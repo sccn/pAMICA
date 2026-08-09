@@ -135,9 +135,8 @@ Full tables, the data-size sweep, and reproduction commands are in the [document
 `pamica` was first released in July 2026, so its case rests on readiness and early use rather than accumulated citations.
 
 Because `pamica` writes the reference binary's output format, existing EEGLAB analyses read its decompositions unchanged,
-so a lab can move to Python without re-tooling everything downstream of the decomposition.
-It also redistributes the reference Fortran as a dependency-free build for macOS, Linux, and Windows,
-which removes a long-standing installation obstacle for users of the original.
+so a lab can adopt Python without re-tooling everything downstream.
+It also redistributes the reference Fortran as a dependency-free build for macOS, Linux, and Windows.
 
 Seven releases have been published, four of them to the Python Package Index (513 downloads in the month before submission), with an archived Zenodo record.
 One user outside the author group reported a bug from their own 236-channel, 8.3-million-sample decomposition (`sccn/pAMICA` issue 207);
