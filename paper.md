@@ -33,8 +33,8 @@ Independent Component Analysis (ICA) separates electroencephalographic and magne
 that isolate brain, muscle, and artifact activities for downstream analysis [@makeig1995independent; @vigario1997independent; @iversen2019megeeg].
 Adaptive Mixture ICA (AMICA) [@palmer2012amica] models each source with a flexible, self-adjusting probability density
 and lets several ICA models coexist, one per segment of a recording.
-It yields the least dependent and most dipolar, hence most physiologically interpretable, EEG decompositions
-among the algorithms benchmarked by @delorme2012independent.
+Among the algorithms benchmarked by @delorme2012independent it recovers the least dependent and most dipolar decompositions,
+and therefore the most physiologically interpretable ones.
 Its reference implementation, by Jason Palmer, is a Fortran program distributed as a compiled binary callable from MATLAB/EEGLAB:
 awkward to install, restricted to the central processing unit (CPU), and unusable from Python.
 
@@ -54,10 +54,9 @@ modern pipelines need an AMICA that runs natively in Python and on a GPU, and th
 General-purpose Python ICA implementations do not fill this gap.
 `scikit-learn` and `MNE-Python` provide FastICA [@hyvarinen2000independent] and Infomax [@bell1995information; @lee1999independent],
 while Picard [@ablin2018faster] offers faster-converging maximum-likelihood ICA;
-none implement AMICA's mixture of models, adaptive generalized-Gaussian densities, or Newton updates, so none reproduce AMICA decompositions.
-`pamica` targets analysts wanting AMICA-quality decompositions in Python,
-GPU users wanting faster runs than the CPU-only binary,
-and methodologists needing a transparent reference implementation.
+none implement AMICA's mixture of models, adaptive generalized-Gaussian densities, or Newton updates, so none can reproduce its decompositions.
+`pamica` is for analysts who want AMICA-quality decompositions in Python, for anyone with a GPU who wants faster runs than the CPU-only binary,
+and for methodologists who need a transparent reference to build on.
 Validation to date is on EEG; the algorithm is modality-agnostic but MEG is untested here.
 
 # State of the field
@@ -67,7 +66,7 @@ it keeps the same output format, adds a Python API with GPU support,
 and can run the reference Fortran itself through a bundled dependency-free native build.
 Three other Python AMICA reimplementations have appeared as of August 2026 [@huberty2025amicapython; @esmaeili2025amica; @herforth2026pyamica], oriented toward MNE-Python;
 `pamica` adds a scikit-learn-style array API, byte-identical EEGLAB I/O, an MLX backend, and an optional MNE-Python wrapper.
-What sets it apart is the depth of its Fortran-parity validation: score functions exact to floating-point resolution against the literal Fortran expressions,
+Its Fortran-parity validation goes further than theirs: score functions exact to floating-point resolution against the literal Fortran expressions,
 and a distributional framework for the non-identifiable multi-model case.
 
 # Software design
@@ -86,15 +85,15 @@ the five source-density families, a mixture of ICA models, component sharing, an
 Three array backends (PyTorch, MLX, NumPy) sit behind one estimator.
 The duplication is deliberate: NumPy stays readable as an executable specification,
 and MLX exists because PyTorch's Metal backend is slower than the CPU on Apple hardware.
-Double precision is the default because parity demands it; single precision serves Apple GPUs, which have no float64.
+Double precision is the default because parity demands it; single precision is available for Apple GPUs, which have no float64.
 
 # Validation
 
-Conformity is measured two ways: by Hungarian-matched component correlation,
-and by the Amari distance [@amari1996new], a relabeling- and scale-invariant unmixing-matrix metric needing no assignment step.
+Parity is measured two ways: by Hungarian-matched component correlation,
+and by the Amari distance [@amari1996new], a relabeling- and scale-invariant unmixing-matrix metric that needs no assignment step.
 Both implementations ran AMICA's default 2000 iterations with Newton disabled (`pamica`'s own default), to isolate the algorithm from initialization.
 With Newton enabled and independent seeds, a few of the weakest components settle into different but equally likely optima
-(mean 0.97, worst component 0.55); a matched initialization restores agreement to ~0.997, making this an initialization-basin property rather than a parity defect.
+(mean 0.97, worst component 0.55); a matched initialization restores agreement to ~0.997, so this is a property of the initialization basin, not a parity defect.
 The single-model comparison uses a well-determined external recording
 (OpenNeuro ds002718, $k\approx153$, where $k$ = frames over squared channel count [@frank2025sufficient])
 alongside the bundled 32-channel sample ($k\approx30$).
@@ -134,17 +133,17 @@ Full tables, the data-size sweep, and reproduction commands are in the [document
 
 `pamica` was first released in July 2026, so its case rests on readiness and early use rather than accumulated citations.
 
-Because `pamica` writes the reference binary's output format, a decomposition computed here is read by existing EEGLAB analyses unchanged,
-which is what lets an established EEG literature move to Python without re-tooling downstream.
+Because `pamica` writes the reference binary's output format, existing EEGLAB analyses read its decompositions unchanged,
+so a lab can move to Python without re-tooling everything downstream of the decomposition.
 It also redistributes the reference Fortran as a dependency-free build for macOS, Linux, and Windows,
-removing a long-standing installation obstacle for users of the original.
+which removes a long-standing installation obstacle for users of the original.
 
 Seven releases have been tagged, four published to the Python Package Index (513 downloads in the month before submission), with an archived Zenodo record.
 One user outside the author group reported a bug from their own 236-channel, 8.3-million-sample decomposition (`sccn/pAMICA` issue 207);
 another, the author of a competing reimplementation, raised completeness and packaging questions (issue 206).
 MNE-Python is publicly weighing which AMICA implementation to adopt (`mne-tools/mne-python` issue 13819).
 Integration into this Center's Python preprocessing tools and the NEMAR archive is underway, not complete.
-The harness, sample data, and reproduction commands ship with the package, so Table 1 is independently re-runnable.
+The harness, sample data, and reproduction commands ship with the package, so a third party can re-run Table 1.
 
 # AI usage disclosure
 
