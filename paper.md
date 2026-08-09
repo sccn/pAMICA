@@ -81,6 +81,7 @@ rather than a modern automatic-differentiation optimizer:
 an Adam/autograd backend was written early and then deleted, because it converged to different optima and made the name "AMICA" ambiguous.
 The port covers exact-EM mixture updates, a positive-definite Newton step [@palmer2008newton], symmetric zero-phase-component-analysis sphering,
 the five source-density families, a mixture of ICA models, and component sharing across models.
+It also computes mutual information reduction and pairwise mutual information, the separation-quality metrics used to benchmark ICA algorithms [@delorme2012independent; @frank2023optimal].
 
 Three array backends (PyTorch, MLX, NumPy) sit behind one estimator.
 That duplication is deliberate: the NumPy path stays readable as an executable specification,
