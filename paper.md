@@ -57,7 +57,7 @@ while Picard [@ablin2018faster] offers faster-converging maximum-likelihood ICA;
 none implement AMICA's mixture of models, adaptive generalized-Gaussian densities, or Newton updates, so none can reproduce its decompositions.
 `pamica` is for analysts who want AMICA-quality decompositions in Python, for anyone with a GPU who wants faster runs than the CPU-only binary,
 and for methodologists who need a transparent reference to build on.
-Validation to date is on EEG; the algorithm is modality-agnostic but MEG is untested here.
+Validation to date is on EEG; the algorithm is modality-agnostic but MEG is untested.
 
 # State of the field
 
@@ -74,7 +74,7 @@ and a distributional framework for the non-identifiable multi-model case.
 The governing decision was to treat numerical parity with Palmer's Fortran, rather than convergence to some independent solution, as the definition of correctness.
 The rest follows from it.
 Wrapping the binary would have secured parity for free but inherited its CPU-only, MATLAB-facing design; reimplementing put parity at risk.
-`pamica` does both, porting the algorithm natively and shipping the reference binary as a selectable backend,
+`pamica` does both, porting the algorithm natively and also shipping the reference binary as a runnable engine,
 so users can reproduce the parity claims on their own data and hardware.
 For the same reason the port follows the reference's natural-gradient [@amari1998natural] expectation-maximization (EM) formulation
 rather than an automatic-differentiation optimizer:
@@ -82,7 +82,7 @@ an Adam/autograd backend was written early and then deleted, because it converge
 The port covers exact-EM mixture updates, a positive-definite Newton step [@palmer2008newton], symmetric sphering,
 the five source-density families, a mixture of ICA models, component sharing, and the mutual-information metrics used to score separation quality [@frank2023optimal].
 
-Three array backends (PyTorch, MLX, NumPy) sit behind one estimator.
+Three array backends (PyTorch, MLX, NumPy) implement the same algorithm behind a common estimator API, with the reference Fortran a fourth.
 The duplication is deliberate: NumPy stays readable as an executable specification,
 and MLX exists because PyTorch's Metal backend is slower than the CPU on Apple hardware.
 Double precision is the default because parity demands it; single precision is available for Apple GPUs, which have no float64.
@@ -90,10 +90,11 @@ Double precision is the default because parity demands it; single precision is a
 # Validation
 
 Parity is measured two ways: by Hungarian-matched component correlation,
-and by the Amari distance [@amari1996new], a relabeling- and scale-invariant unmixing-matrix metric that needs no assignment step.
+and by the Amari distance [@amari1996new], a relabeling- and scale-invariant metric that needs no assignment step.
 Both implementations ran AMICA's default 2000 iterations with Newton disabled (`pamica`'s own default), to isolate the algorithm from initialization.
-With Newton enabled and independent seeds, a few of the weakest components settle into different but equally likely optima
-(mean 0.97, worst component 0.55); a matched initialization restores agreement to ~0.997, so this is a property of the initialization basin, not a parity defect.
+With Newton enabled and independent seeds, some of the weakest components settle into a different basin of equal or higher likelihood:
+on one seed of three this affected ten of seventy components, while the other two matched the reference at ~0.99.
+A matched initialization restores ~0.997, so this is a property of the initialization, not a parity defect.
 The single-model comparison uses a well-determined external recording
 (OpenNeuro ds002718, $k\approx153$, where $k$ = frames over squared channel count [@frank2025sufficient])
 alongside the bundled 32-channel sample ($k\approx30$).
@@ -110,9 +111,9 @@ A permutation test finds no evidence that cross-implementation agreement is wors
 | Multi | Correlation, one run: cross; within-Fortran | 0.65; 0.64 (sd 0.05) |
 | Multi | Amari, one run: cross; within-Fortran | 0.163; 0.174 (sd 0.02) |
 | Multi | Ensemble agreement, cross $-$ within-Fortran | correlation $+0.011$ ($p=0.96$); Amari $-0.011$ ($p>0.999$) |
-| Multi | Ensemble log-likelihood: Fortran; `pamica` | $-3.3539$; $-3.3629$ (KS $p=6\times10^{-5}$) |
+| Multi | Ensemble log-likelihood: Fortran; `pamica` | $-3.3539$; $-3.3629$ (Kolmogorov-Smirnov $p=6\times10^{-5}$) |
 
-: Parity of `pamica` with the Fortran reference. Multi-model rows are over 20-run ensembles (190 within-, 400 cross-implementation pairs); sd is given where computed.
+: Parity of `pamica` with the Fortran reference. Multi-model rows are over 20-run ensembles (190 within-, 400 cross-implementation pairs); sd is the standard deviation, given where computed.
 The final row is the one metric on which the ensembles differ significantly, and it is convergence speed rather than optimum quality: `pamica` reaches Fortran's mean by 200 iterations and passes it by 300.
 
 ![Multi-model ensemble partition-correlation (A) and log-likelihood (B) distributions, 20 `pamica` and 20 Fortran fits of the sample EEG; dashed lines mark each mean.
@@ -125,8 +126,8 @@ Component-level float32 agreement is not yet characterized at a matched iteratio
 and double-precision CUDA is the reproducible NVIDIA path.
 
 On real 70-channel EEG, per-iteration cost is 25 ms for MLX on an Apple GPU, 39 ms for double-precision CUDA on an RTX 4090,
-and 30 ms for native Fortran on a 24-core i9-13900K at its core-count plateau,
-against 193 ms for PyTorch on an Apple-Silicon CPU and 255 ms for PyTorch-Metal, which never beats the CPU it runs beside.
+and 30 ms for native Fortran on a 24-core i9-13900K, against 193 ms for PyTorch on an Apple-Silicon CPU
+and 255 ms for PyTorch-Metal, which never beats the CPU it runs beside.
 Full tables, the data-size sweep, and reproduction commands are in the [documentation](https://eeglab.org/pAMICA/guides/validation/); the correctness harness never uses synthetic data.
 
 # Research impact statement
@@ -138,16 +139,16 @@ so a lab can move to Python without re-tooling everything downstream of the deco
 It also redistributes the reference Fortran as a dependency-free build for macOS, Linux, and Windows,
 which removes a long-standing installation obstacle for users of the original.
 
-Seven releases have been tagged, four published to the Python Package Index (513 downloads in the month before submission), with an archived Zenodo record.
+Seven releases have been published, four of them to the Python Package Index (513 downloads in the month before submission), with an archived Zenodo record.
 One user outside the author group reported a bug from their own 236-channel, 8.3-million-sample decomposition (`sccn/pAMICA` issue 207);
 another, the author of a competing reimplementation, raised completeness and packaging questions (issue 206).
 MNE-Python is publicly weighing which AMICA implementation to adopt (`mne-tools/mne-python` issue 13819).
-Integration into this Center's Python preprocessing tools and the NEMAR archive is underway, not complete.
+Integration into this Center's Python preprocessing and the NEMAR archive is underway, not complete.
 The harness, sample data, and reproduction commands ship with the package, so a third party can re-run Table 1.
 
 # AI usage disclosure
 
-Generative AI was used in this project and is disclosed here under the journal's AI usage policy.
+Generative AI was used in this project, disclosed here under the journal's policy.
 
 **Tools.** Anthropic's Claude models (Sonnet and Opus families), through the Claude Code command-line assistant.
 The instructions given to them are public in the repository (`AGENTS.md`, `CLAUDE.md`, `.rules/`).
@@ -159,7 +160,7 @@ Parity as the correctness criterion, the natural-gradient EM formulation, the ba
 the distributional treatment of the multi-model case, and the acceptance thresholds were chosen by the authors, not by a model.
 Every AI-assisted change was reviewed by a human before merge and run through the parity harness,
 which scores output against the reference binary on real recordings rather than generated fixtures.
-The reported numbers came from running the software and were checked against their source records, as was every bibliographic entry.
+The reported numbers came from running the software and were checked against their run records, as was every bibliographic entry.
 
 # Acknowledgements
 
