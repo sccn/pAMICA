@@ -9,8 +9,8 @@ Python (PyTorch) implementation of Adaptive Mixture Independent Component Analys
 (AMICA) that reproduces the reference Fortran implementation within numerical
 tolerance, with CPU, NVIDIA GPU (CUDA), and Apple GPU (MLX) support. It targets
 EEG/EMG blind source separation and is a drop-in replacement for EEGLAB's AMICA:
-single-model output is byte-identical to the Fortran reference and loads directly
-in EEGLAB.
+single-model output is written in exactly the reference's on-disk format and
+loads directly in EEGLAB.
 
 Single-model results match the Fortran reference (Hungarian-matched component correlation ~ 0.998
 on well-determined data, Newton disabled); see the

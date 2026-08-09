@@ -65,7 +65,7 @@ Validation to date is on EEG; the algorithm is modality-agnostic but MEG is unte
 it keeps the same output format, adds a Python API with GPU support,
 and can run the reference Fortran itself through a bundled dependency-free native build.
 Three other Python AMICA reimplementations have appeared as of August 2026 [@huberty2025amicapython; @esmaeili2025amica; @herforth2026pyamica], oriented toward MNE-Python;
-`pamica` adds a scikit-learn-style array API, byte-identical EEGLAB I/O, an MLX backend, and an optional MNE-Python wrapper.
+`pamica` adds a scikit-learn-style array API, output in EEGLAB's exact on-disk layout, an MLX backend, and an optional MNE-Python wrapper.
 Its Fortran-parity validation goes further than theirs: score functions exact to floating-point resolution against the literal Fortran expressions,
 and a distributional framework for the non-identifiable multi-model case.
 
