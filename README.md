@@ -107,25 +107,6 @@ original AMICA method:
 > mixture of independent component analyzers with shared components. Technical
 > report, Swartz Center for Computational Neuroscience, UC San Diego.
 
-## AI usage disclosure
-
-Generative AI was used in building pamica. Anthropic's Claude models, driven
-through the Claude Code command-line assistant, helped translate the reference
-Fortran into Python, refactor it, scaffold tests, and write the documentation.
-The instructions given to those tools are in this repository
-([AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and [.rules/](.rules)).
-
-The authors made the design decisions and are responsible for the result.
-Parity with the Fortran reference as the definition of correctness, the
-natural-gradient EM formulation, the backend architecture, and the acceptance
-thresholds were chosen by the authors. Every AI-assisted change was reviewed by
-a human before merge and run through the parity harness
-(`validate_implementations.py`), which scores output against the reference
-binary on real recordings rather than against generated fixtures. Correctness
-here rests on that harness, not on the provenance of the code; see the
-[validation guide](https://eeglab.org/pAMICA/guides/validation/) for the
-numbers and how to reproduce them.
-
 ## License
 
 This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
