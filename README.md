@@ -4,6 +4,7 @@
 [![codecov](https://codecov.io/gh/sccn/pAMICA/branch/main/graph/badge.svg)](https://codecov.io/gh/sccn/pAMICA)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21312148.svg)](https://doi.org/10.5281/zenodo.21312148)
 [![Docs](https://img.shields.io/badge/docs-eeglab.org%2FpAMICA-blue)](https://eeglab.org/pAMICA/)
+[![status](https://joss.theoj.org/papers/891de3e30f0973ab984ff879105dad35/status.svg)](https://joss.theoj.org/papers/891de3e30f0973ab984ff879105dad35)
 
 Python (PyTorch) implementation of Adaptive Mixture Independent Component Analysis
 (AMICA) that reproduces the reference Fortran implementation within numerical
