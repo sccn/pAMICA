@@ -3,7 +3,7 @@
 `AMICAICA` fits AMICA directly from an [MNE-Python](https://mne.tools)
 `Raw`/`Epochs` and hands the result back through the standard MNE ICA surface.
 It is **additive**: the scikit-learn-style [`AMICA`](amica.md) interface and the
-byte-identical [EEGLAB output](../guides/eeglab.md) are unchanged; this is a
+[EEGLAB output](../guides/eeglab.md) are unchanged; this is a
 second entry point for MNE users, not a replacement.
 
 MNE is an optional dependency, so `import pamica` never requires it. Install the

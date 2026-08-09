@@ -73,7 +73,7 @@ Pass `return_svar=True` to also get the per-component variances.
 
 ## Multi-model note
 
-Single-model output is byte-identical to the Fortran reference. For
+Single-model output files are byte-identical in layout to a native AMICA run. For
 `n_models > 1` the per-model axis layout is self-consistent (it round-trips
 through `loadmodout15` and pamica's own reader) but is not byte-identical to a
 native multi-model AMICA run; see the multi-model equivalence discussion in
