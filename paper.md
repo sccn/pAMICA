@@ -29,17 +29,14 @@ bibliography: paper.bib
 
 # Summary
 
-Independent Component Analysis (ICA) separates electroencephalographic and magnetoencephalographic (EEG/MEG) recordings into maximally independent sources
-that isolate brain, muscle, and artifact activities for downstream analysis [@makeig1995independent; @vigario1997independent; @iversen2019megeeg].
-Adaptive Mixture ICA (AMICA) [@palmer2012amica] models each source with a flexible, self-adjusting probability density
-and lets several ICA models coexist, one per segment of a recording.
+Independent Component Analysis (ICA) separates electroencephalographic and magnetoencephalographic (EEG/MEG) recordings into maximally independent sources that isolate brain, muscle, and artifact activities for downstream analysis [@makeig1995independent; @vigario1997independent; @iversen2019megeeg].
+Adaptive Mixture ICA (AMICA) [@palmer2012amica] models each source with a flexible, self-adjusting probability density and lets several ICA models coexist, one per segment of a recording.
 Among the algorithms benchmarked by @delorme2012independent it recovers the least dependent and most dipolar decompositions,
 and therefore the most physiologically interpretable ones.
 Its reference implementation, by Jason Palmer, is a Fortran program distributed as a compiled binary callable from MATLAB/EEGLAB:
 awkward to install, restricted to the central processing unit (CPU), and unusable from Python.
 
-`pamica` reproduces the reference Fortran results within numerical tolerance
-while running on the CPU, NVIDIA graphics processing units (GPUs, via CUDA), and Apple GPUs (through Apple's MLX array framework [@mlx2023]).
+`pamica` reproduces the reference Fortran results within numerical tolerance while running on the CPU, NVIDIA graphics processing units (GPUs, via CUDA), and Apple GPUs (through Apple's MLX array framework [@mlx2023]).
 It is a complete reimplementation on PyTorch [@paszke2019pytorch], NumPy [@harris2020array], and SciPy [@virtanen2020scipy] rather than a wrapper around the binary,
 and exposes a scikit-learn-style estimator under a BSD-3-Clause license.
 It writes the format EEGLAB's AMICA loader reads, so established MATLAB tooling consumes its results unchanged.
@@ -76,8 +73,7 @@ The rest follows from it.
 Wrapping the binary would have secured parity for free but inherited its CPU-only, MATLAB-facing design; reimplementing put parity at risk.
 `pamica` does both, porting the algorithm natively and also shipping the reference binary as a runnable engine,
 so users can reproduce the parity claims on their own data and hardware.
-For the same reason the port follows the reference's natural-gradient [@amari1998natural] expectation-maximization (EM) formulation
-rather than an automatic-differentiation optimizer:
+For the same reason the port follows the reference's natural-gradient [@amari1998natural] expectation-maximization (EM) formulation rather than an automatic-differentiation optimizer:
 an Adam/autograd backend was written early and then deleted, because it converged to different optima and made the name "AMICA" ambiguous.
 The port covers exact-EM mixture updates, a positive-definite Newton step [@palmer2008newton], symmetric sphering,
 the five source-density families, a mixture of ICA models, component sharing, and the mutual-information metrics used to score separation quality [@frank2023optimal].
@@ -95,9 +91,7 @@ Both implementations ran AMICA's default 2000 iterations with Newton disabled (`
 With Newton enabled and independent seeds, some of the weakest components settle into a different basin of equal or higher likelihood:
 on one seed of three this affected ten of seventy components, while the other two matched the reference at ~0.99.
 A matched initialization restores ~0.997, so this is a property of the initialization, not a parity defect.
-The single-model comparison uses a well-determined external recording
-(OpenNeuro ds002718, $k\approx153$, where $k$ = frames over squared channel count [@frank2025sufficient])
-alongside the bundled 32-channel sample ($k\approx30$).
+The single-model comparison uses a well-determined external recording (OpenNeuro ds002718, $k\approx153$, where $k$ = frames over squared channel count [@frank2025sufficient]) alongside the bundled 32-channel sample ($k\approx30$).
 A mixture of ICA models is not partition-identifiable, so exact partition parity is the wrong bar there;
 it is judged instead by whether the implementations sample a similar distribution of solutions, over ensembles of 20 runs each (\autoref{fig:ensemble}).
 A permutation test finds no evidence that cross-implementation agreement is worse than Fortran's own run-to-run agreement.
@@ -126,8 +120,7 @@ Component-level float32 agreement is not yet characterized at a matched iteratio
 and double-precision CUDA is the reproducible NVIDIA path.
 
 On real 70-channel EEG, per-iteration cost is 25 ms for MLX on an Apple GPU, 39 ms for double-precision CUDA on an RTX 4090,
-and 30 ms for native Fortran on a 24-core i9-13900K, against 193 ms for PyTorch on an Apple-Silicon CPU
-and 255 ms for PyTorch-Metal, which never beats the CPU it runs beside.
+and 30 ms for native Fortran on a 24-core i9-13900K, against 193 ms for PyTorch on an Apple-Silicon CPU and 255 ms for PyTorch-Metal, which never beats the CPU it runs beside.
 Full tables, the data-size sweep, and reproduction commands are in the [documentation](https://eeglab.org/pAMICA/guides/validation/); the correctness harness never uses synthetic data.
 
 # Research impact statement
@@ -166,7 +159,6 @@ The reported numbers came from running the software and were checked against the
 We thank Jason Palmer and his advisor Ken Kreutz-Delgado, co-developers of AMICA, for the reference implementation,
 and the EEGLAB community for the tools and sample data used to validate this work.
 Two authors developed the methods `pamica` builds on: S.M. co-developed AMICA [@palmer2012amica] and A.D. is a lead developer of EEGLAB [@delorme2004eeglab].
-This work was supported by The Swartz Foundation (Old Field, NY) to the Swartz Center for Computational Neuroscience
-and by National Institutes of Health grant R01-NS047293 (to A.D. and S.M.).
+This work was supported by The Swartz Foundation (Old Field, NY) to the Swartz Center for Computational Neuroscience and by National Institutes of Health grant R01-NS047293 (to A.D. and S.M.).
 
 # References
