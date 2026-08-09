@@ -91,15 +91,15 @@ Both implementations ran AMICA's default 2000 iterations with Newton disabled (`
 With Newton enabled and independent seeds, some of the weakest components settle into a different basin of equal or higher likelihood:
 on one seed of three this affected ten of seventy components, while the other two matched the reference at ~0.99.
 A matched initialization restores ~0.997, so this is a property of the initialization, not a parity defect.
-The single-model comparison uses a well-determined external recording (OpenNeuro ds002718, $k\approx153$, where $k$ = frames over squared channel count [@frank2025sufficient]) alongside the bundled 32-channel sample ($k\approx30$).
+The single-model comparison uses a well-determined external recording ([NEMAR on002718](https://doi.org/10.82901/nemar.on002718), $k\approx153$, where $k$ = frames over squared channel count [@frank2025sufficient]) alongside the bundled 32-channel sample ($k\approx30$).
 A mixture of ICA models is not partition-identifiable, so exact partition parity is the wrong bar there;
 it is judged instead by whether the implementations sample a similar distribution of solutions, over ensembles of 20 runs each (\autoref{fig:ensemble}).
 A permutation test finds no evidence that cross-implementation agreement is worse than Fortran's own run-to-run agreement.
 
 | Regime | Metric (dataset) | Result (mean) |
 |---|---|---|
-| Single | Log-likelihood gap (ds002718) | within ~0.0005 of $-3.6993$ |
-| Single | Component correlation (ds002718) | 0.998 |
+| Single | Log-likelihood gap (on002718) | within ~0.0005 of $-3.6993$ |
+| Single | Component correlation (on002718) | 0.998 |
 | Single | Amari distance (bundled) | 0.006 |
 | Single | Score functions, sufficient statistics | exact, $\sim\!10^{-15}$ |
 | Multi | Correlation, one run: cross; within-Fortran | 0.65; 0.64 (sd 0.05) |
