@@ -72,3 +72,102 @@ uv run python benchmarks/benchmark_dimsweep.py --report mac.json cuda.json scali
 
 Findings live in `.context/issue-77/benchmark_findings.md` (Phase B: channel sweep, Apple GPU)
 and `.context/issue-84/phase2_cpu_scaling.md` (Phase 2: CPU core-count scaling, cross-platform).
+
+## Reproducing Table 1 (issue #144)
+
+`benchmarks/reproduce_table1.py` reproduces the parity numbers in the JOSS paper's Table 1
+against the Fortran reference, printing each measured value next to the paper's claimed one so
+a reviewer can check them off directly:
+
+```bash
+uv run python benchmarks/reproduce_table1.py --tier bundled     # no download, see cost below
+uv run python benchmarks/reproduce_table1.py --tier external \
+  --data benchmarks/data/ds002718_sub-002_eeg70_full.npy        # needs the download below
+```
+
+This is a distinct, more expensive protocol from the `benchmark_dimsweep.py`/`benchmark_decompose.py`
+sweeps above: it re-fits the reference binary and pamica several times each, at the full 2000-iteration
+budget, to get numbers precise enough to compare against the paper rather than a single ms/iteration
+sample. Read this section before running the external tier -- it is not a quick check.
+
+### What each tier costs
+
+**Bundled tier** (`--tier bundled`, default): uses `pamica/sample_data/eeglab_data.fdt`
+(32 channels, 30,504 frames, already committed -- no download). Default budget is 5 single-model
+seeds at 2000 iterations plus a 20-run multi-model ensemble at 100 iterations (matching
+`docs/guides/validation.md`'s documented protocol). Measured end to end on a 2026 Apple Silicon
+laptop (10 cores, no CUDA, MPS unusable here because these runs are float64 -- see below):
+
+| phase | measured |
+|---|---|
+| single-model sweep (5 seeds x 2000 iter, Fortran + pamica) | ~24 min |
+| multi-model ensemble (20 runs x 100 iter, Fortran + pamica) | ~9 min |
+| score-function / sufficient-statistics check | <1 s |
+| **total** | **~33 min** |
+
+A `--n-seeds 2 --max-iter 100 --multimodel-runs 2 --multimodel-max-iter 20` smoke test (not the
+paper's protocol -- noisier numbers, just a pipeline check) completes in well under a minute.
+
+**External tier** (`--tier external`): needs OpenNeuro **ds002718** sub-002 (Wakeman-Henson
+faces), the *full* recording (70 channels, 747,750 frames, k~153 -- not the 60,000-frame
+truncation used for the ms/iteration sweeps above). Download and extraction:
+
+```bash
+# 1. download (public, no credentials; ~224 MB compressed .set)
+aws s3 cp --no-sign-request \
+  s3://openneuro.org/ds002718/sub-002/eeg/sub-002_task-FaceRecognition_eeg.set \
+  /tmp/ds002718_sub-002.set
+
+# 2. extract ALL 70 EEG channels x ALL frames (no truncation) to a float64 .npy
+#    (~419 MB on disk; needs mne)
+uv pip install mne
+uv run python - <<'PY'
+import mne, numpy as np
+raw = mne.io.read_raw_eeglab("/tmp/ds002718_sub-002.set", preload=True, verbose="ERROR")
+data = raw.get_data(picks=raw.ch_names[:70]) * 1e6   # first 70 are EEG; V -> uV
+np.save("benchmarks/data/ds002718_sub-002_eeg70_full.npy", data.astype(np.float64))
+PY
+```
+
+The protocol is 5 sequential Fortran fits at 2000 iterations on that recording, plus 5 matching
+pamica fits -- **hours, not minutes**, even on capable hardware. There is no cheaper substitute:
+`docs/guides/validation.md`'s own data-adequacy sweep found cross-backend agreement is
+under-determined below k~60 and only plateaus at k~153 (this recording's full size), so a
+shorter run would reproduce a noisier number, not a faster version of the same one -- that
+tradeoff was made deliberately when this recording was chosen as the headline dataset.
+
+Single-fit wall-clock at this exact configuration (70ch, 747,750 frames, 2000 iterations,
+`do_newton=0`) was measured on a 32-core Linux workstation with an RTX 4090
+(`.context/issue-90/ksweep_findings.md`):
+
+| backend | single fit |
+|---|---:|
+| native-fortran-f64 | 1303 s (~22 min) |
+| pamica, CUDA float64 | 1856 s (~31 min) |
+
+Scaling those to the paper's 5-seed protocol (Fortran phases can run back to back while each
+seed's GPU phase overlaps the next seed's Fortran phase, the way the original workstation script
+pipelined them):
+
+| configuration | estimated total |
+|---|---|
+| 32-core workstation + CUDA (pipelined: GPU total + one Fortran fit) | **~3 hours** |
+| 32-core workstation + CUDA (naive, sequential) | ~4.4 hours |
+| **no GPU** (pamica falls back to CPU float64; ~5x slower than CUDA-f64 at this size per the
+  ms/iteration table above) | **roughly half a day** for the pamica phase alone |
+
+A slower or fewer-core machine pushes the Fortran phase out further too (native Fortran scales
+with thread count; see the CPU-scaling table in the main `README_dimsweep.md` findings). Budget
+accordingly, and consider running the external tier overnight or on a shared compute node rather
+than interactively.
+
+### Device and binary resolution
+
+Neither tier assumes a GPU or a specific reference-binary path. The compute device is
+auto-detected (CUDA, then Apple MPS, then CPU); because these runs use float64 for Fortran parity
+and MPS has no float64 support, an auto-selected (or explicitly requested) MPS device always
+falls back to CPU, with a printed message saying so. The Fortran binary is resolved via
+`pamica.native.resolver` (a platform release asset, downloaded and SHA-256-verified on first use
+and cached under `~/.cache/pamica/bin/`), honoring `PAMICA_NATIVE_BINARY`/`--fortran-binary` for
+a local override -- so this runs on Linux and Windows, not just the macOS `amica15mac` fixture
+bundled for the older `validate_implementations.py` harness.
