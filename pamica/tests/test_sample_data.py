@@ -436,12 +436,14 @@ def test_numpy_llt_roundtrip(tmp_path):
 
     ``Lht[0]`` must equal ``Lt`` exactly for a single model (both are read from
     the same on-disk sequence). ``Lt.mean()`` (the per-sample total log-density,
-    summed over channels) should be close to ``model.ll[-1] / model.num_samples``
-    -- ``self.ll`` is this backend's raw (unnormalized) per-iteration sum of the
-    same per-sample quantity, so dividing by the sample count recovers the same
-    convention as ``Lt.mean()``. They are not bit-identical: ``self.ll[-1]`` is
-    the pre-update E-step likelihood of the last iteration, while the written
-    LLt is recomputed post-update, so a loose tolerance is used.
+    summed over channels) should be close to ``model.ll[-1] * model.data_dim``
+    -- ``self.ll`` is this backend's per-sample-per-channel normalized
+    per-iteration log-likelihood (issue #212, matching Fortran's
+    ``LL(iter) = LLtmp2 / dble(numgoodsum*nw)``), so multiplying back by the
+    channel count recovers the same per-sample-summed-over-channels convention
+    as ``Lt.mean()``. They are not bit-identical: ``self.ll[-1]`` is the
+    pre-update E-step likelihood of the last iteration, while the written LLt
+    is recomputed post-update, so a loose tolerance is used.
     """
     data = load_data_file(eeglab_data_file, 32, 30504, dtype=np.float32).astype(
         np.float64
@@ -464,7 +466,7 @@ def test_numpy_llt_roundtrip(tmp_path):
     assert out.Lht.shape == (1, model.num_samples)
     np.testing.assert_array_equal(out.Lht[0], out.Lt)
 
-    expected = model.ll[-1] / model.num_samples
+    expected = model.ll[-1] * model.data_dim
     np.testing.assert_allclose(out.Lt.mean(), expected, rtol=1e-2)
 
 

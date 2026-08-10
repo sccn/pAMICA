@@ -1195,16 +1195,16 @@ def test_full_fit_parity_numpy_vs_ng(tmp_path):
 
     Measured on the sample data (issue #37): Hungarian-matched total-spatial-
     filter correlation is 1.000000 (32/32 bijective) and the per-sample-per-
-    channel LL agrees to ~1e-5. NumPy reports the *un-normalized* total LL while
-    NG reports it normalized by (n_samples * n_channels), so the NumPy value is
-    normalized here before comparing. A full fit is not bit-identical across
-    NumPy and PyTorch (float reduction order / BLAS vs ATen), hence tolerances
-    rather than exact equality.
+    channel LL agrees to ~1e-5. Both backends report the per-sample-per-channel
+    normalized LL (NumPy since issue #212, matching NG's own (n_samples *
+    n_channels) normalization), so the two are compared directly with no
+    rescaling. A full fit is not bit-identical across NumPy and PyTorch (float
+    reduction order / BLAS vs ATen), hence tolerances rather than exact
+    equality.
     """
     from scipy.optimize import linear_sum_assignment
 
     data = _load_real_data()  # (NW, FIELD) float64
-    n_samples = data.shape[1]
 
     cfg: dict[str, Any] = dict(
         block_size=512,
@@ -1242,7 +1242,7 @@ def test_full_fit_parity_numpy_vs_ng(tmp_path):
     )
     npm.fit(data)
     filt_np = npm.get_weights() @ npm.sphere
-    ll_np = npm.ll[-1] / (n_samples * NW)  # -> per-sample-per-channel, like NG
+    ll_np = npm.ll[-1]  # already per-sample-per-channel normalized (issue #212)
 
     ng = _fresh_ng(maxdecs=5, **cfg)
     ng.fit(data, max_iter=150, verbose=False)

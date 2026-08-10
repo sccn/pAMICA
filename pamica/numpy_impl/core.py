@@ -279,11 +279,11 @@ class AMICA:
         self.comp_used: Optional[np.ndarray] = None
         # Outlier rejection (do_reject), mirroring AMICATorchNG's good_idx: an
         # index array of the currently-kept samples that only ever shrinks, plus
-        # its count (num_good_samples), which normalizes gm (the model weights).
-        # self.ll stays a raw sum over the good set, not divided by the count
-        # (this backend's existing convention for both modes; unlike Fortran/
-        # torch it is un-normalized). Both None/full until fit() sets them up.
-        # numrej counts rejection passes (the maxrej budget). _last_ll_samples
+        # its count (num_good_samples), which normalizes gm (the model weights)
+        # and self.ll (see _get_updates_and_likelihood, matching Fortran's
+        # LL(iter) = LLtmp2 / dble(numgoodsum*nw), amica15.f90:1752). Both
+        # None/full until fit() sets them up. numrej counts rejection passes
+        # (the maxrej budget). _last_ll_samples
         # holds the pre-update per-sample LL that _reject_outliers thresholds
         # (captured in the E-step, applied after the parameter update, matching
         # the torch ordering).
@@ -748,6 +748,20 @@ class AMICA:
 
         if self.do_reject:
             self._last_ll_samples = np.concatenate(ll_parts)
+
+        # Normalize the accumulated total LL by (good-sample count x working
+        # dimensionality), matching Fortran's LL(iter) = LLtmp2 / dble(numgoodsum*nw)
+        # (amica15.f90:1752) at the point the full-data sum becomes available.
+        # numgoodsum is self.num_good_samples: Fortran initializes numgoodsum to
+        # all_blks (all samples) and only shrinks it under do_reject (amica15.f90:234,
+        # 2234), and self.num_good_samples mirrors that exactly (set to num_samples
+        # in _initialize_parameters, only shrunk by _reject_outliers), so this one
+        # expression is correct whether or not do_reject is set -- no branch needed.
+        # nw is the per-model working dimensionality (Fortran's numeigs, amica15.f90:545);
+        # self.data_dim is its NumPy analogue -- comp_list is (data_dim, num_models),
+        # matching Fortran's comp_list(nw, num_models) (amica15.f90:599).
+        assert self.num_good_samples is not None and self.data_dim is not None
+        updates["ll"] /= self.num_good_samples * self.data_dim
 
         return updates
 
@@ -1279,6 +1293,14 @@ class AMICA:
         dA = np.zeros_like(self.A)
         for h in range(self.num_models):
             dA[:, self.comp_list[:, h]] += self.gm[h] * updates["dWtmp"][:, :, h]
+        # NOTE (issue #212): deliberately left as-is, and it is NOT Fortran-faithful.
+        # Fortran divides dAk by zeta (the accumulated gm weights) before squaring,
+        # and masks both the sum and the divisor by comp_used (amica15.f90:1739-1743).
+        # This does neither, and empirically reports ~5.4e3 on the bundled sample
+        # where Fortran reports ~1e-5, so min_nd/use_grad_norm is unreachable in this
+        # backend for the same reason min_dll was before this fix. Correcting it needs
+        # the zeta division plus confirmation that dWtmp is the same base quantity as
+        # Fortran's dA, so it is tracked separately rather than bundled in here.
         self.nd.append(np.sqrt(np.sum(dA**2) / (self.data_dim * self.num_comps)))
 
     def _optimize(self):
@@ -1583,10 +1605,11 @@ class AMICA:
         ``reject_data``, amica17.f90:2380-2464): drop any currently-good sample
         with ``loglik < mean - rejsig*std`` (population std). Rejection is
         one-directional -- ``good_idx`` only shrinks -- and ``num_good_samples``
-        normalizes ``gm`` thereafter. (``self.ll`` stays a raw sum over the good
-        set; dropping the most-negative samples raises the sum, so the reject
-        iteration is an LL increase and does not spuriously trip the convergence
-        checks.)
+        normalizes ``gm`` and ``self.ll`` thereafter (issue #212). Dropping the
+        most-negative samples raises the mean of what remains regardless of
+        normalization (removing below-average points can only raise a mean), so
+        the reject iteration is an LL increase and does not spuriously trip the
+        convergence checks.
 
         ``self._last_ll_samples`` is this iteration's per-sample LL over the
         current good set (captured pre-update in ``_get_updates_and_likelihood``,

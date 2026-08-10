@@ -87,10 +87,12 @@ def test_rejection_shrinks_good_sample_set():
 
 @pytest.mark.skipif(not _FDT.exists(), reason="sample data missing")
 def test_rejection_does_not_spuriously_stop_fit():
-    """self.ll is a raw sum over the good set (not normalized by the count), so
-    the reject iteration changes the sample count. Dropping the most-negative
-    samples raises the sum, so the fit keeps ascending across the rejection
-    rather than stopping early on a spurious LL 'decrease'."""
+    """self.ll is normalized by the good-sample count (issue #212), and the
+    reject iteration shrinks that count. Dropping the most-negative samples
+    raises the mean of what remains regardless of normalization (removing
+    below-average points can only raise a mean), so the fit keeps ascending
+    across the rejection rather than stopping early on a spurious LL
+    'decrease'."""
     data = _real_data(3000)
     model = AMICA(
         num_models=1,

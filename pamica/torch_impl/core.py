@@ -92,8 +92,8 @@ _EPSDBLE = 1e-16
 # restores it when the final LL falls more than this tolerance below that peak.
 # Units: mean log-likelihood per sample-channel (the same scale as Fortran's
 # min_dll, amica17.f90:1866, which normalizes LL(iter) by numgoodsum*nw before
-# comparing -- NOT the legacy NumPy pamica.min_dll, which compares un-normalized
-# summed LL), so 1e-9 reads as "numerical noise, not a real overshoot". The
+# comparing; the legacy NumPy backend's min_dll now normalizes the same way,
+# issue #212), so 1e-9 reads as "numerical noise, not a real overshoot". The
 # threshold also keeps a
 # monotone single-model run (issue #24 parity) a bit-exact no-op: its final
 # iterate already IS the best, the gap is 0 < tol, and no restore fires.
