@@ -1,9 +1,9 @@
 """Single-model Fortran-vs-NG parity on a data-adequate real recording (k>=60
 per issue #90's documented threshold), using the bundled amica15mac binary
 (also used for Table 1's bundled-sample Amari row; Table 1's headline
-correlation instead uses the Linux amica15_linux build via
-run_5seed_newton0.sh) and AMICATorchNG, instead of the under-determined
-bundled 32ch/30504-frame EEGLAB tutorial recording (k=29.8).
+correlation instead uses the external tier of ../../benchmarks/reproduce_table1.py,
+issue #144) and AMICATorchNG, instead of the under-determined bundled
+32ch/30504-frame EEGLAB tutorial recording (k=29.8).
 
 Data: OpenNeuro ds002718 sub-002 (Wakeman-Henson faces), first 32 of the first
 70 EEG channels, first N frames -- real data, not committed (not bundled; see
