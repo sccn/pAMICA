@@ -218,11 +218,11 @@ def _run_numpy(data, iters, repeats, n_models=1, share=False, threads=None):
                 f"AMICA_NumPy did not converge (non-finite LL) at "
                 f"{data.shape[0]}ch x {data.shape[1]} samples, {n_iter} iters"
             )
-        # AMICA_NumPy.ll is summed over samples*channels; normalize to the
-        # per-sample-per-channel scale the torch/mlx backends report, so the
-        # results column is directly comparable (numpy-f64 then matches
-        # torch-cpu-f64 to ~5 digits, as the parity suite guarantees).
-        ll = float(m.ll[-1]) / (data.shape[0] * data.shape[1])
+        # AMICA_NumPy.ll is already per-sample-per-channel normalized (issue
+        # #212), the same scale the torch/mlx backends report, so the results
+        # column is directly comparable (numpy-f64 matches torch-cpu-f64 to ~5
+        # digits, as the parity suite guarantees) with no rescaling here.
+        ll = float(m.ll[-1])
         return elapsed, ll
 
     # CPU-scaling knob (#86): cap the BLAS/OpenMP thread pool numpy's vectorized
