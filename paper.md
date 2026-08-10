@@ -136,7 +136,8 @@ One user outside the author group reported a bug from their own 236-channel, 8.3
 another, the author of a competing reimplementation, raised completeness and packaging questions (issue 206).
 MNE-Python is publicly weighing which AMICA implementation to adopt (`mne-tools/mne-python` issue 13819).
 Integration into this Center's Python preprocessing and the NEMAR archive is underway, not complete.
-The harness, sample data, and reproduction commands ship with the package, so a third party can re-run Table 1.
+The harness, sample data, and reproduction commands ship with the package.
+All but the two on002718 rows re-run from the bundled sample alone, and the documentation states what each costs to verify.
 
 # AI usage disclosure
 

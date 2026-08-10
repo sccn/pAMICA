@@ -399,24 +399,39 @@ Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests
 
 ## Reproducing these results
 
-The multi-model and score-function checks run from the bundled sample data and the reference binary,
-with no external download:
+The paper's parity table reproduces through one entry point, `benchmarks/reproduce_table1.py`.
+It prints each measured value next to the paper row it corresponds to, so the two can be checked off
+directly. The compute device is auto-detected (float64 is required for parity, so Apple GPUs fall back
+to CPU with a printed reason) and the Fortran reference binary is resolved per platform, so this is not
+macOS-only.
+
+```bash
+uv run python benchmarks/reproduce_table1.py --tier bundled      # no download
+uv run python benchmarks/reproduce_table1.py --tier external \
+  --data benchmarks/data/ds002718_sub-002_eeg70_full.npy         # needs the download
+```
+
+Two tiers, because the rows do not all need the same data. The **bundled** tier covers the Amari
+distance, the score-function and sufficient-statistics checks, and the multi-model rows, all from the
+committed sample. The **external** tier covers the headline correlation and log-likelihood rows, which
+need the well-determined recording ($k\approx153$); that dataset is public but is a manual download.
+
+Verification is not free, and the cost is documented rather than glossed:
+[`benchmarks/README_dimsweep.md`](https://github.com/sccn/pAMICA/blob/main/benchmarks/README_dimsweep.md)
+gives measured wall-clock for each tier, the download size, the hardware assumed, and what changes
+without a GPU. Read it before starting the external tier. There is deliberately no cheap reduced-budget
+tier: below $k\approx60$ the decomposition is under-determined and backends diverge for legitimate
+reasons, so a faster variant would reproduce a noisier number and invite the misreading this section
+exists to prevent.
+
+Two general checks remain useful and are much quicker, but note that neither reproduces a specific
+table row: `validate_implementations.py` defaults to a single seed at 100 iterations with `do_newton`
+read from `sample_params.json`, and `pytest` runs the parity and behaviour suite.
 
 ```bash
 uv run python validate_implementations.py     # single- and multi-model parity report
 uv run pytest                                  # the full parity/behavior test suite
 ```
-
-The bundled-sample single-model numbers (`do_newton=0`, ~0.998 correlation / 0.006 Amari, $k\approx30$)
-are the 5-seed, 2000-iteration sweep produced by
-`uv run python .context/issue-144-parity-data-adequacy/bundled_sample_newton0.py 5 2000`.
-The headline correlation/LL ($k\approx153$) additionally needs the external ds002718 recording
-(OpenNeuro, sub-002, manual download) and is produced by
-`.context/issue-144-parity-data-adequacy/run_5seed_newton0.sh`; that script's paths, thread count, and
-Fortran binary are specific to the workstation it was run on, so it is not yet a portable one-command
-reproduction (tracked as future work). `validate_implementations.py`'s own CLI defaults (a single seed,
-100 iterations, `do_newton` read from `sample_params.json` where it is `true`) do not reproduce either
-row directly.
 
 The multi-model ensemble and Amari detail regenerate from saved fits (no re-fitting) with
 `uv run python .context/issue-27/amari_distance.py`. The cross-platform benchmark and equivalence
