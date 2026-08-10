@@ -623,6 +623,51 @@ def test_disabled_stops_default_path_matches_max_iter_on_short_run(real_data):
     assert len(ng.ll_history) == 15
 
 
+# --- production-realistic thresholds (PR #213 review finding 7) ------------
+
+
+def test_min_dll_stop_reachable_at_shipped_default_threshold(real_data):
+    """Every min_dll/grad_norm test above loosens min_dll/min_nd by 5-6 orders
+    of magnitude to force a fast stop in a short budget. That is fine for
+    exercising the counting/gating logic, but it would not catch a scale bug
+    in the comparison itself -- e.g. comparing a raw, un-normalized
+    log-likelihood against min_dll instead of the normalized per-sample-
+    channel value the docstring promises (``min_dll``'s own docstring flags
+    this as a live concern: issue #212 found exactly this bug in the
+    ``numpy_impl`` backend, whose un-normalized ``self.ll`` means its
+    ``min_dll`` can never fire). A wrongly-scaled comparison in
+    ``AMICATorchNG`` would still pass every other test in this file, since
+    they all use thresholds loose enough to fire regardless of scale.
+
+    This test uses the LITERAL shipped defaults -- ``min_dll=1e-9``,
+    ``maxincs=5``, ``use_grad_norm=True``, ``min_nd=1e-7`` -- none
+    overridden -- and asserts a stop is reachable at all, on real data, in a
+    bounded budget. It is NOT ``@pytest.mark.slow``: it finishes in a few
+    seconds, well under the 3-second-ish budget of the other tests in this
+    module (issue #207 review finding 1 -- ``slow`` means "invokes the
+    macOS-only Fortran binary", not "takes a while", so this does not
+    qualify).
+
+    Reaching the default threshold organically needed real (not synthetic)
+    tuning of WHICH real-data config gets there fast: the PR's own
+    investigation (see the PR #213 description and
+    ``test_disabled_stops_default_path_matches_max_iter_on_short_run`` above)
+    found that ``newt_start=20`` at longer budgets (hundreds to thousands of
+    iterations) does NOT reach either default threshold on this 32-channel
+    sample -- per-iteration LL gains decay roughly like O(1/iter), not fast
+    enough. Starting Newton much earlier (``newt_start=5``) on a smaller
+    sample subset lets Newton's local quadratic convergence take over almost
+    immediately, so consecutive gains cross 1e-9 within a few hundred
+    iterations instead. This is a legitimate real-data config choice (same
+    kind of seed/newt_start probing the other tests in this module already
+    document doing), not a threshold change.
+    """
+    ng = _fresh_ng(seed=1, do_newton=True, newt_start=5, block_size=1024)
+    ng.fit(real_data[:, :4096], max_iter=500, verbose=False)
+    assert ng.stop_reason == "min_dll"
+    assert len(ng.ll_history) < 500  # a real early stop, not max_iter
+
+
 # --- persistence: issue #207 config keys (PR #213 review finding 6) --------
 
 
