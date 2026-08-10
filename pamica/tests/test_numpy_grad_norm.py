@@ -60,10 +60,35 @@ def test_grad_norm_tracks_convergence():
     assert nd[-5:].mean() < nd[:5].mean() / 2.0
 
 
-# Not tested here: that the norm is computed BEFORE the A step and the doscaling
-# rescale, matching Fortran's ordering (amica15.f90:1731-1743 precedes :1789). A
-# doscaling on/off comparison was tried and rejected: it passes against the
-# pre-fix implementation too, because rescaling changes A, which changes the next
-# iteration's sufficient statistics, so the trajectories differ either way. It
-# would have asserted nothing. The ordering is enforced by the placement itself
-# and documented at the call site.
+def test_grad_norm_uses_the_pre_step_mixing_matrix():
+    """Fortran builds dAk inside accum_updates_and_likelihood (amica15.f90:1731-
+    1743) strictly before update_params applies the step (:1789), so the norm
+    describes the gradient at the CURRENT A, not the updated one.
+
+    Snapshot A immediately before an M-step, recompute the Fortran formula from
+    that snapshot independently of the implementation, and require the recorded
+    value to match. A regression that moved the computation back after the A
+    update or after the doscaling rescale would use a different A and fail here.
+
+    A doscaling on/off comparison was tried first and rejected: it passes against
+    the pre-fix implementation too, because rescaling changes A, which changes the
+    next iteration's sufficient statistics, so the trajectories differ either way.
+    It asserted nothing.
+
+    The recomputation needs no access to the implementation's internals. For a
+    single model with rescaling disabled, the applied step IS ``lrate * dAk``
+    (``A -= lrate * dir.T @ A``, and dAk is that same product with zeta == gm ==
+    1), so ``dAk == (A_before - A_after) / lrate`` exactly. Deriving the expected
+    norm from the step that was actually taken is independent of how the
+    implementation computed it.
+    """
+    model = AMICA(num_models=1, num_mix=3, max_iter=3, seed=42, doscaling=False)
+    model.fit(_real_data(4096))
+
+    updates = model._get_updates_and_likelihood()
+    a_before = model.A.copy()
+    model._update_parameters(updates)
+
+    dAk = (a_before - model.A) / model.lrate
+    expected = np.sqrt(np.sum(dAk**2) / (model.data_dim * model.num_comps))
+    assert np.isclose(model.nd[-1], expected, rtol=1e-8)

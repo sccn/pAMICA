@@ -1266,8 +1266,20 @@ class AMICA:
         #
         # dAk is the gm-weighted average of the per-model directions mapped through
         # A (dAk = sum_h gm[h] * dir_h^T @ A, scattered by comp_list, divided by
-        # zeta = sum_h gm[h] per column), i.e. exactly the step that is about to be
-        # taken, so ndtmpsum is ||dA|| / (lrate * sqrt(nw * n_used)).
+        # zeta = sum_h gm[h] per column). ndtmpsum is then the RMS of the used
+        # columns of dAk: ||dAk[:, used]|| / sqrt(nw * n_used), with NO lrate
+        # factor. Fortran measures the gradient direction before the step, not the
+        # applied update lrate*dAk, and does not divide by lrate either
+        # (amica15.f90:1742-1743) -- there is no missing factor here.
+        #
+        # Fortran ordering caveat: Fortran's gm is not reassigned until
+        # update_params (amica15.f90:1789+), which runs AFTER dAk is built, so its
+        # ndtmpsum uses the previous iteration's gm. self.gm is already updated by
+        # this point. That is invisible for num_models=1 (gm == 1) and for the
+        # default disjoint comp_list, where the gm[h] factor cancels exactly
+        # against zeta[idx], but the two differ under share_comps with a genuinely
+        # shared column. Diagnostic only, it does not affect the fitted
+        # parameters; tracked in issue #219.
         dAk = np.zeros_like(self.A)
         zeta = np.zeros(self.num_comps)
         for h in range(self.num_models):
