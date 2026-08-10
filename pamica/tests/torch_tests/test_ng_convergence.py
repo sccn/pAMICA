@@ -19,6 +19,17 @@ reimplementation of the Fortran counting rule (``_predict_min_dll_stop``/
 ``_predict_grad_norm_stop``) applied post-hoc to a *disabled-stops* reference
 run, rather than hardcoding "magic" iteration numbers: this proves the
 implementation matches the rule, not just that it stops somewhere plausible.
+
+Also covers PR #213 review findings on top of the original issue #207 suite:
+``stop_reason`` shadowing under the shipped True/True defaults (grad_norm vs.
+grad_norm_floor/min_dll); do_reject combined with each standalone stop; a
+genuine keep_best overshoot restore under a new stop reason (not a monotone
+trajectory); the five new config keys round-tripping through
+state_dict()/from_state_dict(), including a simulated pre-#207 payload;
+``AMICA.save()``/``load()`` actually exercised, not just claimed; a stop
+reachable at the literal shipped default thresholds; and (folding in issue
+#161) ``mir_history_`` surviving a keep_best restore untouched and coming
+back empty after save/load.
 """
 
 import math
@@ -721,3 +732,65 @@ def test_missing_convergence_keys_fall_back_to_fortran_defaults(real_data):
     assert loaded.maxincs == 5
     assert loaded.use_grad_norm is True
     assert loaded.min_nd == 1e-7
+
+
+# --- mir_history_ vs keep_best / save-load (issue #161) --------------------
+
+
+def test_mir_history_survives_keep_best_restore(real_data):
+    """Issue #161 claim 1: ``mir_history_`` is a TRUE trajectory that a
+    keep_best restore (issue #51) does not rewrite, so its last entry can be
+    (and here, is) computed from the pre-restore, discarded parameters --
+    NOT the restored parameters ``fit`` actually returns. The docstrings'
+    corollary is that the fit-end MIR is ``model.mir(X)`` (computed from the
+    returned parameters), never ``mir_history_[-1]``.
+
+    Uses the same genuine-overshoot recipe as
+    ``test_keep_best_restores_genuine_overshoot_under_min_dll_stop`` above,
+    with ``mir_step=5`` added."""
+    x = real_data[:, :4096]
+    ng = _fresh_ng(
+        n_models=2,
+        seed=0,
+        do_newton=True,
+        newt_start=1,
+        lrate=0.5,
+        block_size=1024,
+        use_min_dll=True,
+        min_dll=1e-4,
+        maxincs=2,
+        use_grad_norm=False,
+        keep_best=True,
+    )
+    ng.fit(x, max_iter=60, verbose=False, mir_step=5)
+    assert ng.stop_reason == "min_dll"
+    assert ng.final_ll_ != ng.ll_history[-1]  # the restore branch fired
+
+    assert ng.mir_history_, "test setup: mir_step recorded nothing"
+    last_it, last_mir, _ = ng.mir_history_[-1]
+    # The last waypoint was recorded at the final (pre-restore) iteration --
+    # _snapshot_params/_restore_params never touch mir_history_, so it is not
+    # truncated or rewritten by the restore that just fired above.
+    assert last_it == len(ng.ll_history) - 1
+
+    # model.mir(X) reflects the RESTORED (actually-returned) parameters, and
+    # differs from that stale pre-restore waypoint -- confirming the
+    # documented distinction is real, not just an absence-of-crash check.
+    mir_now, _ = ng.mir(x)
+    assert not math.isclose(mir_now, last_mir, rel_tol=1e-6)
+
+
+def test_mir_history_empty_after_save_load(real_data, tmp_path):
+    """Issue #161 claim 2: ``mir_history_`` is not persisted in
+    state_dict() (a diagnostic trajectory, not a fitted parameter), so a
+    save/load round trip must yield an EMPTY ``mir_history_`` on the reloaded
+    model -- not stale trajectory data leaked through some other path."""
+    x = real_data[:, :2048]
+    model = AMICA(n_models=1, n_mix=3, device="cpu", verbose=False)
+    model.fit(x, max_iter=10, seed=1, dtype=torch.float64, mir_step=3)
+    assert model.mir_history_, "test setup: mir_step recorded nothing"
+
+    save_path = tmp_path / "mir_history_model.pt"
+    model.save(str(save_path))
+    loaded = AMICA.load(str(save_path))
+    assert loaded.mir_history_ == []
