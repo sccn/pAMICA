@@ -460,11 +460,20 @@ def test_keep_best_stays_active_through_min_dll_stop(real_data):
     assert ng.final_ll_ in ng.ll_history
 
 
-def test_do_reject_interaction_min_dll_stop_leaves_good_idx_usable(real_data):
+def test_do_reject_interaction_grad_norm_floor_stop_leaves_good_idx_usable(real_data):
     """do_reject changes numgoodsum (and so the LL normalization) every
     rejection pass; a converged stop under do_reject must still leave
     good_idx/A/transform usable, and keep_best's do_reject-inactive warning
-    must not prevent the fit from completing normally."""
+    must not prevent the fit from completing normally.
+
+    NOTE (review finding, PR #213): this test sets ``use_min_dll=False``, so
+    it exercises the decrease-branch's ``grad_norm_floor`` half (gap 3), not
+    ``min_dll`` -- renamed from
+    ``test_do_reject_interaction_min_dll_stop_leaves_good_idx_usable`` to
+    match. See the two tests below for do_reject combined with the standalone
+    ``min_dll`` and ``grad_norm`` stops, which were the genuinely missing
+    coverage.
+    """
     x = real_data[:, :8192]
     ng = _fresh_ng(
         seed=1,
@@ -488,6 +497,62 @@ def test_do_reject_interaction_min_dll_stop_leaves_good_idx_usable(real_data):
     assert np.isfinite(sources).all()
     state = ng.state_dict()  # must not raise (issue #50 usable-model contract)
     assert state["extra"]["stop_reason"] == "grad_norm_floor"
+
+
+def test_do_reject_interaction_min_dll_stop_leaves_good_idx_usable(real_data):
+    """do_reject combined with the standalone min_dll stop (gap 1): the
+    genuinely missing coverage flagged alongside the rename above. Same
+    do_reject schedule as the grad_norm_floor variant, with the min_dll
+    config from ``test_min_dll_stop_matches_independent_reference``."""
+    x = real_data[:, :8192]
+    ng = _fresh_ng(
+        seed=42,
+        do_reject=True,
+        rejstart=2,
+        rejint=3,
+        maxrej=2,
+        do_newton=True,
+        newt_start=5,
+        use_min_dll=True,
+        min_dll=0.0025,
+        maxincs=3,
+        use_grad_norm=False,
+    )
+    ng.fit(x, max_iter=40, verbose=False)
+
+    assert ng.stop_reason == "min_dll"
+    assert ng.good_idx is not None and int(ng.good_idx.numel()) < x.shape[1]
+    sources = ng.transform(x, model_idx=0)
+    assert np.isfinite(sources).all()
+    state = ng.state_dict()  # must not raise (issue #50 usable-model contract)
+    assert state["extra"]["stop_reason"] == "min_dll"
+
+
+def test_do_reject_interaction_grad_norm_stop_leaves_good_idx_usable(real_data):
+    """do_reject combined with the standalone grad_norm stop (gap 2): the
+    other genuinely missing coverage flagged alongside the rename above. Same
+    do_reject schedule as the two variants above, with the grad_norm config
+    from ``test_grad_norm_stop_matches_independent_reference``."""
+    x = real_data[:, :8192]
+    ng = _fresh_ng(
+        seed=42,
+        do_reject=True,
+        rejstart=2,
+        rejint=3,
+        maxrej=2,
+        do_newton=False,
+        use_min_dll=False,
+        use_grad_norm=True,
+        min_nd=0.02,
+    )
+    ng.fit(x, max_iter=20, verbose=False)
+
+    assert ng.stop_reason == "grad_norm"
+    assert ng.good_idx is not None and int(ng.good_idx.numel()) < x.shape[1]
+    sources = ng.transform(x, model_idx=0)
+    assert np.isfinite(sources).all()
+    state = ng.state_dict()  # must not raise (issue #50 usable-model contract)
+    assert state["extra"]["stop_reason"] == "grad_norm"
 
 
 # --- disabled-by-default-off regression: both stops off is unaffected ------
