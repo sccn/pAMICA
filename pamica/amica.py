@@ -67,7 +67,13 @@ class AMICA:
         ``grad_norm_floor`` fire together as two halves of the same
         likelihood-decrease branch; ``min_dll``/``grad_norm`` are separate,
         unconditional per-iteration checks); only ``nan_ll``/``singular_ll``
-        are degenerate (see ``converged_``).
+        are degenerate (see ``converged_``). None of these checks short-
+        circuits on an earlier one in the same iteration, so under the
+        shipped ``use_grad_norm=True`` default ``"grad_norm"`` always takes
+        precedence over ``"grad_norm_floor"`` when both would apply --
+        ``"grad_norm_floor"`` only surfaces as this value when
+        ``use_grad_norm=False`` (see ``AMICATorchNG``'s ``use_grad_norm``
+        docstring for the full explanation).
     ll_history_ : list
         Log-likelihood history during training (the true per-iteration
         trajectory; may dip below its peak on a late overshoot)

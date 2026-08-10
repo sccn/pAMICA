@@ -260,6 +260,48 @@ def test_lrate_floor_still_reachable_without_grad_norm(real_data):
     assert len(ng.ll_history) == 23
 
 
+# --- stop_reason precedence (PR #213 review finding 2) ---------------------
+#
+# None of the three fit()-loop stop blocks (decrease branch; min_dll;
+# grad_norm) short-circuits on an earlier one having already fired this same
+# iteration -- Fortran has the same structure (independent leave=.true.
+# assignments, no declared precedence), so this is not a fidelity bug. But it
+# does mean that whichever block runs LAST and finds its own condition true
+# wins. Fixed source order is: decrease branch, then min_dll, then grad_norm.
+# The standalone grad_norm check (last) tests a strict superset of the
+# decrease-branch's grad_norm_floor condition (ndtmpsum <= min_nd, without
+# requiring a coincident decrease), so under the shipped use_grad_norm=True
+# default, "grad_norm" always wins and "grad_norm_floor" is unreachable as a
+# FINAL stop_reason. See the corrected use_grad_norm docstring in
+# torch_impl/core.py.
+
+
+def test_grad_norm_shadows_grad_norm_floor_under_shipped_defaults(real_data):
+    """Same seed/config as ``test_grad_norm_floor_fires_on_likelihood_decrease``
+    (which isolates the decrease-branch's grad_norm_floor half by setting
+    ``use_grad_norm=False``), but with that one override removed so both
+    stops sit at their shipped ``True`` defaults. The standalone grad_norm
+    check (amica15.f90:1073-1079) does not require a likelihood decrease --
+    only ``ndtmpsum <= min_nd`` -- so it fires as soon as that threshold is
+    crossed, which happens well before the later iteration where a genuine
+    decrease would let grad_norm_floor's narrower condition also become true.
+    The two tests together prove the shadowing directly (identical setup,
+    opposite stop_reason, depending only on ``use_grad_norm``) rather than by
+    argument alone.
+    """
+    ng = _fresh_ng(
+        seed=1,
+        do_newton=True,
+        newt_start=2,
+        newtrate=3.0,
+        lrate=0.3,
+        min_nd=1.0,
+        # use_min_dll / use_grad_norm left at their True shipped defaults.
+    )
+    ng.fit(real_data[:, :4096], max_iter=30, verbose=False)
+    assert ng.stop_reason == "grad_norm"
+
+
 # --- share_comps interaction: ndtmpsum must not go stale during the freeze -
 
 

@@ -336,12 +336,34 @@ class AMICATorchNG:
         just decreased; it is also folded into the likelihood-decrease
         branch unconditionally (``stop_reason="grad_norm_floor"``, Fortran
         amica15.f90:1040's ``.or. (ndtmpsum .le. min_nd)``, alongside the
-        existing ``lrate <= minlrate`` check) -- this is the fix for the
-        reported CUDA/``do_newton=True`` case where ``lrate`` sits at
-        ``newtrate`` and oscillates instead of annealing, so the old
+        existing ``lrate <= minlrate`` check) -- this decrease-branch half is
+        what fixes the reported CUDA/``do_newton=True`` case where ``lrate``
+        sits at ``newtrate`` and oscillates instead of annealing, so the old
         ``lrate_floor``-only check never fired and ``max_iter`` was the only
         stop (issue #207). Checked every iteration once two log-likelihood
         values exist (never on the first).
+
+        CAUTION: with ``use_grad_norm`` at this default (``True``), the
+        stop that actually surfaces for the fixed CUDA scenario is
+        ``"grad_norm"``, not ``"grad_norm_floor"``. The standalone check
+        above runs every iteration regardless of LL direction and (in
+        ``fit``'s per-iteration ordering) is evaluated after the
+        likelihood-decrease branch, with no ``elif``/``leave`` gate between
+        them; whichever iteration first satisfies ``ndtmpsum <= min_nd``
+        also satisfies the standalone check that same iteration, so it always
+        overwrites ``stop_reason`` before a decrease-gated
+        ``"grad_norm_floor"`` could be the value ``fit`` finally reports.
+        ``"grad_norm_floor"`` is therefore only distinctly reachable as the
+        *final* ``stop_reason`` when ``use_grad_norm=False`` (isolating the
+        decrease-branch half, as ``test_grad_norm_floor_fires_on_likelihood_decrease``
+        does); ``test_grad_norm_shadows_grad_norm_floor_under_shipped_defaults``
+        (same setup, ``use_grad_norm`` left at its default) confirms the
+        shadowing directly. ``"min_dll"`` can likewise be shadowed by
+        ``"grad_norm"`` if both conditions happen to hold in the same
+        iteration -- Fortran has this same structure (independent
+        ``leave=.true.`` assignments with no declared precedence among them),
+        so this is not a fidelity bug, just a reporting nuance worth knowing
+        before reading ``stop_reason`` as a precise diagnosis.
     min_nd : float, default=1e-7
         Threshold for ``use_grad_norm`` (and the decrease-branch grad-norm
         check). Matches Fortran's ``ndtmpsum`` (amica15.f90:1742-1743): the
@@ -1963,6 +1985,29 @@ class AMICATorchNG:
             # which wraps the decrease branch AND the two stops below: none of
             # the three checks can fire on the first iteration (no LL(iter-1)
             # yet) or before ll_history has two entries after a restart.
+            #
+            # PRECEDENCE NOTE (PR #213 review, issue #207): the three blocks
+            # below (decrease branch; min_dll; grad_norm) are independent --
+            # none is gated on ``leave`` already being True from an earlier
+            # block this same iteration, matching Fortran's own structure of
+            # independent ``leave=.true.`` assignments with no declared
+            # precedence. Whichever block runs LAST and finds its own
+            # condition true wins (its ``self.stop_reason =`` is what
+            # ``fit`` ultimately reports), so with this fixed source order
+            # (decrease branch, then min_dll, then grad_norm) the standalone
+            # grad_norm block always has final say when its condition holds.
+            # In particular, under the shipped ``use_grad_norm=True`` default
+            # this makes the decrease-branch's ``"grad_norm_floor"`` outcome
+            # unreachable: its condition (``ndtmpsum <= min_nd`` during a
+            # decrease) is strictly narrower than the standalone block's
+            # (``ndtmpsum <= min_nd``, any iteration), so whenever
+            # ``"grad_norm_floor"`` would fire, the standalone block fires
+            # too, that same iteration, and overwrites it with
+            # ``"grad_norm"``. See ``use_grad_norm``'s docstring above and
+            # ``test_grad_norm_shadows_grad_norm_floor_under_shipped_defaults``.
+            # This is a reporting nuance, not a behavior change -- deliberately
+            # NOT restructured into an explicit precedence, to keep this
+            # section a direct, reviewable port of amica15.f90:1033-1079.
             have_prev = len(self.ll_history) > 1
             leave = False
             if have_prev and ll < self.ll_history[-2]:
