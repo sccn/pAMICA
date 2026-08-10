@@ -437,27 +437,46 @@ def test_grad_norm_floor_stop_leaves_wrapper_usable(real_data):
 # --- keep_best / do_reject interaction (early stopping must not break them) -
 
 
-def test_keep_best_stays_active_through_min_dll_stop(real_data):
-    """keep_best (issue #51) must keep tracking/reporting the best iterate
-    when the run ends via a NEW stop, not just via max_iter/lrate_floor:
-    final_ll_ is still the best LL seen, and it is a value actually present
-    in ll_history (the safeguard restores real snapshots, not a fabricated
-    number)."""
-    x = real_data[:, :8192]
+def test_keep_best_restores_genuine_overshoot_under_min_dll_stop(real_data):
+    """keep_best (issue #51) must actually exercise its restore branch, not
+    just trivially satisfy ``final_ll_ == max(ll_history) == ll_history[-1]``
+    on a monotone trajectory -- review finding (PR #213): the previous
+    version of this test used a monotone config, under which those equalities
+    hold identically whether the restore logic works or is a no-op, so it
+    proved nothing about the restore itself.
+
+    This config is the known non-monotone recipe from
+    ``test_write_amica_output_ll_matches_kept_iterate`` (issue #92,
+    ``test_amica_ng_wrapper.py``: real 2-model data, aggressive
+    ``do_newton``/``lrate``), combined with a loosened ``min_dll`` so the run
+    stops via the NEW ``min_dll`` stop_reason a few iterations after its
+    peak, not via ``max_iter`` and not via a monotone approach to that peak.
+    """
+    x = real_data[:, :4096]
     ng = _fresh_ng(
-        seed=42,
+        n_models=2,
+        seed=0,
         do_newton=True,
-        newt_start=5,
+        newt_start=1,
+        lrate=0.5,
+        block_size=1024,
         use_min_dll=True,
-        min_dll=0.0025,
-        maxincs=3,
+        min_dll=1e-4,
+        maxincs=2,
         use_grad_norm=False,
         keep_best=True,
     )
-    ng.fit(x, max_iter=40, verbose=False)
+    ng.fit(x, max_iter=60, verbose=False)
     assert ng.stop_reason == "min_dll"
     assert ng.final_ll_ == max(ng.ll_history)
     assert ng.final_ll_ in ng.ll_history
+    # The genuine-overshoot proof: the restore branch only overwrites
+    # final_ll_ when the run ends materially below its peak (issue #51), so
+    # final_ll_ != ll_history[-1] is only reachable if that branch actually
+    # ran -- it cannot happen on a monotone trajectory or a no-op restore.
+    assert ng.final_ll_ != ng.ll_history[-1]
+    assert ng.final_ll_ > ng.ll_history[-1]
+    assert ng.ll_history.index(ng.final_ll_) < len(ng.ll_history) - 1
 
 
 def test_do_reject_interaction_grad_norm_floor_stop_leaves_good_idx_usable(real_data):
