@@ -1258,6 +1258,47 @@ class AMICA:
                 self.lrate0, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
             )
 
+        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1731-1743). Computed
+        # HERE, before the A step and before rescaling, because Fortran builds dAk
+        # inside accum_updates_and_likelihood (:1731-1743) strictly before
+        # update_params applies it (:1789). Using the post-update, post-rescale A
+        # would measure a different quantity.
+        #
+        # dAk is the gm-weighted average of the per-model directions mapped through
+        # A (dAk = sum_h gm[h] * dir_h^T @ A, scattered by comp_list, divided by
+        # zeta = sum_h gm[h] per column). ndtmpsum is then the RMS of the used
+        # columns of dAk: ||dAk[:, used]|| / sqrt(nw * n_used), with NO lrate
+        # factor. Fortran measures the gradient direction before the step, not the
+        # applied update lrate*dAk, and does not divide by lrate either
+        # (amica15.f90:1742-1743) -- there is no missing factor here.
+        #
+        # Fortran ordering caveat: Fortran's gm is not reassigned until
+        # update_params (amica15.f90:1789+), which runs AFTER dAk is built, so its
+        # ndtmpsum uses the previous iteration's gm. self.gm is already updated by
+        # this point. That is invisible for num_models=1 (gm == 1) and for the
+        # default disjoint comp_list, where the gm[h] factor cancels exactly
+        # against zeta[idx], but the two differ under share_comps with a genuinely
+        # shared column. Diagnostic only, it does not affect the fitted
+        # parameters; tracked in issue #219.
+        dAk = np.zeros_like(self.A)
+        zeta = np.zeros(self.num_comps)
+        for h in range(self.num_models):
+            idx = self.comp_list[:, h]
+            dAk[:, idx] += self.gm[h] * np.dot(directions[h].T, self.A[:, idx])
+            zeta[idx] += self.gm[h]
+        nonzero = zeta > 0
+        dAk[:, nonzero] /= zeta[nonzero]
+        # comp_used is None until fit() sets it up, and the M-step is exercised
+        # directly in tests before that happens, so fall back to "all used".
+        used = (
+            self.comp_used
+            if self.comp_used is not None
+            else np.ones(self.num_comps, dtype=bool)
+        )
+        nd_value = float(
+            np.sqrt(np.sum(dAk[:, used] ** 2) / (self.data_dim * int(used.sum())))
+        )
+
         # A is stored as Fortran's A^T (true unmixing = W^T = inv(A)^T), so the
         # Fortran step A_fort -= lrate*A_fort @ dir becomes A -= lrate*dir^T @ A
         # (LEFT-multiply by the TRANSPOSED direction). Right-multiply by the
@@ -1286,22 +1327,11 @@ class AMICA:
         # Store likelihood
         self.ll.append(updates["ll"])
 
-        # Compute the weight-gradient norm every iteration (Fortran's ndtmpsum
-        # is always computed). _check_convergence uses it as the gradient floor
-        # in the decrease-stop condition regardless of use_grad_norm; the flag
-        # only gates the separate final gradient-norm stop.
-        dA = np.zeros_like(self.A)
-        for h in range(self.num_models):
-            dA[:, self.comp_list[:, h]] += self.gm[h] * updates["dWtmp"][:, :, h]
-        # NOTE (issue #212): deliberately left as-is, and it is NOT Fortran-faithful.
-        # Fortran divides dAk by zeta (the accumulated gm weights) before squaring,
-        # and masks both the sum and the divisor by comp_used (amica15.f90:1739-1743).
-        # This does neither, and empirically reports ~5.4e3 on the bundled sample
-        # where Fortran reports ~1e-5, so min_nd/use_grad_norm is unreachable in this
-        # backend for the same reason min_dll was before this fix. Correcting it needs
-        # the zeta division plus confirmation that dWtmp is the same base quantity as
-        # Fortran's dA, so it is tracked separately rather than bundled in here.
-        self.nd.append(np.sqrt(np.sum(dA**2) / (self.data_dim * self.num_comps)))
+        # The weight-gradient norm is computed above, before the A step, matching
+        # Fortran's ordering. _check_convergence uses it as the gradient floor in
+        # the decrease-stop condition regardless of use_grad_norm; the flag only
+        # gates the separate final gradient-norm stop.
+        self.nd.append(nd_value)
 
     def _optimize(self):
         """Main optimization loop."""
