@@ -86,9 +86,10 @@ def test_grad_norm_uses_the_pre_step_mixing_matrix():
     model.fit(_real_data(4096))
 
     updates = model._get_updates_and_likelihood()
-    a_before = model.A.copy()
+    assert model.A is not None  # set by fit(); narrows Optional for the checker
+    a_before = np.asarray(model.A).copy()
     model._update_parameters(updates)
 
-    dAk = (a_before - model.A) / model.lrate
+    dAk = (a_before - np.asarray(model.A)) / model.lrate
     expected = np.sqrt(np.sum(dAk**2) / (model.data_dim * model.num_comps))
     assert np.isclose(model.nd[-1], expected, rtol=1e-8)
