@@ -653,11 +653,12 @@ def test_min_dll_stop_reachable_at_shipped_default_threshold(real_data):
     This test uses the LITERAL shipped defaults -- ``min_dll=1e-9``,
     ``maxincs=5``, ``use_grad_norm=True``, ``min_nd=1e-7`` -- none
     overridden -- and asserts a stop is reachable at all, on real data, in a
-    bounded budget. It is NOT ``@pytest.mark.slow``: it finishes in a few
-    seconds, well under the 3-second-ish budget of the other tests in this
-    module (issue #207 review finding 1 -- ``slow`` means "invokes the
-    macOS-only Fortran binary", not "takes a while", so this does not
-    qualify).
+    bounded budget. It is NOT ``@pytest.mark.slow``: it is the single slowest
+    test in this module (~8s, the 326-iteration Newton fit itself, not test
+    overhead) but still finishes in single-digit seconds, nowhere near the
+    "thousands of iterations" this finding anticipated needing (issue #207
+    review finding 1 -- ``slow`` means "invokes the macOS-only Fortran
+    binary", not "takes a while", so a few extra seconds does not qualify).
 
     Reaching the default threshold organically needed real (not synthetic)
     tuning of WHICH real-data config gets there fast: the PR's own
