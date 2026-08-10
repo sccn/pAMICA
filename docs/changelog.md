@@ -3,6 +3,20 @@
 Release notes are also published on the
 [GitHub releases page](https://github.com/sccn/pAMICA/releases).
 
+## Unreleased
+
+- Added the three missing Fortran convergence stops to `AMICATorchNG`
+  (issue #207): `use_min_dll`/`min_dll`/`maxincs` (small-likelihood-increase
+  stop), `use_grad_norm`/`min_nd` (weight-gradient-norm stop), and the
+  lrate-decrease branch's missing gradient-norm half
+  (`stop_reason="grad_norm_floor"`). Fixes the reported case where, under
+  `do_newton=True`, `lrate` settles at `newtrate` and oscillates instead of
+  annealing, so the pre-existing `lrate_floor` check never fired and
+  `max_iter` was the only working stop. All five new constructor arguments
+  persist through `state_dict()`/`from_state_dict()`; older saved files
+  (missing these keys) still load, falling back to the Fortran-faithful
+  defaults.
+
 ## 0.3.1
 
 Rho-rate schedule fixes across all backends and a reproducible-seed option in the
