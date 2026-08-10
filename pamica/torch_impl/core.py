@@ -2840,6 +2840,17 @@ class AMICATorchNG:
         picks a default when ``None``); ``dtype`` always comes from the saved
         ``config``.
         """
+        # format_version stays 3 here -- deliberately NOT bumped for issue
+        # #207, unlike PR #52's 1->2 (adaptive PDF) and PR #53's 2->3
+        # (keep_best). The check below is strict equality, so bumping would
+        # break loading genuinely older (pre-#53) files for no reason: the
+        # five new config keys (use_min_dll/min_dll/maxincs/use_grad_norm/
+        # min_nd) are additive-only, and a payload saved before #207 simply
+        # lacks them in its ``config`` dict, so ``cls(device=device,
+        # **config)`` below falls back to the constructor's own
+        # Fortran-faithful defaults for whichever keys are missing -- see
+        # test_missing_convergence_keys_fall_back_to_fortran_defaults in
+        # test_ng_convergence.py.
         version = state.get("format_version")
         if version != 3:
             raise ValueError(

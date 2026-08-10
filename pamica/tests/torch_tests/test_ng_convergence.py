@@ -621,3 +621,58 @@ def test_disabled_stops_default_path_matches_max_iter_on_short_run(real_data):
     ng.fit(real_data[:, :8192], max_iter=15, verbose=False)
     assert ng.stop_reason == "max_iter"
     assert len(ng.ll_history) == 15
+
+
+# --- persistence: issue #207 config keys (PR #213 review finding 6) --------
+
+
+def test_convergence_config_round_trips_through_state_dict(real_data):
+    """The five issue #207 config keys (use_min_dll/min_dll/maxincs/
+    use_grad_norm/min_nd) must persist through state_dict()/from_state_dict()
+    like every other constructor argument (issue #36 persistence contract),
+    not just the fitted parameter tensors. Non-default values throughout so a
+    bug that silently fell back to the constructor defaults would be caught."""
+    ng = _fresh_ng(
+        seed=1,
+        use_min_dll=False,
+        min_dll=1e-4,
+        maxincs=2,
+        use_grad_norm=False,
+        min_nd=1e-3,
+    )
+    ng.fit(real_data[:, :2048], max_iter=3, verbose=False)
+    state = ng.state_dict()
+    assert state["config"]["use_min_dll"] is False
+    assert state["config"]["min_dll"] == 1e-4
+    assert state["config"]["maxincs"] == 2
+    assert state["config"]["use_grad_norm"] is False
+    assert state["config"]["min_nd"] == 1e-3
+
+    loaded = AMICATorchNG.from_state_dict(state, device="cpu")
+    assert loaded.use_min_dll is False
+    assert loaded.min_dll == 1e-4
+    assert loaded.maxincs == 2
+    assert loaded.use_grad_norm is False
+    assert loaded.min_nd == 1e-3
+
+
+def test_missing_convergence_keys_fall_back_to_fortran_defaults(real_data):
+    """A state_dict payload saved before issue #207 has ``format_version==3``
+    (deliberately not bumped -- see the comment at the ``format_version``
+    check in ``AMICATorchNG.from_state_dict``) but no
+    use_min_dll/min_dll/maxincs/use_grad_norm/min_nd keys in its ``config``.
+    ``from_state_dict`` must still load such a payload, falling back to the
+    constructor's Fortran-faithful defaults for those five keys -- not
+    raising, and not silently defaulting to some other value."""
+    ng = _fresh_ng(seed=1, use_min_dll=True, use_grad_norm=True)
+    ng.fit(real_data[:, :2048], max_iter=3, verbose=False)
+    state = ng.state_dict()
+    for key in ("use_min_dll", "min_dll", "maxincs", "use_grad_norm", "min_nd"):
+        del state["config"][key]  # simulate a pre-#207 payload
+
+    loaded = AMICATorchNG.from_state_dict(state, device="cpu")
+    assert loaded.use_min_dll is True
+    assert loaded.min_dll == 1e-9
+    assert loaded.maxincs == 5
+    assert loaded.use_grad_norm is True
+    assert loaded.min_nd == 1e-7
