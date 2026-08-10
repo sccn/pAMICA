@@ -110,7 +110,7 @@ def test_rejection_does_not_spuriously_stop_fit():
     # The fit did not stop at/just after the rejection: it ran well past rejstart.
     assert len(ll) > model.rejstart + 2
     # LL after the rejection is not below LL at the rejection iteration (dropping
-    # outliers raises the raw-sum LL; no spurious descent).
+    # below-average samples raises the mean of what remains; no spurious descent).
     assert ll[-1] >= ll[model.rejstart]
 
 
