@@ -268,7 +268,11 @@ def test_lrate_floor_still_reachable_without_grad_norm(real_data):
     ng.fit(real_data[:, :4096], max_iter=30, verbose=False)
     assert ng.stop_reason == "lrate_floor"
     assert ng.lrate <= ng.minlrate
-    assert len(ng.ll_history) == 23
+    # The exact crossing iteration (23 on macOS-arm64) is a snapshot, not an
+    # invariant: the same claim elsewhere in this file varied 326 -> 1076 across
+    # BLAS implementations. Assert the behaviour, which is that the stop fired
+    # before the budget was exhausted, not the iteration it happened on.
+    assert len(ng.ll_history) < 30
 
 
 # --- stop_reason precedence (PR #213 review finding 2) ---------------------
@@ -675,17 +679,22 @@ def test_min_dll_stop_reachable_at_shipped_default_threshold(real_data):
     document doing), not a threshold change.
 
     The budget is deliberately generous. The iteration at which the stop fires
-    is BLAS-dependent: measured at 326 on macOS-arm64, 412 on Linux-x86_64 with
-    a CUDA-enabled torch build, and beyond 500 on the GitHub Linux runner, which
-    failed this test at an earlier ``max_iter=500`` (PR #213 CI). The claim under
-    test is that the default threshold is reachable at all, not that it is
-    reached by any particular iteration, so the budget sits well above the
-    observed spread rather than just above the fastest platform.
+    varies by more than 3x with the BLAS in use: measured at 326 on macOS-arm64,
+    412 on Linux-x86_64 with a CUDA-enabled torch build, and 1076 on the GitHub
+    Linux runner. An earlier version of this test used ``max_iter=500`` and
+    failed CI twice, first on the stop reason and then on a leftover
+    ``len(ll_history) < 500`` bound (PR #213). The claim under test is that the
+    default threshold is reachable at all, not that it is reached by any
+    particular iteration, so both the budget and the bound track the budget
+    rather than a constant fitted to one machine.
     """
     ng = _fresh_ng(seed=1, do_newton=True, newt_start=5, block_size=1024)
     ng.fit(real_data[:, :4096], max_iter=2000, verbose=False)
     assert ng.stop_reason == "min_dll"
-    assert len(ng.ll_history) < 500  # a real early stop, not max_iter
+    # A real early stop rather than exhausting the budget. Bound against the
+    # budget itself, not a fixed number: the firing iteration is BLAS-dependent
+    # (see docstring) and any constant below the budget is a platform trap.
+    assert len(ng.ll_history) < 2000
 
 
 # --- persistence: issue #207 config keys (PR #213 review finding 6) --------
