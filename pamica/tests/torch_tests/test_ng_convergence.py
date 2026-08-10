@@ -407,11 +407,16 @@ def test_min_dll_stop_leaves_backend_usable(real_data, tmp_path):
     assert torch.equal(loaded.A.cpu(), ng.A.cpu())
 
 
-def test_grad_norm_floor_stop_leaves_wrapper_usable(real_data):
+def test_grad_norm_floor_stop_leaves_wrapper_usable(real_data, tmp_path):
     """End-to-end through the AMICA wrapper: a grad_norm_floor stop must
     leave converged_/is_fitted_ True and transform()/save() usable, exactly
     like the pre-existing lrate_floor path -- the CRITICAL requirement that
-    these are CONVERGED stops, not degenerate ones."""
+    these are CONVERGED stops, not degenerate ones.
+
+    ``save()`` is exercised for real here (review finding, PR #213: earlier
+    revisions of this module claimed "transform()/save() usable" in this very
+    docstring but never actually called ``AMICA.save()`` anywhere in the
+    file)."""
     x = real_data[:, :4096]
     model = AMICA(n_models=1, n_mix=3, device="cpu", verbose=False)
     model.fit(
@@ -432,6 +437,15 @@ def test_grad_norm_floor_stop_leaves_wrapper_usable(real_data):
     assert model.is_fitted_ is True
     S = model.transform(x)
     assert np.isfinite(S).all()
+
+    save_path = tmp_path / "grad_norm_floor_model.pt"
+    model.save(str(save_path))
+    loaded = AMICA.load(str(save_path))
+    assert loaded.stop_reason_ == "grad_norm_floor"
+    assert loaded.converged_ is True
+    assert loaded.is_fitted_ is True
+    S_loaded = loaded.transform(x)
+    np.testing.assert_array_equal(S_loaded, S)
 
 
 # --- keep_best / do_reject interaction (early stopping must not break them) -
