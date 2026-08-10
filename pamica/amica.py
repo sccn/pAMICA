@@ -60,8 +60,20 @@ class AMICA:
         one (``stop_reason_`` not in ``nan_ll``/``singular_ll``). A degenerate fit
         holds non-finite parameters and would produce NaN sources (issue #50).
     stop_reason_ : str or None
-        Why the last ``fit`` stopped (the backend ``stop_reason``): e.g.
-        ``"max_iter"``, ``"lrate_floor"``, ``"nan_ll"``, ``"singular_ll"``.
+        Why the last ``fit`` stopped (the backend ``stop_reason``):
+        ``"max_iter"``, ``"lrate_floor"``, ``"grad_norm_floor"``, ``"min_dll"``,
+        ``"grad_norm"``, ``"nan_ll"``, or ``"singular_ll"``. The last five are
+        Fortran-faithful convergence stops (issue #207: ``lrate_floor``/
+        ``grad_norm_floor`` fire together as two halves of the same
+        likelihood-decrease branch; ``min_dll``/``grad_norm`` are separate,
+        unconditional per-iteration checks); only ``nan_ll``/``singular_ll``
+        are degenerate (see ``converged_``). None of these checks short-
+        circuits on an earlier one in the same iteration, so under the
+        shipped ``use_grad_norm=True`` default ``"grad_norm"`` always takes
+        precedence over ``"grad_norm_floor"`` when both would apply --
+        ``"grad_norm_floor"`` only surfaces as this value when
+        ``use_grad_norm=False`` (see ``AMICATorchNG``'s ``use_grad_norm``
+        docstring for the full explanation).
     ll_history_ : list
         Log-likelihood history during training (the true per-iteration
         trajectory; may dip below its peak on a late overshoot)
@@ -177,8 +189,11 @@ class AMICA:
             and the interaction with ``keep_best``.
         **kwargs
             Additional parameters passed to the :class:`AMICATorchNG`
-            constructor (e.g. ``block_size``, ``rho0``, ``seed``, ``dtype``) --
-            the backend's tunables are constructor arguments, not fit() kwargs.
+            constructor (e.g. ``block_size``, ``rho0``, ``seed``, ``dtype``,
+            ``use_min_dll``, ``min_dll``, ``maxincs``, ``use_grad_norm``,
+            ``min_nd`` -- the issue #207 convergence stops, Fortran-faithful
+            defaults ``True``/``1e-9``/``5``/``True``/``1e-7``) -- the
+            backend's tunables are constructor arguments, not fit() kwargs.
 
         Returns
         -------

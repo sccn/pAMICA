@@ -91,12 +91,21 @@ _EPSDBLE = 1e-16
 # its last iterations). fit() therefore tracks the highest-LL iterate and
 # restores it when the final LL falls more than this tolerance below that peak.
 # Units: mean log-likelihood per sample-channel (the same scale as Fortran's
-# min_dll, amica17.f90:1866, which normalizes LL(iter) by numgoodsum*nw before
-# comparing; the legacy NumPy backend's min_dll now normalizes the same way,
-# issue #212), so 1e-9 reads as "numerical noise, not a real overshoot". The
-# threshold also keeps a
-# monotone single-model run (issue #24 parity) a bit-exact no-op: its final
-# iterate already IS the best, the gap is 0 < tol, and no restore fires.
+# min_dll comparison -- verified against BOTH Fortran sources, not just one:
+# amica15.f90:1752 and amica17.f90:1866 both compute LL(iter) = LLtmp2 /
+# dble(numgoodsum*nw) and then compare consecutive LL(iter) values against
+# min_dll (amica15.f90:1061 / amica17.f90:1085), so this is not an amica17-only
+# quirk -- amica15, the actual reference binary's source, does the identical
+# normalization. The legacy NumPy backend compared un-normalized summed LL until
+# issue #212, which made its own min_dll unreachable; it now normalizes the same
+# way, so all three agree on this scale.
+# 1e-9 reads as "numerical noise, not a real overshoot" on this normalized
+# scale. This module's own ``ll_history`` is already stored normalized the
+# same way (``ll = acc["ll"] / (n_use * n_channels)``, see ``fit``), so the
+# min_dll stop (issue #207) compares ``ll_history[-1] - ll_history[-2]``
+# directly with no extra scaling needed. The threshold also keeps a monotone
+# single-model run (issue #24 parity) a bit-exact no-op: its final iterate
+# already IS the best, the gap is 0 < tol, and no restore fires.
 _KEEP_BEST_TOL = 1e-9
 
 
@@ -298,6 +307,76 @@ class AMICATorchNG:
     maxdecs : int, default=5
         Number of consecutive log-likelihood decreases after which the
         learning-rate *ceiling* is ratcheted down (Fortran ``maxdecs``).
+    use_min_dll : bool, default=True
+        Enable the small-likelihood-increase stop (Fortran ``use_min_dll``,
+        amica15_header.f90:24/109; amica15.f90:1060-1072): once the per-
+        sample-channel log-likelihood gain ``ll_history[-1] - ll_history[-2]``
+        falls below ``min_dll`` for more than ``maxincs`` *consecutive*
+        iterations, ``fit`` stops (``stop_reason="min_dll"``). The counter
+        resets to 0 on any iteration with a larger gain (including a
+        likelihood decrease, which is always "less than" a positive
+        ``min_dll``, so it also increments the counter). Checked every
+        iteration once two log-likelihood values exist (never on the first).
+    min_dll : float, default=1e-9
+        Threshold for ``use_min_dll``, on the log-likelihood's own scale
+        (mean log-likelihood per sample-channel, matching ``ll_history`` --
+        see ``amica15.f90:1752``, which normalizes ``LL(iter)`` by
+        ``numgoodsum*nw`` before this comparison in the reference).
+    maxincs : int, default=5
+        Number of consecutive small-gain iterations tolerated before
+        ``use_min_dll`` stops the fit (Fortran ``maxincs``, not itself
+        configurable from the Fortran param file -- fixed at its header
+        default).
+    use_grad_norm : bool, default=True
+        Enable the weight-gradient-norm stop (Fortran ``use_grad_norm``,
+        amica15_header.f90:24/74; amica15.f90:1073-1079): once the RMS
+        weight-update norm ``ndtmpsum`` (see ``min_nd``) falls to or below
+        ``min_nd``, ``fit`` stops (``stop_reason="grad_norm"``). This is
+        independent of ``use_min_dll`` and of whether the log-likelihood
+        just decreased; it is also folded into the likelihood-decrease
+        branch unconditionally (``stop_reason="grad_norm_floor"``, Fortran
+        amica15.f90:1040's ``.or. (ndtmpsum .le. min_nd)``, alongside the
+        existing ``lrate <= minlrate`` check) -- this decrease-branch half is
+        what fixes the reported CUDA/``do_newton=True`` case where ``lrate``
+        sits at ``newtrate`` and oscillates instead of annealing, so the old
+        ``lrate_floor``-only check never fired and ``max_iter`` was the only
+        stop (issue #207). Checked every iteration once two log-likelihood
+        values exist (never on the first).
+
+        CAUTION: with ``use_grad_norm`` at this default (``True``), the
+        stop that actually surfaces for the fixed CUDA scenario is
+        ``"grad_norm"``, not ``"grad_norm_floor"``. The standalone check
+        above runs every iteration regardless of LL direction and (in
+        ``fit``'s per-iteration ordering) is evaluated after the
+        likelihood-decrease branch, with no ``elif``/``leave`` gate between
+        them; whichever iteration first satisfies ``ndtmpsum <= min_nd``
+        also satisfies the standalone check that same iteration, so it always
+        overwrites ``stop_reason`` before a decrease-gated
+        ``"grad_norm_floor"`` could be the value ``fit`` finally reports.
+        ``"grad_norm_floor"`` is therefore only distinctly reachable as the
+        *final* ``stop_reason`` when ``use_grad_norm=False`` (isolating the
+        decrease-branch half, as ``test_grad_norm_floor_fires_on_likelihood_decrease``
+        does); ``test_grad_norm_shadows_grad_norm_floor_under_shipped_defaults``
+        (same setup, ``use_grad_norm`` left at its default) confirms the
+        shadowing directly. ``"min_dll"`` can likewise be shadowed by
+        ``"grad_norm"`` if both conditions happen to hold in the same
+        iteration -- Fortran has this same structure (independent
+        ``leave=.true.`` assignments with no declared precedence among them),
+        so this is not a fidelity bug, just a reporting nuance worth knowing
+        before reading ``stop_reason`` as a precise diagnosis.
+    min_nd : float, default=1e-7
+        Threshold for ``use_grad_norm`` (and the decrease-branch grad-norm
+        check). Matches Fortran's ``ndtmpsum`` (amica15.f90:1742-1743): the
+        RMS, over ``comp_used`` components only, of the per-iteration
+        weight-update direction ``dAk`` (the natural-gradient/Newton step
+        before the ``lrate`` scaling and before ``share_comps``'s A-freeze
+        may discard it) -- ``sqrt(sum(dAk**2, axis=0)[comp_used].sum() /
+        (n_channels * comp_used.sum()))``. The ``comp_used`` mask only
+        differs from all-True when ``share_comps`` has merged/frozen columns
+        (issue #60); it is a no-op otherwise. Computed every iteration
+        regardless of ``use_grad_norm``/``use_min_dll`` (both stops read the
+        same per-iteration value; Fortran computes ``ndtmpsum`` unconditionally
+        too, in ``accum_updates_and_likelihood``, before either check runs).
     newt_ramp : int, default=10
         Denominator of the per-iteration learning-rate ramp toward the current
         ceiling: ``lrate = min(ceiling, lrate + min(1/newt_ramp, lrate))``
@@ -415,6 +494,11 @@ class AMICATorchNG:
         minlrate: float = 1e-12,
         lratefact: float = 0.5,
         maxdecs: int = 5,
+        use_min_dll: bool = True,
+        min_dll: float = 1e-9,
+        maxincs: int = 5,
+        use_grad_norm: bool = True,
+        min_nd: float = 1e-7,
         newt_ramp: int = 10,
         do_newton: bool = False,
         newt_start: int = 20,
@@ -462,6 +546,21 @@ class AMICATorchNG:
         self.minlrate = minlrate
         self.lratefact = lratefact
         self.maxdecs = maxdecs
+
+        # Convergence stops (issue #207), Fortran-faithful defaults (both
+        # amica15_header.f90:24/74/109 flags default True): the small-
+        # likelihood-increase stop (use_min_dll/min_dll/maxincs) and the
+        # weight-gradient-norm stop (use_grad_norm/min_nd). See fit() for the
+        # per-iteration checks and _update_parameters for the ndtmpsum
+        # computation these both read.
+        if maxincs < 0:
+            raise ValueError(f"maxincs must be >= 0, got {maxincs}")
+        self.use_min_dll = use_min_dll
+        self.min_dll = min_dll
+        self.maxincs = maxincs
+        self.use_grad_norm = use_grad_norm
+        self.min_nd = min_nd
+
         self.newt_ramp = newt_ramp
 
         self.do_newton = do_newton
@@ -616,11 +715,18 @@ class AMICATorchNG:
         self.numrej = 0
         self.good_idx: Optional[torch.Tensor] = None
 
-        # Set by fit(): why fitting stopped ("max_iter", "nan_ll", "lrate_floor")
-        # and how many iterations reverted Newton to natural gradient (Fortran
-        # prints this; here it is exposed for parity debugging, see issue #21).
+        # Set by fit(): why fitting stopped ("max_iter", "nan_ll", "lrate_floor",
+        # "grad_norm_floor", "min_dll", "grad_norm" -- issue #207 added the last
+        # three) and how many iterations reverted Newton to natural gradient
+        # (Fortran prints this; here it is exposed for parity debugging, see
+        # issue #21).
         self.stop_reason: Optional[str] = None
         self.n_newton_fallbacks = 0
+
+        # Weight-gradient-norm (Fortran ndtmpsum), recomputed every iteration by
+        # _update_parameters and read by fit()'s convergence checks (issue #207).
+        # None before the first _update_parameters call.
+        self._ndtmpsum: Optional[float] = None
 
         # Populated by fit()/_initialize_parameters().
         self.A: Optional[torch.Tensor] = None
@@ -1315,29 +1421,74 @@ class AMICATorchNG:
         # fixed point but sends the free-running fit downhill -- issue #24 root
         # cause (.context/issue-24/root_cause_Aupdate.py, machine-exact check).
         # (newton_active / sigma2 / lambda_ / kappa were finalized above.)
-        # A-update. When sharing holds A this iteration (the post-merge settle
-        # window, Fortran amica15.f90:1785), skip the whole block -- direction
-        # computation, lrate ramp, and step -- so a discarded Newton direction
-        # cannot pollute the fallback counter. _a_frozen is always False when
-        # sharing is off, so the default path is unchanged.
-        if not self._a_frozen():
-            eye = torch.eye(self.n_channels, dtype=self.dtype, device=self.device)
-            directions = []
-            no_newt = False
-            for h in range(self.n_models):
-                dA_h = -acc["dWtmp"][:, :, h] / acc["dgm"][h] + eye  # I - <g b^T>/dgm
-                if newton_active:
-                    H, posdef = self._newton_direction(
-                        dA_h, sigma2[:, h], lambda_[:, h], kappa[:, h]
-                    )
-                    if posdef:
-                        directions.append(H)
-                    else:
-                        no_newt = True
-                        directions.append(dA_h)  # fall back to natural gradient
+        #
+        # The direction/dAk/gradient-norm computation below runs UNCONDITIONALLY,
+        # not gated on _a_frozen(): Fortran computes dAk and ndtmpsum every
+        # iteration in accum_updates_and_likelihood (amica15.f90:1730-1743),
+        # strictly before the LATER, separate update_A block (amica15.f90:1785)
+        # that actually steps A and is guarded by the share-freeze window. Only
+        # the step itself -- and the lrate ramp / Newton-fallback bookkeeping
+        # that Fortran nests inside that same guarded block -- are conditional on
+        # ``not self._a_frozen()`` (issue #207: the grad-norm stop needs
+        # ndtmpsum to reflect the true gradient magnitude every iteration, not
+        # just the iterations where A actually moves). _a_frozen() is always
+        # False when sharing is off, so the default path recomputes exactly what
+        # it always did, just with the gate narrowed.
+        eye = torch.eye(self.n_channels, dtype=self.dtype, device=self.device)
+        directions = []
+        no_newt = False
+        for h in range(self.n_models):
+            dA_h = -acc["dWtmp"][:, :, h] / acc["dgm"][h] + eye  # I - <g b^T>/dgm
+            if newton_active:
+                H, posdef = self._newton_direction(
+                    dA_h, sigma2[:, h], lambda_[:, h], kappa[:, h]
+                )
+                if posdef:
+                    directions.append(H)
                 else:
-                    directions.append(dA_h)
+                    no_newt = True
+                    directions.append(dA_h)  # fall back to natural gradient
+            else:
+                directions.append(dA_h)
 
+        # Accumulate each model's natural-gradient/Newton contribution per
+        # mixing COLUMN as a gm-WEIGHTED AVERAGE (Fortran dAk/zeta,
+        # amica15.f90:1730-1743): dAk = sum_h gm[h]*dir_h scattered by
+        # comp_list, zeta = sum_h gm[h] per column, then dAk /= zeta. For the
+        # default disjoint comp_list every column has exactly one contributor,
+        # so gm cancels (dAk = dir) and single-model (gm=[1]) is byte-for-byte
+        # unchanged; for a SHARED column (issue #60) the step is Fortran's
+        # responsibility-weighted average, NOT a raw sum (a raw sum would
+        # over-step by the contributor count and destabilize the fit).
+        dAk = torch.zeros_like(self.A)
+        zeta = torch.zeros(self.n_comps, dtype=self.dtype, device=self.device)
+        for h in range(self.n_models):
+            idx = self.comp_list[:, h]
+            dAk.index_add_(1, idx, self.gm[h] * (directions[h].T @ self.A[:, idx]))
+            zeta.index_add_(0, idx, self.gm[h].expand(idx.shape[0]))
+        dAk = dAk / zeta.clamp_min(torch.finfo(self.dtype).tiny)
+
+        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1742-1743):
+        # ``sqrt(sum(dAk**2, mask=comp_used) / (nw*count(comp_used)))``. Read by
+        # fit()'s convergence checks (issue #207); the comp_used mask matters
+        # only when share_comps has merged/frozen columns (all-True otherwise,
+        # so ``comp_used_mask`` covers every column and this is a plain RMS over
+        # dAk). Named distinctly from the ``used`` (1, n_comps) broadcast mask
+        # above (alpha/mu/beta/rho updates) to avoid shadowing it.
+        comp_used_mask = self.comp_used
+        n_used = int(comp_used_mask.sum().item())
+        nd = (dAk**2).sum(dim=0)  # (n_comps,)
+        self._ndtmpsum = float(
+            torch.sqrt(
+                nd[comp_used_mask].sum() / (self.n_channels * max(n_used, 1))
+            ).item()
+        )
+
+        # A-update. When sharing holds A this iteration (the post-merge settle
+        # window, Fortran amica15.f90:1785), skip the step -- lrate ramp,
+        # Newton-fallback bookkeeping, and the DAXPY itself -- so a discarded
+        # Newton direction cannot pollute the fallback counter.
+        if not self._a_frozen():
             if newton_active and no_newt:
                 # Fortran prints "Hessian not positive definite, using natural
                 # gradient" (amica15.f90:1791-1793). Surface the same signal so an
@@ -1360,22 +1511,6 @@ class AMICATorchNG:
                     self.lrate_cap, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
                 )
 
-            # Accumulate each model's natural-gradient/Newton contribution per
-            # mixing COLUMN as a gm-WEIGHTED AVERAGE (Fortran dAk/zeta,
-            # amica15.f90:1730-1743): dAk = sum_h gm[h]*dir_h scattered by
-            # comp_list, zeta = sum_h gm[h] per column, then dAk /= zeta. For the
-            # default disjoint comp_list every column has exactly one contributor,
-            # so gm cancels (dAk = dir) and single-model (gm=[1]) is byte-for-byte
-            # unchanged; for a SHARED column (issue #60) the step is Fortran's
-            # responsibility-weighted average, NOT a raw sum (a raw sum would
-            # over-step by the contributor count and destabilize the fit).
-            dAk = torch.zeros_like(self.A)
-            zeta = torch.zeros(self.n_comps, dtype=self.dtype, device=self.device)
-            for h in range(self.n_models):
-                idx = self.comp_list[:, h]
-                dAk.index_add_(1, idx, self.gm[h] * (directions[h].T @ self.A[:, idx]))
-                zeta.index_add_(0, idx, self.gm[h].expand(idx.shape[0]))
-            dAk = dAk / zeta.clamp_min(torch.finfo(self.dtype).tiny)
             self.A = self.A - self.lrate * dAk
 
         if self.doscaling and (self.iteration % self.scalestep == 0):
@@ -1677,6 +1812,10 @@ class AMICATorchNG:
             torch.arange(n_total, device=self.device) if self.do_reject else None
         )
         numdecs = 0
+        # Consecutive-small-likelihood-gain counter for the min_dll stop (Fortran
+        # numincs, amica15.f90:1062-1071; issue #207). Reset here so a refit on
+        # the same instance gets a fresh count, matching numdecs.
+        numincs = 0
 
         # Best-iterate safeguard (issue #51): track the highest-LL iterate so a
         # late Newton-fallback overshoot cannot leave the returned model below a
@@ -1842,7 +1981,42 @@ class AMICATorchNG:
             # previous per-decrease self.rholrate*=rholratefact was a monotone
             # decay with no reset that collapsed the rho rate to ~1e-5 within a few
             # hundred iterations and froze rho at a stale shape (issue #193).
-            if len(self.ll_history) > 1 and ll < self.ll_history[-2]:
+            # have_prev mirrors Fortran's outer ``if (iter > 1)`` (amica15.f90:1033),
+            # which wraps the decrease branch AND the two stops below: none of
+            # the three checks can fire on the first iteration (no LL(iter-1)
+            # yet) or before ll_history has two entries after a restart.
+            #
+            # PRECEDENCE NOTE (PR #213 review, issue #207): the three blocks
+            # below (decrease branch; min_dll; grad_norm) are independent --
+            # none is gated on ``leave`` already being True from an earlier
+            # block this same iteration, matching Fortran's own structure of
+            # independent ``leave=.true.`` assignments with no declared
+            # precedence. Whichever block runs LAST and finds its own
+            # condition true wins (its ``self.stop_reason =`` is what
+            # ``fit`` ultimately reports), so with this fixed source order
+            # (decrease branch, then min_dll, then grad_norm) the standalone
+            # grad_norm block always has final say when its condition holds.
+            # In particular, under the shipped ``use_grad_norm=True`` default
+            # this makes the decrease-branch's ``"grad_norm_floor"`` outcome
+            # unreachable: its condition (``ndtmpsum <= min_nd`` during a
+            # decrease) is strictly narrower than the standalone block's
+            # (``ndtmpsum <= min_nd``, any iteration), so whenever
+            # ``"grad_norm_floor"`` would fire, the standalone block fires
+            # too, that same iteration, and overwrites it with
+            # ``"grad_norm"``. See ``use_grad_norm``'s docstring above and
+            # ``test_grad_norm_shadows_grad_norm_floor_under_shipped_defaults``.
+            # This is a reporting nuance, not a behavior change -- deliberately
+            # NOT restructured into an explicit precedence, to keep this
+            # section a direct, reviewable port of amica15.f90:1033-1079.
+            have_prev = len(self.ll_history) > 1
+            leave = False
+            if have_prev and ll < self.ll_history[-2]:
+                # ndtmpsum is the SAME per-iteration value use_grad_norm reads
+                # below (amica15.f90:1040's ``.or. (ndtmpsum .le. min_nd)``,
+                # issue #207 gap 3): this is what makes lrate stopping robust
+                # under do_newton, where lrate sits at newtrate/oscillates
+                # instead of annealing toward minlrate, so the old
+                # lrate<=minlrate-only check could never fire (the reported bug).
                 if self.lrate <= self.minlrate:
                     logger.warning(
                         "lrate floor (%g) reached at iter %d; stopping.",
@@ -1850,18 +2024,75 @@ class AMICATorchNG:
                         it,
                     )
                     self.stop_reason = "lrate_floor"
-                    break
-                self.lrate *= self.lratefact
-                numdecs += 1
-                if numdecs >= self.maxdecs:
-                    self.lrate_cap *= self.lratefact
-                    if it > self.newt_start:
-                        self.rholrate *= self.rholratefact
-                    if self.do_newton and it > self.newt_start:
-                        self.newtrate *= self.lratefact
-                    numdecs = 0
+                    leave = True
+                elif self._ndtmpsum is not None and self._ndtmpsum <= self.min_nd:
+                    logger.warning(
+                        "gradient-norm floor (%g) reached at iter %d on a "
+                        "likelihood decrease; stopping.",
+                        self.min_nd,
+                        it,
+                    )
+                    self.stop_reason = "grad_norm_floor"
+                    leave = True
+                else:
+                    self.lrate *= self.lratefact
+                    numdecs += 1
+                    if numdecs >= self.maxdecs:
+                        self.lrate_cap *= self.lratefact
+                        if it > self.newt_start:
+                            self.rholrate *= self.rholratefact
+                        if self.do_newton and it > self.newt_start:
+                            self.newtrate *= self.lratefact
+                        numdecs = 0
+
+            # Small-likelihood-increase stop (Fortran amica15.f90:1060-1072,
+            # use_min_dll/min_dll/maxincs -- issue #207 gap 1). Independent of
+            # the decrease branch above: it runs every iteration once have_prev,
+            # including iterations where the LL just decreased (a decrease is
+            # always "less than" a positive min_dll, so it also increments
+            # numincs there, matching Fortran exactly). numincs resets to 0 on
+            # any gain >= min_dll; stops only after MORE than maxincs
+            # *consecutive* small gains.
+            if have_prev and self.use_min_dll:
+                if ll - self.ll_history[-2] < self.min_dll:
+                    numincs += 1
+                    if numincs > self.maxincs:
+                        logger.warning(
+                            "likelihood increasing by less than %g for more than "
+                            "%d iterations; stopping at iter %d.",
+                            self.min_dll,
+                            self.maxincs,
+                            it,
+                        )
+                        self.stop_reason = "min_dll"
+                        leave = True
+                else:
+                    numincs = 0
+
+            # Weight-gradient-norm stop (Fortran amica15.f90:1073-1079,
+            # use_grad_norm/min_nd -- issue #207 gap 2). Also independent of the
+            # decrease branch: this is the unconditional every-iteration check
+            # (as opposed to the decrease-branch's grad_norm_floor above, which
+            # only applies alongside a likelihood decrease).
+            if (
+                have_prev
+                and self.use_grad_norm
+                and self._ndtmpsum is not None
+                and self._ndtmpsum <= self.min_nd
+            ):
+                logger.warning(
+                    "norm of weight gradient <= %g at iter %d; stopping.",
+                    self.min_nd,
+                    it,
+                )
+                self.stop_reason = "grad_norm"
+                leave = True
+
             if self.do_newton and it == self.newt_start:
                 numdecs = 0
+
+            if leave:
+                break
 
             # Outlier rejection, after the parameter update (Fortran order,
             # amica17.f90:1141-1146) but using the pre-update per-sample LL
@@ -2515,6 +2746,14 @@ class AMICATorchNG:
             "minlrate": self.minlrate,
             "lratefact": self.lratefact,
             "maxdecs": self.maxdecs,
+            # Convergence stops (issue #207); fixed hyperparameters, not
+            # annealed during fit, so no mutated counterpart in ``extra``
+            # (unlike lrate/newtrate/rholrate) is needed.
+            "use_min_dll": self.use_min_dll,
+            "min_dll": self.min_dll,
+            "maxincs": self.maxincs,
+            "use_grad_norm": self.use_grad_norm,
+            "min_nd": self.min_nd,
             "newt_ramp": self.newt_ramp,
             "do_newton": self.do_newton,
             "newt_start": self.newt_start,
@@ -2601,6 +2840,17 @@ class AMICATorchNG:
         picks a default when ``None``); ``dtype`` always comes from the saved
         ``config``.
         """
+        # format_version stays 3 here -- deliberately NOT bumped for issue
+        # #207, unlike PR #52's 1->2 (adaptive PDF) and PR #53's 2->3
+        # (keep_best). The check below is strict equality, so bumping would
+        # break loading genuinely older (pre-#53) files for no reason: the
+        # five new config keys (use_min_dll/min_dll/maxincs/use_grad_norm/
+        # min_nd) are additive-only, and a payload saved before #207 simply
+        # lacks them in its ``config`` dict, so ``cls(device=device,
+        # **config)`` below falls back to the constructor's own
+        # Fortran-faithful defaults for whichever keys are missing -- see
+        # test_missing_convergence_keys_fall_back_to_fortran_defaults in
+        # test_ng_convergence.py.
         version = state.get("format_version")
         if version != 3:
             raise ValueError(
