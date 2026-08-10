@@ -113,7 +113,6 @@ def _fit_with_nd_history(ng: AMICATorchNG, data: np.ndarray, **fit_kwargs) -> li
 # --- gap 1: use_min_dll / maxincs (consecutive-count, reset-on-larger-gain) -
 
 
-@pytest.mark.slow
 def test_min_dll_stop_matches_independent_reference(real_data):
     """The min_dll stop must fire at EXACTLY the iteration an independent
     reimplementation of the Fortran counting rule predicts from a
@@ -171,7 +170,6 @@ def test_min_dll_never_fires_before_two_ll_values(real_data):
 # --- gap 2: use_grad_norm / min_nd (unconditional per-iteration check) -----
 
 
-@pytest.mark.slow
 def test_grad_norm_stop_matches_independent_reference(real_data):
     """The standalone grad_norm stop fires at exactly the iteration an
     independent scan of a stops-disabled ndtmpsum trajectory predicts, and
@@ -265,7 +263,6 @@ def test_lrate_floor_still_reachable_without_grad_norm(real_data):
 # --- share_comps interaction: ndtmpsum must not go stale during the freeze -
 
 
-@pytest.mark.slow
 def test_a_frozen_window_still_computes_fresh_grad_norm(real_data):
     """The comp_used mask in ndtmpsum only matters once share_comps has
     merged/frozen columns, so this is the one scenario that actually
