@@ -673,9 +673,17 @@ def test_min_dll_stop_reachable_at_shipped_default_threshold(real_data):
     iterations instead. This is a legitimate real-data config choice (same
     kind of seed/newt_start probing the other tests in this module already
     document doing), not a threshold change.
+
+    The budget is deliberately generous. The iteration at which the stop fires
+    is BLAS-dependent: measured at 326 on macOS-arm64, 412 on Linux-x86_64 with
+    a CUDA-enabled torch build, and beyond 500 on the GitHub Linux runner, which
+    failed this test at an earlier ``max_iter=500`` (PR #213 CI). The claim under
+    test is that the default threshold is reachable at all, not that it is
+    reached by any particular iteration, so the budget sits well above the
+    observed spread rather than just above the fastest platform.
     """
     ng = _fresh_ng(seed=1, do_newton=True, newt_start=5, block_size=1024)
-    ng.fit(real_data[:, :4096], max_iter=500, verbose=False)
+    ng.fit(real_data[:, :4096], max_iter=2000, verbose=False)
     assert ng.stop_reason == "min_dll"
     assert len(ng.ll_history) < 500  # a real early stop, not max_iter
 
