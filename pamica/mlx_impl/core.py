@@ -39,6 +39,8 @@ import mlx.core as mx  # ty: ignore[unresolved-import]
 import numpy as np
 from scipy.special import digamma, gammaln
 
+from ..rank import MINEIG, MINEIG_REL, numerical_rank
+
 logger = logging.getLogger(__name__)
 
 _LOG2 = math.log(2.0)
@@ -108,6 +110,8 @@ class AMICAMLXNG:
         do_mean: bool = True,
         do_sphere: bool = True,
         do_approx_sphere: bool = True,
+        mineig: float = MINEIG,
+        mineig_rel: Optional[float] = MINEIG_REL,
         seed: Optional[int] = None,
     ):
         # --- Boundaries: reject the still-deferred configurations up front. ---
@@ -159,6 +163,9 @@ class AMICAMLXNG:
         self.do_mean = do_mean
         self.do_sphere = do_sphere
         self.do_approx_sphere = do_approx_sphere
+        # Numerical-rank floors (issue #223); see pamica/rank.py and ADR 0004.
+        self.mineig = mineig
+        self.mineig_rel = mineig_rel
         self.seed = seed
 
         self.iteration = 0
@@ -215,12 +222,34 @@ class AMICAMLXNG:
             order = np.argsort(evals)[::-1]
             evals = evals[order]
             evecs = evecs[:, order]
+            # Numerical rank, decided by the policy shared with the PyTorch and
+            # NumPy backends (pamica/rank.py, issue #223) so the three cannot
+            # disagree. Fortran: numeigs = min(pcakeep, count(eigs > mineig)).
+            n_comp = numerical_rank(
+                evals, mineig=self.mineig, mineig_rel=self.mineig_rel
+            )
+            evals = evals[:n_comp]
+            V = evecs[:, :n_comp]
             inv_sqrt = np.diag(1.0 / np.sqrt(evals))
-            if self.do_approx_sphere:
+            if n_comp < data_dim:
+                # Rank-reduced sphere (n_comp, data_dim), so the sphered data
+                # come out at the kept rank (Fortran nw = numeigs,
+                # amica15.f90:545).
+                w_pca = inv_sqrt @ V.T
+                if self.do_approx_sphere:
+                    # Fortran's orthogonal polar-factor symmetrization of the
+                    # reduced whitening (amica15.f90:483-490).
+                    U_b, _, Vt_b = np.linalg.svd(evecs.T[:n_comp, :n_comp])
+                    sphere = (Vt_b.T @ U_b.T) @ w_pca
+                else:
+                    sphere = w_pca
+                self.n_channels = n_comp
+                self.n_comps = n_comp * self.n_models
+            elif self.do_approx_sphere:
                 # Symmetric ZCA sphere V diag(1/sqrt) V^T (Fortran default).
-                sphere = evecs @ inv_sqrt @ evecs.T
+                sphere = V @ inv_sqrt @ V.T
             else:
-                sphere = inv_sqrt @ evecs.T
+                sphere = inv_sqrt @ V.T
             Xc = sphere @ Xc
             sldet = float(-0.5 * np.log(evals).sum())
         else:

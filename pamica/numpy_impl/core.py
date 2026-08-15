@@ -79,6 +79,7 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 from tqdm import tqdm
+from ..rank import MINEIG, MINEIG_REL, numerical_rank
 from .utils import (
     gammaln,
     determine_block_size,
@@ -219,6 +220,9 @@ class AMICA:
         self.do_approx_sphere = params.get("do_approx_sphere", True)
         self.pcakeep = params.get("pcakeep")
         self.pcadb = params.get("pcadb")
+        # Numerical-rank floors (issue #223); see pamica/rank.py and ADR 0004.
+        self.mineig = params.get("mineig", MINEIG)
+        self.mineig_rel = params.get("mineig_rel", MINEIG_REL)
         self.writestep = params.get("writestep", 100)
         self.max_decs = params.get("max_decs", 5)
         # Consecutive small-increase iterations tolerated before stopping
@@ -359,6 +363,32 @@ class AMICA:
             An unfitted model configured from the parameter file.
         """
         return cls(params_file=params_file, **kwargs)
+
+    @property
+    def data_dim_in(self) -> int:
+        """Input channel count, i.e. the width of the sphere.
+
+        Differs from ``data_dim`` only when rank reduction shrank the model to
+        the detected numerical rank (issue #223). Derived rather than stored, so
+        it cannot drift from the sphere it describes. Mirrors
+        ``AMICATorchNG.n_channels_in``.
+        """
+        if self.sphere is None:
+            return self.data_dim if self.data_dim is not None else 0
+        return int(self.sphere.shape[1])
+
+    def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
+        """Mixing matrix mapped back to input-channel space.
+
+        ``pinv(sphere) @ A``, of shape ``(data_dim_in, data_dim)`` -- the Fortran
+        ``Spinv`` mapping (amica15.f90:550-560), and the only way to recover
+        sensor maps when rank reduction has made the sphere non-square
+        (issue #223). Mirrors ``AMICATorchNG.get_sensor_mixing_matrix``.
+        """
+        if self.sphere is None or self.A is None or self.comp_list is None:
+            raise RuntimeError("Model has not been fitted yet; call fit() first.")
+        A = self.A[:, self.comp_list[:, model_idx]]
+        return np.linalg.pinv(self.sphere) @ A
 
     def get_weights(self) -> np.ndarray:
         """
@@ -501,19 +531,36 @@ class AMICA:
             evals = evals[idx]
             evecs = evecs[:, idx]
 
-            # Determine number of components to keep
-            if self.pcakeep is not None:
-                n_comp = min(self.pcakeep, len(evals))
-            elif self.pcadb is not None:
-                db = 10 * np.log10(evals / evals[0])
-                n_comp = np.sum(db > -self.pcadb)
-            else:
-                n_comp = len(evals)
+            # Numerical rank + explicit PCA reduction, decided by the policy
+            # shared with the PyTorch and MLX backends (pamica/rank.py, issue
+            # #223) so the three cannot disagree about how many dimensions are
+            # real. Fortran: numeigs = min(pcakeep, count(eigs > mineig)).
+            n_comp = numerical_rank(
+                evals,
+                mineig=self.mineig,
+                mineig_rel=self.mineig_rel,
+                pcakeep=self.pcakeep,
+                pcadb=self.pcadb,
+            )
 
             V = evecs[:, :n_comp]
             inv_sqrt = np.diag(1.0 / np.sqrt(evals[:n_comp]))
             # Create sphering matrix
-            if self.do_approx_sphere:
+            if n_comp < self.data_dim:
+                # Rank-reduced: the sphere is (n_comp, data_dim), so the sphered
+                # data come out at the kept rank instead of staying
+                # rank-deficient at full width (Fortran nw = numeigs,
+                # amica15.f90:545).
+                w_pca = inv_sqrt @ V.T
+                if self.do_approx_sphere:
+                    # Fortran symmetrizes the reduced whitening by the orthogonal
+                    # polar factor of the leading n_comp block of V^T
+                    # (amica15.f90:483-490).
+                    U_b, _, Vt_b = np.linalg.svd(evecs.T[:n_comp, :n_comp])
+                    self.sphere = (Vt_b.T @ U_b.T) @ w_pca
+                else:
+                    self.sphere = w_pca
+            elif self.do_approx_sphere:
                 # Symmetric ZCA sphere V diag(1/sqrt(eval)) V^T (Fortran
                 # do_approx_sphere=True, amica17.f90:480-481) -- the parity form.
                 # The old diag(1/sqrt)@V^T (PCA whitening) is a different,
@@ -522,6 +569,25 @@ class AMICA:
             else:
                 # Non-symmetric PCA whitening D^-1/2 V^T (amica17.f90:495).
                 self.sphere = inv_sqrt @ V.T
+
+            # Rank reduction shrank the sphered space: size the model to the
+            # kept rank before _initialize_parameters allocates against
+            # data_dim (Fortran nw = numeigs, amica15.f90:545). No-op, and so
+            # bit-exact, for full-rank data.
+            n_kept = self.sphere.shape[0]
+            if n_kept != self.data_dim:
+                self.logger.info(
+                    "Data covariance has numerical rank %d of %d; fitting %d "
+                    "sources and mapping back via the sphere pseudo-inverse.",
+                    n_kept,
+                    self.data_dim,
+                    n_kept,
+                )
+                if self.num_comps == self.data_dim * self.num_models:
+                    # num_comps was derived from the channel count, so it follows
+                    # the rank; an explicitly configured num_comps is left alone.
+                    self.num_comps = n_kept * self.num_models
+                self.data_dim = n_kept
 
             # Apply sphering
             data = np.dot(self.sphere, data)

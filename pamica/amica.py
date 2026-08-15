@@ -195,6 +195,13 @@ class AMICA:
             defaults ``True``/``1e-9``/``5``/``True``/``1e-7``) -- the
             backend's tunables are constructor arguments, not fit() kwargs.
 
+            Rank-deficient input (Maxwell-filtered MEG, average-referenced or
+            interpolated EEG) is handled by ``mineig``/``mineig_rel`` (issue
+            #223): the model is sized to the detected numerical rank and
+            :meth:`AMICATorchNG.get_sensor_mixing_matrix` maps components back
+            to input channels. ``mineig`` is an absolute eigenvalue floor and so
+            unit-dependent; pass ``mineig_rel`` for data far from unit scale.
+
         Returns
         -------
         self : AMICA

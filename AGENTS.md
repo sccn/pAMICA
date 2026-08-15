@@ -161,6 +161,9 @@ the dead `do_choose_pdfs`, #26), so it is behavior-validated (`tests/torch_tests
 - **NO MOCKS:** Validate against real sample data and the Fortran binary, never fabricated data. Details: `.rules/testing.md`.
 - **No technical debt carried forward:** Address ALL PR review findings; replace, don't deprecate. Details: `.rules/code_review.md`.
 - **Numerical parity is the spec:** Correctness means matching Fortran output within tolerance, not merely "converging".
+- **No one-off backends:** A behavior change lands in every backend that can support it, in the same PR, with a
+  cross-backend test. Deliberate divergences from Fortran are recorded in `docs/guides/amica-differences.md`.
+  Details: `.rules/backend_parity.md`.
 - **Squash merge every PR** by default; use a regular merge commit **only** for PRs coming from an epic branch (to preserve the epic's per-phase history). Never merge until CI is green.
 
 ## [NEVER DO THIS]
@@ -174,6 +177,7 @@ the dead `do_choose_pdfs`, #26), so it is behavior-validated (`tests/torch_tests
 
 ## [REFERENCE] Rules Directory
 - `.rules/testing.md` - NO MOCK policy, coverage
+- `.rules/backend_parity.md` - No one-off backends; shared decisions, cross-backend tests
 - `.rules/python.md` - UV, ruff, ty
 - `.rules/git.md` - Commit/branch conventions
 - `.rules/code_review.md` - PR review toolkit and checklist
