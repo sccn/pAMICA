@@ -463,7 +463,29 @@ class AMICATorchNG:
         Preprocessing options, matching ``pamica.AMICA._preprocess_data``.
     pcakeep, pcadb : int, float, optional
         PCA dimensionality-reduction options (rarely used; see
-        ``pamica.AMICA._preprocess_data``).
+        ``pamica.AMICA._preprocess_data``). Both are capped by the detected
+        numerical rank (``mineig``), matching Fortran's
+        ``numeigs = min(pcakeep, count(eigs > mineig))``.
+    mineig : float, default=1e-15
+        Absolute floor on data-covariance eigenvalues used to detect the
+        numerical rank (Fortran ``mineig``, amica15.f90:395 and
+        amica15_header.f90:66). Eigen-directions at or below it are dropped, the
+        model is sized to the surviving rank, and sensor-space maps come from
+        :meth:`get_sensor_mixing_matrix`. Full-rank data keep every eigenvalue,
+        so this is a no-op there and single-model parity is byte-for-byte.
+
+        Being absolute, it is unit-dependent: EEG in microvolts gives
+        eigenvalues of order 1-100 and the default behaves, but MEG in Tesla
+        gives ~1e-26 and every eigenvalue falls below it, which Fortran would
+        turn into ``numeigs = 0``. pamica raises instead of fitting an empty
+        model. Use ``mineig_rel`` (or rescale) for such data.
+    mineig_rel : float, optional
+        Scale-free alternative to ``mineig``: when set, the threshold becomes
+        ``mineig_rel * largest_eigenvalue`` and ``mineig`` is ignored. Off by
+        default so rank detection stays Fortran-exact. It is also the more
+        accurate detector -- the absolute floor sits amid the numerical-zero
+        eigenvalues of rank-deficient data and over-retains, while a relative
+        floor recovers the true rank (issue #223).
     seed : int, optional
         Seed for parameter initialization. Uses ``numpy.random.RandomState``
         internally (not ``torch``'s RNG) with the exact same draw order as
@@ -531,6 +553,8 @@ class AMICATorchNG:
         do_approx_sphere: bool = True,
         pcakeep: Optional[int] = None,
         pcadb: Optional[float] = None,
+        mineig: float = 1e-15,
+        mineig_rel: Optional[float] = None,
         seed: Optional[int] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float64,
@@ -539,6 +563,12 @@ class AMICATorchNG:
         self.n_models = n_models
         self.n_mix = n_mix
         self.n_comps = n_channels * n_models
+        # Original input channel count, kept when rank reduction shrinks
+        # n_channels to the kept rank (issue #223). Equal to n_channels
+        # whenever the data is full rank.
+        self.n_channels_in = n_channels
+        self.mineig = mineig
+        self.mineig_rel = mineig_rel
         self.block_size = block_size
 
         self.lrate0 = lrate
@@ -653,6 +683,7 @@ class AMICATorchNG:
         self.share_iter = share_iter
         self.comp_thresh = comp_thresh
         self._spinv = None  # cached de-sphering metric, built on first share
+        self._sphere_pinv = None  # cached sphere pseudo-inverse (issue #223)
         if share_comps:
             if share_start < 1:
                 raise ValueError(f"share_start must be >= 1, got {share_start}")
@@ -790,17 +821,62 @@ class AMICATorchNG:
             evals = evals[order]
             evecs = evecs[:, order]
 
+            # Numerical-rank detection, Fortran amica15.f90:395
+            #   numeigs = min(pcakeep, count(eigs > mineig))
+            # mineig is an *absolute* covariance-eigenvalue floor (1e-15,
+            # amica15_header.f90:66), so it is unit-dependent: EEG in microvolts
+            # gives eigenvalues of order 1-100 and the default behaves, but MEG
+            # in Tesla gives ~1e-26 and every eigenvalue falls below it. The
+            # absolute form is the parity-faithful default; mineig_rel adds an
+            # opt-in scale-free floor on top (issue #223).
+            # mineig_rel *replaces* the absolute floor rather than being combined
+            # with it: for MEG in Tesla a relative floor is ~1e-35 in absolute
+            # terms, so a max() against 1e-15 would silently ignore it.
+            thresh = (
+                self.mineig
+                if self.mineig_rel is None
+                else self.mineig_rel * float(evals[0])
+            )
+            n_rank = int((evals > thresh).sum().item())
+            if n_rank < 1:
+                raise ValueError(
+                    f"No data covariance eigenvalue exceeds mineig={thresh:g} "
+                    f"(largest is {float(evals[0]):g}), so the numerical rank is "
+                    "zero and there is nothing to decompose. This usually means "
+                    "the data are on a very small physical scale (e.g. MEG in "
+                    "Tesla, where eigenvalues run ~1e-26): rescale the data, or "
+                    "set mineig/mineig_rel to a threshold suited to its units."
+                )
+
             if self.pcakeep is not None:
-                n_comp = min(self.pcakeep, evals.shape[0])
+                n_comp = min(self.pcakeep, n_rank)
             elif self.pcadb is not None:
                 db = 10.0 * torch.log10(evals / evals[0])
-                n_comp = int((db > -self.pcadb).sum().item())
+                n_comp = min(int((db > -self.pcadb).sum().item()), n_rank)
             else:
-                n_comp = evals.shape[0]
+                n_comp = n_rank
 
             V = evecs[:, :n_comp]
             inv_sqrt = torch.diag(1.0 / torch.sqrt(evals[:n_comp]))
-            if self.do_approx_sphere:
+            if n_comp < data_dim:
+                # Rank-reduced sphere: (n_comp, data_dim), so the sphered data
+                # come out at the kept rank rather than staying rank-deficient
+                # at data_dim rows (Fortran nw = numeigs, amica15.f90:545).
+                # Vt rows are eigenvectors in descending-eigenvalue order,
+                # matching Fortran's reversed Stmp2 (amica15.f90:455-460).
+                w_pca = inv_sqrt @ V.T
+                if self.do_approx_sphere:
+                    # Fortran amica15.f90:483-490 symmetrizes the reduced
+                    # whitening by the orthogonal polar factor of the leading
+                    # n_comp x n_comp block of V^T:
+                    #   B = (V^T)[:n, :n] = U_b S_b Vt_b
+                    #   S = (V_b U_b^T) @ w_pca
+                    B = evecs.T[:n_comp, :n_comp]
+                    U_b, _, Vt_b = torch.linalg.svd(B)
+                    sphere = (Vt_b.T @ U_b.T) @ w_pca
+                else:
+                    sphere = w_pca
+            elif self.do_approx_sphere:
                 # Symmetric ZCA sphere V diag(1/sqrt(eval)) V^T (Fortran
                 # do_approx_sphere=True, amica17.f90:480-481). This is the
                 # Fortran default and the parity-validated form; the old
@@ -826,6 +902,26 @@ class AMICATorchNG:
         self.mean = mean.to(device=self.device, dtype=self.dtype)
         self.sphere = sphere.to(device=self.device, dtype=self.dtype)
         self.sldet = sldet
+
+        # Rank reduction shrank the sphered space, so size the model to the kept
+        # rank before _initialize_parameters allocates against n_channels
+        # (Fortran ``nw = numeigs``, amica15.f90:545). No-op, and therefore
+        # bit-exact, whenever the data are full rank.
+        n_kept = sphere.shape[0]
+        self.n_channels_in = data_dim
+        if n_kept != self.n_channels:
+            logger.info(
+                "Data covariance has numerical rank %d of %d; fitting %d "
+                "sources and mapping back to %d channels via the sphere "
+                "pseudo-inverse.",
+                n_kept,
+                data_dim,
+                n_kept,
+                data_dim,
+            )
+            self.n_channels = n_kept
+            self.n_comps = n_kept * self.n_models
+        self._sphere_pinv = None  # rebuilt on demand for this fit's sphere
 
         return X_cpu.to(device=self.device, dtype=self.dtype)
 
@@ -2255,6 +2351,32 @@ class AMICATorchNG:
         self._check_model_idx(model_idx)
         return self.A[:, self.comp_list[:, model_idx]].T.cpu().numpy()
 
+    def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
+        """Mixing matrix mapped back to input-channel space.
+
+        :meth:`get_mixing_matrix` returns ``A`` in the *sphered* space. These are
+        the corresponding sensor-space maps (EEGLAB/MNE scalp maps),
+        ``pinv(sphere) @ A``, of shape ``(n_channels_in, n_channels)``. This is
+        the Fortran ``Spinv`` mapping (amica15.f90:550-560), and it is the only
+        way to recover sensor maps when rank reduction is active, since the
+        sphere is then non-square (issue #223).
+        """
+        if self.sphere is None:
+            raise RuntimeError(
+                "AMICATorchNG.get_sensor_mixing_matrix() requires a fitted "
+                "model; call fit() first."
+            )
+        if self.A is None or self.comp_list is None:
+            raise RuntimeError(
+                "AMICATorchNG.get_sensor_mixing_matrix() requires a fitted "
+                "model; call fit() first."
+            )
+        self._check_model_idx(model_idx)
+        if self._sphere_pinv is None:
+            self._sphere_pinv = torch.linalg.pinv(self.sphere)
+        A = self.A[:, self.comp_list[:, model_idx]].T
+        return (self._sphere_pinv @ A).cpu().numpy()
+
     def get_unmixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """True unmixing matrix ``W_fort`` = (stored W)^T (issue #24 convention)."""
         if self.W is None:
@@ -2793,6 +2915,9 @@ class AMICATorchNG:
             "do_approx_sphere": self.do_approx_sphere,
             "pcakeep": self.pcakeep,
             "pcadb": self.pcadb,
+            "mineig": self.mineig,
+            "mineig_rel": self.mineig_rel,
+            "n_channels_in": self.n_channels_in,
             "seed": self.seed,
             # Store dtype by name (e.g. "float64") to keep the payload
             # weights_only-safe; rebuilt via getattr(torch, ...) on load.
