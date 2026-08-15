@@ -9,6 +9,7 @@ from the same initialization and random seed.
 import numpy as np
 import json
 import os
+import re
 import subprocess
 import torch
 import inspect
@@ -80,6 +81,85 @@ def load_sample_data() -> Tuple[np.ndarray, Dict]:
     return data, params
 
 
+# params.json spellings that differ from the Fortran keyword of the same setting.
+_FORTRAN_ALIASES = {
+    "num_mix": "num_mix_comps",
+    "share_int": "share_iter",
+    "maxrej": "numrej",
+}
+
+# params.json keys that configure the Python side only, so having no Fortran
+# keyword is expected rather than a dropped setting.
+_PYTHON_ONLY_KEYS = {"device", "seed", "outdir", "files", "dtype"}
+
+
+def fortran_accepted_keys(
+    source: Path = Path("pamica/amica15.f90"),
+) -> Optional[set]:
+    """Keywords the reference binary's parameter parser accepts.
+
+    Read from its own ``case('...')`` arms rather than hardcoded, so this cannot
+    drift from the binary being run. Returns ``None`` if the source is
+    unavailable, which callers treat as "forward everything and do not warn".
+    """
+    if not source.exists():
+        return None
+    return set(re.findall(r"^\s*case\('([^']+)'\)", source.read_text(), re.MULTILINE))
+
+
+def write_fortran_param_file(
+    template_lines,
+    dest: Path,
+    params: Dict,
+    overrides: Optional[Dict] = None,
+) -> None:
+    """Write ``dest`` with every setting in ``params`` the binary understands.
+
+    The Fortran and Python arms of a parity run must be configured identically.
+    Rewriting only a hardcoded handful of keys (as this did before issue #228)
+    left the rest at the template's values while the Python side honored them,
+    which silently turns a parity comparison into an uncontrolled one.
+
+    Keys absent from the template are appended, since the binary accepts more
+    keywords than the shipped ``input.param`` lists. Keys it does not accept are
+    reported, so a setting can never be dropped in silence.
+    """
+    accepted = fortran_accepted_keys()
+    wanted, unsupported = {}, []
+    for key, value in params.items():
+        fortran_key = _FORTRAN_ALIASES.get(key, key)
+        if accepted is not None and fortran_key not in accepted:
+            if key not in _PYTHON_ONLY_KEYS:
+                unsupported.append(key)
+            continue
+        # Fortran parses logicals as 0/1 integers.
+        wanted[fortran_key] = int(value) if isinstance(value, bool) else value
+
+    # Last, so the harness's own paths win over whatever params.json carries.
+    wanted.update(overrides or {})
+
+    if unsupported:
+        print(
+            "WARNING: params with no Fortran keyword are left at the template's "
+            f"value for the reference run: {sorted(unsupported)}. The Python run "
+            "may honor them, so the comparison would not be controlled."
+        )
+
+    written, out = set(), []
+    for line in template_lines:
+        key = line.split()[0] if line.split() else None
+        if key in wanted:
+            out.append(f"{key} {wanted[key]}\n")
+            written.add(key)
+        else:
+            out.append(line)
+    for key, value in wanted.items():
+        if key not in written:
+            out.append(f"{key} {value}\n")
+
+    dest.write_text("".join(out))
+
+
 def run_fortran_amica(
     data: np.ndarray,
     params: Dict,
@@ -120,23 +200,12 @@ def run_fortran_amica(
     with open(sample_param_file, "r") as f:
         param_lines = f.readlines()
 
-    # Update parameter file with our settings
-    with open(working_param_file, "w") as f:
-        for line in param_lines:
-            if line.startswith("files"):
-                f.write("files ./eeglab_data.fdt\n")
-            elif line.startswith("outdir"):
-                f.write("outdir ./fortran_output/\n")
-            elif line.startswith("max_iter"):
-                f.write(f"max_iter {params.get('max_iter', 100)}\n")
-            elif line.startswith("lrate"):
-                f.write(f"lrate {params.get('lrate', 0.05)}\n")
-            elif line.startswith("pdftype"):
-                f.write(f"pdftype {params.get('pdftype', 0)}\n")
-            elif line.startswith("num_mix_comps"):
-                f.write(f"num_mix_comps {params.get('num_mix', 3)}\n")
-            else:
-                f.write(line)
+    write_fortran_param_file(
+        param_lines,
+        working_param_file,
+        params,
+        overrides={"files": "./eeglab_data.fdt", "outdir": "./fortran_output/"},
+    )
 
     # Create output directory
     fortran_output = fortran_dir / "fortran_output"
