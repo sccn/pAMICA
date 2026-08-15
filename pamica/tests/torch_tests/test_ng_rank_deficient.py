@@ -77,19 +77,27 @@ def test_rank_deficient_fits_instead_of_going_degenerate(
     assert tuple(m.model_.sphere.shape) == (m.model_.n_channels, NW)
 
 
-def test_relative_threshold_recovers_the_exact_rank(
+def test_default_relative_threshold_recovers_the_exact_rank(
     rank_deficient: np.ndarray,
 ) -> None:
-    """``mineig_rel`` is scale-free, so it finds the true rank exactly.
-
-    The Fortran-faithful absolute ``mineig`` floor sits in the middle of the
-    numerical-zero eigenvalues (~1e-16 to 1e-14) and so over-retains; the
-    relative floor does not. Default stays absolute for parity.
-    """
+    """The default scale-free floor finds the true rank exactly (ADR 0004)."""
     m = AMICA(verbose=False)
-    m.fit(rank_deficient, max_iter=10, seed=0, mineig_rel=1e-9)
+    m.fit(rank_deficient, max_iter=10, seed=0)
     assert m.model_ is not None
     assert m.model_.n_channels == RANK
+
+
+def test_fortran_absolute_floor_over_retains(rank_deficient: np.ndarray) -> None:
+    """``mineig_rel=None`` restores Fortran's absolute floor, warts included.
+
+    That floor sits amid the numerical-zero eigenvalues (~1e-16 to 1e-14), so it
+    keeps directions that carry no signal. Pinned here because it is the
+    documented reason pamica's default diverges from the reference.
+    """
+    m = AMICA(verbose=False)
+    m.fit(rank_deficient, max_iter=10, seed=0, mineig_rel=None)
+    assert m.model_ is not None
+    assert m.model_.n_channels > RANK
 
 
 def test_sensor_mixing_matrix_reconstructs_the_input(
@@ -97,7 +105,7 @@ def test_sensor_mixing_matrix_reconstructs_the_input(
 ) -> None:
     """``pinv(sphere) @ A`` maps the decomposition back to input channels."""
     m = AMICA(verbose=False)
-    m.fit(rank_deficient, max_iter=15, seed=0, mineig_rel=1e-9)
+    m.fit(rank_deficient, max_iter=15, seed=0)
     assert m.model_ is not None
     A = m.model_.get_sensor_mixing_matrix()
     S = m.transform(rank_deficient)
@@ -127,25 +135,24 @@ def test_pcakeep_with_pca_whitening_no_longer_crashes(
     assert tuple(m.model_.sphere.shape) == (RANK, NW)
 
 
-def test_zero_rank_raises_rather_than_producing_nans(real_data: np.ndarray) -> None:
-    """MEG in Tesla puts every eigenvalue under the absolute floor.
-
-    Fortran would set ``numeigs = 0``; we refuse with an actionable message
-    instead of fitting an empty model.
-    """
-    with pytest.raises(ValueError, match="numerical rank is zero"):
-        AMICA(verbose=False).fit(real_data * 1e-13, max_iter=5, seed=0)
-
-
-def test_tesla_scale_data_fits_with_relative_threshold(
-    real_data: np.ndarray,
-) -> None:
-    """The scale-free floor makes MEG-magnitude input work without rescaling."""
+def test_tesla_scale_data_fits_by_default(real_data: np.ndarray) -> None:
+    """MEG-magnitude input works without rescaling under the default floor."""
     m = AMICA(verbose=False)
-    m.fit(real_data * 1e-13, max_iter=5, seed=0, mineig_rel=1e-9)
+    m.fit(real_data * 1e-13, max_iter=5, seed=0)
     assert m.model_ is not None
     assert m.converged_
     assert m.model_.n_channels == NW
+
+
+def test_absolute_floor_rejects_tesla_scale_data(real_data: np.ndarray) -> None:
+    """Under Fortran's absolute floor every Tesla-scale eigenvalue is "zero".
+
+    Fortran computes ``numeigs = 0`` and proceeds; we refuse with a message
+    naming the cause and the fix. This is the failure mode the default relative
+    floor exists to avoid.
+    """
+    with pytest.raises(ValueError, match="numerical rank is zero"):
+        AMICA(verbose=False).fit(real_data * 1e-13, max_iter=5, seed=0, mineig_rel=None)
 
 
 def test_nan_data_still_reaches_the_degenerate_fit_contract(

@@ -95,6 +95,7 @@ nav:
       - Backends & Devices: guides/backends.md
       - EEGLAB interoperability: guides/eeglab.md
       - Validation & Parity: guides/validation.md
+      - Differences vs AMICA: guides/amica-differences.md
   - API Reference:
       - Overview: api/index.md
       - AMICA: api/amica.md

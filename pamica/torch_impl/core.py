@@ -54,6 +54,7 @@ from tqdm import tqdm
 
 from ..metrics import mir as mir_metric
 from ..metrics import pairwise_mi
+from ..rank import MINEIG, MINEIG_REL, numerical_rank
 from .utils import setup_device
 
 logger = logging.getLogger(__name__)
@@ -553,8 +554,8 @@ class AMICATorchNG:
         do_approx_sphere: bool = True,
         pcakeep: Optional[int] = None,
         pcadb: Optional[float] = None,
-        mineig: float = 1e-15,
-        mineig_rel: Optional[float] = None,
+        mineig: float = MINEIG,
+        mineig_rel: Optional[float] = MINEIG_REL,
         seed: Optional[int] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float64,
@@ -817,49 +818,17 @@ class AMICATorchNG:
             evals = evals[order]
             evecs = evecs[:, order]
 
-            # Numerical-rank detection, Fortran amica15.f90:395
-            #   numeigs = min(pcakeep, count(eigs > mineig))
-            # mineig is an *absolute* covariance-eigenvalue floor (1e-15,
-            # amica15_header.f90:66), so it is unit-dependent: EEG in microvolts
-            # gives eigenvalues of order 1-100 and the default behaves, but MEG
-            # in Tesla gives ~1e-26 and every eigenvalue falls below it. The
-            # absolute form is the parity-faithful default; mineig_rel adds an
-            # opt-in scale-free floor on top (issue #223).
-            # mineig_rel *replaces* the absolute floor rather than being combined
-            # with it: for MEG in Tesla a relative floor is ~1e-35 in absolute
-            # terms, so a max() against 1e-15 would silently ignore it.
-            thresh = (
-                self.mineig
-                if self.mineig_rel is None
-                else self.mineig_rel * float(evals[0])
+            # Numerical-rank detection (Fortran amica15.f90:395). The policy is
+            # shared with the NumPy and MLX backends so they cannot drift
+            # (pamica/rank.py); only the eigenvalues cross the boundary, as a
+            # read-only copy, so the sphere below stays bit-exact.
+            n_comp = numerical_rank(
+                evals.cpu().numpy(),
+                mineig=self.mineig,
+                mineig_rel=self.mineig_rel,
+                pcakeep=self.pcakeep,
+                pcadb=self.pcadb,
             )
-            if not bool(torch.isfinite(evals).all()):
-                # Non-finite covariance (NaN/Inf in the data). Rank detection is
-                # meaningless here and `nan > thresh` is False, which would
-                # otherwise look like rank zero. Leave the dimension alone and
-                # let the fit reach the degenerate-fit contract (issue #50),
-                # which reports `nan_ll` and refuses output -- that is the
-                # documented behavior for unusable data, not an exception here.
-                n_rank = evals.shape[0]
-            else:
-                n_rank = int((evals > thresh).sum().item())
-            if n_rank < 1:
-                raise ValueError(
-                    f"No data covariance eigenvalue exceeds mineig={thresh:g} "
-                    f"(largest is {float(evals[0]):g}), so the numerical rank is "
-                    "zero and there is nothing to decompose. This usually means "
-                    "the data are on a very small physical scale (e.g. MEG in "
-                    "Tesla, where eigenvalues run ~1e-26): rescale the data, or "
-                    "set mineig/mineig_rel to a threshold suited to its units."
-                )
-
-            if self.pcakeep is not None:
-                n_comp = min(self.pcakeep, n_rank)
-            elif self.pcadb is not None:
-                db = 10.0 * torch.log10(evals / evals[0])
-                n_comp = min(int((db > -self.pcadb).sum().item()), n_rank)
-            else:
-                n_comp = n_rank
 
             V = evecs[:, :n_comp]
             inv_sqrt = torch.diag(1.0 / torch.sqrt(evals[:n_comp]))
