@@ -84,7 +84,7 @@ def test_sources_roundtrip_under_reduced_rank(reduced_fit, rank_deficient, tmp_p
     ones under a row permutation and a per-component scale. Both are conventional
     (ICA sources are order- and scale-arbitrary); what must hold exactly is that
     the scale is *constant along each row*, which is what would break if the
-    sphere were read back transposed or mis-padded.
+    sphere were read back transposed or padded incorrectly.
     """
     outdir = tmp_path / "amicaout"
     reduced_fit.write_amica_output(outdir)
