@@ -105,3 +105,28 @@ def test_python_only_keys_are_not_reported(tmp_path, capsys):
     _written(tmp_path, {"device": "cpu", "seed": 42})
     out = capsys.readouterr().out
     assert "device" not in out and "seed" not in out
+
+
+def test_real_params_json_produces_a_parseable_file(tmp_path):
+    """Regression: the full params.json, not a hand-picked subset.
+
+    `files` and `field_dim` are lists there, and writing Python's repr put
+    brackets in the file, which aborts the Fortran parser at read time. The
+    unit tests above all passed while the harness could not run.
+    """
+    import json
+
+    params = json.loads(
+        (ROOT / "pamica" / "sample_data" / "sample_params.json").read_text()
+    )
+    got = _written(tmp_path, params, overrides={"seed": 42, "max_threads": 1})
+    for key, value in got.items():
+        assert "[" not in value and "]" not in value, f"{key} kept Python list syntax"
+    assert got["field_dim"] == "30504"
+    assert got["seed"] == "42"
+    assert got["max_threads"] == "1"
+
+
+def test_list_values_are_space_separated(tmp_path):
+    got = _written(tmp_path, {"field_dim": [100, 200]})
+    assert got["field_dim"] == "100 200"

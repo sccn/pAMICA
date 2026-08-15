@@ -90,7 +90,13 @@ _FORTRAN_ALIASES = {
 
 # params.json keys that configure the Python side only, so having no Fortran
 # keyword is expected rather than a dropped setting.
-_PYTHON_ONLY_KEYS = {"device", "seed", "outdir", "files", "dtype"}
+_PYTHON_ONLY_KEYS = {"device", "outdir", "files", "dtype"}
+
+# Keywords the tracked amica15.f90 carries but sccn/amica master does not, so
+# they are absent when this parses an upstream source (issue #228). The binary's
+# parser has no `case default`, so an unknown keyword is silently ignored --
+# passing `seed` to an unpatched legacy binary is harmless, it just has no effect.
+_PAMICA_EXTRA_KEYS = {"seed"}
 
 
 def fortran_accepted_keys(
@@ -104,7 +110,22 @@ def fortran_accepted_keys(
     """
     if not source.exists():
         return None
-    return set(re.findall(r"^\s*case\('([^']+)'\)", source.read_text(), re.MULTILINE))
+    found = set(re.findall(r"^\s*case\('([^']+)'\)", source.read_text(), re.MULTILINE))
+    return found | _PAMICA_EXTRA_KEYS
+
+
+def _fortran_value(value) -> str:
+    """Render a params.json value the way the Fortran parser reads it.
+
+    Logicals are 0/1 integers, and the per-file lists (``files``, ``field_dim``)
+    are whitespace-separated -- writing Python's ``repr`` for those puts brackets
+    in the file and the parser aborts.
+    """
+    if isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, (list, tuple)):
+        return " ".join(_fortran_value(v) for v in value)
+    return str(value)
 
 
 def write_fortran_param_file(
@@ -132,11 +153,10 @@ def write_fortran_param_file(
             if key not in _PYTHON_ONLY_KEYS:
                 unsupported.append(key)
             continue
-        # Fortran parses logicals as 0/1 integers.
-        wanted[fortran_key] = int(value) if isinstance(value, bool) else value
+        wanted[fortran_key] = _fortran_value(value)
 
     # Last, so the harness's own paths win over whatever params.json carries.
-    wanted.update(overrides or {})
+    wanted.update({k: _fortran_value(v) for k, v in (overrides or {}).items()})
 
     if unsupported:
         print(
@@ -200,11 +220,19 @@ def run_fortran_amica(
     with open(sample_param_file, "r") as f:
         param_lines = f.readlines()
 
+    # seed and max_threads are pinned, not taken from params: an unseeded or
+    # multi-threaded reference run is not reproducible (issue #228), which makes
+    # any comparison against it a comparison with a random draw.
     write_fortran_param_file(
         param_lines,
         working_param_file,
         params,
-        overrides={"files": "./eeglab_data.fdt", "outdir": "./fortran_output/"},
+        overrides={
+            "files": "./eeglab_data.fdt",
+            "outdir": "./fortran_output/",
+            "seed": int(seed),
+            "max_threads": 1,
+        },
     )
 
     # Create output directory
