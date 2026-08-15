@@ -46,16 +46,25 @@ def fitted(raw):
     )
 
 
-def _picked_data(raw):
-    """The exact array AMICAICA fits on (all good data channels, float64)."""
-    return raw.copy().pick("data", exclude="bads").get_data().astype(np.float64)
+def _picked_data(raw, fitted=None, picks="data"):
+    """The exact array AMICAICA fits on.
+
+    Good data channels, float64, divided by the fit's channel-type pre-whitener
+    (issue #225) -- the same scaling MNE's own ICA applies before PCA. Pass the
+    fitted wrapper to apply it; omit it only when the raw, unscaled array is
+    what is under test.
+    """
+    x = raw.copy().pick(picks, exclude="bads").get_data().astype(np.float64)
+    if fitted is not None:
+        x = x / fitted.pre_whitener_
+    return x
 
 
 # --- the mapping crux -------------------------------------------------------
 def test_get_sources_matches_amica_transform(raw, fitted):
     """to_mne_ica().get_sources == AMICA.transform on the same data."""
     s_mne = fitted.to_mne_ica().get_sources(raw).get_data()
-    s_amica = fitted.amica_.transform(_picked_data(raw))
+    s_amica = fitted.amica_.transform(_picked_data(raw, fitted))
     assert s_mne.shape == s_amica.shape == (fitted.n_components_, raw.n_times)
     np.testing.assert_allclose(s_mne, s_amica, rtol=1e-6, atol=1e-9)
 
@@ -117,7 +126,7 @@ def test_fit_with_channel_subset(raw):
     assert ica.n_components_ == 10
     assert ica.ch_names_ == picks
     s_mne = ica.to_mne_ica().get_sources(raw).get_data()
-    x = raw.copy().pick(picks).get_data().astype(np.float64)
+    x = raw.copy().pick(picks).get_data().astype(np.float64) / ica.pre_whitener_
     assert ica.amica_ is not None
     np.testing.assert_allclose(s_mne, ica.amica_.transform(x), rtol=1e-6, atol=1e-9)
 
@@ -130,6 +139,7 @@ def test_fit_from_epochs(raw):
     assert ica._fit_kind == "epochs"
     src = ica.to_mne_ica().get_sources(epochs).get_data()  # (n_ep, n_comp, n_time)
     x = np.hstack(epochs.copy().pick("data", exclude="bads").get_data())
+    x = x / ica.pre_whitener_
     assert ica.amica_ is not None
     np.testing.assert_allclose(
         np.hstack(src), ica.amica_.transform(x), rtol=1e-6, atol=1e-9
@@ -164,7 +174,7 @@ def test_pca_components_orthonormal_and_variance_ordered(raw, fitted):
     assert np.all(np.diff(ev) <= 0), "explained variance must be descending"
     # Independent oracle: project the mean-centered data onto pca_components_;
     # each row's variance is that data-covariance eigenvalue, in the same order.
-    x = _picked_data(raw)
+    x = _picked_data(raw, fitted)
     proj = p @ (x - ica.pca_mean_[:, None])
     np.testing.assert_allclose(proj.var(axis=1), ev, rtol=1e-5)
 
@@ -265,9 +275,22 @@ def test_fit_rejects_non_finite_data(raw):
         AMICAICA(device="cpu", verbose=False).fit(bad, max_iter=MAX_ITER)
 
 
-def test_fit_rejects_pca_reduction(raw):
-    with pytest.raises(ValueError, match="PCA reduction"):
-        AMICAICA(device="cpu", verbose=False).fit(raw, max_iter=5, pcakeep=10)
+def test_pca_reduction_is_supported(raw):
+    """Formerly rejected outright; the export now builds pca_components_ from a
+    non-square sphere, so an explicitly reduced fit round-trips (issue #225)."""
+    fitted = AMICAICA(device="cpu", verbose=False).fit(raw, max_iter=5, pcakeep=10)
+    assert fitted.amica_ is not None and fitted.ch_names_ is not None
+    assert fitted.n_components_ == 10
+    ica = fitted.to_mne_ica()
+    assert ica.pca_components_.shape == (10, len(fitted.ch_names_))
+    # Orthonormal rows are what make MNE's get_components/apply valid.
+    np.testing.assert_allclose(
+        ica.pca_components_ @ ica.pca_components_.T, np.eye(10), atol=1e-10
+    )
+    s_mne = ica.get_sources(raw).get_data()
+    s_amica = fitted.amica_.transform(_picked_data(raw, fitted))
+    assert s_mne.shape == (10, raw.n_times)
+    np.testing.assert_allclose(s_mne, s_amica, rtol=1e-6, atol=1e-9)
 
 
 def test_degenerate_fit_is_refused_and_labeled(raw):
@@ -314,7 +337,7 @@ def test_per_model_export_roundtrips_with_nonzero_c(raw, fitted_2m):
     Unlike the single-model case, the per-model center c is nonzero, so this
     exercises the inv(sphere)@c fold into pca_mean_ that phase 1 deferred.
     """
-    x = _picked_data(raw)
+    x = _picked_data(raw, fitted_2m)
     c = fitted_2m.amica_.model_.c.cpu().numpy()
     for h in range(2):
         assert np.any(c[:, h]), f"model {h} center c should be nonzero"
@@ -469,7 +492,7 @@ def test_metadata_requires_fit():
 
 # --- separation-quality metrics (issue #143) --------------------------------
 def test_mir_matches_amica_per_model(raw, fitted_2m):
-    x = _picked_data(raw)
+    x = _picked_data(raw, fitted_2m)
     mirs = []
     for h in range(2):
         m = fitted_2m.mir(raw, model_idx=h)
@@ -479,7 +502,7 @@ def test_mir_matches_amica_per_model(raw, fitted_2m):
 
 
 def test_pmi_matches_amica_per_model(raw, fitted_2m):
-    x = _picked_data(raw)
+    x = _picked_data(raw, fitted_2m)
     pmis = []
     for h in range(2):
         pmi_w = fitted_2m.pmi(raw, model_idx=h)
@@ -492,6 +515,7 @@ def test_pmi_matches_amica_per_model(raw, fitted_2m):
 def test_mir_pmi_on_epochs(raw, fitted_2m):
     epochs = mne.make_fixed_length_epochs(raw, duration=2.0, preload=True)
     x = np.hstack(epochs.copy().pick("data", exclude="bads").get_data())
+    x = x / fitted_2m.pre_whitener_
     np.testing.assert_allclose(fitted_2m.mir(epochs), fitted_2m.amica_.mir(x))
     np.testing.assert_allclose(fitted_2m.pmi(epochs), fitted_2m.amica_.pmi(x))
 
@@ -499,7 +523,7 @@ def test_mir_pmi_on_epochs(raw, fitted_2m):
 def test_mir_pmi_nbins_passthrough(raw, fitted_2m):
     """nbins must reach the metric: a non-default nbins matches AMICA with the
     same nbins (a dropped forward would silently fall back to the default)."""
-    x = _picked_data(raw)
+    x = _picked_data(raw, fitted_2m)
     np.testing.assert_allclose(
         fitted_2m.mir(raw, nbins=50), fitted_2m.amica_.mir(x, nbins=50)
     )

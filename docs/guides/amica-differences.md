@@ -85,13 +85,28 @@ A = m.model_.get_sensor_mixing_matrix()  # (306, 70) scalp maps
 export) — when rank reduction is active the sphere is non-square and only the
 pseudo-inverse maps back.
 
-!!! warning "MEG channel types"
-    Magnetometers and gradiometers have different physical units. pamica does not yet
-    scale them for you ([issue #221](https://github.com/sccn/pAMICA/issues/221)). This
-    matters more than it looks: scaling barely affects a full-rank fit, but it decides
-    *which* directions survive rank truncation. On mixed data, badly scaled input
-    retained 72.6% of signal variance against 99.2% for correctly scaled input. Scale by
-    channel type before fitting.
+### Mixed channel types (MEG)
+
+Magnetometers and gradiometers have different physical units, and the difference is not
+cosmetic: scaling barely affects a full-rank fit, but it decides *which* directions
+survive rank truncation. On mixed data, badly scaled input retained 72.6% of signal
+variance against 99.2% for correctly scaled input.
+
+The MNE wrapper handles this for you, following MNE's own ICA convention — one `std` per
+channel type, applied as `X / pre_whitener_`:
+
+```python
+from pamica.mne_compat import AMICAICA
+
+fitted = AMICAICA().fit(raw)     # channel types scaled automatically
+fitted.pre_whitener_             # (n_channels, 1) scale actually applied
+```
+
+For a single channel type this changes nothing: AMICA's sphering absorbs a global
+rescale exactly (verified — the two spheres' ratio is one constant to ~1e-15).
+
+Using the array API (`pamica.AMICA`) directly, scale by channel type yourself before
+fitting; there is no `info` from which to infer types.
 
 ## Backend differences
 

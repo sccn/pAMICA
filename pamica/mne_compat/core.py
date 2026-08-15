@@ -15,8 +15,8 @@ single-model MNE ICA), plus a per-sample model-dominance accessor
 density family, GG shape, component sharing -- stays inspectable via
 :meth:`AMICAICA.get_pdftype` / :meth:`get_rho` / :meth:`shared_components`
 (issue #142), and the separation-quality metrics :meth:`AMICAICA.mir` /
-:meth:`pmi` run directly on an MNE object (issue #143). PCA reduction is
-unsupported (full-rank whitening only).
+:meth:`pmi` run directly on an MNE object (issue #143). Rank-deficient input is supported: the model is sized to the
+numerical rank and exported through MNE's native ``pca_components_`` (issue #225).
 """
 
 from typing import Optional, Union
@@ -34,6 +34,30 @@ from ..amica import AMICA
 from ..torch_impl import PDFTYPE_NAMES
 
 __all__ = ["AMICAICA", "PDFTYPE_NAMES"]
+
+
+def _compute_pre_whitener(data: np.ndarray, info) -> np.ndarray:
+    """Per-channel-type scaling factors, matching MNE's ``ICA``.
+
+    MNE z-scores by channel type before PCA (``ICA._compute_pre_whitener``): one
+    ``std`` per type, broadcast to that type's channels, then applied as
+    ``data / pre_whitener``. Reproduced here rather than imported because MNE's
+    version is private and reads the array off ``self``.
+
+    Returns
+    -------
+    np.ndarray of shape (n_channels, 1)
+        Scale per channel. Types contributing no variance (a flat channel type)
+        get 1.0 rather than 0, so the division cannot produce inf/NaN.
+    """
+    pre_whitener = np.ones((len(data), 1), dtype=np.float64)
+    for _, picks in mne.channel_indices_by_type(info).items():
+        if not picks:
+            continue
+        scale = float(np.std(data[picks]))
+        if scale > 0:
+            pre_whitener[picks] = scale
+    return pre_whitener
 
 
 class AMICAICA:
@@ -81,8 +105,12 @@ class AMICAICA:
     ch_names_ : list of str
         Names of the fitted channels, in order.
     n_components_ : int
-        Number of ICA components (equals the number of fitted channels; AMICA
-        keeps ``n_sources == n_channels``).
+        Number of ICA components. Equals the number of fitted channels unless the
+        data are rank-deficient, in which case the model is sized to the detected
+        numerical rank (issue #223).
+    pre_whitener_ : np.ndarray of shape (n_channels, 1)
+        Per-channel-type scaling applied before fitting, following MNE's own ICA
+        convention (one ``std`` per channel type, applied as ``X / pre_whitener_``).
     converged_ : bool
         Whether the last fit ended usable (not degenerate). A degenerate fit is
         kept for inspection but refused by the consumer methods (issue #50).
@@ -94,8 +122,11 @@ class AMICAICA:
     Model ``h``'s AMICA transform is ``S = W_fort @ (sphere @ (X - mean) - c_h)``,
     where ``c_h`` is that model's data-space center (identically zero for a
     single model, since the ``c`` update is gated to ``n_models > 1``). MNE
-    computes sources as ``S = unmixing_matrix_ @ pca_components_ @ (X - pca_mean_)``
-    (with a unit pre-whitener). Writing the symmetric-ZCA ``sphere`` as
+    computes sources as
+    ``S = unmixing_matrix_ @ pca_components_ @ (X / pre_whitener_ - pca_mean_)``.
+    ``X`` is scaled by channel type before fitting, exactly as MNE's own ICA does,
+    so the two pipelines agree; AMICA's sphering absorbs a global rescale, so this
+    changes nothing for single-channel-type data. Writing the symmetric-ZCA ``sphere`` as
     ``V @ diag(1/sqrt(e)) @ V.T`` with ``V`` orthonormal, the exported ICA for
     model ``h`` uses ``pca_components_ = V.T``,
     ``unmixing_matrix_ = W_fort @ sphere @ V`` and
@@ -106,12 +137,12 @@ class AMICAICA:
     test (``to_mne_ica(model_idx=h).get_sources(raw)`` equals
     ``amica_.transform(X, model_idx=h)``).
 
-    PCA reduction (``pcakeep``/``pcadb``) is unsupported: it leaves the sphere
-    rank-deficient, so the export (which assumes a full-rank whitening) would be
-    numerically invalid, and :meth:`fit` rejects it. Rank-deficient *data* (for
-    example average-referenced EEG) is the same hazard reached through data
-    conditioning rather than a keyword; such a fit typically diverges and is
-    refused as degenerate.
+    Rank-deficient input -- Maxwell-filtered MEG, average referencing, channel
+    interpolation, or an explicit ``pcakeep``/``pcadb`` -- is supported. The sphere
+    is then ``(n_kept, n_channels)`` and has no eigendecomposition, so the export
+    takes its right singular vectors instead; MNE represents the result natively,
+    since ``pca_components_`` is ``(n_components, n_channels)``. ``n_components_``
+    reports the retained rank.
     """
 
     def __init__(
@@ -132,6 +163,7 @@ class AMICAICA:
         self.info_ = None
         self.ch_names_: Optional[list] = None
         self.n_components_: Optional[int] = None
+        self.pre_whitener_: Optional[np.ndarray] = None
         self.converged_: bool = False
         self.stop_reason_: Optional[str] = None
         self._n_samples: Optional[int] = None
@@ -167,8 +199,8 @@ class AMICAICA:
         **fit_kwargs
             Forwarded to :meth:`AMICA.fit` (e.g. ``max_iter``, ``lrate``,
             ``do_newton``) and the backend constructor (e.g. ``block_size``).
-            ``pcakeep``/``pcadb`` (PCA reduction) are rejected, since they leave
-            the sphere rank-deficient and the MNE export invalid.
+            ``pcakeep``/``pcadb`` (PCA reduction) are supported: the export
+            builds ``pca_components_`` from the reduced sphere (issue #225).
 
         Returns
         -------
@@ -180,8 +212,7 @@ class AMICAICA:
             If ``inst`` is not an MNE ``Raw``/``Epochs``.
         ValueError
             If ``start``/``stop`` are given for ``Epochs``, ``stop`` exceeds the
-            recording length, the selected data is non-finite, or the fit used
-            PCA reduction.
+            recording length, or the selected data is non-finite.
         """
         if not isinstance(inst, (mne.io.BaseRaw, mne.BaseEpochs)):
             raise TypeError(
@@ -222,6 +253,16 @@ class AMICAICA:
                 "fitting."
             )
 
+        # Channel-type scaling, matching MNE's own ICA._compute_pre_whitener:
+        # one std per channel type, applied as data / pre_whitener. Required for
+        # mixed magnetometer/gradiometer data, whose physical units differ by
+        # orders of magnitude (issue #225). AMICA's sphering absorbs a *global*
+        # rescale exactly, so for single-channel-type data (ordinary EEG) this
+        # leaves the sources unchanged; it bites only across types, where it
+        # decides which directions survive rank reduction.
+        pre_whitener = _compute_pre_whitener(X, picked.info)
+        X = X / pre_whitener
+
         if isinstance(self.random_state, (int, np.integer)):
             fit_kwargs.setdefault("seed", int(self.random_state))
 
@@ -233,21 +274,19 @@ class AMICAICA:
         )
         amica.fit(X, **fit_kwargs)
 
-        if amica.model_ is not None and amica.model_._pca_reduced():
-            raise ValueError(
-                "AMICAICA does not support PCA reduction (pcakeep/pcadb): it "
-                "leaves the sphere rank-deficient, so the MNE ICA export (which "
-                "assumes a full-rank whitening) would be numerically invalid. "
-                "Refit without pcakeep/pcadb."
-            )
-
         # Publish to self only after every fallible step above succeeds, so a
         # failed (re)fit leaves the previously fitted state intact rather than a
         # mix of the old model and the new attempt's metadata (mirrors the
         # local-first pattern in AMICA.fit).
         self.info_ = picked.info
         self.ch_names_ = ch_names
-        self.n_components_ = X.shape[0]
+        self.pre_whitener_ = pre_whitener
+        # The fitted model dimension, which is the input channel count unless
+        # rank reduction shrank it (issue #223). MNE represents this natively:
+        # pca_components_ is (n_components, n_channels).
+        self.n_components_ = (
+            amica.model_.n_channels if amica.model_ is not None else X.shape[0]
+        )
         self._n_samples = X.shape[1]
         self._fit_kind = fit_kind
         self.amica_ = amica
@@ -305,25 +344,40 @@ class AMICAICA:
         sphere = backend.sphere.cpu().numpy()
         w_fort = amica.get_unmixing_matrix(model_idx=model_idx)
         c = backend.c.cpu().numpy()[:, model_idx]  # per-model center (sphered space)
-        n_ch = sphere.shape[0]
+        n_ch, n_in = sphere.shape
 
-        # Orthonormal eigenbasis of the symmetric-ZCA sphere
-        # (sphere = V diag(1/sqrt(cov_eval)) V.T). eigh gives ascending
-        # sphere-eigenvalues (= 1/sqrt(cov_eval)); reorder to descending
-        # explained variance so pca_components_ matches MNE's PCA convention.
-        sphere_evals, evecs = np.linalg.eigh(sphere)
-        cov_evals = 1.0 / sphere_evals**2
-        order = np.argsort(cov_evals)[::-1]
-        v = evecs[:, order]
-        cov_evals = cov_evals[order]
+        if n_ch == n_in:
+            # Orthonormal eigenbasis of the symmetric-ZCA sphere
+            # (sphere = V diag(1/sqrt(cov_eval)) V.T). eigh gives ascending
+            # sphere-eigenvalues (= 1/sqrt(cov_eval)); reorder to descending
+            # explained variance so pca_components_ matches MNE's PCA convention.
+            sphere_evals, evecs = np.linalg.eigh(sphere)
+            cov_evals = 1.0 / sphere_evals**2
+            order = np.argsort(cov_evals)[::-1]
+            v = evecs[:, order]
+            cov_evals = cov_evals[order]
+        else:
+            # Rank-reduced fit (issue #223): the sphere is (n_kept, n_in), so it
+            # has no eigendecomposition. Its right singular vectors give the same
+            # thing eigh gives in the square case -- an orthonormal basis of the
+            # retained subspace -- and MNE models this natively, since
+            # pca_components_ is (n_components, n_channels).
+            _, svals, vt = np.linalg.svd(sphere, full_matrices=False)
+            # Singular values of the sphere are 1/sqrt(cov eigenvalue); descending
+            # explained variance is therefore ascending singular value.
+            order = np.argsort(svals)
+            v = vt[order].T
+            cov_evals = 1.0 / svals[order] ** 2
 
         pca_components = v.T
         unmixing = w_fort @ sphere @ v
         # Fold the per-model center c (in sphered space) into pca_mean via the
-        # data-space offset inv(sphere) @ c, so MNE's (X - pca_mean) reproduces
+        # data-space offset pinv(sphere) @ c, so MNE's (X - pca_mean) reproduces
         # AMICA's W(sphere(X - mean) - c). c is identically zero for a single
-        # model, leaving pca_mean == mean bit-for-bit.
-        pca_mean = mean + np.linalg.solve(sphere, c) if np.any(c) else mean
+        # model, leaving pca_mean == mean bit-for-bit. pinv rather than solve: the
+        # sphere is non-square under rank reduction, and for a square sphere the
+        # two agree to round-off.
+        pca_mean = mean + np.linalg.pinv(sphere) @ c if np.any(c) else mean
 
         ica = _MNEICA(
             n_components=n_ch,
@@ -341,7 +395,7 @@ class AMICAICA:
         ica.pca_components_ = pca_components
         ica.pca_explained_variance_ = cov_evals
         ica.unmixing_matrix_ = unmixing
-        ica.pre_whitener_ = np.ones((n_ch, 1))
+        ica.pre_whitener_ = self.pre_whitener_
         ica.n_iter_ = max(int(getattr(backend, "iteration", 0)), 1)
         # MNE's own fit sets these; read_ica_eeglab (the precedent for building
         # an ICA from an external decomposition) sets reject_=None. Without them
@@ -537,6 +591,9 @@ class AMICAICA:
 
         Selects the exact channels the fit used (by name) so the array aligns
         with the stored sphere/unmixing; ``Epochs`` are concatenated along time.
+        The channel-type pre-whitener is applied, because the backend was fitted
+        on scaled data and would otherwise be handed a differently-scaled array
+        (issue #225).
         """
         if not isinstance(inst, (mne.io.BaseRaw, mne.BaseEpochs)):
             raise TypeError(
@@ -547,7 +604,10 @@ class AMICAICA:
             X = picked.get_data()
         else:
             X = np.hstack(picked.get_data())
-        return np.ascontiguousarray(X, dtype=np.float64)
+        X = np.ascontiguousarray(X, dtype=np.float64)
+        if self.pre_whitener_ is not None:
+            X = X / self.pre_whitener_
+        return X
 
     def _check_model_idx(self, model_idx: int) -> int:
         if not isinstance(model_idx, (int, np.integer)):
