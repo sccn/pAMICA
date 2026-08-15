@@ -833,7 +833,16 @@ class AMICATorchNG:
                 if self.mineig_rel is None
                 else self.mineig_rel * float(evals[0])
             )
-            n_rank = int((evals > thresh).sum().item())
+            if not bool(torch.isfinite(evals).all()):
+                # Non-finite covariance (NaN/Inf in the data). Rank detection is
+                # meaningless here and `nan > thresh` is False, which would
+                # otherwise look like rank zero. Leave the dimension alone and
+                # let the fit reach the degenerate-fit contract (issue #50),
+                # which reports `nan_ll` and refuses output -- that is the
+                # documented behavior for unusable data, not an exception here.
+                n_rank = evals.shape[0]
+            else:
+                n_rank = int((evals > thresh).sum().item())
             if n_rank < 1:
                 raise ValueError(
                     f"No data covariance eigenvalue exceeds mineig={thresh:g} "

@@ -146,3 +146,22 @@ def test_tesla_scale_data_fits_with_relative_threshold(
     assert m.model_ is not None
     assert m.converged_
     assert m.model_.n_channels == NW
+
+
+def test_nan_data_still_reaches_the_degenerate_fit_contract(
+    real_data: np.ndarray,
+) -> None:
+    """Rank detection must not intercept unusable data (issue #50).
+
+    A NaN makes every covariance eigenvalue non-finite, and ``nan > thresh`` is
+    False, which would look like rank zero. That must not become a ``ValueError``
+    from preprocessing: the documented behavior is a ``nan_ll`` stop with the
+    model marked unusable.
+    """
+    bad = real_data[:, :4096].copy()
+    bad[0, 0] = np.nan
+    m = AMICA(n_models=1, device="cpu", verbose=False)
+    m.fit(bad, max_iter=3, block_size=1024, seed=0)
+    assert m.stop_reason_ == "nan_ll"
+    assert m.converged_ is False
+    assert m.is_fitted_ is False
