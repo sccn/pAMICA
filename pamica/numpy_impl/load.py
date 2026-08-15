@@ -179,7 +179,31 @@ def write_amicaout(
     # multi-model interleave it replaces was never MATLAB-readable (issue #159).
     # The symmetric sphere S is order-agnostic; mean/gm/LL are 1-D.
     _w("W", np.asarray(W).transpose(2, 0, 1))
-    _w("S", sphere)
+    # Fortran always writes S at recl = 2*nbyte*nx*nx (amica15.f90:2299): the
+    # array is allocated (nx, nx) and zero-filled, and a rank-reduced sphere
+    # occupies only its first `numeigs` rows. Pad to that shape so a reduced fit
+    # is readable by loadmodout15.m and by loadmodout() below, which both reshape
+    # to (nx, nx) and slice [:num_pcs] (issue #164/#223).
+    sphere = np.asarray(sphere)
+    if sphere.ndim != 2:
+        raise ValueError(f"sphere must be 2-D (nw, nx); got shape {sphere.shape}")
+    n_keep, n_in = sphere.shape
+    if n_keep > n_in:
+        raise ValueError(
+            f"sphere has more rows than columns ({sphere.shape}); expected "
+            "(num_pcs, data_dim) with num_pcs <= data_dim"
+        )
+    if n_keep < n_in:
+        padded = np.zeros((n_in, n_in), dtype=np.float64)
+        padded[:n_keep] = sphere
+        # Column-major, because the padded array is not symmetric. The square
+        # branch below deliberately keeps its C-order write: the symmetric-ZCA
+        # sphere is its own transpose only to ~1e-17, so switching orders there
+        # would perturb bytes that are guaranteed identical to the Fortran
+        # reference (issue #92).
+        _w("S", padded, order="F")
+    else:
+        _w("S", sphere)
     _w("mean", mean)
     # The (num_mix, num_comps) mixture params and (num_comps, num_models) c /
     # comp_list are non-square, so their byte layout DOES depend on order: they
@@ -257,7 +281,12 @@ def loadmodout(outdir: Union[str, Path]) -> AmicaOutput:
             raise FileNotFoundError("No sphere or mean present, cannot continue")
     else:
         if len(S.shape) == 1:
-            S = S.reshape(nx, nx)
+            # Column-major, matching Fortran's (nx, nx) array and MATLAB's
+            # reshape in loadmodout15.m. Indistinguishable from a C-order
+            # reshape for the symmetric-ZCA sphere (which is why this went
+            # unnoticed), but not for a rank-reduced sphere, whose zero pad
+            # would otherwise land in the wrong half (issue #164).
+            S = S.reshape(nx, nx, order="F")
 
     # Read component list
     comp_list = read_binary_file(outdir / "comp_list", dtype=np.int32)
