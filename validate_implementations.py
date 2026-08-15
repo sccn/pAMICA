@@ -180,6 +180,33 @@ def write_fortran_param_file(
     dest.write_text("".join(out))
 
 
+LEGACY_BINARY = Path("pamica/sample_data/amica15mac")
+
+
+def default_reference_binary(*, download: bool = True) -> Path:
+    """The reference binary to compare against, preferring the native engine.
+
+    The native engine is built from a source carrying the ``seed`` option
+    (sccn/amica PR #54), so its runs are reproducible; the bundled
+    ``amica15mac`` fixture predates it and re-randomizes its initialization on
+    every run, which makes any comparison against it a comparison with a random
+    draw (issue #228). Falls back to the fixture, loudly, when the native engine
+    cannot be resolved.
+    """
+    try:
+        from pamica.native import resolver
+
+        return resolver.resolve(download=download)
+    except Exception as exc:  # network, unsupported platform, missing cache
+        print(
+            f"WARNING: native engine unavailable ({exc}); falling back to "
+            f"{LEGACY_BINARY}, which cannot be seeded. Reference runs will not "
+            "be reproducible and single-run comparisons against them are not "
+            "controlled (issue #228)."
+        )
+        return LEGACY_BINARY
+
+
 def run_fortran_amica(
     data: np.ndarray,
     params: Dict,
@@ -190,12 +217,12 @@ def run_fortran_amica(
     """Run the AMICA reference binary and collect results.
 
     ``binary_path`` selects which reference binary to run. It defaults to the
-    bundled macOS x86_64 fixture (``pamica/sample_data/amica15mac``); pass the
-    cross-platform native-engine binary (see ``--native-engine`` in ``main``) to
-    run the real Fortran reference on Linux/Windows/Apple-Silicon instead.
+    native engine (see :func:`default_reference_binary`), which is seedable and
+    therefore reproducible; pass ``LEGACY_BINARY`` for the bundled macOS x86_64
+    fixture instead.
     """
     if binary_path is None:
-        binary_path = Path("pamica/sample_data/amica15mac")
+        binary_path = default_reference_binary()
     # Resolve to an absolute path now, before the run chdirs into fortran_dir.
     binary_path = Path(binary_path).resolve()
     if not binary_path.exists():
@@ -259,6 +286,17 @@ def run_fortran_amica(
             print(f"Fortran AMICA failed: {result.stderr}")
             print(f"Stdout: {result.stdout}")
             return None
+
+        # A binary predating sccn/amica PR #54 has no `seed` case and its parser
+        # has no `case default`, so it ignores the keyword in silence and
+        # re-randomizes instead. Detect that rather than reporting a comparison
+        # against a random draw as if it were controlled (issue #228).
+        if "seed =" not in result.stdout:
+            print(
+                f"WARNING: {binary_path} did not acknowledge the seed, so it "
+                "predates the seedable build. Its initialization is random per "
+                "run and this comparison is not controlled (issue #228)."
+            )
 
     except subprocess.TimeoutExpired:
         os.chdir(original_dir)

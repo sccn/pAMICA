@@ -130,3 +130,29 @@ def test_real_params_json_produces_a_parseable_file(tmp_path):
 def test_list_values_are_space_separated(tmp_path):
     got = _written(tmp_path, {"field_dim": [100, 200]})
     assert got["field_dim"] == "100 200"
+
+
+def test_default_reference_binary_falls_back_loudly(capsys, monkeypatch):
+    """Without a native engine the harness must say the run is uncontrolled.
+
+    The fallback binary cannot be seeded, so silently using it would report a
+    comparison against a random draw as if it were controlled (issue #228).
+    """
+    from validate_implementations import LEGACY_BINARY, default_reference_binary
+
+    monkeypatch.delenv("PAMICA_NATIVE_BINARY", raising=False)
+    got = default_reference_binary(download=False)
+    if got == LEGACY_BINARY:
+        out = capsys.readouterr().out
+        assert "cannot be seeded" in out and "#228" in out
+    else:  # a cached native engine is present; that is the good path
+        assert got.exists()
+
+
+def test_env_override_selects_the_native_engine(tmp_path, monkeypatch):
+    fake = tmp_path / "amica15_native"
+    fake.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("PAMICA_NATIVE_BINARY", str(fake))
+    from validate_implementations import default_reference_binary
+
+    assert default_reference_binary(download=False) == fake.resolve()
