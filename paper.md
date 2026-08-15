@@ -30,7 +30,7 @@ bibliography: paper.bib
 # Summary
 
 Independent Component Analysis (ICA) separates electroencephalographic and magnetoencephalographic (EEG/MEG) recordings into maximally independent sources that isolate brain, muscle, and artifact activities for downstream analysis [@makeig1995independent; @vigario1997independent; @iversen2019megeeg].
-Adaptive Mixture ICA (AMICA) [@palmer2012amica] models each source with a flexible, self-adjusting probability density and lets several ICA models coexist, one per segment of a recording.
+Adaptive Mixture ICA (AMICA) [@palmer2006super; @palmer2007modeling; @palmer2012amica] models each source with a flexible, self-adjusting probability density and lets several ICA models coexist, one per segment of a recording.
 Among the algorithms benchmarked by @delorme2012independent it recovers the least dependent and most dipolar decompositions,
 and therefore the most physiologically interpretable ones.
 Its reference implementation, by Jason Palmer, is a Fortran program distributed as a compiled binary callable from MATLAB/EEGLAB:
@@ -122,22 +122,21 @@ and double-precision CUDA is the reproducible NVIDIA path.
 On real 70-channel EEG, per-iteration cost is 25 ms for MLX on an Apple GPU, 39 ms for double-precision CUDA on an RTX 4090,
 and 30 ms for native Fortran on a 24-core i9-13900K, against 193 ms for PyTorch on an Apple-Silicon CPU and 255 ms for PyTorch-Metal, which never beats the CPU it runs beside.
 Full tables, the data-size sweep, and reproduction commands are in the [documentation](https://eeglab.org/pAMICA/guides/validation/); the correctness harness never uses synthetic data.
+The harness and sample data ship with the package, and every row of Table 1 but the two on002718 entries re-runs from the bundled sample alone.
 
 # Research impact statement
 
-`pamica` was first released in July 2026, so its case rests on readiness and early use rather than accumulated citations.
+AMICA is not a new method: its source model and estimation were published in 2006-2008 [@palmer2006super; @palmer2007modeling; @palmer2008newton],
+and it ranked first of the twenty-two algorithms benchmarked by @delorme2012independent.
+MNE-Python is publicly weighing which of the Python ports to adopt (`mne-tools/mne-python` issue 13819),
+where an MNE core developer and the author of a competing port lean toward `pamica`,
+since this Center develops AMICA and maintains the reference Fortran and EEGLAB.
 
-Because `pamica` writes the reference binary's output format, existing EEGLAB analyses read its decompositions unchanged,
-so a lab can adopt Python without re-tooling everything downstream.
-It also redistributes the reference Fortran as a dependency-free build for macOS, Linux, and Windows.
-
-Seven releases have been published, four of them to the Python Package Index (513 downloads in the month before submission), with an archived Zenodo record.
-One user outside the author group reported a bug from their own 236-channel, 8.3-million-sample decomposition (`sccn/pAMICA` issue 207);
-another, the author of a competing reimplementation, raised completeness and packaging questions (issue 206).
-MNE-Python is publicly weighing which AMICA implementation to adopt (`mne-tools/mne-python` issue 13819).
-Integration into this Center's Python preprocessing and the NEMAR archive is underway, not complete.
-The harness, sample data, and reproduction commands ship with the package.
-All but the two on002718 rows re-run from the bundled sample alone, and the documentation states what each costs to verify.
+`sccn/pAMICA` has been public since 2021, with public issues, pull requests, seven releases (four on PyPI), and a Zenodo archive.
+Three researchers outside the author group have filed issues, two mid-analysis on their own data:
+a 236-channel, 8.3-million-sample EEG decomposition (issue 207) and Maxwell-filtered 306-channel MEG (issue 221);
+the third is adopting AMICA for a multiverse analysis in MNE-Python (issue 206).
+Integration is underway, not complete, into this Center's Python preprocessing and into NEMAR [@delorme2022nemar], the public archive we operate: 800 datasets, ~40,000 participants, 55 TB.
 
 # AI usage disclosure
 
