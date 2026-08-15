@@ -285,17 +285,22 @@ class AMICATorchNG:
         Number of ICA mixture models.
     n_mix : int, default=3
         Number of mixture components per source.
-    block_size : int, default=512
+    block_size : int, default=8192
         Number of samples processed per accumulation block. Peak memory
         during the E-step scales with this, not with the total sample count.
         Larger blocks give bigger tensor ops (less Python/dispatch overhead,
-        better threading/GPU utilization) at higher memory. 512 is a fixed
-        choice inside Fortran's ``do_opt_block`` auto-tune range (128-1024, step
-        128); the Fortran *header* default is 128 and it auto-tunes per host, so
-        this does not track a single reference value. A single iteration's
-        sufficient statistics are block-size-independent to ~1e-8
-        (``test_blocking_invariance``), but the (chaotic) multi-iteration
-        trajectory shifts at the ~1e-6 level as this changes.
+        better threading/GPU utilization) at higher memory. Every backend is
+        dispatch-bound at small blocks, making this the largest throughput knob:
+        raising it from 512 to 8192 is ~6x on CPU float64 for the bundled sample
+        (issue #216). 8192 rather than larger because peak block memory scales
+        with it and 8192 stays near 240 MB even at 256 channels.
+
+        Fortran pins no comparable value (header default 128, auto-tuned over
+        128-1024 via ``do_opt_block``). Per-iteration sufficient statistics are
+        block-size-independent to ~1e-8 (``test_blocking_invariance``); the
+        multi-iteration trajectory shifts ~1e-6, inside parity tolerance but
+        enough that a bit-for-bit Fortran comparison must match ``block_size`` on
+        both sides (the bundled ``input.param`` uses 512).
     lrate : float, default=0.1
         Initial/maximum natural-gradient learning rate (``lrate0`` in NumPy).
     minlrate : float, default=1e-12
@@ -512,7 +517,7 @@ class AMICATorchNG:
         n_channels: int,
         n_models: int = 1,
         n_mix: int = 3,
-        block_size: int = 512,
+        block_size: int = 8192,
         lrate: float = 0.1,
         minlrate: float = 1e-12,
         lratefact: float = 0.5,

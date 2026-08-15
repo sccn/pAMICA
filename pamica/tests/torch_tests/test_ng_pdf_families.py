@@ -125,10 +125,15 @@ def test_log_pdf_only_matches_log_pdf_and_deriv(code):
     assert torch.equal(az_rho, _Y.abs().pow(_RHO))
 
 
-def test_block_size_default_is_512():
-    """Pin the issue #63 default so a revert/typo is caught (the block-size
-    invariance tests would still pass at any finite block size)."""
-    assert AMICATorchNG(n_channels=NW, device="cpu").block_size == 512
+def test_block_size_default_is_8192():
+    """Pin the issue #216 default so a revert/typo is caught (the block-size
+    invariance tests would still pass at any finite block size).
+
+    Raised from 512, which left every backend dispatch-bound: ~6x on CPU float64
+    for the bundled sample. Chosen over a larger value because peak block memory
+    scales with it and 8192 stays safe at high channel counts.
+    """
+    assert AMICATorchNG(n_channels=NW, device="cpu").block_size == 8192
 
 
 def test_pdtype_h_is_none_only_for_gg():
