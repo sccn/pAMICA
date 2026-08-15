@@ -563,10 +563,6 @@ class AMICATorchNG:
         self.n_models = n_models
         self.n_mix = n_mix
         self.n_comps = n_channels * n_models
-        # Original input channel count, kept when rank reduction shrinks
-        # n_channels to the kept rank (issue #223). Equal to n_channels
-        # whenever the data is full rank.
-        self.n_channels_in = n_channels
         self.mineig = mineig
         self.mineig_rel = mineig_rel
         self.block_size = block_size
@@ -908,7 +904,6 @@ class AMICATorchNG:
         # (Fortran ``nw = numeigs``, amica15.f90:545). No-op, and therefore
         # bit-exact, whenever the data are full rank.
         n_kept = sphere.shape[0]
-        self.n_channels_in = data_dim
         if n_kept != self.n_channels:
             logger.info(
                 "Data covariance has numerical rank %d of %d; fitting %d "
@@ -2351,6 +2346,17 @@ class AMICATorchNG:
         self._check_model_idx(model_idx)
         return self.A[:, self.comp_list[:, model_idx]].T.cpu().numpy()
 
+    @property
+    def n_channels_in(self) -> int:
+        """Input channel count, i.e. the width of the sphere.
+
+        Differs from ``n_channels`` only when rank reduction shrank the model to
+        the detected numerical rank (issue #223); equal to it for full-rank data
+        and before :meth:`fit`. Derived rather than stored, so it cannot drift
+        from the sphere it describes.
+        """
+        return self.n_channels if self.sphere is None else int(self.sphere.shape[1])
+
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space.
 
@@ -2917,7 +2923,6 @@ class AMICATorchNG:
             "pcadb": self.pcadb,
             "mineig": self.mineig,
             "mineig_rel": self.mineig_rel,
-            "n_channels_in": self.n_channels_in,
             "seed": self.seed,
             # Store dtype by name (e.g. "float64") to keep the payload
             # weights_only-safe; rebuilt via getattr(torch, ...) on load.
