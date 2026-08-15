@@ -45,8 +45,13 @@ computes in float64 for Fortran parity, which MPS cannot represent, so parity ru
 (the `AMICA` wrapper falls back to CPU automatically when a device is not pinned).
 
 **Performance (#63, `.context/issue-63/perf_findings.md`, `benchmarks/benchmark_gpu.py`):** the E-step
-pow-dedup (dropping the unused `dpdf`) is ~-35% and bit-identical; `block_size` default is 512 (was
-128, ~-18%). CUDA float64 is ~4.5x over a 16-thread CPU (RTX 4090, warmed) and agrees with the CPU LL
+pow-dedup (dropping the unused `dpdf`) is ~-35% and bit-identical. **`block_size` default is 8192
+(#216, raised from 512).** Every backend is dispatch-bound at small blocks, making this the single
+largest throughput knob: ~6x on CPU float64 for the bundled sample (217 -> 36 ms/it). 8192 rather
+than larger because peak block memory scales with it and 8192 stays safe at high channel counts.
+Runs compared bit-for-bit against the Fortran binary must set `block_size` on both sides (the
+bundled `input.param` uses 512); the trajectory shifts ~1e-6 with it, inside parity tolerance.
+CUDA float64 is ~4.5x over a 16-thread CPU (RTX 4090, warmed) and agrees with the CPU LL
 to 5 sig digits (auto-selected by the wrapper). float32 now converges reliably on
 full-size data across seeds (#75 guarded the one float32-only divide-by-zero: a sample rounding an
 activation to exactly 0 gave `0/0` in the mu denominator; not a summation-precision problem, so it

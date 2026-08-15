@@ -205,7 +205,7 @@ class AMICA:
         self.do_history = params.get("do_history", False)
         self.histstep = params.get("histstep", 10)
         self.do_opt_block = params.get("do_opt_block", True)
-        self.block_size = params.get("block_size", 128)
+        self.block_size = params.get("block_size", 8192)
         self.blk_min = params.get("blk_min", 128)
         self.blk_max = params.get("blk_max", 1024)
         self.blk_step = params.get("blk_step", 128)

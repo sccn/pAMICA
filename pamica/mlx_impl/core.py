@@ -89,7 +89,7 @@ class AMICAMLXNG:
         n_channels: int,
         n_models: int = 1,
         n_mix: int = 3,
-        block_size: int = 512,
+        block_size: int = 8192,
         lrate: float = 0.1,
         minlrate: float = 1e-12,
         lratefact: float = 0.5,
