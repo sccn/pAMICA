@@ -765,7 +765,15 @@ def test_mir_history_survives_keep_best_restore(real_data):
 
     Uses the same genuine-overshoot recipe as
     ``test_keep_best_restores_genuine_overshoot_under_min_dll_stop`` above,
-    with ``mir_step=5`` added."""
+    with ``mir_step=1`` added.
+
+    ``mir_step=1`` is load-bearing, not incidental. The ``min_dll``/``maxincs``
+    stop halts one or two iterations past the peak, so with any coarser step
+    the last waypoint lands *before* the best iterate and the window a
+    truncating restore would damage is never sampled -- a restore that dropped
+    every waypoint after the best iterate would leave this fixture unchanged
+    and the test would pass under the bug. Recording every iteration puts a
+    waypoint strictly inside that window."""
     x = real_data[:, :4096]
     ng = _fresh_ng(
         n_models=2,
@@ -780,21 +788,31 @@ def test_mir_history_survives_keep_best_restore(real_data):
         use_grad_norm=False,
         keep_best=True,
     )
-    ng.fit(x, max_iter=60, verbose=False, mir_step=5)
+    ng.fit(x, max_iter=60, verbose=False, mir_step=1)
     assert ng.stop_reason == "min_dll"
     assert ng.final_ll_ != ng.ll_history[-1]  # the restore branch fired
 
     assert ng.mir_history_, "test setup: mir_step recorded nothing"
     last_it, last_mir, _ = ng.mir_history_[-1]
     # The trajectory runs to the final (pre-restore) iteration --
-    # _snapshot_params/_restore_params never touch mir_history_, so it is not
-    # truncated or rewritten by the restore that just fired above. Waypoints
-    # land on multiples of mir_step, so the last one is the highest multiple at
-    # or below the final iteration; asserting equality with the final iteration
-    # only held while the stop happened to coincide with a waypoint.
+    # _snapshot_params/_restore_params never touch mir_history_, so it is
+    # neither truncated nor rewritten by the restore that just fired above.
+    # At mir_step=1 every iteration is a waypoint, so this holds for any
+    # stopping iteration; the earlier equality-with-a-multiple-of-5 form was
+    # satisfied by a truncating restore as well as a correct one.
     final_it = len(ng.ll_history) - 1
-    assert last_it == (final_it // 5) * 5
-    assert last_it > final_it - 5, "trajectory was truncated before the restore"
+    assert ng.final_ll_ is not None
+    best_it = ng.ll_history.index(ng.final_ll_)
+    assert best_it < final_it, (
+        "test setup: the restore must discard at least one iteration, or "
+        "there is no truncation window to guard"
+    )
+    assert last_it == final_it, "the post-peak waypoints were dropped"
+    # The count is what a partial truncation would move even if the last entry
+    # happened to survive.
+    assert len(ng.mir_history_) == final_it + 1, (
+        "mir_history_ is not the full per-iteration trajectory"
+    )
 
     # model.mir(X) reflects the RESTORED (actually-returned) parameters, and
     # differs from that stale pre-restore waypoint -- confirming the
