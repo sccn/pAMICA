@@ -48,7 +48,12 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add paper.pdf
           if ! git diff --cached --quiet; then
-            git commit -m "Rebuild paper.pdf [skip ci]"
+            # No [skip ci] marker: it is per-commit, not per-event, so a squash
+            # merge folds it into the merge commit message and silences every
+            # workflow on the target branch (it swallowed an auto-bump-dev run
+            # this way). Not needed anyway -- this pushes with the default
+            # GITHUB_TOKEN, whose pushes do not trigger workflows.
+            git commit -m "Rebuild paper.pdf"
             git push
           else
             echo "paper.pdf unchanged, nothing to commit"
