@@ -40,6 +40,19 @@ size, and a reproducible Fortran reference for parity runs.
   seeds the reference run and pins it to one thread, and defaults to the
   seedable native engine rather than the unseedable bundled fixture. Two
   reference runs are now bit-identical where before they differed by up to 0.59.
+- `benchmarks/reproduce_table1.py` reproduces the paper's parity table from the
+  bundled sample, and the validation guide states what each row costs to verify
+  (issue #144).
+- **Both Fortran convergence criteria were dead in `numpy_impl` and now work**
+  (issue #212). `AMICA_NumPy` stored the raw log-likelihood sum instead of
+  Fortran's per-sample-per-channel normalization, reporting `-3317862.78` where
+  the reference reports `-3.3`; `min_dll` defaults to `1e-9`, so `use_min_dll`
+  could never fire from genuine convergence. Separately, `nd` was built from the
+  raw block sum rather than the `gm`-weighted mapped directions, reporting
+  ~5.4e3 against Fortran's ~5.7e-2 and staying flat across iterations, so
+  `use_grad_norm`/`min_nd` was equally unreachable. Both now match the reference
+  formulas, and `AMICA_NumPy.ll_history` is on the same scale as the other
+  backends.
 - Added the three missing Fortran convergence stops to `AMICATorchNG`
   (issue #207): `use_min_dll`/`min_dll`/`maxincs` (small-likelihood-increase
   stop), `use_grad_norm`/`min_nd` (weight-gradient-norm stop), and the
