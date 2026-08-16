@@ -402,12 +402,32 @@ Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests
 AMICA ships four stops. On recordings the size of the bundled sample, only two of
 them fire, and it is worth knowing which before concluding that one is broken.
 
-| Stop | Default | Fires on the bundled sample? |
-|---|---|---|
-| `max_iter` | 2000 | yes, unless `min_dll` fires first |
-| `use_min_dll` / `min_dll` | on, `1e-9` | yes — measured at iteration 326-1076 depending on the BLAS build |
-| `use_grad_norm` / `min_nd` | on, `1e-7` | **no** |
-| `lrate_floor` (`minlrate`) | `1e-12` | only when the learning rate anneals there, which `do_newton=True` prevents |
+Two of the four defaults differ between the backends, so read the column that
+matches the entry point you use. `AMICA_NumPy` resolves its defaults from the
+bundled `pamica/numpy_impl/params.json`; `AMICA`/`AMICATorchNG` take theirs from
+the constructor signature; Fortran compiles in the values in `amica15_header.f90`
+and the bundled `pamica/sample_data/input.param` overrides several.
+
+| Stop | `AMICA` / `AMICATorchNG` | `AMICA_NumPy` | Fortran (compiled / `input.param`) |
+|---|---|---|---|
+| `max_iter` | **100** | 2000 | none / 2000 |
+| `min_dll` (`use_min_dll`) | on, `1e-9` | on, `1e-9` | on, `1e-9` |
+| `min_nd` (`use_grad_norm`) | on, `1e-7` | on, `1e-7` (named `min_grad_norm`) | on, `1e-7` |
+| `minlrate` (`lrate_floor`) | `1e-12` | `1e-12` | `1e-12` / `1e-8` |
+| `do_newton` | **off** | **on** | off / on |
+
+Which of them actually ends a fit:
+
+- **`min_dll` normally wins**, at iteration 326-1076 depending on the BLAS build
+  — but only when `max_iter` is large enough to let it. At `AMICATorchNG`'s
+  default `max_iter=100` the fit always ends on `max_iter` before `min_dll` can
+  fire, so the default PyTorch run is iteration-limited, not converged. Raise
+  `max_iter` if you want the likelihood stop to be the one that decides.
+- **`min_nd` never fires** on a recording this size, in any of the three
+  implementations. This is the subject of the rest of this section.
+- **`minlrate` needs sustained likelihood decreases** to anneal the learning rate
+  all the way to the floor. The bundled sample stops on `min_dll` (or `max_iter`)
+  long before that, so it is not a stop you will meet here.
 
 **`min_nd` is not reachable on a recording this size, in any of the three
 implementations.** Running the reference binary to completion under a matched

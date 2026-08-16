@@ -243,8 +243,9 @@ class AMICA:
         # min_grad_norm is Fortran-faithful but not reachable on small
         # recordings: the reference binary's own gradient norm plateaus two
         # orders above it on the bundled sample, so min_dll is what ends a fit
-        # there. Kept rather than retuned; see the convergence-criteria section
-        # of docs/guides/validation.md (issue #218).
+        # there. Kept rather than retuned; see "Which convergence criterion
+        # actually stops a fit" in docs/guides/validation.md (issue #218).
+        # AMICATorchNG spells this same threshold min_nd.
         self.min_grad_norm = params.get("min_grad_norm", 1e-7)
         self.use_min_dll = params.get("use_min_dll", True)
         self.use_grad_norm = params.get("use_grad_norm", True)
