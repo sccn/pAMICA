@@ -99,6 +99,9 @@ INTEGER :: numargs, argnum, filenum, filestart, filestop, sampnum, sampstart
 integer :: sampstop, blknum, blocknum, fld1, fld2, num_blocks
 INTEGER :: i, j, k
 integer :: ii, jj, kk, c0, c1, c2
+INTEGER :: nseed, input_seed = 0
+LOGICAL :: use_seed = .false.
+INTEGER, ALLOCATABLE :: seedvec(:)
 integer :: counts_per_sec=0, cnt1=0, cnt2=0
 INTEGER :: iter, len, fh, info, lwork, lstate=16, state(16), lseed = 1
 integer :: host_num, ip(4), name_len

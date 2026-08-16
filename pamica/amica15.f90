@@ -214,10 +214,28 @@ call MPI_BCAST(rho0,1,MPI_DOUBLE_PRECISION,0,seg_comm,ierr)
 call MPI_BCAST(minlrate,1,MPI_DOUBLE_PRECISION,0,seg_comm,ierr)
 call MPI_BCAST(lratefact,1,MPI_DOUBLE_PRECISION,0,seg_comm,ierr)
 call MPI_BCAST(rholratefact,1,MPI_DOUBLE_PRECISION,0,seg_comm,ierr)
+call MPI_BCAST(input_seed,1,MPI_INTEGER,0,seg_comm,ierr)
+call MPI_BCAST(use_seed,1,MPI_LOGICAL,0,seg_comm,ierr)
 
 !--- set up the random number generator for this node
 call system_clock(c1)
-call random_seed(PUT = c1 * (myrank+1) * (seed+myrank+1))
+! Portable + reproducible RNG seeding (sccn/amica PR #54, supersedes #53):
+! random_seed(PUT=...) needs an array of the compiler SIZE (query with SIZE=);
+! the original size-2 array only compiled under ifort. With `seed` set in the
+! param file, seed deterministically (reproducible); otherwise clock-seed.
+call random_seed(size = nseed)
+allocate(seedvec(nseed))
+if (use_seed) then
+   do jj = 1, nseed
+      seedvec(jj) = input_seed + 1009*myrank + 37*(jj-1)
+   end do
+else
+   do jj = 1, nseed
+      seedvec(jj) = c1 + 1009*(myrank+1)*jj + 37*(jj-1)
+   end do
+end if
+call random_seed(PUT = seedvec)
+deallocate(seedvec)
 !call DRANDINITIALIZE(1,1,(myrank+1)*(c1/tot_procs + 1),lseed,state,lstate,info)
 
 
@@ -3675,6 +3693,10 @@ subroutine get_cmd_args
         read(tmparg,'(a)') outdirparam
      case('indir')
         read(tmparg,'(a)') indirparam
+     case('seed')
+        read(tmparg,'(i12)') input_seed
+        use_seed = .true.
+        print *, 'seed = ', input_seed; call flush(6)
      end select
 
   end do
