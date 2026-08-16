@@ -742,6 +742,13 @@ class AMICATorchNG:
         # fit-end MIR is mir() on the returned parameters, not
         # mir_history_[-1]. Not part of state_dict(): it's a diagnostic,
         # not a fitted parameter.
+        #
+        # Not index-aligned with ll_history: the entry for iteration i is
+        # computed AFTER that iteration's _update_parameters, while
+        # ll_history[i] is the likelihood of the parameters BEFORE it (the
+        # E-step accumulator that produced the update). The two therefore
+        # describe states one update apart, so zipping them by index compares
+        # different parameters (issue #161).
         self.mir_history_: list[tuple[int, float, float]] = []
 
         # Outlier-rejection bookkeeping (set up in fit()).

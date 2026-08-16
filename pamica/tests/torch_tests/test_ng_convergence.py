@@ -786,10 +786,15 @@ def test_mir_history_survives_keep_best_restore(real_data):
 
     assert ng.mir_history_, "test setup: mir_step recorded nothing"
     last_it, last_mir, _ = ng.mir_history_[-1]
-    # The last waypoint was recorded at the final (pre-restore) iteration --
+    # The trajectory runs to the final (pre-restore) iteration --
     # _snapshot_params/_restore_params never touch mir_history_, so it is not
-    # truncated or rewritten by the restore that just fired above.
-    assert last_it == len(ng.ll_history) - 1
+    # truncated or rewritten by the restore that just fired above. Waypoints
+    # land on multiples of mir_step, so the last one is the highest multiple at
+    # or below the final iteration; asserting equality with the final iteration
+    # only held while the stop happened to coincide with a waypoint.
+    final_it = len(ng.ll_history) - 1
+    assert last_it == (final_it // 5) * 5
+    assert last_it > final_it - 5, "trajectory was truncated before the restore"
 
     # model.mir(X) reflects the RESTORED (actually-returned) parameters, and
     # differs from that stale pre-restore waypoint -- confirming the
