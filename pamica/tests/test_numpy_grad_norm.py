@@ -96,35 +96,78 @@ def test_grad_norm_uses_the_pre_step_mixing_matrix():
 
 
 # --- gm ordering under sharing (issue #219) ---------------------------------
-def test_grad_norm_uses_pre_update_model_weights():
-    """`dAk` is weighted by the model weights of the *previous* iteration.
+def _shared_two_model_fit(max_iter=3):
+    """A fitted 2-model NumPy model whose comp_list genuinely shares a column.
 
-    Fortran builds `dAk` inside `accum_updates_and_likelihood`
-    (amica15.f90:1753) and only reassigns `gm` in `update_params` (:1788), so
-    its `ndtmpsum` never sees the current iteration's weights. We reassigned
-    `gm` first and weighted with the new values.
-
-    Invisible for a single model (`gm == 1`) and for the default disjoint
-    `comp_list`, where the `gm[h]` factor cancels against `zeta[idx]`; it is
-    real only when `share_comps` gives a column to more than one model. This
-    pins the ordering directly, since a shared column is hard to force from a
-    short fit.
+    Sharing is forced directly rather than waited for: `share_comps` reaches a
+    shared column only after a merge fires, and a short fit on this sample is
+    not guaranteed to produce one.
     """
-    model = AMICA(num_models=2, num_mix=3, max_iter=3, seed=42)
+    model = AMICA(num_models=2, num_mix=3, max_iter=max_iter, seed=42)
     model.fit(_real_data(4096))
-
-    # Force a genuinely shared column: model 1's first component points at the
-    # same mixing column as model 0's.
     assert model.comp_list is not None
     model.comp_list[0, 1] = model.comp_list[0, 0]
+    return model
 
-    # Two M-steps that differ only in the model weights present when `dAk` is
-    # built. If `nd` were computed from the post-update `gm`, the second call
-    # would be indistinguishable from the first.
-    before = float(np.asarray(model.nd)[-1])
-    assert np.isfinite(before) and before > 0.0
-    assert model.gm is not None
-    assert len(model.gm) == 2 and abs(model.gm.sum() - 1.0) < 1e-9
+
+def _nd_for_pre_update_gm(model, updates, gm_pre):
+    """Run one M-step with `gm` preset to `gm_pre`, return the resulting nd.
+
+    `updates` is held fixed across calls, so the *post*-update gm
+    (`updates["dgm"] / num_samples`) is identical whichever `gm_pre` is passed.
+    Any difference in nd therefore comes from the pre-update value.
+    """
+    saved = {
+        name: np.array(getattr(model, name), copy=True)
+        for name in ("A", "mu", "beta", "rho", "alpha", "gm", "c")
+        if getattr(model, name, None) is not None
+    }
+    model.gm = np.array(gm_pre, dtype=float)
+    model.nd = []
+    model._update_parameters(updates)
+    nd = float(np.asarray(model.nd)[-1])
+    for name, value in saved.items():
+        setattr(model, name, value)
+    return nd
+
+
+def test_nd_uses_pre_update_model_weights():
+    """nd is weighted by the model weights from before the mixture update.
+
+    Fortran builds dAk in accum_updates_and_likelihood (amica15.f90:1753) and
+    only reassigns gm in update_params (:1788), so its ndtmpsum never sees the
+    current iteration's weights.
+
+    The two M-steps below share one `updates` dict, so they agree on the
+    post-update gm exactly. They differ only in the gm present when dAk is
+    built. Weighting by the post-update value would make them identical; the
+    assertion is that they are not.
+    """
+    model = _shared_two_model_fit()
+    updates = model._get_updates_and_likelihood()
+
+    nd_a = _nd_for_pre_update_gm(model, updates, [0.9, 0.1])
+    nd_b = _nd_for_pre_update_gm(model, updates, [0.1, 0.9])
+
+    assert np.isfinite(nd_a) and np.isfinite(nd_b)
+    assert nd_a != nd_b, (
+        "nd is identical under opposite pre-update model weights, so it is "
+        "being built from the post-update gm"
+    )
+
+
+def test_nd_ignores_the_post_update_model_weights():
+    """The complement: holding the pre-update gm fixed pins nd.
+
+    Guards the other direction, so the test above cannot be satisfied by nd
+    simply being sensitive to unrelated state.
+    """
+    model = _shared_two_model_fit()
+    updates = model._get_updates_and_likelihood()
+
+    first = _nd_for_pre_update_gm(model, updates, [0.7, 0.3])
+    second = _nd_for_pre_update_gm(model, updates, [0.7, 0.3])
+    assert first == second
 
 
 def test_shared_column_keeps_grad_norm_finite():
@@ -134,17 +177,7 @@ def test_shared_column_keeps_grad_norm_finite():
     accumulates a positive weight per contributing model, so the division stays
     finite even when one model's weight collapses.
     """
-    model = AMICA(
-        num_models=2,
-        num_mix=3,
-        max_iter=5,
-        seed=7,
-        share_comps=True,
-        share_start=1,
-        share_int=2,
-    )
-    model.fit(_real_data(4096))
-
-    nd = np.asarray(model.nd)
-    assert np.all(np.isfinite(nd)), "sharing produced a non-finite gradient norm"
-    assert np.all(nd > 0.0)
+    model = _shared_two_model_fit()
+    updates = model._get_updates_and_likelihood()
+    nd = _nd_for_pre_update_gm(model, updates, [1.0, 0.0])
+    assert np.isfinite(nd) and nd > 0.0
