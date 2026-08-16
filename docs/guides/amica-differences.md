@@ -120,6 +120,35 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | Outlier rejection | yes | yes | no | yes |
 | Precision | f64/f32 | f64 | f32 only | f64 |
 | Rank detection | yes | yes | yes | yes (absolute floor) |
+| `min_dll` stop | yes | yes | **no** | yes |
+| `min_nd` stop / gradient norm | yes | yes | **no** | yes |
+| `keep_best` best-iterate restore | yes | no | no | n/a |
+| MIR diagnostic | yes | no | no | n/a |
+| Persistence | `state_dict` | EEGLAB `amicaout` | none | EEGLAB `amicaout` |
 
-MLX limitations raise `NotImplementedError` rather than differing silently, per
-`.rules/backend_parity.md`.
+Most MLX limitations fail loudly: `do_newton=True` and non-GG `pdftype` raise
+`NotImplementedError`, and every unsupported parameter is simply absent from the
+constructor, so passing it raises `TypeError`.
+
+**The convergence stops are the exception, and the one difference to plan
+around.** `pamica/mlx_impl/core.py` implements neither stop — it has no
+`min_dll`/`use_min_dll`/`maxincs` and no `min_nd`/`use_grad_norm`/`ndtmpsum`, so
+its only outcomes are `max_iter`, `lrate_floor`, and the degenerate reasons
+(`nan_ll`, `singular_ll`, `nan_params`). **An MLX fit therefore always runs the
+full iteration budget**, while the other backends stop on likelihood stagnation
+(`min_dll`, on by default at `1e-9`) — measured at iteration 326-1076 on the
+bundled sample, depending on the BLAS build.
+
+Nothing warns you about this, because there is no parameter to reject. Two
+consequences:
+
+- Moving a working configuration from the PyTorch backend to MLX for the
+  Apple-GPU speedup does more work than the same `max_iter` implies. Choose
+  `max_iter` for MLX from where the other backends actually converge on your
+  data, not from their default budget.
+- MLX cannot be evaluated on gradient-norm behaviour at all. Where this
+  documentation says `min_nd` is unreachable "in all three implementations"
+  (see the convergence section of [validation](validation.md)), that means
+  Fortran, PyTorch and NumPy; MLX never computes the quantity.
+
+Tracked in issue #248.
