@@ -113,6 +113,50 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+  # Apple Silicon coverage (issue #246). The Linux jobs above cannot exercise
+  # two things the project depends on:
+  #   * pamica/tests/mlx_tests/ -- MLX is Apple-GPU only and is the recommended
+  #     Apple backend (AGENTS.md), so it had never run in CI at all.
+  #   * the Accelerate BLAS numerical path. Summation order differs from
+  #     OpenBLAS enough to move a stopping iteration, which is how a broken
+  #     assertion in test_ng_convergence.py stayed green on Linux through #241
+  #     and failed immediately on macOS.
+  # macos-26 is the current arm64 image (macos-14/15 are also arm64; 14 is
+  # deprecated). Standard runners are free and unmetered for public repos --
+  # do not switch to a -large/-xlarge variant, which is billed even here.
+  test-macos:
+    name: Test (macOS 26, Apple Silicon)
+    needs: [lint, typecheck]
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # --extra mlx is the whole point of this job: without it mlx_tests/
+      # self-skips and the run adds nothing the Linux job did not already do.
+      - run: uv sync --extra mlx
+      - name: Assert MLX is importable
+        # A silent skip here would make this job green while testing nothing,
+        # which is the failure mode it exists to prevent.
+        run: uv run python -c "import mlx.core; print('mlx', mlx.core.__version__)"
+      - name: Build native AMICA binary (for engine E2E tests)
+        # Same recipe as the macos-arm64 target in release-binaries.yml:
+        # gfortran from brew's gcc, LAPACK/BLAS from the Accelerate framework.
+        run: |
+          brew install gcc
+          LAPACK_LIBS="-framework Accelerate" bash native/build.sh
+          echo "PAMICA_NATIVE_BINARY=$PWD/native/amica15_shim" >> "$GITHUB_ENV"
+      # "not slow" matches the Linux job: the slow tests drive the bundled
+      # x86_64 amica15mac reference binary, which needs Rosetta on an arm64
+      # runner. Pointing them at the arm64 binary built above is the follow-up
+      # tracked in #246, not part of closing the MLX/Accelerate gap.
+      # --no-cov: the Linux job owns the coverage gate and the Codecov upload;
+      # a second partial run would report a different total for the same commit.
+      - name: pytest (excluding slow / Fortran-binary parity tests)
+        run: uv run pytest -m "not slow" -n auto --no-cov
+
   test-mne:
     name: Test MNE wrapper (optional [mne] extra)
     needs: [lint, typecheck]
