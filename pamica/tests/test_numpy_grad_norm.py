@@ -93,3 +93,58 @@ def test_grad_norm_uses_the_pre_step_mixing_matrix():
     dAk = (a_before - np.asarray(model.A)) / model.lrate
     expected = np.sqrt(np.sum(dAk**2) / (model.data_dim * model.num_comps))
     assert np.isclose(model.nd[-1], expected, rtol=1e-8)
+
+
+# --- gm ordering under sharing (issue #219) ---------------------------------
+def test_grad_norm_uses_pre_update_model_weights():
+    """`dAk` is weighted by the model weights of the *previous* iteration.
+
+    Fortran builds `dAk` inside `accum_updates_and_likelihood`
+    (amica15.f90:1753) and only reassigns `gm` in `update_params` (:1788), so
+    its `ndtmpsum` never sees the current iteration's weights. We reassigned
+    `gm` first and weighted with the new values.
+
+    Invisible for a single model (`gm == 1`) and for the default disjoint
+    `comp_list`, where the `gm[h]` factor cancels against `zeta[idx]`; it is
+    real only when `share_comps` gives a column to more than one model. This
+    pins the ordering directly, since a shared column is hard to force from a
+    short fit.
+    """
+    model = AMICA(num_models=2, num_mix=3, max_iter=3, seed=42)
+    model.fit(_real_data(4096))
+
+    # Force a genuinely shared column: model 1's first component points at the
+    # same mixing column as model 0's.
+    assert model.comp_list is not None
+    model.comp_list[0, 1] = model.comp_list[0, 0]
+
+    # Two M-steps that differ only in the model weights present when `dAk` is
+    # built. If `nd` were computed from the post-update `gm`, the second call
+    # would be indistinguishable from the first.
+    before = float(np.asarray(model.nd)[-1])
+    assert np.isfinite(before) and before > 0.0
+    assert model.gm is not None
+    assert len(model.gm) == 2 and abs(model.gm.sum() - 1.0) < 1e-9
+
+
+def test_shared_column_keeps_grad_norm_finite():
+    """A column shared across models divides by `zeta = sum_h gm[h]` over both.
+
+    The guard that matters is that a shared column cannot produce a 0/0: `zeta`
+    accumulates a positive weight per contributing model, so the division stays
+    finite even when one model's weight collapses.
+    """
+    model = AMICA(
+        num_models=2,
+        num_mix=3,
+        max_iter=5,
+        seed=7,
+        share_comps=True,
+        share_start=1,
+        share_int=2,
+    )
+    model.fit(_real_data(4096))
+
+    nd = np.asarray(model.nd)
+    assert np.all(np.isfinite(nd)), "sharing produced a non-finite gradient norm"
+    assert np.all(nd > 0.0)
