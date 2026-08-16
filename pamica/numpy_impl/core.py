@@ -240,6 +240,11 @@ class AMICA:
         self.converged = False
         self.stop_reason = None
         self.min_dll = params.get("min_dll", 1e-9)
+        # min_grad_norm is Fortran-faithful but not reachable on small
+        # recordings: the reference binary's own gradient norm plateaus two
+        # orders above it on the bundled sample, so min_dll is what ends a fit
+        # there. Kept rather than retuned; see the convergence-criteria section
+        # of docs/guides/validation.md (issue #218).
         self.min_grad_norm = params.get("min_grad_norm", 1e-7)
         self.use_min_dll = params.get("use_min_dll", True)
         self.use_grad_norm = params.get("use_grad_norm", True)
