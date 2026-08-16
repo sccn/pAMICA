@@ -1222,14 +1222,49 @@ class AMICA:
                     self.iter,
                 )
 
-        # Update mixture weights
-        self.alpha = updates["dalpha_n"] / np.sum(updates["dalpha_n"], axis=0)
+        # A component merged away by share_comps is no longer referenced by
+        # comp_list, so no sufficient statistic accumulates into its column and
+        # the divisions below are 0/0 = NaN. Update only used columns and freeze
+        # the rest at their last finite value (rho is excluded: its own 1e-8
+        # floor keeps it finite, so it drifts rather than freezing -- harmless,
+        # since no dead column is read downstream), as AMICATorchNG does (Fortran
+        # carries the NaN harmlessly behind its comp_used mask; keeping them
+        # finite means a fit cannot report success while holding NaN parameters,
+        # issue #240). All-True with the default comp_list, so the ordinary path
+        # is unchanged.
+        used = (
+            self.comp_used
+            if self.comp_used is not None
+            else np.ones(self.num_comps, dtype=bool)
+        )
+
+        # Update mixture weights. errstate because np.where evaluates both
+        # branches: an unused column's 0/0 is computed and discarded, and would
+        # otherwise warn on every iteration after a merge.
+        with np.errstate(invalid="ignore", divide="ignore"):
+            alpha_next = updates["dalpha_n"] / np.sum(updates["dalpha_n"], axis=0)
+        self.alpha = np.where(used, alpha_next, self.alpha)
+        # errstate above silences the 0/0 that np.where computes for a dead
+        # column and discards. That also silenced numpy's warning for a genuine
+        # 0/0 in a LIVE column (a component whose responsibility mass collapses
+        # to exactly zero), which used to be the only signal it happened. Check
+        # explicitly instead, mirroring the mu/beta canary below, so the origin
+        # is not lost to a later unattributable nan-LL stop.
+        if not np.all(np.isfinite(self.alpha)):
+            self.logger.warning(
+                "Non-finite alpha at iter %d (component responsibility mass "
+                "collapsed).",
+                self.iter,
+            )
 
         # Exact-EM mixture location/scale (Fortran :1978/:1993). These are
         # fixed-point updates -- mu += dmu_n/dmu_d, beta *= sqrt(dbeta_n/dbeta_d)
         # -- NOT first-order gradient steps, so they carry no lrate.
-        self.mu = self.mu + updates["dmu_n"] / updates["dmu_d"]
-        self.beta = self.beta * np.sqrt(updates["dbeta_n"] / updates["dbeta_d"])
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mu_next = self.mu + updates["dmu_n"] / updates["dmu_d"]
+            beta_next = self.beta * np.sqrt(updates["dbeta_n"] / updates["dbeta_d"])
+        self.mu = np.where(used, mu_next, self.mu)
+        self.beta = np.where(used, beta_next, self.beta)
         self.beta = np.clip(self.beta, self.invsigmin, self.invsigmax)
         # Fortran keeps a live "NaN in sbeta!" canary here (amica17.f90:1996-2000);
         # the exact-EM mu/beta divisions are unguarded (matching Fortran), so
@@ -1379,6 +1414,11 @@ class AMICA:
         # (LEFT-multiply by the TRANSPOSED direction). Right-multiply by the
         # untransposed dir is invisible at the fixed point but sends the fit
         # downhill -- issue #24 root cause.
+        # Per-model loop. For a disjoint comp_list this equals Fortran's single
+        # weighted DAXPY, but a column shared across models takes one step per
+        # contributing model instead of one averaged step -- issue #242, which
+        # ships separately because no test written for it so far distinguishes
+        # the two.
         for h in range(self.num_models):
             idx = self.comp_list[:, h]
             self.A[:, idx] = self.A[:, idx] - self.lrate * np.dot(

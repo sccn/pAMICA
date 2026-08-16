@@ -131,8 +131,6 @@ def identify_shared_components(A, W, comp_list, comp_thresh=0.99):
     num_comps = A.shape[1]
     data_dim = A.shape[0]
 
-    comp_used = np.ones(num_comps, dtype=bool)
-
     # Compare components between models
     for h1 in range(num_models):
         for h2 in range(h1 + 1, num_models):
@@ -160,8 +158,16 @@ def identify_shared_components(A, W, comp_list, comp_thresh=0.99):
 
                         if not shared:
                             # Merge components
-                            comp_used[k2] = False
                             comp_list[comp_list == k2] = k1
+
+    # Derive comp_used from the final comp_list rather than tracking it during
+    # the merge loop. A fresh np.ones() per call forgot every column merged away
+    # in an earlier call: once comp_list is fully merged the k1 == k2 guard skips
+    # every pair, and the mask came back all-True while half the columns were
+    # dead (issue #240). Matches AMICATorchNG.comp_used, which is a property
+    # derived the same way.
+    comp_used = np.zeros(num_comps, dtype=bool)
+    comp_used[np.unique(comp_list)] = True
 
     return comp_list, comp_used
 
