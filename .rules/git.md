@@ -44,8 +44,25 @@ Notes:
 - Add `[skip-bump]` to a commit message to suppress the dev bump for that push.
 - The bump workflows commit as `pamica-bot` and skip their own commits; do not
   reuse that identity by hand.
-- Pushing through branch protection needs the `AUTO_TAG_PAT` repository secret;
-  the default `GITHUB_TOKEN` cannot do it.
+- The automation needs an `AUTO_TAG_PAT` repository secret. The default
+  `GITHUB_TOKEN` cannot drive it: pushes and releases it makes do not trigger
+  other workflows, so the release chain would go quiet instead of publishing.
+
+### AUTO_TAG_PAT permissions
+Fine-grained PAT scoped to this repository:
+
+| Permission | Why |
+|---|---|
+| Contents: read and write | push bump commits and tags, create releases |
+| Workflows: read and write | `sync-dev` merges main into dev; when a release touched `.github/workflows/**` that merge carries workflow files, and GitHub rejects a PAT push that does so without this |
+
+Classic PAT equivalent: `repo` + `workflow`.
+
+The push authenticates as the PAT's owner whatever git identity the workflow
+sets, so a machine account keeps the bot attribution honest. Once `main` is
+protected, that account also has to be able to push through the protection.
+Fine-grained PATs expire; an expired one fails at the push rather than at the
+preflight, so the error is less obvious than a missing secret.
 
 ## Commit Practice
 - **Atomic commits** - One logical change per commit
