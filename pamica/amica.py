@@ -88,6 +88,9 @@ class AMICA:
         the mid-fit ``W``/``sphere``. Like ``ll_history_``, a ``keep_best``
         restore does not rewrite it -- use :meth:`mir` on the fitted model for
         the value of the *returned* parameters, not ``mir_history_[-1]``.
+        Not index-aligned with ``ll_history_``: entry ``i`` is computed after
+        iteration ``i``'s update, while ``ll_history_[i]`` is the likelihood of
+        the parameters before it, so the two are one update apart (issue #161).
 
     Examples
     --------
