@@ -1183,6 +1183,13 @@ class AMICA:
             and self.comp_list is not None
             and self.A is not None
         )
+        # Fortran builds dAk from the model weights of the *previous* iteration:
+        # gm is not reassigned until update_params (amica15.f90:1789+), which runs
+        # after accum_updates_and_likelihood (:1731-1743). Snapshot it here so the
+        # nd block below weights by the same gm Fortran would (issue #219).
+        assert self.gm is not None
+        gm_prev = self.gm.copy()
+
         # Update model weights, normalizing by the number of samples the E-step
         # actually summed over: the good set under do_reject, else all samples.
         if self.do_reject:
@@ -1338,20 +1345,22 @@ class AMICA:
         # applied update lrate*dAk, and does not divide by lrate either
         # (amica15.f90:1742-1743) -- there is no missing factor here.
         #
-        # Fortran ordering caveat: Fortran's gm is not reassigned until
-        # update_params (amica15.f90:1789+), which runs AFTER dAk is built, so its
-        # ndtmpsum uses the previous iteration's gm. self.gm is already updated by
-        # this point. That is invisible for num_models=1 (gm == 1) and for the
-        # default disjoint comp_list, where the gm[h] factor cancels exactly
-        # against zeta[idx], but the two differ under share_comps with a genuinely
-        # shared column. Diagnostic only, it does not affect the fitted
-        # parameters; tracked in issue #219.
+        # Weighted by gm_prev, the pre-update model weights, because Fortran builds
+        # dAk before update_params reassigns gm (issue #219). Invisible for
+        # num_models=1 (gm == 1) and for the default disjoint comp_list, where the
+        # gm[h] factor cancels against zeta[idx]; it bites only under share_comps
+        # with a genuinely shared column, where the two weightings differ.
+        #
+        # Diagnostic only *here*: this dAk feeds nd_value alone. The A-update below
+        # is a separate per-model loop that never reads dAk, so the ordering cannot
+        # move a fitted parameter in this backend. AMICATorchNG applies the same
+        # dAk to A, so there the identical fix does change fitted parameters.
         dAk = np.zeros_like(self.A)
         zeta = np.zeros(self.num_comps)
         for h in range(self.num_models):
             idx = self.comp_list[:, h]
-            dAk[:, idx] += self.gm[h] * np.dot(directions[h].T, self.A[:, idx])
-            zeta[idx] += self.gm[h]
+            dAk[:, idx] += gm_prev[h] * np.dot(directions[h].T, self.A[:, idx])
+            zeta[idx] += gm_prev[h]
         nonzero = zeta > 0
         dAk[:, nonzero] /= zeta[nonzero]
         # comp_used is None until fit() sets it up, and the M-step is exercised

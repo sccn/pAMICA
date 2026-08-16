@@ -1378,6 +1378,15 @@ class AMICATorchNG:
             and self.A is not None
             and self.comp_list is not None
         )
+        # Fortran builds dAk from the previous iteration's model weights: gm is
+        # not reassigned until update_params (amica15.f90:1789+), after
+        # accum_updates_and_likelihood (:1731-1743). Snapshot before overwriting so
+        # dAk -- which both drives the A-update below and reports ndtmpsum, unlike
+        # numpy_impl where it is only the diagnostic -- weights the way Fortran
+        # does (issue #219). Cloned rather than aliased: gm is only ever rebound
+        # today, but an in-place write elsewhere would silently corrupt this.
+        assert self.gm is not None
+        gm_prev = self.gm.clone()
         self.gm = acc["dgm"] / n_samples
 
         # Per-model data-space bias (Fortran's `update_c` flag, amica17.f90:1423-
@@ -1538,8 +1547,8 @@ class AMICATorchNG:
         zeta = torch.zeros(self.n_comps, dtype=self.dtype, device=self.device)
         for h in range(self.n_models):
             idx = self.comp_list[:, h]
-            dAk.index_add_(1, idx, self.gm[h] * (directions[h].T @ self.A[:, idx]))
-            zeta.index_add_(0, idx, self.gm[h].expand(idx.shape[0]))
+            dAk.index_add_(1, idx, gm_prev[h] * (directions[h].T @ self.A[:, idx]))
+            zeta.index_add_(0, idx, gm_prev[h].expand(idx.shape[0]))
         dAk = dAk / zeta.clamp_min(torch.finfo(self.dtype).tiny)
 
         # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1742-1743):
