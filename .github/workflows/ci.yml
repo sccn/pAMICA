@@ -128,6 +128,11 @@ jobs:
     name: Test (macOS 26, Apple Silicon)
     needs: [lint, typecheck]
     runs-on: macos-26
+    env:
+      # The only job on hardware where torch auto-selects MPS (torch_impl/
+      # utils.py picks it whenever no device is pinned and MPS is available),
+      # so it is the only job where the fallback actually does anything.
+      PYTORCH_ENABLE_MPS_FALLBACK: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -137,24 +142,40 @@ jobs:
       # --extra mlx is the whole point of this job: without it mlx_tests/
       # self-skips and the run adds nothing the Linux job did not already do.
       - run: uv sync --extra mlx
-      - name: Assert MLX is importable
-        # A silent skip here would make this job green while testing nothing,
-        # which is the failure mode it exists to prevent.
-        run: uv run python -c "import mlx.core; print('mlx', mlx.core.__version__)"
+      - name: Assert MLX sees an Apple GPU
+        # mlx_tests/ is gated on BOTH an mlx import and
+        # mx.default_device().type == gpu (test_mlx_backend.py:28-33). A hosted
+        # runner that imported mlx but fell back to CPU would skip all 11 tests
+        # and still report success -- green while testing nothing, the exact
+        # failure this job exists to prevent. Assert the device, not just the
+        # import, so that regression fails here instead of passing silently.
+        run: |
+          uv run python -c "
+          import mlx.core as mx
+          dev = mx.default_device()
+          print('mlx', mx.__version__, 'device', dev)
+          assert dev.type == mx.DeviceType.gpu, f'no Apple GPU: {dev}'
+          "
       - name: Build native AMICA binary (for engine E2E tests)
         # Same recipe as the macos-arm64 target in release-binaries.yml:
-        # gfortran from brew's gcc, LAPACK/BLAS from the Accelerate framework.
+        # gfortran from brew's gcc, LAPACK/BLAS from Accelerate, and the static
+        # libquadmath the release build uses.
         run: |
           brew install gcc
-          LAPACK_LIBS="-framework Accelerate" bash native/build.sh
+          LAPACK_LIBS="-framework Accelerate" EXTRA_LDFLAGS="-static-libquadmath" \
+            bash native/build.sh
           echo "PAMICA_NATIVE_BINARY=$PWD/native/amica15_shim" >> "$GITHUB_ENV"
-      # "not slow" matches the Linux job: the slow tests drive the bundled
-      # x86_64 amica15mac reference binary, which needs Rosetta on an arm64
-      # runner. Pointing them at the arm64 binary built above is the follow-up
-      # tracked in #246, not part of closing the MLX/Accelerate gap.
+      # "not slow" matches the Linux job, but NOT for the Linux job's reason.
+      # There it is because the slow tests need the macOS-only reference binary;
+      # here they are excluded purely for wall-clock (2000-iteration fits).
+      # Note the two that do shell out (test_ng_backend.py:1096,:1179) would
+      # work on this runner: they pass binary_path=None, which resolves via
+      # PAMICA_NATIVE_BINARY (native/resolver.py:112) -- set above -- so they
+      # would use the arm64 binary this job just built, never Rosetta. Enabling
+      # them would give CI its first Fortran parity coverage; tracked in #246.
       # --no-cov: the Linux job owns the coverage gate and the Codecov upload;
       # a second partial run would report a different total for the same commit.
-      - name: pytest (excluding slow / Fortran-binary parity tests)
+      - name: pytest (excluding slow tests)
         run: uv run pytest -m "not slow" -n auto --no-cov
 
   test-mne:
