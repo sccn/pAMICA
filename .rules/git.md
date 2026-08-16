@@ -14,11 +14,38 @@
   - `chore:` Maintenance tasks
 
 ## Branch Strategy
+- **`main` is the stable branch and is protected.** Nothing lands on it except a
+  release merge from `dev`. Everything on `main` is released.
+- **`dev` is the integration branch.** Feature and fix branches are cut from
+  `dev` and merged back into `dev`.
 - **Feature branches:** `feature/issue-N-short-description`
 - **Bugfix branches:** `fix/issue-N-description`
 - **Use `gh issue develop`** to create branches from issues
 - **No spaces** in branch names, use hyphens
 - **Delete after merge**
+
+## Versioning (automated)
+Versions are managed by CI; do not hand-edit `pyproject.toml` to bump.
+
+| Event | Version effect | Workflow |
+|---|---|---|
+| PR merged into `dev` | `X.Y.Z.devN` -> `X.Y.Z.dev(N+1)` | `auto-bump-dev.yml` |
+| `dev` merged into `main` | `.devN` stripped -> `X.Y.Z`, tagged `vX.Y.Z`, release published | `auto-tag.yml` |
+| Release published to PyPI | `main` merged back to `dev`, bumped to `X.Y.(Z+1).dev0` | `sync-dev.yml` |
+
+So a release is: merge `dev` into `main`. Everything after that is automatic —
+the tag, the GitHub release, the PyPI upload (`publish.yml`), the native binaries
+(`release-binaries.yml`), and returning `dev` to a fresh `.dev0`.
+
+`.devN` is PEP 440, so `pip install pamica==0.3.3.dev4` resolves and a dev build
+is always identifiable at runtime via `pamica.__version__`.
+
+Notes:
+- Add `[skip-bump]` to a commit message to suppress the dev bump for that push.
+- The bump workflows commit as `pamica-bot` and skip their own commits; do not
+  reuse that identity by hand.
+- Pushing through branch protection needs the `AUTO_TAG_PAT` repository secret;
+  the default `GITHUB_TOKEN` cannot do it.
 
 ## Commit Practice
 - **Atomic commits** - One logical change per commit
