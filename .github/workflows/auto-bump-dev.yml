@@ -74,6 +74,8 @@ jobs:
           uv run python scripts/sync_version.py sync "${{ steps.compute.outputs.next }}"
           uv lock
           git add pyproject.toml CITATION.cff .zenodo.json uv.lock
-          git commit -m "Bump version to ${{ steps.compute.outputs.next }}"
+          # Tolerate a no-op: re-running after a partial bump leaves nothing
+          # staged, and failing there would be noise, not a signal.
+          git diff --cached --quiet || git commit -m "Bump version to ${{ steps.compute.outputs.next }}"
           # A concurrent push wins; this workflow re-fires from the new HEAD.
           git push origin dev || echo "::warning::push to dev rejected (concurrent push); skipping"

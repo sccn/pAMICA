@@ -72,5 +72,8 @@ jobs:
           uv run python scripts/sync_version.py sync "${{ steps.tag.outputs.next }}"
           uv lock
           git add pyproject.toml CITATION.cff .zenodo.json uv.lock
-          git commit -m "Bump version to ${{ steps.tag.outputs.next }}"
+          # dev may already sit at the target version (a same-day re-run, or a
+          # dev branch created ahead of the release); the merge above is still
+          # worth pushing, so a no-op bump must not fail the job.
+          git diff --cached --quiet || git commit -m "Bump version to ${{ steps.tag.outputs.next }}"
           git push origin dev
