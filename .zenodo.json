@@ -1,7 +1,7 @@
 {
   "title": "pAMICA: a Python implementation of Adaptive Mixture ICA",
   "description": "pamica is a Python (PyTorch) implementation of Adaptive Mixture Independent Component Analysis (AMICA) that reproduces the reference Fortran implementation within numerical tolerance, with CPU, NVIDIA GPU (CUDA), and Apple GPU (MLX) support. It targets EEG/EMG blind source separation and provides a scikit-learn-style interface and byte-identical EEGLAB (loadmodout15) output.",
-  "version": "0.3.3.dev2",
+  "version": "0.3.3.dev3",
   "publication_date": "2026-08-16",
   "upload_type": "software",
   "access_right": "open",
