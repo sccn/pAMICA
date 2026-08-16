@@ -121,7 +121,7 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | Precision | f64/f32 | f64 | f32 only | f64 |
 | Rank detection | yes | yes | yes | yes (absolute floor) |
 | `min_dll` stop | yes | yes | **no** | yes |
-| `min_nd` stop / gradient norm | yes | yes | **no** | yes |
+| `min_nd` stop / gradient norm | yes | yes (as `min_grad_norm`) | **no** | yes |
 | `keep_best` best-iterate restore | yes | no | no | n/a |
 | MIR diagnostic | yes | no | no | n/a |
 | Persistence | `state_dict` | EEGLAB `amicaout` | none | EEGLAB `amicaout` |
@@ -134,21 +134,25 @@ constructor, so passing it raises `TypeError`.
 around.** `pamica/mlx_impl/core.py` implements neither stop — it has no
 `min_dll`/`use_min_dll`/`maxincs` and no `min_nd`/`use_grad_norm`/`ndtmpsum`, so
 its only outcomes are `max_iter`, `lrate_floor`, and the degenerate reasons
-(`nan_ll`, `singular_ll`, `nan_params`). **An MLX fit therefore always runs the
-full iteration budget**, while the other backends stop on likelihood stagnation
-(`min_dll`, on by default at `1e-9`) — measured at iteration 326-1076 on the
-bundled sample, depending on the BLAS build.
+(`nan_ll`, `singular_ll`, `nan_params`).
+
+The distinction is not that an MLX fit runs to `max_iter` — a PyTorch fit does
+too at its own `max_iter=100` default, because `min_dll` needs several hundred
+iterations to trigger on a recording this size. The distinction is what raising
+`max_iter` buys you. On the other backends, a larger budget lets the likelihood
+stop end the fit when it stops improving. **On MLX a larger budget is simply
+spent**, however long the fit has stopped making progress.
 
 Nothing warns you about this, because there is no parameter to reject. Two
 consequences:
 
 - Moving a working configuration from the PyTorch backend to MLX for the
-  Apple-GPU speedup does more work than the same `max_iter` implies. Choose
-  `max_iter` for MLX from where the other backends actually converge on your
-  data, not from their default budget.
-- MLX cannot be evaluated on gradient-norm behaviour at all. Where this
-  documentation says `min_nd` is unreachable "in all three implementations"
-  (see the convergence section of [validation](validation.md)), that means
-  Fortran, PyTorch and NumPy; MLX never computes the quantity.
+  Apple-GPU speedup does more work than the same `max_iter` implies. Size
+  `max_iter` for MLX from where the other backends actually stop improving on
+  your data.
+- MLX cannot be evaluated on gradient-norm behaviour at all, because it never
+  computes the quantity. Any statement elsewhere in these guides about whether
+  the `min_nd` threshold is reachable covers Fortran, PyTorch and NumPy only.
+  (`numpy_impl` spells that same threshold `min_grad_norm`.)
 
 Tracked in issue #248.
