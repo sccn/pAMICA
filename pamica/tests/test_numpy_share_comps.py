@@ -52,6 +52,19 @@ def _shared_fit(max_iter: int = 5, share_comps: bool = True):
 
 
 # --- comp_used staleness (#240) ---------------------------------------------
+def _force_collinear_pair(model):
+    """Make model 1's first column a copy of model 0's, so a merge must fire.
+
+    Deterministic on purpose. Keying the test on whether a merge happened to
+    occur would make it skip under the very bug it guards: the stale mask is
+    all-True, which reads as "no merge fired".
+    """
+    k0 = int(model.comp_list[0, 0])
+    k1 = int(model.comp_list[0, 1])
+    model.A[:, k1] = model.A[:, k0]
+    return k0, k1
+
+
 def test_comp_used_survives_a_second_identify_call():
     """The mask must not forget columns merged away by an earlier call.
 
@@ -59,13 +72,13 @@ def test_comp_used_survives_a_second_identify_call():
     ``comp_list``, so every pair hits the ``k1 == k2`` guard and no merge fires.
     A mask built during that loop comes back all-True.
     """
-    model = _shared_fit(max_iter=3)
-    first = identify_shared_components(
+    model = _shared_fit(max_iter=3, share_comps=False)
+    _force_collinear_pair(model)
+
+    comp_list_after, used_first = identify_shared_components(
         model.A, model.W, model.comp_list.copy(), model.comp_thresh
     )
-    comp_list_after, used_first = first
-    if used_first.all():
-        pytest.skip("no merge fired on this data; nothing to forget")
+    assert not used_first.all(), "setup failed: the forced collinear pair did not merge"
 
     _, used_second = identify_shared_components(
         model.A, model.W, comp_list_after.copy(), model.comp_thresh
@@ -97,13 +110,24 @@ def test_sharing_leaves_finite_mixture_parameters():
 
 
 def test_unused_columns_keep_their_last_finite_value():
-    """Frozen, not zeroed: an unused column keeps the value it last held."""
-    model = _shared_fit()
+    """Frozen, not zeroed: an unused column keeps the value it last held.
+
+    The merge is forced rather than hoped for, so a stale all-True mask fails
+    here instead of skipping.
+    """
+    model = _shared_fit(max_iter=3, share_comps=False)
+    _force_collinear_pair(model)
+    model.comp_list, model.comp_used = identify_shared_components(
+        model.A, model.W, model.comp_list, model.comp_thresh
+    )
     unused = ~model.comp_used
-    if not unused.any():
-        pytest.skip("no column was merged away on this data")
+    assert unused.any(), "setup failed: no column was merged away"
+
+    updates = model._get_updates_and_likelihood()
+    model._update_parameters(updates)
     assert np.all(np.isfinite(model.mu[:, unused]))
     assert np.all(model.beta[:, unused] > 0.0)
+    assert np.all(np.isfinite(model.alpha[:, unused]))
 
 
 def test_default_comp_list_is_unaffected():

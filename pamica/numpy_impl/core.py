@@ -1225,7 +1225,9 @@ class AMICA:
         # A component merged away by share_comps is no longer referenced by
         # comp_list, so no sufficient statistic accumulates into its column and
         # the divisions below are 0/0 = NaN. Update only used columns and freeze
-        # the rest at their last finite value, as AMICATorchNG does (Fortran
+        # the rest at their last finite value (rho is excluded: its own 1e-8
+        # floor keeps it finite, so it drifts rather than freezing -- harmless,
+        # since no dead column is read downstream), as AMICATorchNG does (Fortran
         # carries the NaN harmlessly behind its comp_used mask; keeping them
         # finite means a fit cannot report success while holding NaN parameters,
         # issue #240). All-True with the default comp_list, so the ordinary path
@@ -1242,6 +1244,18 @@ class AMICA:
         with np.errstate(invalid="ignore", divide="ignore"):
             alpha_next = updates["dalpha_n"] / np.sum(updates["dalpha_n"], axis=0)
         self.alpha = np.where(used, alpha_next, self.alpha)
+        # errstate above silences the 0/0 that np.where computes for a dead
+        # column and discards. That also silenced numpy's warning for a genuine
+        # 0/0 in a LIVE column (a component whose responsibility mass collapses
+        # to exactly zero), which used to be the only signal it happened. Check
+        # explicitly instead, mirroring the mu/beta canary below, so the origin
+        # is not lost to a later unattributable nan-LL stop.
+        if not np.all(np.isfinite(self.alpha)):
+            self.logger.warning(
+                "Non-finite alpha at iter %d (component responsibility mass "
+                "collapsed).",
+                self.iter,
+            )
 
         # Exact-EM mixture location/scale (Fortran :1978/:1993). These are
         # fixed-point updates -- mu += dmu_n/dmu_d, beta *= sqrt(dbeta_n/dbeta_d)
