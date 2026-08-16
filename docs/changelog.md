@@ -5,6 +5,54 @@ Release notes are also published on the
 
 ## Unreleased
 
+## 0.3.2
+
+Rank-deficient input support across every backend, a much faster default block
+size, and a reproducible Fortran reference for parity runs.
+
+- **Rank-deficient data now works** (issue #223, reported from Maxwell-filtered
+  MEG in #221). The numerical rank of the data covariance is detected and the
+  model is sized to it, porting the reference's `mineig`/`numeigs`/`Spinv`
+  machinery, which pamica had not implemented: previously such a fit died with
+  `nan_ll` on the first iteration. New `get_sensor_mixing_matrix()` returns
+  sensor-space scalp maps when the sphere is no longer square. The rank policy
+  is shared by the PyTorch, NumPy and MLX backends so they cannot disagree.
+- **Rank detection defaults to a relative eigenvalue floor** (`mineig_rel=1e-12`)
+  rather than the reference's absolute `mineig=1e-15`, which is unit-dependent:
+  MEG in Tesla yields rank zero under it, and average-referenced EEG is detected
+  only by luck. Pass `mineig_rel=None` for the reference's exact behavior. Well
+  conditioned data is unaffected and stays bit-identical. See ADR 0004 and
+  `docs/guides/amica-differences.md`, which now lists every deliberate difference
+  from the reference in one table.
+- **The MNE wrapper scales by channel type** before fitting, following MNE's own
+  ICA convention (issue #225). Required for mixed magnetometer/gradiometer data,
+  whose units differ by orders of magnitude; it decides which directions survive
+  rank reduction. A single channel type is unaffected. `AMICAICA` also exports
+  rank-reduced fits, and no longer rejects `pcakeep`/`pcadb`.
+- **`block_size` default raised from 512 to 8192** (issue #216), ~6x faster per
+  iteration on CPU float64 for the bundled sample. Every backend was
+  dispatch-bound at the old value. Runs compared bit-for-bit against the binary
+  must set the same value on both sides.
+- **EEGLAB output of a rank-reduced fit is readable** (issue #164): the sphere is
+  padded to the `nx*nx` record the reference writes, and read back column-major.
+- **Parity runs are now controlled experiments** (issue #228). The harness
+  forwards every setting the binary understands instead of six hardcoded keys,
+  seeds the reference run and pins it to one thread, and defaults to the
+  seedable native engine rather than the unseedable bundled fixture. Two
+  reference runs are now bit-identical where before they differed by up to 0.59.
+- `benchmarks/reproduce_table1.py` reproduces the paper's parity table from the
+  bundled sample, and the validation guide states what each row costs to verify
+  (issue #144).
+- **Both Fortran convergence criteria were dead in `numpy_impl` and now work**
+  (issue #212). `AMICA_NumPy` stored the raw log-likelihood sum instead of
+  Fortran's per-sample-per-channel normalization, reporting `-3317862.78` where
+  the reference reports `-3.3`; `min_dll` defaults to `1e-9`, so `use_min_dll`
+  could never fire from genuine convergence. Separately, `nd` was built from the
+  raw block sum rather than the `gm`-weighted mapped directions, reporting
+  ~5.4e3 against Fortran's ~5.7e-2 and staying flat across iterations, so
+  `use_grad_norm`/`min_nd` was equally unreachable. Both now match the reference
+  formulas, and `AMICA_NumPy.ll_history` is on the same scale as the other
+  backends.
 - Added the three missing Fortran convergence stops to `AMICATorchNG`
   (issue #207): `use_min_dll`/`min_dll`/`maxincs` (small-likelihood-increase
   stop), `use_grad_norm`/`min_nd` (weight-gradient-norm stop), and the
