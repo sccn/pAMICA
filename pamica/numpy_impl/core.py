@@ -1350,6 +1350,11 @@ class AMICA:
         # num_models=1 (gm == 1) and for the default disjoint comp_list, where the
         # gm[h] factor cancels against zeta[idx]; it bites only under share_comps
         # with a genuinely shared column, where the two weightings differ.
+        #
+        # Diagnostic only *here*: this dAk feeds nd_value alone. The A-update below
+        # is a separate per-model loop that never reads dAk, so the ordering cannot
+        # move a fitted parameter in this backend. AMICATorchNG applies the same
+        # dAk to A, so there the identical fix does change fitted parameters.
         dAk = np.zeros_like(self.A)
         zeta = np.zeros(self.num_comps)
         for h in range(self.num_models):

@@ -1381,9 +1381,12 @@ class AMICATorchNG:
         # Fortran builds dAk from the previous iteration's model weights: gm is
         # not reassigned until update_params (amica15.f90:1789+), after
         # accum_updates_and_likelihood (:1731-1743). Snapshot before overwriting so
-        # the ndtmpsum block below weights the way Fortran does (issue #219).
+        # dAk -- which both drives the A-update below and reports ndtmpsum, unlike
+        # numpy_impl where it is only the diagnostic -- weights the way Fortran
+        # does (issue #219). Cloned rather than aliased: gm is only ever rebound
+        # today, but an in-place write elsewhere would silently corrupt this.
         assert self.gm is not None
-        gm_prev = self.gm
+        gm_prev = self.gm.clone()
         self.gm = acc["dgm"] / n_samples
 
         # Per-model data-space bias (Fortran's `update_c` flag, amica17.f90:1423-
