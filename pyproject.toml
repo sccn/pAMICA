@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pamica"
-version = "0.3.3.dev5"
+version = "0.3.3.dev6"
 description = "pAMICA: Python implementation of the Adaptive Mixture ICA algorithm"
 readme = "README.md"
 authors = [
