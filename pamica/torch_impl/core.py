@@ -383,6 +383,13 @@ class AMICATorchNG:
         regardless of ``use_grad_norm``/``use_min_dll`` (both stops read the
         same per-iteration value; Fortran computes ``ndtmpsum`` unconditionally
         too, in ``accum_updates_and_likelihood``, before either check runs).
+
+        Not reachable on small recordings, in any implementation: the reference
+        binary's own gradient norm plateaus at 1.0-1.65e-5 on the bundled
+        32-channel sample, two orders above this threshold, so the stop never
+        fires there and ``min_dll`` is what ends the fit. The default is kept
+        Fortran-faithful rather than retuned; see the convergence-criteria
+        section of ``docs/guides/validation.md`` (issue #218).
     newt_ramp : int, default=10
         Denominator of the per-iteration learning-rate ramp toward the current
         ceiling: ``lrate = min(ceiling, lrate + min(1/newt_ramp, lrate))``
