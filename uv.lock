@@ -1191,7 +1191,7 @@ wheels = [
 
 [[package]]
 name = "pamica"
-version = "0.3.3.dev6"
+version = "0.3.3.dev7"
 source = { editable = "." }
 dependencies = [
     { name = "json5" },
