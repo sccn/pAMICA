@@ -29,6 +29,7 @@ import torch
 # base type-check/CI env has no mne, hence the scoped ignore (issue #139).
 import mne  # ty: ignore[unresolved-import]
 from mne.preprocessing import ICA as _MNEICA  # ty: ignore[unresolved-import]
+from mne.annotations import _annotations_starts_stops
 
 from ..amica import AMICA
 from ..torch_impl import PDFTYPE_NAMES
@@ -164,6 +165,8 @@ class AMICAICA:
         self.ch_names_: Optional[list] = None
         self.n_components_: Optional[int] = None
         self.pre_whitener_: Optional[np.ndarray] = None
+        self.reject_by_annotation_: bool = False
+        self.good_sample_mask_: Optional[np.ndarray] = None
         self.converged_: bool = False
         self.stop_reason_: Optional[str] = None
         self._n_samples: Optional[int] = None
@@ -180,6 +183,7 @@ class AMICAICA:
         picks=None,
         start: Optional[int] = None,
         stop: Optional[int] = None,
+        reject_by_annotation: bool = True,
         **fit_kwargs,
     ) -> "AMICAICA":
         """Fit AMICA to the data of an MNE ``Raw`` or ``Epochs``.
@@ -196,6 +200,10 @@ class AMICAICA:
         start, stop : int | None
             Sample range for ``Raw`` input, passed to ``get_data``; ``None`` uses
             the full recording. Not supported for ``Epochs`` (raises).
+        reject_by_annotation : bool, default=True
+            If ``True``, omit time segments whose annotation description starts
+            with ``"bad"`` when fitting from :class:`~mne.io.Raw`. This matches
+            MNE's ``ICA.fit`` behavior. Has no effect for :class:`~mne.BaseEpochs`.    
         **fit_kwargs
             Forwarded to :meth:`AMICA.fit` (e.g. ``max_iter``, ``lrate``,
             ``do_newton``) and the backend constructor (e.g. ``block_size``).
@@ -237,11 +245,37 @@ class AMICAICA:
                 range_kw["start"] = start
             if stop is not None:
                 range_kw["stop"] = stop
-            X = picked.get_data(**range_kw)
+            fit_start = 0 if start is None else start # used in good_sample_mask
+            fit_stop = inst.n_times if stop is None else stop # used in good_sample_mask
+            # Match MNE ICA: omit samples covered by annotations whose
+            # description starts with "bad" before whitening and fitting.
+            if reject_by_annotation:
+                X = picked.get_data(reject_by_annotation="omit",**range_kw,)
+                        # ----------------------------------------------------
+                        # Build a mask on the original Raw sample axis.
+                        #
+                        # True  -> sample is used for AMICA fitting
+                        # False -> sample is rejected by a "bad" annotation
+                        #
+                        # This uses MNE's own annotation-to-sample conversion
+                        # and therefore does not confuse real NaN values in the
+                        # input data with rejected samples.
+                        # ----------------------------------------------------
+                annotation_onsets, annotation_ends = (_annotations_starts_stops(inst,"bad",))
+                good_sample_mask = np.ones(inst.n_times,dtype=bool,)
+                for annotation_start, annotation_stop in zip(annotation_onsets,annotation_ends,):
+                    annotation_start = max(annotation_start,fit_start,)
+                    annotation_stop = min(annotation_stop,fit_stop,)
+                    if annotation_start < annotation_stop:
+                        good_sample_mask[annotation_start:annotation_stop] = False
+            else:
+                X = picked.get_data(reject_by_annotation=None,**range_kw,)
+                # No samples are rejected.
+                good_sample_mask = np.ones(inst.n_times,dtype=bool,)
             fit_kind = "raw"
         else:
             # Concatenate epochs along time, as MNE's ICA does for fitting.
-            X = np.hstack(picked.get_data())
+            X = np.hstack(picked.get_data(reject_by_annotation=None,))
             fit_kind = "epochs"
 
         X = np.ascontiguousarray(X, dtype=np.float64)
@@ -281,6 +315,12 @@ class AMICAICA:
         self.info_ = picked.info
         self.ch_names_ = ch_names
         self.pre_whitener_ = pre_whitener
+        if is_raw:
+            self.good_sample_mask_ = good_sample_mask
+            self.reject_by_annotation_ = reject_by_annotation
+        else:
+            self.good_sample_mask_ = None
+            self.reject_by_annotation_ = False
         # The fitted model dimension, which is the input channel count unless
         # rank reduction shrank it (issue #223). MNE represents this natively:
         # pca_components_ is (n_components, n_channels).
@@ -601,9 +641,20 @@ class AMICAICA:
             )
         picked = inst.copy().pick(self.ch_names_)
         if isinstance(inst, mne.io.BaseRaw):
-            X = picked.get_data()
+            # Always start from the complete Raw data.
+            X = picked.get_data(reject_by_annotation=None)
+            # Reproduce the exact sample selection used during fitting.
+            if self.reject_by_annotation_:
+                if self.good_sample_mask_ is None:
+                    raise RuntimeError(
+                        "AMICAICA: good_sample_mask_ is not available. ")
+                if len(self.good_sample_mask_) != picked.n_times:
+                    raise ValueError(
+                        "AMICAICA: good_sample_mask_ does not match the "
+                        "number of samples in the provided Raw instance.")
+                X = X[:, self.good_sample_mask_]
         else:
-            X = np.hstack(picked.get_data())
+            X = np.hstack(picked.get_data(reject_by_annotation=None))
         X = np.ascontiguousarray(X, dtype=np.float64)
         if self.pre_whitener_ is not None:
             X = X / self.pre_whitener_
