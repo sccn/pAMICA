@@ -471,7 +471,10 @@ class AMICATorchNG:
         that window never consumes the whole cycle.
     comp_thresh : float, default=0.99
         Cosine-similarity cutoff (in the de-sphered/sensor-space metric) above
-        which two mixing columns are identified and merged.
+        which two mixing columns are identified and merged. The de-sphering uses
+        ``pinv(sphere)``, so sharing also works on rank-reduced and
+        rank-deficient fits (issues #253, #221); see
+        :meth:`_identify_shared_comps`.
     do_mean, do_sphere, do_approx_sphere : bool
         Preprocessing options, matching ``pamica.AMICA._preprocess_data``.
     pcakeep, pcadb : int, float, optional
@@ -691,8 +694,9 @@ class AMICATorchNG:
         self.share_start = share_start
         self.share_iter = share_iter
         self.comp_thresh = comp_thresh
-        self._spinv = None  # cached de-sphering metric, built on first share
-        self._sphere_pinv = None  # cached sphere pseudo-inverse (issue #223)
+        # Cached sphere pseudo-inverse (issues #223, #253): the sensor-space
+        # back-map, shared by get_sensor_mixing_matrix and the sharing metric.
+        self._sphere_pinv = None
         if share_comps:
             if share_start < 1:
                 raise ValueError(f"share_start must be >= 1, got {share_start}")
@@ -702,15 +706,6 @@ class AMICATorchNG:
                 raise ValueError(f"share_iter must be > 6, got {share_iter}")
             if not 0.0 < comp_thresh <= 1.0:
                 raise ValueError(f"comp_thresh must be in (0, 1], got {comp_thresh}")
-            if pcakeep is not None or pcadb is not None:
-                # PCA reduction makes the sphere rank-deficient, so the
-                # de-sphering metric used for the merge decision is not
-                # invertible. Reject up front rather than crash mid-fit.
-                raise ValueError(
-                    "share_comps is incompatible with PCA reduction "
-                    "(pcakeep/pcadb): the de-sphering similarity metric requires "
-                    "a full-rank sphere."
-                )
 
         self.do_mean = do_mean
         self.do_sphere = do_sphere
@@ -1658,12 +1653,33 @@ class AMICATorchNG:
 
             t0 = |a . b| / (||a|| ||b||),   a = Spinv A[:,ci], b = Spinv A[:,cj]
 
-        where ``Spinv = sphere^-1`` de-spheres the columns back to sensor space
-        (so the similarity compares scalp maps). On a match, ``cj`` is folded
-        into ``ci``: every ``comp_list`` entry equal to ``cj`` is reassigned to
-        ``ci``, so the two now share one mixing column and one density (the
-        M-step already accumulates every sufficient statistic through
-        ``comp_list`` via index_add, so shared components sum automatically).
+        where ``Spinv = pinv(sphere)`` de-spheres the columns back to
+        input-channel (sensor) space, so the similarity compares scalp maps.
+
+        The pseudo-inverse -- not a true inverse -- is the faithful back-map:
+        the reference carries exactly this, ``Spinv(nx, numeigs)``, whenever
+        rank/PCA reduction is active (amica15.f90:550-560). Invertibility was
+        never a mathematical requirement of the merge metric, only of the way it
+        used to be computed (issue #253). Two consequences:
+
+        * Full rank, square sphere: ``pinv == inv`` to ~1e-15, orders of
+          magnitude below any ``comp_thresh`` (~0.99) decision boundary, so
+          merge decisions on well-conditioned data are unchanged.
+        * Rank-reduced sphere ``(n_kept, n_channels)`` (issue #223), or a square
+          sphere fitted on rank-deficient data (Maxwell-filtered MEG,
+          average-referenced EEG): ``pinv`` maps each column into the retained
+          sensor subspace instead of failing. For the reduced PCA sphere
+          ``S = D^-1/2 V_r^T`` this is ``pinv(S) = V_r D^1/2``, i.e. a
+          de-whitening followed by the orthonormal ``U_r = V_r`` embedding
+          proposed in issue #221; the embedding leaves the cosine untouched, so
+          this is the same comparison the full-rank path makes, evaluated in the
+          subspace the data actually occupy.
+
+        On a match, ``cj`` is folded into ``ci``: every ``comp_list`` entry equal
+        to ``cj`` is reassigned to ``ci``, so the two now share one mixing column
+        and one density (the M-step already accumulates every sufficient
+        statistic through ``comp_list`` via index_add, so shared components sum
+        automatically).
 
         Greedy and order-dependent, matching the reference's quadruple loop.
         Skips a pair already merged, or one whose two columns coexist in some
@@ -1681,31 +1697,12 @@ class AMICATorchNG:
         if self.n_models < 2:
             return
         assert self.A is not None and self.comp_list is not None
-        if self._spinv is None:
-            # The de-sphering metric needs a full-rank, invertible sphere.
-            # Average-referenced EEG (covariance rank n_channels-1) or naturally
-            # rank-deficient data makes the sphere singular; surface it loudly
-            # rather than merging on garbage (the degenerate-fit philosophy,
-            # amica.py). (pcakeep/pcadb reduction is already rejected in __init__.)
-            assert self.sphere is not None
-            try:
-                spinv = torch.linalg.inv(self.sphere)
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    "Component sharing needs an invertible sphere, but it is "
-                    "singular (common with average-referenced or rank-deficient "
-                    "data). Disable share_comps or use full-rank data."
-                ) from exc
-            if not torch.isfinite(spinv).all():
-                raise RuntimeError(
-                    "Component sharing produced a non-finite de-sphering matrix "
-                    "(the sphere is singular/ill-conditioned). Disable share_comps "
-                    "or use full-rank data."
-                )
-            self._spinv = spinv
+        # _pinv_sphere raises on a non-finite sphere, so the metric below can
+        # only be garbage if A itself is (guarded per-pair in the scan).
+        spinv = self._pinv_sphere()
         # De-sphered mixing columns in sensor space, on CPU for the small greedy
         # scan (n_models^2 * n_channels^2 pairs; avoids per-element GPU syncs).
-        atil = (self._spinv @ self.A).detach().cpu().numpy()
+        atil = (spinv @ self.A).detach().cpu().numpy()
         norms = np.linalg.norm(atil, axis=0)
         cl = self.comp_list.detach().cpu().numpy().copy()  # (nw, n_models)
         nw, m = cl.shape
@@ -1742,6 +1739,32 @@ class AMICATorchNG:
                 merged,
                 int(np.unique(cl).size),
             )
+
+    def _pinv_sphere(self) -> torch.Tensor:
+        """Cached ``pinv(sphere)``: the back-map from sphered to input-channel space.
+
+        This is the Fortran ``Spinv`` (amica15.f90:550-560), which the reference
+        also builds as a pseudo-inverse, ``Spinv(nx, numeigs)``, under rank/PCA
+        reduction. A pseudo-inverse rather than an inverse because reduction
+        leaves the sphere non-square (issue #223) and a square sphere fitted on
+        rank-deficient data is singular; for a full-rank square sphere the two
+        agree to ~1e-15. Built on first use and invalidated per fit in
+        :meth:`_preprocess` (and on :meth:`_load_params`), so it can never
+        describe a sphere other than the current one.
+        """
+        assert self.sphere is not None
+        if self._sphere_pinv is None:
+            if not torch.isfinite(self.sphere).all():
+                # Only a degenerate fit (non-finite input data) gets here. Say
+                # so, rather than letting LAPACK report a confusing
+                # "ill-conditioned / repeated singular values" SVD failure.
+                raise RuntimeError(
+                    "The sphere holds non-finite values, so it has no "
+                    "pseudo-inverse: the fit is degenerate. Check the input "
+                    "data for NaN/inf."
+                )
+            self._sphere_pinv = torch.linalg.pinv(self.sphere)
+        return self._sphere_pinv
 
     @property
     def comp_used(self) -> torch.Tensor:
@@ -1903,7 +1926,6 @@ class AMICATorchNG:
         self.mir_history_ = []
         self.numrej = 0
         self.n_newton_fallbacks = 0
-        self._spinv = None  # rebuild the de-sphering metric for this fit's sphere
         self.stop_reason = "max_iter"
         self.good_idx = (
             torch.arange(n_total, device=self.device) if self.do_reject else None
@@ -2384,10 +2406,8 @@ class AMICATorchNG:
                 "model; call fit() first."
             )
         self._check_model_idx(model_idx)
-        if self._sphere_pinv is None:
-            self._sphere_pinv = torch.linalg.pinv(self.sphere)
         A = self.A[:, self.comp_list[:, model_idx]].T
-        return (self._sphere_pinv @ A).cpu().numpy()
+        return (self._pinv_sphere() @ A).cpu().numpy()
 
     def get_unmixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """True unmixing matrix ``W_fort`` = (stored W)^T (issue #24 convention)."""
@@ -3034,6 +3054,8 @@ class AMICATorchNG:
                 setattr(self, name, tensor.to(self.device))
             else:
                 setattr(self, name, tensor.to(self.device, self.dtype))
+        # sphere was just replaced, so any cached back-map describes the old one.
+        self._sphere_pinv = None
 
         extra = state["extra"]
         self.sldet = extra["sldet"]
