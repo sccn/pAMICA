@@ -5,11 +5,11 @@ spent the whole iteration budget while every other backend stopped on likelihood
 stagnation. These tests pin the ported behaviour to the PyTorch backend, which is
 the porting reference:
 
-1. ``use_min_dll``/``min_dll``/``maxincs`` (amica15.f90:1060-1072)
+1. ``use_min_dll``/``min_dll``/``maxincs`` (amica15.f90:1078-1090)
 2. ``use_grad_norm``/``min_nd`` over the per-iteration weight-gradient norm
-   ``ndtmpsum`` (amica15.f90:1073-1079, accumulated at :1731-1743)
+   ``ndtmpsum`` (amica15.f90:1091-1097, accumulated at :1749-1761)
 3. the likelihood-decrease branch's ``.or. (ndtmpsum .le. min_nd)`` half
-   (amica15.f90:1040), ``stop_reason="grad_norm_floor"``
+   (amica15.f90:1058), ``stop_reason="grad_norm_floor"``
 
 Cross-backend by design (``.rules/backend_parity.md``): the two backends must
 stop at the SAME iteration with the SAME ``stop_reason`` on the same real data.
@@ -128,7 +128,7 @@ def test_min_dll_stops_at_the_same_iteration_as_torch(real_data):
 
 
 def test_min_dll_never_fires_before_two_likelihoods(real_data):
-    """Fortran wraps all three stops in ``if (iter > 1)`` (amica15.f90:1033).
+    """Fortran wraps all three stops in ``if (iter > 1)`` (amica15.f90:1051).
     An absurdly generous min_dll with maxincs=0 (stop on the first small gain)
     must therefore still produce two likelihood values, never one."""
     m = _mlx(use_min_dll=True, min_dll=1e6, maxincs=0, use_grad_norm=False)
@@ -169,7 +169,7 @@ def test_grad_norm_stops_at_the_same_iteration_as_torch(real_data):
 
 
 def test_grad_norm_never_fires_before_two_likelihoods(real_data):
-    """The have_prev guard again (amica15.f90:1033), from the grad-norm side:
+    """The have_prev guard again (amica15.f90:1051), from the grad-norm side:
     a min_nd above any possible norm still leaves two likelihood values."""
     m = _mlx(use_min_dll=False, use_grad_norm=True, min_nd=1e6)
     m.fit(real_data[:, :4096], max_iter=5, verbose=False)
@@ -181,8 +181,8 @@ def test_grad_norm_never_fires_before_two_likelihoods(real_data):
 def test_grad_norm_is_the_norm_of_the_step_actually_taken(real_data):
     """``ndtmpsum`` is Fortran's ``sqrt(sum(dAk*dAk)/(nw*num_comps))`` over the
     step direction built BEFORE the lrate scaling and before the A update
-    applies it (amica15.f90:1731-1743, strictly ahead of update_params at
-    :1789) -- not a norm of the updated A, and not the raw ``dWtmp`` block sum
+    applies it (amica15.f90:1749-1761, strictly ahead of update_params' A step
+    at :1803-1815) -- not a norm of the updated A, and not the raw ``dWtmp`` block sum
     (the bug issue #212 found in the NumPy backend, where the reported value was
     five orders of magnitude off and carried no convergence information).
 
@@ -212,7 +212,7 @@ def test_grad_norm_is_the_norm_of_the_step_actually_taken(real_data):
 
 
 def test_grad_norm_floor_fires_on_a_likelihood_decrease(real_data):
-    """The second disjunct of amica15.f90:1040. With ``use_grad_norm`` off (so
+    """The second disjunct of amica15.f90:1058. With ``use_grad_norm`` off (so
     the unconditional check of stop 2 cannot fire) and a min_nd above any norm
     this fit reaches, the only way out is the decrease branch -- and it must
     take it while lrate is nowhere near its floor, which is exactly the case the
