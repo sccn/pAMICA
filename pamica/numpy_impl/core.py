@@ -249,9 +249,10 @@ class AMICA:
         self.restartiter = params.get("restartiter", 10)
         self.maxrestarts = params.get("maxrestarts", 3)
         self.numrestarts = 0
-        # Set by fit(): whether the fit ended with a finite likelihood, and the
-        # reason it stopped. converged=False signals a terminal non-finite LL
-        # (diverged, no results written), which callers/CLI must surface.
+        # Set by fit(): whether the fit ended usable, and the reason it stopped.
+        # converged=False signals a terminal non-finite LL or non-finite fitted
+        # parameters (diverged or degenerate; no results written), which
+        # callers/CLI must surface.
         self.converged = False
         self.stop_reason = None
         self.min_dll = params.get("min_dll", 1e-9)
@@ -514,6 +515,29 @@ class AMICA:
                 "(diverged after %d restart(s)); results were not written.",
                 self.numrestarts,
             )
+        else:
+            # A finite likelihood is not on its own proof of a usable fit: a
+            # parameter can go non-finite in a way the LL does not see (a
+            # collapsed mixture component leaves NaN in mu/beta while the LL of
+            # the remaining components stays finite, issue #240). Returning that
+            # as a success is the silent failure the project rules single out, so
+            # check the fitted parameters themselves, mirroring the PyTorch
+            # wrapper's degenerate-fit contract (issue #50): converged=False,
+            # stop_reason names what went non-finite, and nothing is written.
+            degenerate = [
+                name
+                for name in ("A", "W", "c", "mu", "alpha", "beta", "rho", "gm")
+                if not np.all(np.isfinite(getattr(self, name)))
+            ]
+            if degenerate:
+                self.converged = False
+                self.stop_reason = "Non-finite parameters at exit: " + ", ".join(
+                    degenerate
+                )
+                self.logger.error(
+                    "AMICA did not converge: %s; results were not written.",
+                    self.stop_reason,
+                )
 
         # Always persist the final converged result. _write_results is otherwise
         # only called on writestep boundaries during the loop, so a run whose

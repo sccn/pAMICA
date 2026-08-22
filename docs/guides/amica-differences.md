@@ -16,12 +16,21 @@ that is not listed, that is a bug worth
 | 2 | Zero numerical rank | `numeigs = 0`, continues | `ValueError` naming cause and fix | fitting a zero-dimensional model is not a recoverable state | — (no reason to want it) |
 | 3 | Returned iterate | last EM iterate | highest-likelihood iterate (`keep_best`) | the lrate schedule is non-monotone; late Newton overshoots cut LL variance 12.7x → 2.0x | `keep_best=False` |
 | 4 | Newton | on (`do_newton=1`) | off | isolates the algorithm from initialization for parity work | `do_newton=True` |
-| 5 | Degenerate fits | returns NaN sources | refuses `transform`/`get_*`/`save` | NaN sources silently poison downstream analysis | — (see ADR 0003, issue #50) |
+| 5 | Degenerate fits | returns NaN sources | PyTorch refuses `transform`/`get_*`/`save`; NumPy reports `converged=False` with a `stop_reason` and writes nothing | NaN sources silently poison downstream analysis | — (see ADR 0003, issue #50) |
 | 6 | Precision | float64 | float64 (float32 on Apple GPUs) | Apple GPUs have no float64; float32 agrees to ~7 significant digits, not bit-parity | `dtype=torch.float64` |
 | 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
+| 8 | Columns merged away by `share_comps` | updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided) | a fit must not end holding NaN parameters, mask or no mask; the columns are dead either way | — (see issues #60, #240) |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
-row 3 with ADR 0003; row 5 with issue #50.
+row 3 with ADR 0003; row 5 with issue #50; row 8 with issues #60 and #240.
+
+Two `share_comps` details are pamica's own because the reference cannot decide
+them: the A-freeze window after a merge is anchored on `share_start` (the literal
+`mod(iter, share_iter)` misaligns unless `share_start` is a multiple of
+`share_iter`, and freezes A permanently for `share_iter <= 6`, which both array
+backends reject up front), and the merge similarity metric has no bit-exact
+oracle at all — the reference's `Spinv2` is declared but never allocated, so its
+own reassignment is unrunnable.
 
 ## 1. Relative rank threshold (the one changed default)
 
