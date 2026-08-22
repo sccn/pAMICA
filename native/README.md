@@ -47,7 +47,7 @@ each target and attaches the checksummed binaries to the GitHub release:
 
 | target | runner | LAPACK/BLAS | link |
 |---|---|---|---|
-| macos-arm64 | macos-14 | Accelerate (system) | static Fortran runtime -> only Accelerate + libSystem |
+| macos-arm64 | macos-26 | Accelerate (system) | static Fortran runtime -> only Accelerate + libSystem |
 | linux-x64 | ubuntu-latest | static reference LAPACK/BLAS | static Fortran runtime, dynamic glibc |
 | linux-arm64 | ubuntu-24.04-arm | static reference LAPACK/BLAS | as above |
 | windows-x64 | windows-latest (MSYS2 MINGW64) | static OpenBLAS | `-static` (no MSYS2 DLLs) |
