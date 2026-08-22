@@ -17,6 +17,10 @@ density family, GG shape, component sharing -- stays inspectable via
 (issue #142), and the separation-quality metrics :meth:`AMICAICA.mir` /
 :meth:`pmi` run directly on an MNE object (issue #143). Rank-deficient input is supported: the model is sized to the
 numerical rank and exported through MNE's native ``pca_components_`` (issue #225).
+``bad_*`` annotations are respected like MNE's own ICA (issue #251):
+:meth:`AMICAICA.fit` omits annotated samples by default (recorded in
+``good_sample_mask_``), and the scoring methods evaluate the passed instance's
+good samples, keeping per-sample outputs timeline-aligned via ``NaN`` columns.
 """
 
 from typing import Optional, Union
@@ -58,6 +62,43 @@ def _compute_pre_whitener(data: np.ndarray, info) -> np.ndarray:
         if scale > 0:
             pre_whitener[picks] = scale
     return pre_whitener
+
+
+def _raw_data_and_mask(picked, reject_by_annotation: bool, **range_kw):
+    """Data of a picked ``Raw`` plus the timeline mask of the returned columns.
+
+    Returns ``(X, good_sample_mask)``: ``X`` is ``(n_channels, n_kept)`` and
+    ``good_sample_mask`` is boolean over the recording's full timeline
+    (``picked.n_times``), True exactly for the columns of ``X``. With
+    ``reject_by_annotation``, samples covered by annotations whose description
+    starts with ``"bad"`` are omitted through MNE's own
+    ``get_data(reject_by_annotation="omit")`` (issue #251); the mask is derived
+    from the sample times of that same call, so mask and data cannot disagree.
+    Samples outside a ``start``/``stop`` range are False.
+    """
+    X, times = picked.get_data(
+        reject_by_annotation="omit" if reject_by_annotation else None,
+        return_times=True,
+        **range_kw,
+    )
+    good_sample_mask = np.zeros(picked.n_times, dtype=bool)
+    good_sample_mask[picked.time_as_index(times, use_rounding=True)] = True
+    return X, good_sample_mask
+
+
+def _expand_to_timeline(values: np.ndarray, good) -> np.ndarray:
+    """Re-expand per-kept-sample ``values`` onto the full timeline as NaN gaps.
+
+    ``values`` is ``(n_rows, n_kept)``; ``good`` the boolean timeline mask from
+    :func:`_raw_data_and_mask` (or ``None`` when nothing was rejected). Rejected
+    timeline positions become ``NaN`` columns, keeping per-sample outputs
+    aligned with the scored instance (issue #251).
+    """
+    if good is None or good.all():
+        return values
+    full = np.full((values.shape[0], good.size), np.nan, dtype=np.float64)
+    full[:, good] = values
+    return full
 
 
 class AMICAICA:
@@ -111,6 +152,15 @@ class AMICAICA:
     pre_whitener_ : np.ndarray of shape (n_channels, 1)
         Per-channel-type scaling applied before fitting, following MNE's own ICA
         convention (one ``std`` per channel type, applied as ``X / pre_whitener_``).
+    reject_by_annotation_ : bool
+        Whether the last ``Raw`` fit dropped ``bad_*``-annotated samples
+        (issue #251). Always ``False`` for an ``Epochs`` fit.
+    good_sample_mask_ : np.ndarray of bool or None
+        For a ``Raw`` fit, which samples of the recording's timeline the fit
+        consumed: ``True`` exactly for the fitted columns, ``False`` for
+        samples covered by ``bad_*`` annotations (when rejection is on) and
+        for samples outside a ``start``/``stop`` range. ``None`` for an
+        ``Epochs`` fit.
     converged_ : bool
         Whether the last fit ended usable (not degenerate). A degenerate fit is
         kept for inspection but refused by the consumer methods (issue #50).
@@ -164,6 +214,8 @@ class AMICAICA:
         self.ch_names_: Optional[list] = None
         self.n_components_: Optional[int] = None
         self.pre_whitener_: Optional[np.ndarray] = None
+        self.reject_by_annotation_: bool = False
+        self.good_sample_mask_: Optional[np.ndarray] = None
         self.converged_: bool = False
         self.stop_reason_: Optional[str] = None
         self._n_samples: Optional[int] = None
@@ -180,6 +232,7 @@ class AMICAICA:
         picks=None,
         start: Optional[int] = None,
         stop: Optional[int] = None,
+        reject_by_annotation: bool = True,
         **fit_kwargs,
     ) -> "AMICAICA":
         """Fit AMICA to the data of an MNE ``Raw`` or ``Epochs``.
@@ -196,6 +249,12 @@ class AMICAICA:
         start, stop : int | None
             Sample range for ``Raw`` input, passed to ``get_data``; ``None`` uses
             the full recording. Not supported for ``Epochs`` (raises).
+        reject_by_annotation : bool, default=True
+            If ``True``, omit samples covered by annotations whose description
+            starts with ``"bad"`` when fitting from :class:`~mne.io.Raw`,
+            matching MNE's own ``ICA.fit`` default (issue #251). The samples
+            actually fitted are recorded in ``good_sample_mask_``. Has no
+            effect for ``Epochs`` (MNE drops bad-annotated epochs at epoching).
         **fit_kwargs
             Forwarded to :meth:`AMICA.fit` (e.g. ``max_iter``, ``lrate``,
             ``do_newton``) and the backend constructor (e.g. ``block_size``).
@@ -212,7 +271,9 @@ class AMICAICA:
             If ``inst`` is not an MNE ``Raw``/``Epochs``.
         ValueError
             If ``start``/``stop`` are given for ``Epochs``, ``stop`` exceeds the
-            recording length, or the selected data is non-finite.
+            recording length, the selected data is non-finite, or no samples
+            remain to fit (an empty ``start``/``stop`` range, or ``bad``
+            annotations covering the entire selected range).
         """
         if not isinstance(inst, (mne.io.BaseRaw, mne.BaseEpochs)):
             raise TypeError(
@@ -237,10 +298,28 @@ class AMICAICA:
                 range_kw["start"] = start
             if stop is not None:
                 range_kw["stop"] = stop
-            X = picked.get_data(**range_kw)
+            X, good_sample_mask = _raw_data_and_mask(
+                picked, reject_by_annotation, **range_kw
+            )
+            if X.shape[1] == 0:
+                # Distinguish an empty start/stop range from annotation
+                # rejection, so the error points at the actual cause.
+                range_n = (inst.n_times if stop is None else stop) - (
+                    0 if start is None else start
+                )
+                if range_n <= 0:
+                    raise ValueError(
+                        f"AMICAICA.fit: the start/stop range selects no samples "
+                        f"(start={start!r}, stop={stop!r})."
+                    )
+                raise ValueError(
+                    "AMICAICA.fit: no samples left to fit ('bad' annotations "
+                    "cover the entire selected start/stop range)."
+                )
             fit_kind = "raw"
         else:
             # Concatenate epochs along time, as MNE's ICA does for fitting.
+            good_sample_mask = None
             X = np.hstack(picked.get_data())
             fit_kind = "epochs"
 
@@ -281,6 +360,8 @@ class AMICAICA:
         self.info_ = picked.info
         self.ch_names_ = ch_names
         self.pre_whitener_ = pre_whitener
+        self.good_sample_mask_ = good_sample_mask
+        self.reject_by_annotation_ = bool(reject_by_annotation) if is_raw else False
         # The fitted model dimension, which is the input channel count unless
         # rank reduction shrank it (issue #223). MNE represents this natively:
         # pca_components_ is (n_components, n_channels).
@@ -446,7 +527,9 @@ class AMICAICA:
     # ------------------------------------------------------------------
     # Multi-model dominance (issue #141)
     # ------------------------------------------------------------------
-    def get_model_probability(self, inst) -> np.ndarray:
+    def get_model_probability(
+        self, inst, *, reject_by_annotation: bool = True
+    ) -> np.ndarray:
         """Per-sample posterior probability of each model on ``inst`` (dominance).
 
         Returns ``P(model | sample)`` as ``(n_models, n_samples)`` via
@@ -454,15 +537,37 @@ class AMICAICA:
         concatenated along time). Each column sums to 1; all ones for a single
         model. MNE's own ``ICA`` has no multi-model concept, so this is exposed
         here rather than through the exported per-model ICA objects.
+
+        Parameters
+        ----------
+        inst : mne.io.BaseRaw | mne.BaseEpochs
+            Data to score.
+        reject_by_annotation : bool, default=True
+            For ``Raw`` input, evaluate only samples not covered by ``inst``'s
+            ``bad_*`` annotations, mirroring MNE's ``ICA.score_sources``
+            default (issue #251). The output keeps the full ``n_times``
+            timeline -- rejected columns are ``NaN`` -- so it stays aligned
+            with ``inst`` without any manual re-indexing. ``False`` scores
+            every sample (the model evaluates fine on artifact segments; their
+            probabilities are simply dominated by whatever model claims the
+            artifact).
         """
         self._check_fitted("compute the model probability")
         if self.amica_ is None:
             raise RuntimeError(
                 "AMICAICA: internal state is inconsistent; refit before scoring."
             )
-        return self.amica_.model_probability(self._data_for(inst))
+        X, good = self._data_for(inst, reject_by_annotation=reject_by_annotation)
+        return _expand_to_timeline(self.amica_.model_probability(X), good)
 
-    def plot_model_probability(self, inst, *, srate: Optional[float] = None, **kwargs):
+    def plot_model_probability(
+        self,
+        inst,
+        *,
+        srate: Optional[float] = None,
+        reject_by_annotation: bool = True,
+        **kwargs,
+    ):
         """Plot per-model probability + best-model log-likelihood over ``inst``.
 
         Delegates to :func:`pamica.viz.plot_model_probability` with the live
@@ -470,6 +575,13 @@ class AMICAICA:
         data. ``srate`` defaults to the fitted recording's sampling rate, so the
         x-axis is in seconds; extra keywords (``smooth_sec``, ``window_sec``,
         ``axes``) pass through.
+
+        With ``reject_by_annotation`` (default, ``Raw`` only), samples covered
+        by ``inst``'s ``bad_*`` annotations plot as gaps: the log-likelihood is
+        evaluated on the good samples only and rejected columns are ``NaN``, so
+        the time axis stays aligned with ``inst`` (issue #251). Note
+        ``smooth_sec`` widens the gaps by the smoothing window, since the
+        Hanning smoothing propagates ``NaN`` across its support.
         """
         from ..viz import plot_model_probability as _plot_model_probability
 
@@ -478,7 +590,8 @@ class AMICAICA:
             raise RuntimeError(
                 "AMICAICA: internal state is inconsistent; refit before plotting."
             )
-        lht = self.amica_.model_loglik(self._data_for(inst))
+        X, good = self._data_for(inst, reject_by_annotation=reject_by_annotation)
+        lht = _expand_to_timeline(self.amica_.model_loglik(X), good)
         if srate is None:
             srate = float(self.info_["sfreq"])
         return _plot_model_probability(lht=lht, srate=srate, **kwargs)
@@ -486,7 +599,14 @@ class AMICAICA:
     # ------------------------------------------------------------------
     # Separation-quality metrics (issue #143, on top of #133)
     # ------------------------------------------------------------------
-    def mir(self, inst, *, model_idx: int = 0, nbins: Optional[int] = None) -> tuple:
+    def mir(
+        self,
+        inst,
+        *,
+        model_idx: int = 0,
+        nbins: Optional[int] = None,
+        reject_by_annotation: bool = True,
+    ) -> tuple:
         """Mutual Information Reduction of model ``model_idx`` on ``inst``.
 
         How much mutual information the fitted unmixing removes from the data,
@@ -502,6 +622,10 @@ class AMICAICA:
             Which model's unmixing to use.
         nbins : int, optional
             Histogram bin count; see :func:`pamica.metrics.mir`.
+        reject_by_annotation : bool, default=True
+            For ``Raw`` input, score only samples not covered by ``inst``'s
+            ``bad_*`` annotations, mirroring MNE's ``ICA.score_sources``
+            default (issue #251).
 
         Returns
         -------
@@ -511,10 +635,16 @@ class AMICAICA:
         self._check_fitted("compute MIR")
         model_idx = self._check_model_idx(model_idx)
         assert self.amica_ is not None
-        return self.amica_.mir(self._data_for(inst), model_idx=model_idx, nbins=nbins)
+        X, _ = self._data_for(inst, reject_by_annotation=reject_by_annotation)
+        return self.amica_.mir(X, model_idx=model_idx, nbins=nbins)
 
     def pmi(
-        self, inst, *, model_idx: int = 0, nbins: Optional[int] = None
+        self,
+        inst,
+        *,
+        model_idx: int = 0,
+        nbins: Optional[int] = None,
+        reject_by_annotation: bool = True,
     ) -> np.ndarray:
         """Pairwise Mutual Information between model ``model_idx``'s sources on ``inst``.
 
@@ -530,6 +660,10 @@ class AMICAICA:
             Which model's sources to use.
         nbins : int, optional
             Histogram bin count; see :func:`pamica.metrics.pairwise_mi`.
+        reject_by_annotation : bool, default=True
+            For ``Raw`` input, score only samples not covered by ``inst``'s
+            ``bad_*`` annotations, mirroring MNE's ``ICA.score_sources``
+            default (issue #251).
 
         Returns
         -------
@@ -539,7 +673,8 @@ class AMICAICA:
         self._check_fitted("compute PMI")
         model_idx = self._check_model_idx(model_idx)
         assert self.amica_ is not None
-        return self.amica_.pmi(self._data_for(inst), model_idx=model_idx, nbins=nbins)
+        X, _ = self._data_for(inst, reject_by_annotation=reject_by_annotation)
+        return self.amica_.pmi(X, model_idx=model_idx, nbins=nbins)
 
     # ------------------------------------------------------------------
     # pamica-specific metadata (issue #142)
@@ -586,7 +721,7 @@ class AMICAICA:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _data_for(self, inst) -> np.ndarray:
+    def _data_for(self, inst, *, reject_by_annotation: bool = False):
         """The fitted-channel data of ``inst`` as ``(n_channels, n_samples)``.
 
         Selects the exact channels the fit used (by name) so the array aligns
@@ -594,20 +729,47 @@ class AMICAICA:
         The channel-type pre-whitener is applied, because the backend was fitted
         on scaled data and would otherwise be handed a differently-scaled array
         (issue #225).
+
+        With ``reject_by_annotation`` (``Raw`` only), samples covered by
+        ``inst``'s own ``bad_*`` annotations are omitted -- the evaluation-time
+        analogue of MNE's ``ICA.score_sources`` behavior (issue #251). The
+        rejection follows the *passed* instance's annotations, not the fit-time
+        mask, so it stays correct for any Raw handed in.
+
+        Returns
+        -------
+        X : np.ndarray of shape (n_channels, n_kept)
+        good_mask : np.ndarray of bool, shape (inst.n_times,), or None
+            ``True`` for the timeline positions the columns of ``X`` occupy;
+            ``None`` when nothing was rejected (``Epochs``, or rejection off).
         """
         if not isinstance(inst, (mne.io.BaseRaw, mne.BaseEpochs)):
             raise TypeError(
                 f"expected an mne.io.Raw or mne.Epochs, got {type(inst).__name__}."
             )
         picked = inst.copy().pick(self.ch_names_)
+        good_mask = None
         if isinstance(inst, mne.io.BaseRaw):
-            X = picked.get_data()
+            if reject_by_annotation:
+                X, good_mask = _raw_data_and_mask(picked, True)
+                if X.shape[1] == 0:
+                    # One consistent hard error for all four scoring methods
+                    # (get_model_probability would otherwise return silent
+                    # all-NaN and mir/pmi an opaque zero-size reduction error).
+                    raise ValueError(
+                        "AMICAICA: every sample of the provided Raw is covered "
+                        "by 'bad' annotations, so there is nothing to score. "
+                        "Pass reject_by_annotation=False to score annotated "
+                        "segments anyway."
+                    )
+            else:
+                X = picked.get_data()
         else:
             X = np.hstack(picked.get_data())
         X = np.ascontiguousarray(X, dtype=np.float64)
         if self.pre_whitener_ is not None:
             X = X / self.pre_whitener_
-        return X
+        return X, good_mask
 
     def _check_model_idx(self, model_idx: int) -> int:
         if not isinstance(model_idx, (int, np.integer)):
