@@ -205,3 +205,34 @@ def test_fully_annotated_range_raises(raw_annot):
     )
     with pytest.raises(ValueError, match="no samples left"):
         AMICAICA(device="cpu", verbose=False).fit(covered, max_iter=5)
+
+
+def test_empty_start_stop_range_blames_the_range(raw_annot):
+    """An inverted range must not be misdiagnosed as annotation rejection."""
+    with pytest.raises(ValueError, match="start/stop range selects no samples"):
+        AMICAICA(device="cpu", verbose=False).fit(
+            raw_annot, start=1000, stop=1000, max_iter=5
+        )
+
+
+def test_fully_annotated_scoring_raises(fitted_rej, raw_annot):
+    """All four scoring surfaces refuse an all-bad Raw with one clear error."""
+    covered = raw_annot.copy()
+    covered.set_annotations(
+        mne.Annotations(
+            onset=[0.0],
+            duration=[float(raw_annot.times[-1]) + 1.0],
+            description=["bad_all"],
+        )
+    )
+    for call in (
+        lambda: fitted_rej.get_model_probability(covered),
+        lambda: fitted_rej.plot_model_probability(covered),
+        lambda: fitted_rej.mir(covered),
+        lambda: fitted_rej.pmi(covered),
+    ):
+        with pytest.raises(ValueError, match="nothing to score"):
+            call()
+    # Opting out still scores the annotated samples.
+    prob = fitted_rej.get_model_probability(covered, reject_by_annotation=False)
+    assert np.isfinite(prob).all()

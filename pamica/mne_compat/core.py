@@ -86,6 +86,21 @@ def _raw_data_and_mask(picked, reject_by_annotation: bool, **range_kw):
     return X, good_sample_mask
 
 
+def _expand_to_timeline(values: np.ndarray, good) -> np.ndarray:
+    """Re-expand per-kept-sample ``values`` onto the full timeline as NaN gaps.
+
+    ``values`` is ``(n_rows, n_kept)``; ``good`` the boolean timeline mask from
+    :func:`_raw_data_and_mask` (or ``None`` when nothing was rejected). Rejected
+    timeline positions become ``NaN`` columns, keeping per-sample outputs
+    aligned with the scored instance (issue #251).
+    """
+    if good is None or good.all():
+        return values
+    full = np.full((values.shape[0], good.size), np.nan, dtype=np.float64)
+    full[:, good] = values
+    return full
+
+
 class AMICAICA:
     """Fit AMICA from MNE objects and interoperate with ``mne.preprocessing.ICA``.
 
@@ -256,7 +271,9 @@ class AMICAICA:
             If ``inst`` is not an MNE ``Raw``/``Epochs``.
         ValueError
             If ``start``/``stop`` are given for ``Epochs``, ``stop`` exceeds the
-            recording length, or the selected data is non-finite.
+            recording length, the selected data is non-finite, or no samples
+            remain to fit (an empty ``start``/``stop`` range, or ``bad``
+            annotations covering the entire selected range).
         """
         if not isinstance(inst, (mne.io.BaseRaw, mne.BaseEpochs)):
             raise TypeError(
@@ -285,6 +302,16 @@ class AMICAICA:
                 picked, reject_by_annotation, **range_kw
             )
             if X.shape[1] == 0:
+                # Distinguish an empty start/stop range from annotation
+                # rejection, so the error points at the actual cause.
+                range_n = (inst.n_times if stop is None else stop) - (
+                    0 if start is None else start
+                )
+                if range_n <= 0:
+                    raise ValueError(
+                        f"AMICAICA.fit: the start/stop range selects no samples "
+                        f"(start={start!r}, stop={stop!r})."
+                    )
                 raise ValueError(
                     "AMICAICA.fit: no samples left to fit ('bad' annotations "
                     "cover the entire selected start/stop range)."
@@ -531,12 +558,7 @@ class AMICAICA:
                 "AMICAICA: internal state is inconsistent; refit before scoring."
             )
         X, good = self._data_for(inst, reject_by_annotation=reject_by_annotation)
-        prob = self.amica_.model_probability(X)
-        if good is not None and not good.all():
-            full = np.full((prob.shape[0], good.size), np.nan, dtype=np.float64)
-            full[:, good] = prob
-            return full
-        return prob
+        return _expand_to_timeline(self.amica_.model_probability(X), good)
 
     def plot_model_probability(
         self,
@@ -569,11 +591,7 @@ class AMICAICA:
                 "AMICAICA: internal state is inconsistent; refit before plotting."
             )
         X, good = self._data_for(inst, reject_by_annotation=reject_by_annotation)
-        lht = self.amica_.model_loglik(X)
-        if good is not None and not good.all():
-            full = np.full((lht.shape[0], good.size), np.nan, dtype=np.float64)
-            full[:, good] = lht
-            lht = full
+        lht = _expand_to_timeline(self.amica_.model_loglik(X), good)
         if srate is None:
             srate = float(self.info_["sfreq"])
         return _plot_model_probability(lht=lht, srate=srate, **kwargs)
@@ -734,6 +752,16 @@ class AMICAICA:
         if isinstance(inst, mne.io.BaseRaw):
             if reject_by_annotation:
                 X, good_mask = _raw_data_and_mask(picked, True)
+                if X.shape[1] == 0:
+                    # One consistent hard error for all four scoring methods
+                    # (get_model_probability would otherwise return silent
+                    # all-NaN and mir/pmi an opaque zero-size reduction error).
+                    raise ValueError(
+                        "AMICAICA: every sample of the provided Raw is covered "
+                        "by 'bad' annotations, so there is nothing to score. "
+                        "Pass reject_by_annotation=False to score annotated "
+                        "segments anyway."
+                    )
             else:
                 X = picked.get_data()
         else:
