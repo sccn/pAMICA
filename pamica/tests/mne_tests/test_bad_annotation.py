@@ -1,393 +1,207 @@
+"""``reject_by_annotation`` support in ``AMICAICA`` (issue #251).
+
+Real sample EEG only: the bundled ``eeglab_data.set`` with ``bad_*``
+annotations added on top -- the annotations are metadata, the data stay real.
+Pinned behaviors:
+
+1. fit-time omission matches MNE's own ``get_data(reject_by_annotation="omit")``
+   selection exactly, and ``good_sample_mask_`` indexes precisely the fitted
+   columns (they come from the same ``get_data`` call, so they cannot drift);
+2. fitting an annotated ``Raw`` equals fitting :class:`pamica.AMICA` directly
+   on the kept columns -- the wrapper adds bookkeeping, not numerics;
+3. per-sample scoring stays timeline-aligned: ``NaN`` exactly on the rejected
+   columns, driven by the *passed* instance's annotations;
+4. ``start``/``stop`` composes with rejection (the mask is False outside the
+   fitted range -- regression for the initial PR #252 draft);
+5. ``Epochs`` input is unaffected (regression: ``Epochs.get_data`` has no
+   ``reject_by_annotation`` kwarg).
+"""
+
+from pathlib import Path
+
 import numpy as np
-import mne
-import pandas as pd
-import matplotlib.pyplot as plt
-from pamica.mne_compat.core import AMICAICA
+import pytest
 
+mne = pytest.importorskip("mne")
 
-# ============================================================
-# Configuration
-# ============================================================
+from pamica import AMICA  # noqa: E402  (after importorskip)
+from pamica.mne_compat import AMICAICA  # noqa: E402
 
-sfreq = 100.0
-duration = 30.0
-n_samples = int(sfreq * duration)
+mne.set_log_level("ERROR")
 
-ch_names = [
-    "MEG001",
-    "MEG002",
-    "MEG003",
-    "MEG004",
-]
+SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
+SET_FILE = SAMPLE_DIR / "eeglab_data.set"
+SEED = 42
+MAX_ITER = 12  # enough to move off the init; behavior, not convergence
 
-ch_types = ["mag"] * len(ch_names)
-
-
-# ============================================================
-# Create artificial Raw data
-# ============================================================
-
-rng = np.random.default_rng(42)
-
-data = rng.standard_normal(
-    (len(ch_names), n_samples)
+pytestmark = pytest.mark.skipif(
+    not SET_FILE.exists(), reason="sample eeglab_data.set missing"
 )
 
-info = mne.create_info(
-    ch_names=ch_names,
-    sfreq=sfreq,
-    ch_types=ch_types,
-)
-
-raw = mne.io.RawArray(
-    data,
-    info,
-)
+# (onset_s, duration_s) of the bad spans; a non-bad "stimulus" annotation is
+# added alongside to pin that only bad_* descriptions are rejected.
+BAD_SPANS = [(5.0, 2.0), (100.0, 3.0), (200.0, 1.0)]
 
 
-# ============================================================
-# Add bad annotations
-# ============================================================
-
-raw.set_annotations(
-    mne.Annotations(
-        onset=[
-            5.0,
-            15.0,
-            25.0,
-        ],
-        duration=[
-            2.0,
-            3.0,
-            1.0,
-        ],
-        description=[
-            "bad_test_1",
-            "bad_test_2",
-            "bad_test_3",
-        ],
+@pytest.fixture(scope="module")
+def raw_annot():
+    """Real continuous EEG with three bad_* spans and one non-bad annotation."""
+    raw = mne.io.read_raw_eeglab(str(SET_FILE), preload=True)
+    raw.set_annotations(
+        mne.Annotations(
+            onset=[o for o, _ in BAD_SPANS] + [150.0],
+            duration=[d for _, d in BAD_SPANS] + [2.0],
+            description=["bad_one", "bad_two", "bad_three", "stimulus"],
+        )
     )
-)
+    return raw
 
 
-# ============================================================
-# Display Raw information
-# ============================================================
-
-print("=" * 70)
-print("Raw data information")
-print("=" * 70)
-
-print(raw)
-
-print("\nAnnotations:")
-print(raw.annotations)
-
-print("\nOriginal data shape:")
-print(raw.get_data().shape)
+@pytest.fixture(scope="module")
+def picked(raw_annot):
+    """The channel selection AMICAICA fits on (good data channels)."""
+    return raw_annot.copy().pick("data", exclude="bads")
 
 
-# ============================================================
-# Verify MNE annotation rejection
-# ============================================================
-
-data_all = raw.get_data(
-    reject_by_annotation=None,
-)
-
-data_without_bad = raw.get_data(
-    reject_by_annotation="omit",
-)
-
-print("\n" + "=" * 70)
-print("MNE annotation rejection")
-print("=" * 70)
-
-print(
-    f"Without annotation rejection: "
-    f"{data_all.shape}"
-)
-
-print(
-    f"With bad annotations omitted: "
-    f"{data_without_bad.shape}"
-)
+@pytest.fixture(scope="module")
+def n_good(picked):
+    """MNE's own count of samples surviving bad_* omission."""
+    return picked.get_data(reject_by_annotation="omit").shape[1]
 
 
-# ============================================================
-# Calculate expected sample counts
-# ============================================================
-
-bad_duration = sum(
-    [2.0, 3.0, 1.0]
-)
-
-expected_bad_samples = int(
-    bad_duration * sfreq
-)
-
-expected_remaining_samples = (
-    n_samples - expected_bad_samples
-)
-
-print("\nExpected:")
-print(f"Total samples:     {n_samples}")
-print(f"Bad samples:       {expected_bad_samples}")
-print(f"Remaining samples: {expected_remaining_samples}")
-
-
-# ============================================================
-# Check MNE behavior
-# ============================================================
-
-assert data_all.shape[1] == n_samples
-
-assert (
-    data_without_bad.shape[1]
-    == expected_remaining_samples
-)
-
-print("\nPASS: MNE annotation rejection behaves as expected.")
-
-
-# ============================================================
-# Test pAMICA with reject_by_annotation=True
-# ============================================================
-
-print("\n" + "=" * 70)
-print("Testing pAMICA: reject_by_annotation=True")
-print("=" * 70)
-
-ica_rej_ann = AMICAICA(
-    n_models=2,
-    random_state=42,
-    verbose=True,
-).fit(
-    raw,
-    max_iter=100,
-    reject_by_annotation=True,
-)
-
-ica_rej_ann_mne = (
-    ica_rej_ann.to_mne_ica(model_idx=0)
-)
-
-
-print(
-    "\nMNE ICA data shape "
-    "(reject_by_annotation=True):"
-)
-print(ica_rej_ann_mne)
-
-
-# ============================================================
-# Test pAMICA with reject_by_annotation=False
-# ============================================================
-
-print("\n" + "=" * 70)
-print("Testing pAMICA: reject_by_annotation=False")
-print("=" * 70)
-
-ica_no_rej_ann = AMICAICA(
-    n_models=2,
-    random_state=42,
-    verbose=True,
-).fit(
-    raw,
-    max_iter=100,
-    reject_by_annotation=False,
-)
-
-ica_no_rej_ann_mne = (
-    ica_no_rej_ann.to_mne_ica(model_idx=0)
-)
-
-print(
-    "\nMNE ICA data shape "
-    "(reject_by_annotation=False):"
-)
-print(ica_no_rej_ann_mne)
-
-print("\n" + "=" * 70)
-print("pAMICA sample mask")
-print("=" * 70)
-
-print("Mask shape:", ica_rej_ann.good_sample_mask_.shape)
-print("Good samples:", ica_rej_ann.good_sample_mask_.sum())
-print("Rejected samples:", (~ica_rej_ann.good_sample_mask_).sum())
-print("AMICA fitting samples:", ica_rej_ann._n_samples)
-
-assert ica_rej_ann.good_sample_mask_.shape == (raw.n_times,)
-assert ica_rej_ann.good_sample_mask_.sum() == 2400
-assert (~ica_rej_ann.good_sample_mask_).sum() == 600
-assert ica_rej_ann._n_samples == 2400
-
-print("\nPASS: pAMICA sample mask is correct.")
-ica_rej_ann._data_for(inst=raw)
-model_probability = ica_rej_ann.get_model_probability(
-    inst=raw,
-)
-
-print("Original model probability shape:")
-print(model_probability.shape)
-
-
-# ============================================================
-# Get the sample mask used during AMICA fitting
-# ============================================================
-
-good_sample_mask = ica_rej_ann.good_sample_mask_
-
-print("\nGood sample mask shape:")
-print(good_sample_mask.shape)
-
-print("Good samples:")
-print(good_sample_mask.sum())
-
-print("Rejected samples:")
-print((~good_sample_mask).sum())
-
-
-# ============================================================
-# Reconstruct model probability on the original Raw timeline
-#
-# model_probability contains probabilities only for the samples
-# that were used during AMICA fitting.
-#
-# good_sample_mask maps these probabilities back to the original
-# Raw sample axis.
-#
-# Good samples  -> probability value
-# Rejected      -> NaN
-# ============================================================
-
-n_models = model_probability.shape[0]
-n_samples = raw.n_times
-
-full_model_probability = np.full(
-    (n_models, n_samples),
-    np.nan,
-    dtype=float,
-)
-
-full_model_probability[
-    :,
-    good_sample_mask,
-] = model_probability
-
-
-# ============================================================
-# Verify rejected samples
-# ============================================================
-
-bad_mask = ~good_sample_mask
-
-print("\nFull model probability shape:")
-print(full_model_probability.shape)
-
-print("\nProbability values in bad segments:")
-print(
-    full_model_probability[
-        :,
-        bad_mask,
-    ]
-)
-
-n_bad_nan = np.isnan(
-    full_model_probability[
-        :,
-        bad_mask,
-    ]
-).sum()
-
-print("\nNumber of NaNs in bad segments:")
-print(n_bad_nan)
-
-expected_nan = n_models * bad_mask.sum()
-
-if n_bad_nan == expected_nan:
-    print(
-        "PASS: All rejected samples contain NaN "
-        "in the reconstructed model probability."
-    )
-else:
-    print(
-        "FAIL: Some rejected samples contain "
-        "non-NaN probability values."
+@pytest.fixture(scope="module")
+def fitted_rej(raw_annot):
+    """One annotated-Raw fit (default reject_by_annotation=True), reused."""
+    return AMICAICA(n_mix=3, random_state=SEED, device="cpu", verbose=False).fit(
+        raw_annot, max_iter=MAX_ITER
     )
 
 
-# ============================================================
-# Verify that good-sample probabilities were not changed
-# ============================================================
-
-reconstructed_good_probability = full_model_probability[
-    :,
-    good_sample_mask,
-]
-
-if np.allclose(
-    reconstructed_good_probability,
-    model_probability,
-):
-    print(
-        "PASS: Good-sample probabilities were correctly "
-        "mapped back to the original timeline."
-    )
-else:
-    print(
-        "FAIL: Good-sample probabilities changed "
-        "during reconstruction."
-    )
+def test_fit_omits_bad_annotated_samples(fitted_rej, raw_annot, n_good):
+    assert n_good < raw_annot.n_times  # the annotations actually removed data
+    assert fitted_rej._n_samples == n_good
+    assert fitted_rej.reject_by_annotation_ is True
+    mask = fitted_rej.good_sample_mask_
+    assert mask is not None and mask.dtype == bool
+    assert mask.shape == (raw_annot.n_times,)
+    assert int(mask.sum()) == n_good
 
 
-# ============================================================
-# Create the original Raw time axis
-# ============================================================
-
-time = np.arange(
-    n_samples
-) / raw.info["sfreq"]
-
-
-# ============================================================
-# Convert to DataFrame
-# ============================================================
-
-model_probability_df = pd.DataFrame(
-    full_model_probability.T,
-    columns=[
-        f"model_{i}"
-        for i in range(n_models)
-    ],
-)
-
-model_probability_df.insert(
-    0,
-    "time_s",
-    time,
-)
+def test_mask_indexes_exactly_the_fitted_columns(fitted_rej, picked):
+    """full_data[:, mask] reproduces MNE's omit selection bit-for-bit."""
+    mask = fitted_rej.good_sample_mask_
+    full = picked.get_data()
+    omitted = picked.get_data(reject_by_annotation="omit")
+    np.testing.assert_array_equal(full[:, mask], omitted)
 
 
-# ============================================================
-# Plot model probabilities
-# ============================================================
-
-plt.figure(figsize=(14, 5))
-
-for model_idx in range(n_models):
-    plt.plot(
-        time,
-        full_model_probability[model_idx],
-        label=f"model_{model_idx}",
+def test_fit_equals_manual_column_drop(fitted_rej, picked):
+    """The annotated-Raw fit is the plain AMICA fit on the kept columns."""
+    x = np.ascontiguousarray(picked.get_data()[:, fitted_rej.good_sample_mask_])
+    # All channels are one type (EEG), so the channel-type pre-whitener is a
+    # single global std -- reproduce it as the wrapper computes it.
+    x = x / float(np.std(x))
+    manual = AMICA(n_mix=3, device="cpu", verbose=False)
+    manual.fit(x, seed=SEED, max_iter=MAX_ITER)
+    np.testing.assert_array_equal(
+        fitted_rej.amica_.get_unmixing_matrix(0), manual.get_unmixing_matrix(0)
     )
 
-plt.xlabel("Time (s)")
-plt.ylabel("Model probability")
-plt.title("AMICA Model Probability")
 
-if n_models > 1:
-    plt.legend()
+def test_reject_false_keeps_all_samples(raw_annot):
+    fitted = AMICAICA(n_mix=3, random_state=SEED, device="cpu", verbose=False).fit(
+        raw_annot, max_iter=5, reject_by_annotation=False
+    )
+    assert fitted._n_samples == raw_annot.n_times
+    assert fitted.reject_by_annotation_ is False
+    mask = fitted.good_sample_mask_
+    assert mask is not None and mask.all()
 
-plt.tight_layout()
-plt.show()
+
+def test_start_stop_composes_with_rejection(raw_annot, picked):
+    start, stop = 1000, 20000
+    fitted = AMICAICA(n_mix=3, random_state=SEED, device="cpu", verbose=False).fit(
+        raw_annot, start=start, stop=stop, max_iter=5
+    )
+    mask = fitted.good_sample_mask_
+    assert mask is not None
+    assert not mask[:start].any() and not mask[stop:].any()
+    assert int(mask.sum()) == fitted._n_samples
+    expected = picked.get_data(
+        reject_by_annotation="omit", start=start, stop=stop
+    ).shape[1]
+    assert fitted._n_samples == expected
+
+
+def test_model_probability_is_timeline_aligned(fitted_rej, raw_annot):
+    """Full-length output, NaN exactly on the rejected columns (issue #251)."""
+    mask = fitted_rej.good_sample_mask_
+    prob = fitted_rej.get_model_probability(raw_annot)
+    assert prob.shape == (1, raw_annot.n_times)
+    assert np.isnan(prob[:, ~mask]).all()
+    assert np.isfinite(prob[:, mask]).all()
+    np.testing.assert_allclose(prob[:, mask], 1.0)  # single model
+    # Opting out scores every sample: same shape, no NaN.
+    prob_all = fitted_rej.get_model_probability(raw_annot, reject_by_annotation=False)
+    assert prob_all.shape == (1, raw_annot.n_times)
+    assert np.isfinite(prob_all).all()
+
+
+def test_scoring_follows_the_passed_instances_annotations(fitted_rej, raw_annot):
+    """Rejection is evaluation-time and per-instance, like ICA.score_sources."""
+    clean = raw_annot.copy().set_annotations(None)
+    prob = fitted_rej.get_model_probability(clean)
+    assert prob.shape == (1, clean.n_times)
+    assert np.isfinite(prob).all()
+
+
+def test_mir_scores_good_samples_only(fitted_rej, raw_annot, picked):
+    mask = fitted_rej.good_sample_mask_
+    x_good = picked.get_data()[:, mask]
+    x_good = np.ascontiguousarray(x_good) / fitted_rej.pre_whitener_
+    mir_wrapper, _ = fitted_rej.mir(raw_annot)
+    mir_manual, _ = fitted_rej.amica_.mir(x_good, model_idx=0)
+    assert np.isclose(mir_wrapper, mir_manual)
+    # Opting out changes the scored sample set without erroring.
+    mir_all, _ = fitted_rej.mir(raw_annot, reject_by_annotation=False)
+    assert np.isfinite(mir_all)
+
+
+def test_epochs_fit_is_unaffected(raw_annot):
+    """Regression: Epochs.get_data has no reject_by_annotation kwarg."""
+    epochs = mne.make_fixed_length_epochs(raw_annot, duration=2.0, preload=True)
+    fitted = AMICAICA(n_mix=3, random_state=SEED, device="cpu", verbose=False).fit(
+        epochs, max_iter=5
+    )
+    assert fitted.good_sample_mask_ is None
+    assert fitted.reject_by_annotation_ is False
+
+
+def test_nan_inside_bad_segment_is_tolerated(raw_annot, n_good):
+    """Rejection drops NaN samples inside bad spans before the finite check."""
+    data = raw_annot.get_data()
+    bad_start = int(BAD_SPANS[0][0] * raw_annot.info["sfreq"])
+    data[0, bad_start + 10 : bad_start + 20] = np.nan
+    noisy = mne.io.RawArray(data, raw_annot.info.copy(), verbose=False)
+    noisy.set_annotations(raw_annot.annotations)
+    fitted = AMICAICA(n_mix=3, random_state=SEED, device="cpu", verbose=False).fit(
+        noisy, max_iter=5
+    )
+    assert fitted._n_samples == n_good
+    with pytest.raises(ValueError, match="non-finite"):
+        AMICAICA(n_mix=3, random_state=SEED, device="cpu", verbose=False).fit(
+            noisy, max_iter=5, reject_by_annotation=False
+        )
+
+
+def test_fully_annotated_range_raises(raw_annot):
+    covered = raw_annot.copy()
+    covered.set_annotations(
+        mne.Annotations(
+            onset=[0.0],
+            duration=[float(raw_annot.times[-1]) + 1.0],
+            description=["bad_all"],
+        )
+    )
+    with pytest.raises(ValueError, match="no samples left"):
+        AMICAICA(device="cpu", verbose=False).fit(covered, max_iter=5)
