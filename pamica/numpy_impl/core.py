@@ -1199,6 +1199,7 @@ class AMICA:
             and self.num_samples is not None
             and self.c is not None
             and self.mu is not None
+            and self.alpha is not None
             and self.beta is not None
             and self.rho is not None
             and self.comp_list is not None
@@ -1245,32 +1246,34 @@ class AMICA:
 
         # A component merged away by share_comps is no longer referenced by
         # comp_list, so no sufficient statistic accumulates into its column and
-        # the divisions below are 0/0 = NaN. Update only used columns and freeze
-        # the rest at their last finite value (rho is excluded: its own 1e-8
-        # floor keeps it finite, so it drifts rather than freezing -- harmless,
-        # since no dead column is read downstream), as AMICATorchNG does (Fortran
-        # carries the NaN harmlessly behind its comp_used mask; keeping them
-        # finite means a fit cannot report success while holding NaN parameters,
-        # issue #240). All-True with the default comp_list, so the ordinary path
-        # is unchanged.
+        # its mixture divisions would be 0/0 = NaN. Update only the used columns
+        # and leave the rest frozen at their last finite value, as AMICATorchNG
+        # does (Fortran instead carries the NaN harmlessly behind its comp_used
+        # mask; keeping them finite means a fit cannot report success while
+        # holding NaN parameters, issue #240).
+        #
+        # The dead columns are INDEXED OUT rather than computed and masked: a
+        # 0/0 that is never evaluated raises no RuntimeWarning, so nothing has to
+        # be suppressed with np.errstate and a genuine 0/0 in a LIVE column (a
+        # component whose responsibility mass collapses to exactly zero) still
+        # warns, as it does with sharing off. ``cols`` is a full slice whenever
+        # every column is live -- always so with the default comp_list -- which
+        # keeps the ordinary path bit-identical and copy-free. (comp_used is None
+        # until fit() sets it up, and the M-step is exercised directly in tests
+        # before that happens, so fall back to "all used".)
         used = (
             self.comp_used
             if self.comp_used is not None
             else np.ones(self.num_comps, dtype=bool)
         )
+        cols = slice(None) if used.all() else np.flatnonzero(used)
 
-        # Update mixture weights. errstate because np.where evaluates both
-        # branches: an unused column's 0/0 is computed and discarded, and would
-        # otherwise warn on every iteration after a merge.
-        with np.errstate(invalid="ignore", divide="ignore"):
-            alpha_next = updates["dalpha_n"] / np.sum(updates["dalpha_n"], axis=0)
-        self.alpha = np.where(used, alpha_next, self.alpha)
-        # errstate above silences the 0/0 that np.where computes for a dead
-        # column and discards. That also silenced numpy's warning for a genuine
-        # 0/0 in a LIVE column (a component whose responsibility mass collapses
-        # to exactly zero), which used to be the only signal it happened. Check
-        # explicitly instead, mirroring the mu/beta canary below, so the origin
-        # is not lost to a later unattributable nan-LL stop.
+        # Update mixture weights
+        dalpha_n = updates["dalpha_n"][:, cols]
+        self.alpha[:, cols] = dalpha_n / np.sum(dalpha_n, axis=0)
+        # Fortran has no alpha canary, but a collapsed live component gives the
+        # same 0/0 the mu/beta canary below reports; surface it here too so the
+        # origin is not lost to a later unattributable nan-LL stop.
         if not np.all(np.isfinite(self.alpha)):
             self.logger.warning(
                 "Non-finite alpha at iter %d (component responsibility mass "
@@ -1281,11 +1284,11 @@ class AMICA:
         # Exact-EM mixture location/scale (Fortran :1978/:1993). These are
         # fixed-point updates -- mu += dmu_n/dmu_d, beta *= sqrt(dbeta_n/dbeta_d)
         # -- NOT first-order gradient steps, so they carry no lrate.
-        with np.errstate(invalid="ignore", divide="ignore"):
-            mu_next = self.mu + updates["dmu_n"] / updates["dmu_d"]
-            beta_next = self.beta * np.sqrt(updates["dbeta_n"] / updates["dbeta_d"])
-        self.mu = np.where(used, mu_next, self.mu)
-        self.beta = np.where(used, beta_next, self.beta)
+        dmu = updates["dmu_n"][:, cols] / updates["dmu_d"][:, cols]
+        self.mu[:, cols] = self.mu[:, cols] + dmu
+        self.beta[:, cols] = self.beta[:, cols] * np.sqrt(
+            updates["dbeta_n"][:, cols] / updates["dbeta_d"][:, cols]
+        )
         self.beta = np.clip(self.beta, self.invsigmin, self.invsigmax)
         # Fortran keeps a live "NaN in sbeta!" canary here (amica17.f90:1996-2000);
         # the exact-EM mu/beta divisions are unguarded (matching Fortran), so
@@ -1303,10 +1306,18 @@ class AMICA:
         # dalpha_n (floored so a near-empty component cannot poison rho). A NaN
         # is reset to rho0 -- but logged first, so the reset does not silently
         # erase the failure origin.
+        # Restricted to the live columns for the same reason as mu/beta/alpha
+        # (and as AMICATorchNG, which masks rho with ``used`` too): a merged-away
+        # column has no responsibility mass, so its rho would ratchet up on the
+        # floored denominator every iteration instead of staying at the value it
+        # was merged away with.
         if not np.all(self.rho == 1.0) and not np.all(self.rho == 2.0):
-            drho = updates["drho_n"] / np.maximum(updates["dalpha_n"], 1e-8)
-            psi = digamma(1.0 + 1.0 / self.rho)
-            new_rho = self.rho + self.rholrate * (1.0 - (self.rho / psi) * drho)
+            rho_cols = self.rho[:, cols]
+            drho = updates["drho_n"][:, cols] / np.maximum(
+                updates["dalpha_n"][:, cols], 1e-8
+            )
+            psi = digamma(1.0 + 1.0 / rho_cols)
+            new_rho = rho_cols + self.rholrate * (1.0 - (rho_cols / psi) * drho)
             nan_mask = np.isnan(new_rho)
             if nan_mask.any():
                 self.logger.warning(
@@ -1317,7 +1328,7 @@ class AMICA:
                     self.rho0,
                 )
                 new_rho = np.where(nan_mask, self.rho0, new_rho)
-            self.rho = np.clip(new_rho, self.minrho, self.maxrho)
+            self.rho[:, cols] = np.clip(new_rho, self.minrho, self.maxrho)
 
         # Update unmixing matrices
         newton_active = self.do_newton and self.iter >= self.newt_start
