@@ -397,6 +397,68 @@ guarded to a no-op so the parity results above stay byte-for-byte unchanged.
 
 Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests/test_ng_sharing.py`, `torch_tests/test_amica_ng_wrapper.py`, and `test_numpy_reject.py`.
 
+## Which convergence criterion actually stops a fit
+
+AMICA ships four stops. On recordings the size of the bundled sample, only two of
+them fire, and it is worth knowing which before concluding that one is broken.
+
+Two of the four defaults differ between the backends, so read the column that
+matches the entry point you use. `AMICA_NumPy` resolves its defaults from the
+bundled `pamica/numpy_impl/params.json`; `AMICA`/`AMICATorchNG` take theirs from
+the constructor signature; Fortran compiles in the values in `amica15_header.f90`
+and the bundled `pamica/sample_data/input.param` overrides several.
+
+| Stop | `AMICA` / `AMICATorchNG` | `AMICA_NumPy` | Fortran (compiled / `input.param`) |
+|---|---|---|---|
+| `max_iter` | **100** | 2000 | none / 2000 |
+| `min_dll` (`use_min_dll`) | on, `1e-9` | on, `1e-9` | on, `1e-9` |
+| `min_nd` (`use_grad_norm`) | on, `1e-7` | on, `1e-7` (named `min_grad_norm`) | on, `1e-7` |
+| `minlrate` (`lrate_floor`) | `1e-12` | `1e-12` | `1e-12` / `1e-8` |
+| `do_newton` | **off** | **on** | off / on |
+
+Which of them actually ends a fit:
+
+- **`min_dll` normally wins**, at iteration 326-1076 depending on the BLAS build
+  — but only when `max_iter` is large enough to let it. At `AMICATorchNG`'s
+  default `max_iter=100` the fit always ends on `max_iter` before `min_dll` can
+  fire, so the default PyTorch run is iteration-limited, not converged. Raise
+  `max_iter` if you want the likelihood stop to be the one that decides.
+- **`min_nd` never fires** on a recording this size, in any of the three
+  implementations. This is the subject of the rest of this section.
+- **`minlrate` needs sustained likelihood decreases** to anneal the learning rate
+  all the way to the floor. The bundled sample stops on `min_dll` (or `max_iter`)
+  long before that, so it is not a stop you will meet here.
+
+**`min_nd` is not reachable on a recording this size, in any of the three
+implementations.** Running the reference binary to completion under a matched
+configuration, its own gradient norm oscillates rather than shrinking:
+
+| iteration | Fortran `nd` |
+|---:|---:|
+| 1000 | 4.7e-5 |
+| 1300 | 2.8e-5 |
+| 1500 | 3.1e-5 |
+| 1700 | 3.2e-5 |
+| 2000 | 2.5e-5 |
+
+It then plateaus at 1.0-1.65e-5 out to iteration 5073 without ever crossing the
+`1e-7` threshold, which sits about two orders of magnitude below the reference's
+own floor. Both Python backends plateau roughly two orders higher again — near
+a fixed point `dAk` tends to zero, so the norm is measuring a near-total
+cancellation where floating-point and BLAS ordering differences dominate what is
+left.
+
+This is a property of the data rather than a defect. 30504 samples is small
+against the free parameters (1024 in `A` alone, before the mixture parameters),
+so the natural-gradient residual has a finite-sample noise floor above the
+threshold. The reference ships the same default and behaves the same way, so
+retuning it here would mean changing a Fortran-faithful default to manufacture a
+desired outcome.
+
+What data size *would* make `min_nd` meaningful has not been characterized. If
+you need a gradient-based stop, measure the plateau on your own recording first
+and set `min_nd` above it; otherwise leave `min_dll` to do the work.
+
 ## Reproducing these results
 
 The paper's parity table reproduces through one entry point, `benchmarks/reproduce_table1.py`.

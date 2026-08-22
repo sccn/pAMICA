@@ -240,6 +240,12 @@ class AMICA:
         self.converged = False
         self.stop_reason = None
         self.min_dll = params.get("min_dll", 1e-9)
+        # min_grad_norm is Fortran-faithful but not reachable on small
+        # recordings: the reference binary's own gradient norm plateaus two
+        # orders above it on the bundled sample, so min_dll is what ends a fit
+        # there. Kept rather than retuned; see "Which convergence criterion
+        # actually stops a fit" in docs/guides/validation.md (issue #218).
+        # AMICATorchNG spells this same threshold min_nd.
         self.min_grad_norm = params.get("min_grad_norm", 1e-7)
         self.use_min_dll = params.get("use_min_dll", True)
         self.use_grad_norm = params.get("use_grad_norm", True)
@@ -1183,6 +1189,13 @@ class AMICA:
             and self.comp_list is not None
             and self.A is not None
         )
+        # Fortran builds dAk from the model weights of the *previous* iteration:
+        # gm is not reassigned until update_params (amica15.f90:1789+), which runs
+        # after accum_updates_and_likelihood (:1731-1743). Snapshot it here so the
+        # nd block below weights by the same gm Fortran would (issue #219).
+        assert self.gm is not None
+        gm_prev = self.gm.copy()
+
         # Update model weights, normalizing by the number of samples the E-step
         # actually summed over: the good set under do_reject, else all samples.
         if self.do_reject:
@@ -1215,14 +1228,49 @@ class AMICA:
                     self.iter,
                 )
 
-        # Update mixture weights
-        self.alpha = updates["dalpha_n"] / np.sum(updates["dalpha_n"], axis=0)
+        # A component merged away by share_comps is no longer referenced by
+        # comp_list, so no sufficient statistic accumulates into its column and
+        # the divisions below are 0/0 = NaN. Update only used columns and freeze
+        # the rest at their last finite value (rho is excluded: its own 1e-8
+        # floor keeps it finite, so it drifts rather than freezing -- harmless,
+        # since no dead column is read downstream), as AMICATorchNG does (Fortran
+        # carries the NaN harmlessly behind its comp_used mask; keeping them
+        # finite means a fit cannot report success while holding NaN parameters,
+        # issue #240). All-True with the default comp_list, so the ordinary path
+        # is unchanged.
+        used = (
+            self.comp_used
+            if self.comp_used is not None
+            else np.ones(self.num_comps, dtype=bool)
+        )
+
+        # Update mixture weights. errstate because np.where evaluates both
+        # branches: an unused column's 0/0 is computed and discarded, and would
+        # otherwise warn on every iteration after a merge.
+        with np.errstate(invalid="ignore", divide="ignore"):
+            alpha_next = updates["dalpha_n"] / np.sum(updates["dalpha_n"], axis=0)
+        self.alpha = np.where(used, alpha_next, self.alpha)
+        # errstate above silences the 0/0 that np.where computes for a dead
+        # column and discards. That also silenced numpy's warning for a genuine
+        # 0/0 in a LIVE column (a component whose responsibility mass collapses
+        # to exactly zero), which used to be the only signal it happened. Check
+        # explicitly instead, mirroring the mu/beta canary below, so the origin
+        # is not lost to a later unattributable nan-LL stop.
+        if not np.all(np.isfinite(self.alpha)):
+            self.logger.warning(
+                "Non-finite alpha at iter %d (component responsibility mass "
+                "collapsed).",
+                self.iter,
+            )
 
         # Exact-EM mixture location/scale (Fortran :1978/:1993). These are
         # fixed-point updates -- mu += dmu_n/dmu_d, beta *= sqrt(dbeta_n/dbeta_d)
         # -- NOT first-order gradient steps, so they carry no lrate.
-        self.mu = self.mu + updates["dmu_n"] / updates["dmu_d"]
-        self.beta = self.beta * np.sqrt(updates["dbeta_n"] / updates["dbeta_d"])
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mu_next = self.mu + updates["dmu_n"] / updates["dmu_d"]
+            beta_next = self.beta * np.sqrt(updates["dbeta_n"] / updates["dbeta_d"])
+        self.mu = np.where(used, mu_next, self.mu)
+        self.beta = np.where(used, beta_next, self.beta)
         self.beta = np.clip(self.beta, self.invsigmin, self.invsigmax)
         # Fortran keeps a live "NaN in sbeta!" canary here (amica17.f90:1996-2000);
         # the exact-EM mu/beta divisions are unguarded (matching Fortran), so
@@ -1338,20 +1386,22 @@ class AMICA:
         # applied update lrate*dAk, and does not divide by lrate either
         # (amica15.f90:1742-1743) -- there is no missing factor here.
         #
-        # Fortran ordering caveat: Fortran's gm is not reassigned until
-        # update_params (amica15.f90:1789+), which runs AFTER dAk is built, so its
-        # ndtmpsum uses the previous iteration's gm. self.gm is already updated by
-        # this point. That is invisible for num_models=1 (gm == 1) and for the
-        # default disjoint comp_list, where the gm[h] factor cancels exactly
-        # against zeta[idx], but the two differ under share_comps with a genuinely
-        # shared column. Diagnostic only, it does not affect the fitted
-        # parameters; tracked in issue #219.
+        # Weighted by gm_prev, the pre-update model weights, because Fortran builds
+        # dAk before update_params reassigns gm (issue #219). Invisible for
+        # num_models=1 (gm == 1) and for the default disjoint comp_list, where the
+        # gm[h] factor cancels against zeta[idx]; it bites only under share_comps
+        # with a genuinely shared column, where the two weightings differ.
+        #
+        # Diagnostic only *here*: this dAk feeds nd_value alone. The A-update below
+        # is a separate per-model loop that never reads dAk, so the ordering cannot
+        # move a fitted parameter in this backend. AMICATorchNG applies the same
+        # dAk to A, so there the identical fix does change fitted parameters.
         dAk = np.zeros_like(self.A)
         zeta = np.zeros(self.num_comps)
         for h in range(self.num_models):
             idx = self.comp_list[:, h]
-            dAk[:, idx] += self.gm[h] * np.dot(directions[h].T, self.A[:, idx])
-            zeta[idx] += self.gm[h]
+            dAk[:, idx] += gm_prev[h] * np.dot(directions[h].T, self.A[:, idx])
+            zeta[idx] += gm_prev[h]
         nonzero = zeta > 0
         dAk[:, nonzero] /= zeta[nonzero]
         # comp_used is None until fit() sets it up, and the M-step is exercised
@@ -1370,6 +1420,11 @@ class AMICA:
         # (LEFT-multiply by the TRANSPOSED direction). Right-multiply by the
         # untransposed dir is invisible at the fixed point but sends the fit
         # downhill -- issue #24 root cause.
+        # Per-model loop. For a disjoint comp_list this equals Fortran's single
+        # weighted DAXPY, but a column shared across models takes one step per
+        # contributing model instead of one averaged step -- issue #242, which
+        # ships separately because no test written for it so far distinguishes
+        # the two.
         for h in range(self.num_models):
             idx = self.comp_list[:, h]
             self.A[:, idx] = self.A[:, idx] - self.lrate * np.dot(

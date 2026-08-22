@@ -113,6 +113,71 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+  # Apple Silicon coverage (issue #246). The Linux jobs above cannot exercise
+  # two things the project depends on:
+  #   * pamica/tests/mlx_tests/ -- MLX is Apple-GPU only and is the recommended
+  #     Apple backend (AGENTS.md), so it had never run in CI at all.
+  #   * the Accelerate BLAS numerical path. Summation order differs from
+  #     OpenBLAS enough to move a stopping iteration, which is how a broken
+  #     assertion in test_ng_convergence.py stayed green on Linux through #241
+  #     and failed immediately on macOS.
+  # macos-26 is the current arm64 image (macos-14/15 are also arm64; 14 is
+  # deprecated). Standard runners are free and unmetered for public repos --
+  # do not switch to a -large/-xlarge variant, which is billed even here.
+  test-macos:
+    name: Test (macOS 26, Apple Silicon)
+    needs: [lint, typecheck]
+    runs-on: macos-26
+    env:
+      # The only job on hardware where torch auto-selects MPS (torch_impl/
+      # utils.py picks it whenever no device is pinned and MPS is available),
+      # so it is the only job where the fallback actually does anything.
+      PYTORCH_ENABLE_MPS_FALLBACK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # --extra mlx is the whole point of this job: without it mlx_tests/
+      # self-skips and the run adds nothing the Linux job did not already do.
+      - run: uv sync --extra mlx
+      - name: Assert MLX sees an Apple GPU
+        # mlx_tests/ is gated on BOTH an mlx import and
+        # mx.default_device().type == gpu (test_mlx_backend.py:28-33). A hosted
+        # runner that imported mlx but fell back to CPU would skip all 11 tests
+        # and still report success -- green while testing nothing, the exact
+        # failure this job exists to prevent. Assert the device, not just the
+        # import, so that regression fails here instead of passing silently.
+        run: |
+          uv run python -c "
+          import mlx.core as mx
+          dev = mx.default_device()
+          print('mlx', mx.__version__, 'device', dev)
+          assert dev.type == mx.DeviceType.gpu, f'no Apple GPU: {dev}'
+          "
+      - name: Build native AMICA binary (for engine E2E tests)
+        # Same recipe as the macos-arm64 target in release-binaries.yml:
+        # gfortran from brew's gcc, LAPACK/BLAS from Accelerate, and the static
+        # libquadmath the release build uses.
+        run: |
+          brew install gcc
+          LAPACK_LIBS="-framework Accelerate" EXTRA_LDFLAGS="-static-libquadmath" \
+            bash native/build.sh
+          echo "PAMICA_NATIVE_BINARY=$PWD/native/amica15_shim" >> "$GITHUB_ENV"
+      # "not slow" matches the Linux job, but NOT for the Linux job's reason.
+      # There it is because the slow tests need the macOS-only reference binary;
+      # here they are excluded purely for wall-clock (2000-iteration fits).
+      # Note the two that do shell out (test_ng_backend.py:1096,:1179) would
+      # work on this runner: they pass binary_path=None, which resolves via
+      # PAMICA_NATIVE_BINARY (native/resolver.py:112) -- set above -- so they
+      # would use the arm64 binary this job just built, never Rosetta. Enabling
+      # them would give CI its first Fortran parity coverage; tracked in #246.
+      # --no-cov: the Linux job owns the coverage gate and the Codecov upload;
+      # a second partial run would report a different total for the same commit.
+      - name: pytest (excluding slow tests)
+        run: uv run pytest -m "not slow" -n auto --no-cov
+
   test-mne:
     name: Test MNE wrapper (optional [mne] extra)
     needs: [lint, typecheck]

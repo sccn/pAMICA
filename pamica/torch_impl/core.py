@@ -383,6 +383,13 @@ class AMICATorchNG:
         regardless of ``use_grad_norm``/``use_min_dll`` (both stops read the
         same per-iteration value; Fortran computes ``ndtmpsum`` unconditionally
         too, in ``accum_updates_and_likelihood``, before either check runs).
+
+        Not reachable on small recordings, in any implementation: the reference
+        binary's own gradient norm plateaus at 1.0-1.65e-5 on the bundled
+        32-channel sample, two orders above this threshold, so the stop never
+        fires there and ``min_dll`` is what ends the fit. The default is kept
+        Fortran-faithful rather than retuned; see the convergence-criteria
+        section of ``docs/guides/validation.md`` (issue #218).
     newt_ramp : int, default=10
         Denominator of the per-iteration learning-rate ramp toward the current
         ceiling: ``lrate = min(ceiling, lrate + min(1/newt_ramp, lrate))``
@@ -742,6 +749,13 @@ class AMICATorchNG:
         # fit-end MIR is mir() on the returned parameters, not
         # mir_history_[-1]. Not part of state_dict(): it's a diagnostic,
         # not a fitted parameter.
+        #
+        # Not index-aligned with ll_history: the entry for iteration i is
+        # computed AFTER that iteration's _update_parameters, while
+        # ll_history[i] is the likelihood of the parameters BEFORE it (the
+        # E-step accumulator that produced the update). The two therefore
+        # describe states one update apart, so zipping them by index compares
+        # different parameters (issue #161).
         self.mir_history_: list[tuple[int, float, float]] = []
 
         # Outlier-rejection bookkeeping (set up in fit()).
@@ -1378,6 +1392,15 @@ class AMICATorchNG:
             and self.A is not None
             and self.comp_list is not None
         )
+        # Fortran builds dAk from the previous iteration's model weights: gm is
+        # not reassigned until update_params (amica15.f90:1789+), after
+        # accum_updates_and_likelihood (:1731-1743). Snapshot before overwriting so
+        # dAk -- which both drives the A-update below and reports ndtmpsum, unlike
+        # numpy_impl where it is only the diagnostic -- weights the way Fortran
+        # does (issue #219). Cloned rather than aliased: gm is only ever rebound
+        # today, but an in-place write elsewhere would silently corrupt this.
+        assert self.gm is not None
+        gm_prev = self.gm.clone()
         self.gm = acc["dgm"] / n_samples
 
         # Per-model data-space bias (Fortran's `update_c` flag, amica17.f90:1423-
@@ -1538,8 +1561,8 @@ class AMICATorchNG:
         zeta = torch.zeros(self.n_comps, dtype=self.dtype, device=self.device)
         for h in range(self.n_models):
             idx = self.comp_list[:, h]
-            dAk.index_add_(1, idx, self.gm[h] * (directions[h].T @ self.A[:, idx]))
-            zeta.index_add_(0, idx, self.gm[h].expand(idx.shape[0]))
+            dAk.index_add_(1, idx, gm_prev[h] * (directions[h].T @ self.A[:, idx]))
+            zeta.index_add_(0, idx, gm_prev[h].expand(idx.shape[0]))
         dAk = dAk / zeta.clamp_min(torch.finfo(self.dtype).tiny)
 
         # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1742-1743):
