@@ -141,3 +141,33 @@ same iteration (`pamica/tests/test_mlx_convergence_stops.py` asserts exactly
 that on the bundled sample). Statements elsewhere in these guides about the
 `min_nd` threshold being unreachable on small recordings now cover MLX too;
 `numpy_impl` spells that same threshold `min_grad_norm`.
+
+## Component sharing on rank-reduced fits
+
+`share_comps` merges components that are near-collinear *across models*,
+comparing each pair of mixing columns after mapping them back to input-channel
+(sensor) space.
+The PyTorch backend built that back-map with `inv(sphere)`, so it refused every
+rank-reduced or rank-deficient fit: with rank reduction active the sphere is
+`(n_kept, n_channels)` and has no inverse, and a square sphere fitted on
+rank-deficient data is singular.
+The back-map is now `pinv(sphere)`, which is what the reference itself carries
+under reduction (`Spinv(nx, numeigs)`, amica15.f90:550-560), so sharing works at
+any rank (issue #253, reported from Maxwell-filtered MEG in #221).
+
+```python
+m = AMICA(n_models=2).fit(X, share_comps=True)   # X may be rank-deficient
+m.shared_components()                            # groups of (model, source) pairs
+```
+
+For a full-rank square sphere `pinv` equals `inv` to about 1e-15, far below the
+`comp_thresh` decision boundary (0.99 by default), so merge decisions on
+well-conditioned data are unchanged; the bundled sample reproduces its previous
+`comp_list` and log-likelihood bit for bit.
+
+The NumPy backend reaches the merge decision from a different metric: its
+`identify_shared_components` compares the columns of `A` directly in the sphered
+space, with no back-map at all, so it never needed an inverse and already ran at
+any rank.
+The two backends can therefore identify different pairs on the same data; the
+NumPy sharing path is being reworked in issues #240 and #242.

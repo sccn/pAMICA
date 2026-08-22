@@ -11,6 +11,16 @@ Release notes are also published on the
   likelihood-decrease branch's gradient-norm half, with the same names, defaults
   and `stop_reason` strings as `AMICATorchNG`, and stops at the same iteration
   as it on the same data.
+- **`share_comps` works on rank-reduced and rank-deficient fits** (issue #253,
+  reported from Maxwell-filtered MEG in #221). The PyTorch merge metric mapped
+  mixing columns back to sensor space with `inv(sphere)`, which raised
+  "Component sharing needs an invertible sphere" on exactly the data class that
+  rank detection had just made fittable. It now uses `pinv(sphere)`, the
+  reference's own `Spinv` back-map under reduction (amica15.f90:550-560), and
+  `share_comps` with `pcakeep`/`pcadb` is no longer rejected at construction.
+  Full-rank fits are unaffected: `pinv` equals `inv` to ~1e-15 there, and the
+  bundled sample reproduces its previous `comp_list` and log-likelihood bit for
+  bit.
 
 ## 0.3.2
 
