@@ -5,6 +5,25 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **`AMICA.from_params_file` now reads the literal Fortran `input.param` text
+  format directly** (issue #132, JOSS reviewer feedback), content-sniffed
+  (not extension-trusted) alongside the existing JSON schema so the same
+  file can drive both the reference binary and pamica for a parity run. The
+  translation (`pamica/fortran_params.py`, `read_fortran_param_file`) parses
+  all 89 keywords `amica15.f90`'s parser accepts into pamica's actual
+  constructor/`fit()` names, renaming the three that Fortran spells
+  differently (`min_grad_norm` -> `min_nd`, `max_decs` -> `maxdecs`,
+  `numrej` -> `maxrej`), and warns loudly (never drops silently) about the
+  36 known keywords with no pamica equivalent (checkpoint warm-start,
+  per-family EM freeze toggles, the `do_opt_block` search, FIR/DFT
+  pre-filtering, reporting cadence, ...), about any keyword it does not
+  recognize at all, and (hard `ValueError`) when a non-empty file yields
+  zero recognized settings. `fit()` applies the translated dict as per-call
+  defaults -- an explicitly passed argument always wins over the file's
+  value -- and warns once about any file setting that matches neither a
+  `fit()` nor `AMICATorchNG` parameter (data-location metadata like
+  `files`/`outdir`/`data_dim`). See `docs/guides/validation.md#parameter-files`
+  for the mapping table.
 - **Widened CI coverage** (issue #246, building on #247's macOS Apple Silicon
   job): `ci.yml` now also triggers on pushes to `dev` (the integration
   branch), not just `main` and pull requests, so post-merge drift is caught
