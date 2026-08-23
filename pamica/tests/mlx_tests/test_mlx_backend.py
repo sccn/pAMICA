@@ -189,6 +189,10 @@ def test_backend_stable_on_full_data():
     assert m.final_ll_ is not None
     assert np.isfinite(m.final_ll_)
     assert np.all(np.isfinite(np.array(m.A)))
+    # W is derived from A by inv(), so it can overflow to inf/NaN while A is
+    # still finite -- a fit ending with a NaN unmixing matrix is unusable
+    # however healthy final_ll_ looks (fit()'s nan_params guard covers it too).
+    assert np.all(np.isfinite(np.array(m.W)))
     assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
     assert hist[-1] > hist[0]  # ascent
     # Single-model must never touch the bias c (the n_models>1-only update); a

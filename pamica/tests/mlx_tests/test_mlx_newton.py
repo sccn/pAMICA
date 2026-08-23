@@ -107,11 +107,13 @@ def _ratchet_count(rate: float, rate0: float, factor: float) -> int:
 # The two ratchet tests below need a run whose likelihood decreases straddle
 # ``newt_start``: some maxdecs cycles completing before the Newton switch-on and
 # some after. WHEN a fit decreases is BLAS- and hardware-dependent -- the same
-# effect this repo already documents for the `min_dll` stop, which fires at
-# iteration 326 on macOS-arm64, 412 on Linux-CUDA and 1076 on a GitHub runner
-# (docs/guides/validation.md) -- so a hardcoded `newt_start` that straddles on
-# one machine need not straddle on another, and the tests below originally went
-# vacuous on the CI Apple-Silicon runner for exactly that reason.
+# effect this repo already documents for the `min_dll` stop, which fires
+# anywhere in iteration 326-1076 depending on the BLAS build
+# (docs/guides/validation.md; the per-platform breakdown is at
+# torch_tests/test_ng_convergence.py:682-683) -- so a hardcoded `newt_start`
+# that straddles on one machine need not straddle on another, and the tests
+# below originally went vacuous on the CI Apple-Silicon runner for exactly that
+# reason.
 #
 # They are therefore data-driven: a probe fit whose ``newt_start`` sits past the
 # budget reports where the decreases actually land ON THE EXECUTING MACHINE, and
@@ -197,7 +199,8 @@ def natural_gradient_prefix() -> list[float]:
 # --- (e) stability ----------------------------------------------------------
 
 
-def test_newton_fit_is_stable_on_full_data():
+@pytest.mark.parametrize("seed", [1, 3, 42])
+def test_newton_fit_is_stable_on_full_data(seed):
     """A full-recording float32 Newton fit runs to its budget without diverging
     and improves the likelihood.
 
@@ -205,20 +208,134 @@ def test_newton_fit_is_stable_on_full_data():
     of squares over 30504 samples and the guard compares a product of those sums
     against exactly 1. This is the MLX counterpart of
     ``torch_tests/test_ng_float32_stability.py``, whose failure mode was a
-    ``nan_ll`` stop rather than a bad number.
+    ``nan_ll`` stop rather than a bad number -- and which sweeps seeds for the
+    same reason this does: the divergence it regressed against was reachable
+    from some initializations and not others, so a single seed would have been
+    a coin flip rather than a guard.
     """
-    m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED, do_newton=True)
+    m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=seed, do_newton=True)
     m.fit(_load_real_data(), max_iter=100, verbose=False)
 
     hist = np.asarray(m.ll_history, dtype=float)
     assert np.all(np.isfinite(hist))
     assert m.final_ll_ is not None and np.isfinite(m.final_ll_)
     assert np.all(np.isfinite(np.array(m.A)))
+    # W is derived from A by inv(), so it can overflow while A stays finite; a
+    # fit that ends holding a NaN unmixing matrix is unusable however healthy
+    # final_ll_ looks (the fit() nan_params guard covers the same quantity).
+    assert np.all(np.isfinite(np.array(m.W)))
     assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
     assert hist[-1] > hist[0]  # ascent
     # Newton was reached (the schedule ran past newt_start) and stayed usable.
     assert len(hist) > m.newt_start
     assert m.n_newton_fallbacks == 0
+
+
+def test_newton_inactive_is_bit_identical():
+    """Newton that never switches on must leave the trajectory bit-for-bit
+    unchanged -- the invariant the whole port rests on.
+
+    ``do_newton=True`` with ``newt_start`` past any reachable iteration runs the
+    Newton code paths that are not schedule-gated (the three curvature
+    accumulators in every block, the restructured direction loop, the
+    ``newton_active`` branches in the M-step and in ``fit``'s ratchets) while
+    ``newton_active`` stays False throughout. So the only thing this flag
+    changes here is which code path runs, and any arithmetic that leaked into
+    the natural-gradient path would show up as a difference. Exact equality, not
+    a tolerance: the twin of ``test_mlx_sharing.py::
+    test_unscheduled_sharing_is_bit_identical``.
+    """
+    data = _load_real_data(8192)
+    off = AMICAMLXNG(
+        n_channels=NW, n_mix=NMIX, seed=SEED, block_size=1024, do_newton=False
+    )
+    off.fit(data, max_iter=10, verbose=False)
+    on = AMICAMLXNG(
+        n_channels=NW,
+        n_mix=NMIX,
+        seed=SEED,
+        block_size=1024,
+        do_newton=True,
+        newt_start=10**6,
+    )
+    on.fit(data, max_iter=10, verbose=False)
+
+    assert on.ll_history == off.ll_history
+    assert on._ndtmpsum == off._ndtmpsum
+    for attr in ("A", "mu", "gm"):
+        np.testing.assert_array_equal(
+            np.array(getattr(on, attr)),
+            np.array(getattr(off, attr)),
+            err_msg=f"{attr} changed although Newton never switched on",
+        )
+    # The schedule state is untouched too: nothing ratcheted the Newton ceiling
+    # and nothing was counted as a fallback.
+    assert on.newtrate == on.newtrate0
+    assert on.n_newton_fallbacks == 0
+
+
+def test_newton_direction_matches_formula():
+    """``_newton_direction`` reproduces the Fortran 2x2 solve and its
+    positive-definiteness guard on controlled inputs.
+
+    The one unit-style pin in this file, and the direct counterpart of
+    ``torch_tests/test_ng_backend.py::test_newton_direction_matches_formula``:
+    the closed form (amica15.f90:1718-1741) is pure arithmetic on
+    ``sigma2``/``kappa``/``lambda``, so driving it with chosen numbers is what
+    isolates the formula from whatever curvature real data happens to produce
+    -- the real-data paths are covered by every other test here and by the
+    float64 cross-backend comparisons. Chosen numbers are legitimate here for
+    the same reason they are on the PyTorch side: nothing is standing in for
+    data, the inputs ARE the function's arguments.
+
+    MLX needs its own copy because the posdef reduction is implemented
+    differently: torch masks with ``valid[offdiag].all()``, which MLX cannot do
+    (no boolean-mask indexing), so it forces the diagonal True via
+    ``mx.eye(dtype=bool)`` instead. The diagonal never satisfies ``prod > 1``
+    for small sigma2/kappa, so an incorrect mask would flip the verdict -- which
+    is exactly what the second half below catches.
+    """
+    rng = np.random.RandomState(0)
+    n = 6
+    dA = mx.array(rng.randn(n, n).astype(np.float32))
+    # Large sigma2/kappa so sk1*sk2 > 1 for every pair -> positive definite.
+    sigma2 = mx.array((np.abs(rng.randn(n)) + 2.0).astype(np.float32))
+    kappa = mx.array((np.abs(rng.randn(n)) + 2.0).astype(np.float32))
+    lambda_ = mx.array((np.abs(rng.randn(n)) + 1.0).astype(np.float32))
+
+    model = AMICAMLXNG(n_channels=n, n_mix=NMIX, seed=SEED, do_newton=True)
+    H, posdef = model._newton_direction(dA, sigma2, lambda_, kappa)
+    assert posdef
+
+    h = np.array(H, dtype=np.float64)
+    s = np.array(sigma2, dtype=np.float64)
+    k = np.array(kappa, dtype=np.float64)
+    lam = np.array(lambda_, dtype=np.float64)
+    d = np.array(dA, dtype=np.float64)
+    for i in range(n):
+        # Diagonal uses lambda, not the off-diagonal formula.
+        assert h[i, i] == pytest.approx(d[i, i] / lam[i], rel=1e-6)
+        for j in range(n):
+            if i == j:
+                continue
+            sk1, sk2 = s[i] * k[j], s[j] * k[i]
+            assert sk1 * sk2 > 1.0, "input no longer exercises the posdef branch"
+            expected = (sk1 * d[i, j] - d[j, i]) / (sk1 * sk2 - 1.0)
+            assert h[i, j] == pytest.approx(expected, rel=1e-5)
+
+    # Tiny sigma2/kappa so no pair satisfies sk1*sk2 > 1 -> not positive
+    # definite. The diagonal fails the same test, so a posdef reduction that
+    # forgot to exempt it would still report False here -- the discriminating
+    # half is the posdef=True case above, which the diagonal would break.
+    small = mx.array(np.full(n, 0.1, dtype=np.float32))
+    H_small, posdef_small = model._newton_direction(dA, small, lambda_, small)
+    assert not posdef_small
+    # Every off-diagonal entry is zeroed when its pair fails the guard; the
+    # diagonal still carries dA/lambda.
+    h_small = np.array(H_small, dtype=np.float64)
+    np.testing.assert_allclose(np.diag(h_small), np.diag(d) / lam, rtol=1e-6)
+    off_diag = h_small[~np.eye(n, dtype=bool)]
+    np.testing.assert_array_equal(off_diag, np.zeros_like(off_diag))
 
 
 # --- (f) schedule arms ------------------------------------------------------
@@ -400,6 +517,35 @@ def test_numdecs_resets_when_newton_switches_on(natural_gradient_prefix):
     assert _ratchet_count(m.lrate_cap, m.lrate0, m.lratefact) == len(with_reset)
 
 
+def test_grad_norm_floor_fires_under_newton():
+    """The issue #207 scenario, now reachable on MLX: under Newton the lrate can
+    sit at ``newtrate`` and oscillate instead of annealing, so the
+    likelihood-decrease branch's ``lrate <= minlrate`` half can never fire and
+    only its ``ndtmpsum <= min_nd`` half can stop the run.
+
+    Before #264 this branch was unreachable here in the configuration it was
+    written for -- MLX had no Newton, so nothing held the lrate up. With
+    ``use_min_dll`` off (isolating this from the small-gain stop) and a generous
+    ``min_nd``, a decrease must stop the fit via ``grad_norm_floor`` while the
+    lrate is nowhere near its floor. Mirrors
+    ``torch_tests/test_ng_convergence.py::
+    test_grad_norm_floor_fires_on_likelihood_decrease``.
+    """
+    m = AMICAMLXNG(
+        n_channels=NW, n_mix=NMIX, seed=1, block_size=1024,
+        do_newton=True, newt_start=2, newtrate=3.0, lrate=0.3,
+        use_min_dll=False, use_grad_norm=False, min_nd=1.0,
+    )  # fmt: skip
+    m.fit(_load_real_data(4096), max_iter=30, verbose=False)
+
+    assert m.stop_reason == "grad_norm_floor"
+    # The whole point: this is NOT the lrate_floor path.
+    assert m.lrate > m.minlrate
+    # And it fired inside the decrease branch it lives in, not at an arbitrary
+    # iteration.
+    assert m.ll_history[-1] < m.ll_history[-2]
+
+
 def test_newton_schedule_state_resets_at_fit_start():
     """A refit starts from the pristine ``newtrate`` ceiling with a zeroed
     fallback count, so a previously annealed run cannot leak into the next one
@@ -492,6 +638,8 @@ def test_multimodel_newton_fit_completes():
     hist = np.asarray(m.ll_history, dtype=float)
     assert np.all(np.isfinite(hist))
     assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert np.all(np.isfinite(np.array(m.A)))
+    assert np.all(np.isfinite(np.array(m.W)))  # derived from A by inv()
     assert hist[-1] > hist[0]
     assert len(hist) > m.newt_start, "Newton never switched on"
 
@@ -563,5 +711,6 @@ def test_sharing_and_newton_fit_completes():
     assert np.all(np.isfinite(hist))
     assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
     assert np.all(np.isfinite(np.array(m.A)))
+    assert np.all(np.isfinite(np.array(m.W)))  # derived from A by inv()
     assert len(hist) > m.share_start, "sharing never got a chance to fire"
     assert m.shared_components(), "no merge fired; the interplay is untested"
