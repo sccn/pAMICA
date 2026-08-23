@@ -358,13 +358,20 @@ def test_three_model_newton_curvature_matches_float64_twin():
         err = _relerr(a, b)
         assert err < 1e-4, f"{name} differs from the float64 twin by {err:.2e}"
 
+    fallbacks_before = model.n_newton_fallbacks
     model._update_parameters(acc, x_t.shape[1])
     ng._update_parameters(acc_ng, x_ng.shape[1])
     mx.eval(model.A)
 
+    assert model.n_newton_fallbacks == fallbacks_before, "MLX fell back"
+    assert ng.n_newton_fallbacks == 0, "torch fell back"
     assert ng.A is not None
     gap = np.abs(np.array(model.A, dtype=np.float64) - ng.A.numpy()).max()
     assert gap < 1e-4, f"A diverged from the float64 Newton M-step by {gap:.2e}"
+    # The gradient norm reads the same Newton-preconditioned dAk, under the same
+    # comp_used mask, so it has to agree too.
+    assert model._ndtmpsum is not None and ng._ndtmpsum is not None
+    assert model._ndtmpsum == pytest.approx(ng._ndtmpsum, rel=1e-4)
 
 
 @pytest.mark.slow
