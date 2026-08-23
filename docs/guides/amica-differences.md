@@ -123,9 +123,9 @@ Separate from reference divergences: the optional MLX backend is a subset.
 
 | Feature | PyTorch | NumPy | MLX | Native Fortran |
 |---|---|---|---|---|
-| Newton | yes | yes | `NotImplementedError` | yes |
-| PDF families | all five | all five | GG only | all five |
-| Component sharing | yes | yes | no | yes |
+| Newton | yes | yes | yes (float32) | yes |
+| PDF families | all five | GG only | all five (float32) | all five |
+| Component sharing | yes | yes | yes | yes |
 | Outlier rejection | yes | yes | no | yes |
 | Precision | f64/f32 | f64 | f32 only | f64 |
 | Rank detection | yes | yes | yes | yes (absolute floor) |
@@ -135,9 +135,15 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | MIR diagnostic | yes | no | no | n/a |
 | Persistence | `state_dict` | EEGLAB `amicaout` | none | EEGLAB `amicaout` |
 
-Most MLX limitations fail loudly: `do_newton=True` and non-GG `pdftype` raise
-`NotImplementedError`, and every unsupported parameter is simply absent from the
-constructor, so passing it raises `TypeError`.
+The NumPy row's "GG only" corrects an earlier version of this table, which
+listed "all five": `AMICA_NumPy._compute_log_pdf` (its fit-path density
+function) has no `pdtype` parameter at all, so the legacy backend never
+implemented the non-GG families the PyTorch and MLX backends carry (issue
+#265).
+
+Most MLX limitations fail loudly: `transform` and every unsupported parameter
+(outlier rejection, save/load) are simply absent from the constructor or raise
+`NotImplementedError`, rather than silently downgrading.
 
 The convergence stops used to be the exception — MLX implemented neither, so a
 fit there always spent the whole iteration budget. Issue #248 closed that gap:
@@ -150,6 +156,58 @@ same iteration (`pamica/tests/test_mlx_convergence_stops.py` asserts exactly
 that on the bundled sample). Statements elsewhere in these guides about the
 `min_nd` threshold being unreachable on small recordings now cover MLX too;
 `numpy_impl` spells that same threshold `min_grad_norm`.
+
+Component sharing was the other gap, closed by issue #263: `AMICAMLXNG` now takes
+`share_comps`/`share_start`/`share_iter`/`comp_thresh` with the PyTorch
+backend's names, defaults and validation, runs the same merge schedule and
+post-merge A-freeze, and exposes `comp_used`/`shared_components()`.
+It does not re-derive the merge metric — it calls the same
+`identify_shared_components` kernel the NumPy backend uses, on host float64
+`pinv(sphere) @ A`, so all three backends decide identically from one fitted
+state (`pamica/tests/test_mlx_sharing_cross_backend.py` pins that against
+`AMICATorchNG`).
+Row 8 of the "At a glance" table at the top of this page (merged-away columns
+frozen at their last finite value, not left NaN behind the mask) holds in MLX as
+well.
+
+Newton was next, closed by issue #264: `AMICAMLXNG` takes
+`do_newton`/`newt_start`/`newtrate`/`newt_ramp` with the PyTorch backend's names,
+defaults and semantics, accumulates the same curvature statistics, applies the
+same per-source-pair 2x2 solve behind the same raw `prod > 1` guard, and counts
+rejections in `n_newton_fallbacks`. It runs entirely in float32 — Apple GPUs have
+no FP64 — which was pre-registered as a go/no-go rather than assumed: on the
+bundled sample the curvature matches a float64 PyTorch twin to 4e-7 relative, a
+matched 100-iteration fit lands on the float64 likelihood to five significant
+digits, and the positive-definiteness guard never comes within 1.9 of its
+boundary. Evidence and the gate script are in `.context/issue-264/`. `newtrate`
+is a float32 ceiling like `lrate_cap`, so a Newton fit on MLX should be treated
+as ~7-significant-digit, not float64-parity — use the PyTorch backend for
+Fortran-parity runs, as the Precision row above already implies.
+
+The non-GG PDF families were the last of the four, closed by issue #265:
+`AMICAMLXNG` takes `pdftype`/`kurt_start`/`num_kurt`/`kurt_int` with the
+PyTorch backend's names, defaults and semantics — all five `amica15.f90`
+families (0 GG, 2 Gaussian, 3 logistic, 4 sub-Gaussian cosh+, and the
+`pdftype=1` extended-Infomax adaptive switcher between codes 1/4 by kurtosis
+sign) — and exposes `get_pdftype()`. `pdftype=0` stays byte-for-byte the
+pre-#265 implementation (the `_pdtype_h` `None` fast path adds zero graph
+nodes; verified by a before/after fit comparison on the bundled sample). The
+fixed families' `z0`/`fp` match the literal Fortran forms through MLX's
+float32 evaluation to 1e-6 (absolute, since code 4's `y - tanh(y)` cancels
+catastrophically near `y=0` in float32 — measured 100% relative error at
+`y=1e-4` — so the true parity claim is against the formula, not against a
+Taylor-stabilized substitute), and a matched-budget fit lands on the float64
+PyTorch likelihood to within 0.05 for every family. `self.dorho` (a flag, set
+to `pdftype == 0`) gates the `drho_n` accumulation and the per-iteration
+lgamma-table refresh here, skipping work AMICATorchNG always pays for a
+frozen non-GG `rho` (a deliberate MLX-only WORK divergence, not a numeric
+one) — its digamma pull is already gated behind the same flag, so that part
+is unchanged. Like `share_comps`'s merge metric, the switcher has no
+bit-exact oracle
+— the reference declares `do_choose_pdfs` (`pdftype=1`) but never accumulates
+the moments that would drive it — so it is behavior-validated on real EEG, and
+`share_comps` does NOT synchronize `pdtype` across a merged pair (see
+`shared_components()`'s docstring). Evidence is in `.context/issue-265/`.
 
 ## Component sharing on rank-reduced fits
 
@@ -174,9 +232,18 @@ For a full-rank square sphere `pinv` equals `inv` to about 1e-15, far below the
 well-conditioned data are unchanged; the bundled sample reproduces its previous
 `comp_list` and log-likelihood bit for bit.
 
-The NumPy backend reaches the merge decision from a different metric: its
-`identify_shared_components` compares the columns of `A` directly in the sphered
-space, with no back-map at all, so it never needed an inverse and already ran at
-any rank.
-The two backends can therefore identify different pairs on the same data; the
-NumPy sharing path is being reworked in issues #240 and #242.
+The NumPy backend now reaches the merge decision from the same metric (issue
+#258): `identify_shared_components` takes the de-sphered sensor-space maps
+directly -- `pinv(sphere) @ A`, the same back-map described above -- instead of
+comparing columns of the sphered `A`.
+The two backends therefore make the identical merge decision from the same
+fitted state (`pamica/tests/test_numpy_share_comps.py::test_numpy_merge_decision_matches_torch_backend`).
+The MLX backend calls that same kernel on the same host float64 inputs (issue
+#263), so all three agree.
+On one real fitted 2-model state the top candidate cross-model pair measured
+0.992 cosine similarity in sensor space against 0.970 in the old sphered
+space -- close enough that, with the default `comp_thresh=0.99`, the two
+metrics disagree on whether that pair merges. A NumPy fit that shares
+components can therefore reach a different `comp_list` than it did before
+#258, even on a full-rank, well-conditioned sphere; only the `pinv`-vs-`inv`
+comparison two paragraphs above is unaffected by that swap.

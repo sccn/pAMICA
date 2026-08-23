@@ -72,8 +72,10 @@ def _mlx(**kwargs):
 
 def _torch(**kwargs) -> AMICATorchNG:
     """The same configuration on the porting reference: float32 (MLX has no
-    float64) and no Newton (MLX has none), so the only remaining difference is
-    the array library and the device."""
+    float64) and no Newton -- deliberately isolating the natural-gradient path,
+    so the only remaining difference is the array library and the device. (Both
+    backends do support Newton since issue #264; leaving it off here keeps these
+    convergence-stop comparisons about the stops themselves.)"""
     kwargs.setdefault("n_channels", NW)
     kwargs.setdefault("n_models", 1)
     kwargs.setdefault("n_mix", NMIX)

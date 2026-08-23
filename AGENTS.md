@@ -67,8 +67,11 @@ real 70-ch EEG):** on Apple Silicon the **MLX backend is the GPU win: ~15-25 ms/
 channels, ~7x over torch-CPU and faster than an RTX 4090 (CUDA ~36 ms/it) at EEG scale**; **PyTorch-MPS
 never wins (162-255 ms/it, at or worse than CPU)**, so use MLX, not `device="mps"`, on Apple hardware.
 CUDA float64 stays the bit-safe NVIDIA path. All backends agree on the LL to ~3 digits on real data.
-Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses); the remaining MLX follow-up
-is component sharing.
+Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses). Component sharing (#263),
+Newton (#264, float32, validated against a float64 torch twin -- see `.context/issue-264/`) and the
+non-GG pdf families (#265, including the adaptive switcher; see `.context/issue-265/`) are all
+ported; the remaining MLX gaps are `transform`, outlier rejection and save/load (fast-follows, not
+tracked against a numbered issue).
 
 ## Key Files
 - **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`)
@@ -111,7 +114,7 @@ was never amica17. The fixed families are bit-exact vs the literal Fortran `z0`/
 converge to the binary within ~0.005 LL (Newton-matched). The dynamic `do_choose_pdfs` switch is
 dead code even in amica15 (the moment buffers are never accumulated), so the auto-switcher has no
 bit-exact oracle and is validated by real-data LL. `pdftype=0` stays the default and is
-byte-for-byte unchanged. See `.context/decisions/` and `tests/torch_tests/test_ng_pdf_families.py`.
+byte-for-byte unchanged. See `.context/decisions/` and `pamica/tests/torch_tests/test_ng_pdf_families.py`.
 
 **Component sharing (#60): DONE.** `share_comps` multi-model reassignment is ported to
 `AMICATorchNG`: on the `share_start`/`share_iter` schedule, components near-collinear across

@@ -300,6 +300,9 @@ class AMICA:
         self.num_samples: Optional[int] = None
         self.mean: Optional[np.ndarray] = None
         self.sphere: Optional[np.ndarray] = None
+        # Cached pinv(sphere), the sensor-space back-map (see _pinv_sphere).
+        # Invalidated wherever self.sphere is (re)assigned.
+        self._sphere_pinv: Optional[np.ndarray] = None
         self.sldet = 0.0
         self.comp_list: Optional[np.ndarray] = None
         self.comp_used: Optional[np.ndarray] = None
@@ -399,6 +402,33 @@ class AMICA:
             return self.data_dim if self.data_dim is not None else 0
         return int(self.sphere.shape[1])
 
+    def _pinv_sphere(self) -> np.ndarray:
+        """Cached ``pinv(sphere)``: the back-map from sphered to input-channel space.
+
+        This is the Fortran ``Spinv`` (amica15.f90:568-578), which the reference
+        also builds as a pseudo-inverse, ``Spinv(nx, numeigs)``, under rank/PCA
+        reduction. A pseudo-inverse rather than an inverse because reduction
+        leaves the sphere non-square (issue #223) and a square sphere fitted on
+        rank-deficient data is singular; for a full-rank square sphere the two
+        agree to ~1e-15. Built on first use and invalidated wherever
+        ``self.sphere`` is (re)assigned (:meth:`_preprocess_data`), so it can
+        never describe a sphere other than the current one. Mirrors
+        ``AMICATorchNG._pinv_sphere``.
+        """
+        assert self.sphere is not None
+        if self._sphere_pinv is None:
+            if not np.isfinite(self.sphere).all():
+                # Only a degenerate fit (non-finite input data) gets here. Say
+                # so, rather than letting LAPACK report a confusing
+                # "ill-conditioned / repeated singular values" SVD failure.
+                raise RuntimeError(
+                    "The sphere holds non-finite values, so it has no "
+                    "pseudo-inverse: the fit is degenerate. Check the input "
+                    "data for NaN/inf."
+                )
+            self._sphere_pinv = np.linalg.pinv(self.sphere)
+        return self._sphere_pinv
+
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space.
 
@@ -410,7 +440,7 @@ class AMICA:
         if self.sphere is None or self.A is None or self.comp_list is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
         A = self.A[:, self.comp_list[:, model_idx]]
-        return np.linalg.pinv(self.sphere) @ A
+        return self._pinv_sphere() @ A
 
     def get_weights(self) -> np.ndarray:
         """
@@ -704,6 +734,10 @@ class AMICA:
         else:
             self.sphere = np.eye(self.data_dim)
             self.sldet = 0.0
+
+        # self.sphere was just (re)built: any cached back-map now describes a
+        # stale sphere. Covers every assignment above regardless of branch.
+        self._sphere_pinv = None
 
         self.data = data
 
@@ -1421,9 +1455,18 @@ class AMICA:
             # The dsigma2/dkappa/dlambda accumulators already carry the sbeta^2
             # and baralpha-weighted mu^2 factors, so finalization is a plain
             # division by the model mass dgm = sum_t v_h.
-            self.sigma2 = updates["dsigma2"] / updates["dgm"][:, None]
-            self.lambda_ = updates["dlambda"] / updates["dgm"][:, None]
-            self.kappa = updates["dkappa"] / updates["dgm"][:, None]
+            #
+            # dgm is (num_models,) and the accumulators are (data_dim,
+            # num_models), so the model mass broadcasts along the LAST axis
+            # (issue #267). The old ``[:, None]`` made it (num_models, 1), which
+            # only happens to broadcast when num_models == 1: every multi-model
+            # Newton fit raised "operands could not be broadcast together with
+            # shapes (data_dim, num_models) (num_models, 1)". Same as the torch
+            # backend's ``dgm.unsqueeze(0)`` (torch_impl/core.py:1323).
+            dgm = updates["dgm"][None, :]
+            self.sigma2 = updates["dsigma2"] / dgm
+            self.lambda_ = updates["dlambda"] / dgm
+            self.kappa = updates["dkappa"] / dgm
 
         # Per-model direction: Newton H if the model is positive definite,
         # otherwise natural gradient. Matching Fortran (amica17.f90:1814-1837),
@@ -1756,9 +1799,26 @@ class AMICA:
                     and itf >= self.share_start
                     and (itf - self.share_start) % self.share_int == 0
                 ):
+                    # Sensor-space maps (issue #258): pinv(sphere) @ A, matching
+                    # AMICATorchNG._identify_shared_comps so both backends make
+                    # the same merge decision from the same fitted state.
+                    assert self.comp_list is not None
+                    unique_before = int(np.unique(self.comp_list).size)
                     self.comp_list, self.comp_used = identify_shared_components(
-                        self.A, self.W, self.comp_list, self.comp_thresh
+                        self._pinv_sphere() @ self.A, self.comp_list, self.comp_thresh
                     )
+                    unique_after = int(np.unique(self.comp_list).size)
+                    # identify_shared_components is stateless, so the merge log
+                    # (matching AMICATorchNG's) is emitted here from the
+                    # before/after unique-component count instead.
+                    if unique_after < unique_before:
+                        self.logger.info(
+                            "Component sharing (iter %d): %d merge(s), %d unique "
+                            "components.",
+                            self.iter,
+                            unique_before - unique_after,
+                            unique_after,
+                        )
                     self._update_unmixing_matrices()
 
                 # Write intermediate results/history if requested, on Fortran's

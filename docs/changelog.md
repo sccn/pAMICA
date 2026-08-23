@@ -5,6 +5,97 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **The MLX backend now supports all five source-density families** (issue
+  #265, epic #260 Phase 4, porting the PyTorch backend's issue #26).
+  `AMICAMLXNG` takes `pdftype`/`kurt_start`/`num_kurt`/`kurt_int` with
+  `AMICATorchNG`'s names, defaults and semantics: the fixed families (2
+  Gaussian, 3 logistic, 4 sub-Gaussian cosh+, 1 super-Gaussian cosh-) via a
+  per-source `pdtype` dispatch in `_score`/`_log_pdf`, and the `pdftype=1`
+  extended-Infomax adaptive switcher between codes 1/4 by kurtosis sign on the
+  usual schedule, plus a new `get_pdftype()` accessor. `pdftype=0` (the
+  default) is byte-for-byte the pre-#265 implementation: the `_pdtype_h`
+  `None` fast path adds zero graph nodes, verified by an epic-tip-vs-new
+  before/after fit comparison (bit-identical `A`/`ll_history`, single- and
+  multi-model). The fixed families' `z0`/`fp` match the literal
+  `amica15.f90` forms through MLX's float32 evaluation to 1e-6
+  (`rtol=atol`), and a matched 100-iteration fit lands on the float64
+  PyTorch likelihood to within ~1e-7 for every family (four orders inside
+  the 0.05 gate). `rho` is frozen for every non-GG family
+  (`self.dorho = pdftype == 0`), which also skips the per-iteration
+  lgamma-table refresh here and the `drho_n` accumulation, which
+  `AMICATorchNG` still pays unconditionally in its `_get_block_updates` for
+  a frozen `rho` (its digamma pull is already gated behind the same
+  `self.dorho` flag, so that part is not a divergence -- a deliberate
+  MLX-only WORK divergence, not a numeric one). The
+  switcher accumulates its kurtosis moments in numpy float64 on the host
+  (an MLX-motivated mechanism difference, not a decision difference) and
+  has no bit-exact oracle -- the reference declares `do_choose_pdfs` but
+  never accumulates the moments that would drive it -- so it is
+  behavior-validated on real EEG, as ADR 0002 already scoped for the
+  PyTorch backend. `share_comps` does not synchronize `pdtype` across a
+  merged pair, documented on `shared_components()`. Corrected an inaccurate
+  cell in `docs/guides/amica-differences.md`'s backend table along the way:
+  the legacy NumPy backend's fit path (`_compute_log_pdf`) has no `pdtype`
+  parameter and only ever implemented the generalized-Gaussian family, not
+  "all five" as the table previously (incorrectly) claimed. Evidence:
+  `.context/issue-265/pdf_family_findings.md`.
+- **The MLX backend now supports Newton** (issue #264). `AMICAMLXNG` takes
+  `do_newton`/`newt_start`/`newtrate`/`newt_ramp` with `AMICATorchNG`'s names,
+  defaults and semantics: the same curvature accumulators, the same
+  per-source-pair 2x2 solve behind the same unguarded `prod > 1`
+  positive-definiteness test, the same learning-rate ramp to `newtrate` (and to
+  `lrate_cap` on a fallback), the same `maxdecs` ratchets, and the same
+  `n_newton_fallbacks` counter. It runs entirely in float32, which was
+  pre-registered as a go/no-go rather than assumed: on the bundled sample the
+  finalized curvature matches a float64 PyTorch twin to 4e-7 relative, one
+  warmed Newton M-step moves `A` to within 2.4e-7 of the twin's, a matched
+  100-iteration fit reaches -3.41149 against float64's -3.41149, and the
+  positive-definiteness guard never comes within 1.9 of its boundary across six
+  full-data fits (zero fallbacks, monotone likelihood). Evidence and the gate
+  script: `.context/issue-264/`. `do_newton` is off by default and every
+  accumulator it needs is gated on it, so natural-gradient fits — including
+  multi-model and `share_comps` ones — are bit-identical to before.
+- **Multi-model Newton no longer crashes on the NumPy backend** (issue #267).
+  `numpy_impl` finalized the curvature by dividing its `(data_dim, num_models)`
+  accumulators by `dgm[:, None]`, a `(num_models, 1)` model mass that broadcasts
+  only for one model, so every multi-model Newton fit raised `ValueError:
+  operands could not be broadcast together` on the first iteration Newton was
+  active. The issue reported it from a `share_comps` collapse, but it needed no
+  sharing at all. Now `dgm[None, :]`, matching the PyTorch backend's
+  `dgm.unsqueeze(0)`. Single-model fits are unaffected.
+- **The MLX backend now supports component sharing** (issue #263). `AMICAMLXNG`
+  takes `share_comps`/`share_start`/`share_iter`/`comp_thresh` with
+  `AMICATorchNG`'s names, defaults and validation, runs the same merge schedule
+  and 6-iteration post-merge A-freeze, masks the mixture updates and the
+  gradient norm by `comp_used`, and exposes `comp_used` and
+  `shared_components()`. The merge decision is not reimplemented: it calls the
+  NumPy `identify_shared_components` kernel on host float64 `pinv(sphere) @ A`,
+  the metric the PyTorch and NumPy backends already share, so all three decide
+  identically from the same fitted state. Sharing is off by default and inert
+  for `n_models=1`; with it off, every masking and freezing step added here is a
+  no-op, so a fit is bit-identical to the same fit with sharing enabled but
+  never scheduled (see the `gm` entry below for the one float32-ULP shift
+  multi-model fits see relative to the previous release).
+- **The MLX multi-model A-update now weights with the previous iteration's
+  `gm`** (issue #263; issue #219 raised the same ordering question for
+  `numpy_impl`'s `ndtmpsum` and flagged the array backends as follow-up, since
+  fixed in PyTorch and now here). Fortran builds `dAk` in the accumulation pass,
+  before `update_params` reassigns `gm` (amica15.f90:1749-1761, :1788); MLX used
+  the just-updated `gm`. The weights cancel analytically for a disjoint
+  `comp_list`, so single-model fits stay byte-for-byte identical and default
+  multi-model fits are unaffected except at float32-ULP scale (the two `gm`
+  snapshots genuinely differ, so the cancelling division rounds differently;
+  measured at most 2.98e-8 in `dAk` on the bundled sample). A fit that shares
+  components moves its shared columns differently (by ~1e-2 in `A`) and now
+  matches the PyTorch backend to float32 precision.
+- **NumPy `share_comps` now measures similarity on de-sphered sensor-space
+  maps, matching the PyTorch backend and the Fortran reference** (issue #258).
+  `identify_shared_components` used to compare mixing columns directly in the
+  sphered space; it now takes `pinv(sphere) @ A`, the same `Spinv` back-map
+  `AMICATorchNG` and `amica15.f90` use (:1916, :568-578), so both backends
+  reach the identical merge decision from the same fitted state. Borderline
+  merge decisions near `comp_thresh` can change relative to a pre-#258 NumPy
+  fit, even on a full-rank sphere.
 - **The MLX backend now has convergence stops** (issue #248). `AMICAMLXNG`
   implemented neither, so an Apple-GPU fit always ran to `max_iter`; it now
   carries `use_min_dll`/`min_dll`/`maxincs`, `use_grad_norm`/`min_nd` and the
