@@ -44,6 +44,11 @@ def test_multimodel_newton_fit_finalizes_curvature(num_models):
 
     ``num_models=1`` is the case the old broadcast happened to survive, so it
     pins that the fix did not disturb it; 2 and 3 are the ones that raised.
+    This is the numpy twin of ``torch_tests/test_ng_backend.py::
+    test_newton_three_model_finite_and_shaped`` and
+    ``mlx_tests/test_mlx_newton.py::test_three_model_newton_mstep_and_fit_are_finite``
+    (issue #272): a non-degenerate stop and finite non-curvature parameters
+    are asserted too, matching the depth of those two.
     """
     model = AMICA(
         num_models=num_models,
@@ -58,6 +63,8 @@ def test_multimodel_newton_fit_finalizes_curvature(num_models):
     )
     model.fit(_real_data())
 
+    assert model.converged is True, f"degenerate fit: {model.stop_reason}"
+    assert len(model.ll) == 4, "the fit did not complete all iterations"
     assert model.sigma2 is not None, "Newton was never active; the test is vacuous"
     assert model.lambda_ is not None and model.kappa is not None
     for name, arr in (
