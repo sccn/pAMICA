@@ -171,6 +171,38 @@ bit-identical `A`/`W` on a short fit with and without it) and adds negligible
 per-iteration overhead (~30 microseconds per model, measured on the bundled
 sample).
 
+Non-finite entries need separate handling, because they cannot be fed to
+`np.linalg.cond` directly (its SVD raises `LinAlgError` on NaN/inf, a
+different failure than the one this guard targets). A matrix that is
+non-finite in EVERY entry — the observed shape of a zero-responsibility
+("dead") model's corruption, where dividing by `dgm==0` propagates NaN/inf
+through the whole per-model direction matrix — carries no structural signal
+to check, so it is left to flow through to `inv`/`slogdet` unguarded exactly
+as before the guard existed; `inv` returns NaN rather than aborting, caught
+downstream by `fit`'s existing `nan_params` guard on that same iteration.
+Any OTHER non-finite pattern first has its non-finite entries replaced with
+`0.0` (a neutral fill, not an extreme sentinel — an extreme fill makes any
+stray non-finite entry read as infinitely ill-conditioned by pure scale
+mismatch, unable to distinguish a merely-corrupted-but-fine matrix from a
+genuinely singular one) before the condition check runs. This closes a gap a
+review pass found in the guard's first version: a matrix that is BOTH
+non-finite in one unrelated entry AND structurally singular elsewhere (an
+exact duplicate column plus a stray NaN) used to skip the check entirely and
+reach the same uncatchable abort the guard exists to prevent.
+
+**Containment is not complete**, and this is by design rather than an
+oversight: no scalar condition-number threshold, on the sanitized matrix or
+otherwise, can guarantee catching every conceivable abort-capable matrix. The
+empirically observed LU-abort onset (cond~9e8 to beyond cond~5e10,
+matrix-structure-dependent, not a clean function of cond alone) sits below
+the 1e12 threshold, so a believed-rare residual window remains between "the
+guard's check passes" and "this specific matrix would actually have aborted".
+Running `inv` itself in a disposable per-call subprocess would close that
+window completely, but was rejected as disproportionate: a subprocess spawn
+on the per-iteration hot path is a far larger and less predictable cost than
+one host-side `np.linalg.cond` call, for a defect this guard already makes
+rare in practice.
+
 The convergence stops used to be the exception — MLX implemented neither, so a
 fit there always spent the whole iteration budget. Issue #248 closed that gap:
 `pamica/mlx_impl/core.py` now carries `use_min_dll`/`min_dll`/`maxincs` and

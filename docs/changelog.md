@@ -37,11 +37,29 @@ Release notes are also published on the
   (~1e15-1e17). Read-only: verified bit-identical `A`/`W` on a short fit
   with and without the guard, and negligible added cost (~30 microseconds
   per model per iteration, measured on the bundled sample). The upstream MLX
-  behavior is also being reported separately. Tests:
+  behavior is also being reported separately.
+  Non-finite entries get their own handling: a matrix that is non-finite in
+  EVERY entry (the observed shape of a dead, zero-responsibility model's
+  corruption) carries no structural signal to check and is left to flow
+  through to `inv`/`nan_params` exactly as before; any other non-finite
+  pattern has its non-finite entries 0-filled (a neutral, non-scale-distorting
+  value) before the condition check runs. This closes a gap a review pass
+  found in the first version of the guard: a matrix that was BOTH non-finite
+  in one entry AND structurally singular elsewhere (an exact duplicate column
+  plus one stray NaN) used to skip the check entirely on any non-finite entry
+  and still reach the uncatchable abort. Containment is intentionally not
+  total — no scalar condition-number threshold can guarantee catching every
+  abort-capable matrix, since the observed LU-abort onset (cond~9e8 to beyond
+  cond~5e10) sits below the 1e12 threshold — and both docs and code comments
+  now say so explicitly, alongside noting (and rejecting, as disproportionate
+  to a now-rare defect) a fully complete alternative: running `inv` itself in
+  a disposable per-call subprocess. Tests:
   `pamica/tests/mlx_tests/test_mlx_inv_guard.py` (singular and near-singular
   `A` on a real fitted model raise `RuntimeError` rather than aborting, the
-  guard is bit-identical to an unguarded `inv`/`slogdet` call, and a
-  standard fit is unaffected).
+  duplicate-column-plus-stray-NaN combination raises rather than aborting, a
+  purely non-finite dead-model `A` flows through to `nan_params` without
+  raising or aborting, the guard is bit-identical to an unguarded
+  `inv`/`slogdet` call, and a standard fit is unaffected).
 - **Pinned `mir_history_` against the `keep_best` rollback and against
   save/load** (issue #161, follow-up from #137/#160). Both claims already
   held before this PR and were already tested: `test_mir_history_survives_keep_best_restore`
