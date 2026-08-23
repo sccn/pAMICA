@@ -100,76 +100,97 @@ def determine_block_size(data, min_size, max_size, step_size, num_threads=1):
     return block_sizes[np.argmin(block_times)]
 
 
-def identify_shared_components(A, W, comp_list, comp_thresh=0.99):
+def identify_shared_components(atil, comp_list, comp_thresh=0.99):
     """
-    Identify components that are shared between different models based on correlation.
+    Identify components that are shared between different models, in sensor space.
 
-    This function analyzes the mixing matrix columns to find components that are
-    highly correlated between different models, suggesting they represent the same
-    underlying source. When shared components are identified, they are merged to
-    maintain a more parsimonious representation.
+    Two components (model ``h`` source ``i`` and model ``hh`` source ``ii``,
+    ``h < hh``) are identified when the angle between their mixing columns,
+    measured in the original (de-sphered) data space, is below the
+    ``comp_thresh`` cutoff::
+
+        t0 = |a . b| / (||a|| ||b||),   a = atil[:, ci], b = atil[:, cj]
+
+    ``atil`` must already be the de-sphered (sensor-space) mixing columns --
+    callers pass ``pinv(sphere) @ A``, the Fortran ``Spinv`` back-map
+    (amica15.f90:568-578) applied to the mixing matrix, mirroring
+    ``identify_shared_comps`` (amica15.f90:1916). This is a cross-backend
+    agreement contract (.rules/backend_parity.md): ``AMICATorchNG._identify_shared_comps``
+    (torch_impl/core.py) computes the identical ``pinv(sphere) @ A`` metric,
+    so both backends make the same merge decision from the same fitted state
+    (see ``tests/test_numpy_share_comps.py::test_...matches_the_torch_backend``).
+    Before issue #258 this function compared raw columns of the *sphered* ``A``
+    directly, which could disagree with the PyTorch backend under rank
+    reduction or PCA whitening, where the sphere is not orthonormal.
+
+    On a match, ``cj`` is folded into ``ci``: every ``comp_list`` entry equal
+    to ``cj`` is reassigned to ``ci``, so the two now share one mixing column
+    and one density.
+
+    Greedy and order-dependent, matching the reference's quadruple loop.
+    Skips a pair already merged, or one whose two columns coexist in some
+    single model (a model cannot share a component with itself).
 
     Parameters
     ----------
-    A : ndarray
-        Mixing matrix
-    W : ndarray
-        Unmixing matrices
-    comp_list : ndarray
-        Component assignments
+    atil : ndarray of shape (data_dim_in, num_comps)
+        De-sphered (sensor-space) mixing columns, i.e. ``pinv(sphere) @ A``.
+    comp_list : ndarray of shape (data_dim, num_models)
+        Component assignments. Not mutated -- a copy is merged and returned.
     comp_thresh : float
-        Correlation threshold for identifying shared components
+        Cosine-similarity threshold for identifying shared components.
 
     Returns
     -------
     comp_list : ndarray
-        Updated component assignments
+        Updated component assignments (a new array; the input is untouched).
     comp_used : ndarray
-        Boolean mask of used components
+        Boolean mask of used components.
     """
-    num_models = W.shape[2]
-    num_comps = A.shape[1]
-    data_dim = A.shape[0]
+    cl = comp_list.copy()
+    nw, num_models = cl.shape
+    norms = np.linalg.norm(atil, axis=0)
+    tiny = np.finfo(atil.dtype).tiny
 
-    # Compare components between models
-    for h1 in range(num_models):
-        for h2 in range(h1 + 1, num_models):
-            for i1 in range(data_dim):
-                for i2 in range(data_dim):
-                    k1 = comp_list[i1, h1]
-                    k2 = comp_list[i2, h2]
-
-                    # Skip if components are already identified
-                    if k1 == k2:
+    for h in range(num_models):
+        for hh in range(h + 1, num_models):
+            for i in range(nw):
+                for ii in range(nw):
+                    ci, cj = int(cl[i, h]), int(cl[ii, hh])
+                    if ci == cj:
                         continue
 
-                    # Compute correlation
-                    corr = np.abs(np.dot(A[:, k1], A[:, k2])) / (
-                        np.sqrt(np.sum(A[:, k1] ** 2) * np.sum(A[:, k2] ** 2))
+                    t0 = np.abs(atil[:, ci] @ atil[:, cj]) / (
+                        norms[ci] * norms[cj] + tiny
                     )
+                    # NaN t0 (e.g. a zero-norm column) must NOT merge:
+                    # `NaN >= thresh` is False either way, but guard finiteness
+                    # explicitly so a future rewrite of the comparison direction
+                    # cannot silently start merging on NaN.
+                    if not np.isfinite(t0) or t0 < comp_thresh:
+                        continue
 
-                    if corr >= comp_thresh:
-                        # Check if components appear together in any model
-                        shared = False
-                        for h in range(num_models):
-                            if k1 in comp_list[:, h] and k2 in comp_list[:, h]:
-                                shared = True
-                                break
+                    # A model cannot share a component with itself: skip if any
+                    # single model already uses both columns.
+                    if any(
+                        (cl[:, k] == ci).any() and (cl[:, k] == cj).any()
+                        for k in range(num_models)
+                    ):
+                        continue
 
-                        if not shared:
-                            # Merge components
-                            comp_list[comp_list == k2] = k1
+                    cl[cl == cj] = ci  # fold cj into ci everywhere
 
     # Derive comp_used from the final comp_list rather than tracking it during
     # the merge loop. A fresh np.ones() per call forgot every column merged away
-    # in an earlier call: once comp_list is fully merged the k1 == k2 guard skips
+    # in an earlier call: once comp_list is fully merged the ci == cj guard skips
     # every pair, and the mask came back all-True while half the columns were
     # dead (issue #240). Matches AMICATorchNG.comp_used, which is a property
     # derived the same way.
+    num_comps = atil.shape[1]
     comp_used = np.zeros(num_comps, dtype=bool)
-    comp_used[np.unique(comp_list)] = True
+    comp_used[np.unique(cl)] = True
 
-    return comp_list, comp_used
+    return cl, comp_used
 
 
 def get_unmixing_matrices(A, comp_list):
