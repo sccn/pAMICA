@@ -324,6 +324,16 @@ class AMICA:
         # Initialize optimization state
         self.iter = 0
         self.ll = []  # Log likelihood history
+        # ``self.ll[-1]`` is this backend's equivalent of AMICATorchNG's
+        # ``final_ll_``: the LL of the returned model. Under ``share_comps``,
+        # if a merge fires on the LAST fit iteration, ``self.A``/``comp_list``
+        # are already post-merge but ``self.ll[-1]`` still reports the
+        # pre-merge log-likelihood -- the merge runs after that iteration's LL
+        # is stored, so its effect on the LL only shows up in the next
+        # iteration's E-step, which never runs. This matches the reference
+        # ordering (Fortran identify_shared_comps runs after the iteration's
+        # LL accumulation, amica15.f90:1856-1858), so it is documented behavior,
+        # not a bug (issue #269).
         self.nd = []  # Gradient norm history
 
         # Initialize Newton optimization parameters
@@ -475,6 +485,15 @@ class AMICA:
         -------
         self : AMICA
             The fitted model.
+
+        Notes
+        -----
+        Under ``share_comps``, if a merge fires on the LAST iteration, the
+        returned ``A``/``comp_list`` are already post-merge but ``self.ll[-1]``
+        still reports the pre-merge log-likelihood -- the merge's effect on
+        the LL only shows up in the next E-step, which never runs. This
+        matches the reference ordering (issue #269); see the ``self.ll``
+        attribute's comment for detail.
         """
         if data is None:
             if not self._config_files:
@@ -1794,6 +1813,12 @@ class AMICA:
                 # iteration (itf, above), the same anchor AMICATorchNG uses, so
                 # an identical (share_start, share_int) fires on the same
                 # iterations in both backends and lines up with _a_frozen.
+                #
+                # This runs AFTER self.ll.append(updates["ll"]) inside
+                # _update_parameters above, so a merge on the final iteration
+                # lands in self.A/comp_list but not in the ll value already
+                # stored -- see the final_ll_ note on self.ll's init (issue
+                # #269).
                 if (
                     self.share_comps
                     and itf >= self.share_start

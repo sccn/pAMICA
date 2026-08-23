@@ -263,7 +263,10 @@ class AMICAMLXNG:
         so default fits are unchanged. There is no bit-exact oracle -- the
         reference's similarity metric is never initialized (like the dead
         ``do_choose_pdfs``, #26) -- so this implements the intended algorithm,
-        validated by real-data behavior and against the PyTorch backend.
+        validated by real-data behavior and against the PyTorch backend. A
+        merge that fires on the LAST fit iteration is reflected in the
+        returned model but trails in ``final_ll_``; see that attribute's
+        comment (issue #269).
     ``share_start`` (100) / ``share_iter`` (100)
         Sharing schedule: first iteration to attempt merges and the interval
         between attempts. The A-update is held for the first 6 iterations of
@@ -504,6 +507,17 @@ class AMICAMLXNG:
 
         self.iteration = 0
         self.ll_history: list[float] = []
+        # Log-likelihood of the returned parameters, set by fit() to
+        # ll_history[-1] (there is no keep_best restore on this backend, see
+        # the module docstring). Under share_comps, if a merge fires on the
+        # LAST fit iteration, the returned A/W/comp_list are already
+        # post-merge but final_ll_ still reports the pre-merge
+        # log-likelihood -- the merge runs after that iteration's LL is
+        # recorded, so its effect on the LL only shows up in the next
+        # iteration's E-step, which never runs. This matches the reference
+        # ordering (Fortran identify_shared_comps runs after the iteration's
+        # LL accumulation, amica15.f90:1856-1858) and AMICATorchNG's ordering, so
+        # it is documented behavior, not a bug (issue #269).
         self.final_ll_: Optional[float] = None
         self.stop_reason: Optional[str] = None
 
@@ -1525,7 +1539,13 @@ class AMICAMLXNG:
     def fit(
         self, X: np.ndarray, max_iter: int = 100, verbose: bool = True
     ) -> "AMICAMLXNG":
-        """Fit the model. ``X`` is ``(n_channels, n_samples)``."""
+        """Fit the model. ``X`` is ``(n_channels, n_samples)``.
+
+        Under ``share_comps``, if a merge fires on the LAST iteration, the
+        returned ``A``/``W``/``comp_list`` are already post-merge but
+        ``final_ll_`` still reports the pre-merge log-likelihood; see that
+        attribute's comment (issue #269).
+        """
         if X.ndim != 2:
             raise ValueError(f"X must be 2D (n_channels, n_samples), got {X.shape}")
         if X.shape[0] != self.n_channels:
@@ -1682,6 +1702,11 @@ class AMICAMLXNG:
             # the merged comp_list -- otherwise the next E-step would read a
             # stale W (pre-merge comp_list) while indexing the densities by the
             # merged comp_list. No-op when share_comps is off or n_models == 1.
+            #
+            # This runs AFTER ``ll`` (this iteration's LL) was captured above,
+            # so a merge on the final iteration lands in the returned
+            # A/W/comp_list but not in the ``ll_history``/``final_ll_`` value
+            # appended just below -- see final_ll_'s comment (issue #269).
             if self.share_comps:
                 itf = it + 1
                 if (

@@ -432,7 +432,10 @@ class AMICATorchNG:
         peak's parameters. A monotone single-model run (issue #24 parity) is a
         bit-exact no-op. Automatically inactive under ``do_reject`` (the
         good-sample set, and thus the LL normalization, changes across
-        iterations, making per-iteration LLs incomparable).
+        iterations, making per-iteration LLs incomparable) and under
+        ``share_comps`` (a merge changes the parameter count, so pre- and
+        post-merge LLs are not comparable and reverting to an earlier snapshot
+        would silently undo the merge; issue #269).
     pdftype : int, default=0
         Source-density family (issue #26), matching Fortran ``amica15.f90``'s
         ``pdtype`` codes: 0 generalized Gaussian (default; rho adapts), 2
@@ -462,7 +465,9 @@ class AMICATorchNG:
         single-model (#24) and default multi-model (#27) results are unchanged.
         There is no bit-exact oracle -- the reference's similarity metric is
         never initialized (like ``do_choose_pdfs``, #26) -- so this implements
-        the intended algorithm, validated by real-data behavior.
+        the intended algorithm, validated by real-data behavior. A merge that
+        fires on the LAST fit iteration is reflected in the returned model but
+        trails in ``final_ll_``; see that attribute's comment (issue #269).
     share_start, share_iter : int
         Sharing schedule: first iteration to attempt merges and the interval
         between attempts (Fortran ``share_start``/``share_iter``). The A-update
@@ -735,6 +740,17 @@ class AMICATorchNG:
         # (which can include a late overshoot), while ``final_ll_`` is the LL of
         # the iterate fit() actually kept -- use this, not ``ll_history[-1]``, as
         # the model's fitted log-likelihood. Set by fit().
+        #
+        # Under share_comps, a merge that fires on the LAST fit iteration is
+        # reflected in the returned A/W/comp_list but NOT in final_ll_: the
+        # merge runs after that iteration's LL has already been computed and
+        # recorded (Fortran identify_shared_comps runs after the iteration's
+        # LL accumulation, amica15.f90:1856-1858 vs the earlier LL accumulation), so
+        # the merge's effect on the likelihood only shows up in the next
+        # iteration's E-step -- which never runs. keep_best is disabled under
+        # share_comps (see fit()), so this is not a keep_best artifact; it
+        # holds even with keep_best=False. Fortran-faithful, so this is
+        # documented behavior, not a bug (issue #269).
         self.final_ll_: Optional[float] = None
         # Mutual Information Reduction (MIR) waypoint trajectory (issue #137),
         # populated by fit() when
@@ -1907,6 +1923,15 @@ class AMICATorchNG:
         Returns
         -------
         self : AMICATorchNG
+
+        Notes
+        -----
+        Under ``share_comps``, if a merge fires on the LAST iteration, the
+        returned ``A``/``W``/``comp_list`` are already post-merge but
+        ``final_ll_`` still reports the pre-merge log-likelihood -- the merge's
+        effect on the LL only shows up in the next E-step, which never runs.
+        This matches the reference ordering (issue #269); see ``final_ll_``'s
+        comment for detail.
         """
         if X.ndim != 2:
             raise ValueError(
@@ -2049,6 +2074,11 @@ class AMICATorchNG:
             # merged comp_list -- otherwise the next E-step would read a stale W
             # (pre-merge comp_list) while indexing the densities by the merged
             # comp_list. No-op when share_comps is off or n_models == 1.
+            #
+            # This runs AFTER ``ll`` (this iteration's LL) was captured above,
+            # so a merge on the final iteration lands in the returned
+            # A/W/comp_list but not in the ``ll_history``/``final_ll_`` value
+            # appended just below -- see final_ll_'s comment (issue #269).
             if self.share_comps:
                 itf = it + 1
                 if (
