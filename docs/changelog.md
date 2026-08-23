@@ -21,10 +21,12 @@ Release notes are also published on the
   (`rtol=atol`), and a matched 100-iteration fit lands on the float64
   PyTorch likelihood to within ~1e-7 for every family (four orders inside
   the 0.05 gate). `rho` is frozen for every non-GG family
-  (`self.dorho = pdftype == 0`), which also skips the `drho_n`
-  accumulation, the per-iteration lgamma-table refresh, and the digamma
-  pull -- dead work AMICATorchNG still pays every iteration for a frozen
-  `rho` (a deliberate MLX-only WORK divergence, not a numeric one). The
+  (`self.dorho = pdftype == 0`), which also skips the per-iteration
+  lgamma-table refresh here and the `drho_n` accumulation, which
+  `AMICATorchNG` still pays unconditionally in its `_get_block_updates` for
+  a frozen `rho` (its digamma pull is already gated behind the same
+  `self.dorho` flag, so that part is not a divergence -- a deliberate
+  MLX-only WORK divergence, not a numeric one). The
   switcher accumulates its kurtosis moments in numpy float64 on the host
   (an MLX-motivated mechanism difference, not a decision difference) and
   has no bit-exact oracle -- the reference declares `do_choose_pdfs` but

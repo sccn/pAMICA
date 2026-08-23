@@ -47,15 +47,22 @@ logistic, 4 sub-Gaussian cosh+, 1 super-Gaussian cosh-) via nested ``mx.where``;
 runs the pre-#265 GG-only body unchanged, so default fits stay bit-identical.
 The GG shape parameter ``rho`` is frozen for every non-GG family
 (``self.dorho = pdftype == 0``, Fortran ``dorho=.false.``), which also gates
-the ``drho_n`` accumulation, the per-iteration lgamma-table refresh and the
-digamma pull -- dead work AMICATorchNG still pays every iteration (it always
-accumulates and discards), so this is a deliberate MLX-only WORK divergence,
-never a numeric one. ``pdftype=1`` enables the extended-Infomax adaptive
-switcher (``_choose_pdfs``); it accumulates its kurtosis moments in numpy
-float64 on the host (a knife-edge sign decision, done off the lossy float32
-GPU graph) and has no bit-exact oracle -- Fortran declares the switch but never
-runs it (``m2sum``/``m4sum`` allocated, never accumulated) -- so it is
-behavior-validated on real EEG, exactly as in the PyTorch backend (ADR 0002).
+the ``drho_n`` accumulation and the per-iteration lgamma-table refresh here.
+AMICATorchNG already gates its digamma pull behind the same ``self.dorho``
+flag (core.py:1483-1489), so that is not a divergence; its genuine dead work
+for a non-GG fit is the ``drho_n`` accumulation, which it computes
+unconditionally in ``_get_block_updates`` (no ``dorho`` gate there), and the
+inline ``torch.lgamma(1+1/rho)`` term ``_log_pdf_only`` recomputes on every
+call to build the (dead, for non-GG) GG-fallthrough branch. This backend
+skips both -- ``drho_n`` via the gate above, and the lgamma term by reusing a
+cached ``_lgamma_table`` refreshed only when ``dorho`` -- so this is a
+deliberate MLX-only WORK divergence, never a numeric one. ``pdftype=1``
+enables the extended-Infomax adaptive switcher (``_choose_pdfs``); it
+accumulates its kurtosis moments in numpy float64 on the host (a knife-edge
+sign decision, done off the lossy float32 GPU graph) and has no bit-exact
+oracle -- Fortran declares the switch but never runs it (``m2sum``/``m4sum``
+allocated, never accumulated) -- so it is behavior-validated on real EEG,
+exactly as in the PyTorch backend (ADR 0002).
 
 Convergence stops (issue #248) are the full AMICATorchNG/Fortran set:
 ``use_min_dll``/``min_dll``/``maxincs``, ``use_grad_norm``/``min_nd``, and the
@@ -118,9 +125,11 @@ _CPU = mx.cpu
 def _logcosh(x: mx.array) -> mx.array:
     """Numerically stable ``log cosh(x) = |x| - log2 + log1p(exp(-2|x|))``
     (AMICATorchNG ``_logcosh``, core.py:113-116). Naive ``mx.log(mx.cosh(x))``
-    overflows to inf in float32 at ``|x| >= 90`` (``cosh`` itself overflows
-    first) -- reachable, since ``beta`` clips at ``invsigmax=1000`` -- while this
-    form is exact to 1e-6 out to at least 1e3 (policy 3; no ``mlx.nn`` import)."""
+    overflows to inf in float32 by ``|x| == 90`` (measured crossover: finite at
+    89.0, inf at 89.5; ``cosh`` itself overflows first) -- reachable, since
+    ``beta`` clips at ``invsigmax=1000`` -- while this form stays within float32
+    precision (~1e-4 absolute; measured 2.9e-5 at ``x=1000``) out to at least
+    1e3 (policy 3; no ``mlx.nn`` import)."""
     ax = mx.abs(x)
     return ax - _LOG2 + mx.log1p(mx.exp(-2.0 * ax))
 
@@ -311,7 +320,11 @@ class AMICAMLXNG:
         single-component families 1/4 (and the adaptive mode) require
         ``n_mix=1``. ``pdftype=0`` stays byte-for-byte the pre-#265
         implementation (the ``_pdtype_h`` ``None`` fast path, policy 2 --
-        verified by a before/after bit-identity check, see the PR).
+        verified by a before/after bit-identity check, see
+        ``.context/issue-265/pdf_family_findings.md``). ``rho`` does not
+        describe the fitted density for codes 1-4: it stays frozen at ``rho0``
+        and is only ever meaningful for the generalized-Gaussian family
+        (code 0).
     ``kurt_start`` (3) / ``num_kurt`` (5) / ``kurt_int`` (1)
         Adaptive-switch schedule (only used when ``pdftype=1``): first
         iteration to re-estimate kurtosis, number of switch passes, and the
@@ -1642,11 +1655,16 @@ class AMICAMLXNG:
             # the new per-source families take effect from the next E-step.
             # itf is the Fortran-style 1-indexed iteration. num_kurt=0 disables
             # switching (the family stays at its pdftype=1 super-Gaussian
-            # init). Runs BEFORE the sharing hook below, matching torch's
-            # ordering -- component sharing does not synchronize pdtype across
-            # merged columns (see shared_components()), so running the switch
-            # first means a just-merged pair still gets independently
-            # re-evaluated kurtosis this same iteration.
+            # init). Placed BEFORE the sharing hook below, matching
+            # AMICATorchNG's source order -- component sharing does not
+            # synchronize pdtype across merged columns (see
+            # shared_components()), so running the switch first means a
+            # just-merged pair still gets independently re-evaluated kurtosis
+            # this same iteration. This ordering is documentation, not a
+            # regression-tested contract: no test here pins the hooks' relative
+            # order (both are no-ops for most configurations, and share_comps
+            # x pdftype=1 has no bit-exact oracle either way to pin against), so
+            # a future accidental swap would not be caught by the suite.
             if self.do_choose_pdfs and self.n_kurt_done < self.num_kurt:
                 itf = it + 1
                 if (

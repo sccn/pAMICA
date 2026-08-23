@@ -16,10 +16,13 @@ extended-Infomax adaptive switcher from `AMICATorchNG` (issue #26) into
 - Constructor validation ported verbatim from `AMICATorchNG` (`pdftype in
   (0,1,2,3,4)`, codes 1/4 require `n_mix=1`, the `kurt_start`/`num_kurt`/
   `kurt_int` schedule validated only under `pdftype=1`).
-- `self.dorho = pdftype == 0` gates the `drho_n` accumulator, the
-  per-iteration lgamma-table refresh, and the digamma pull -- all dead work
-  for a frozen non-GG `rho` that AMICATorchNG still pays every iteration (a
-  deliberate MLX-only WORK divergence, not a numeric one).
+- `self.dorho = pdftype == 0` gates the `drho_n` accumulator and the
+  per-iteration lgamma-table refresh here. `AMICATorchNG` already gates its
+  digamma pull behind the same `self.dorho` flag (core.py:1483-1489), so
+  that part is not a divergence; its genuine dead work for a frozen non-GG
+  `rho` is the `drho_n` accumulation, which it pays unconditionally every
+  iteration in `_get_block_updates` (a deliberate MLX-only WORK divergence,
+  not a numeric one).
 - `_choose_pdfs`/`_pdtype_from_kurtosis`: the switcher's second-moment
   accumulation runs in numpy float64 on the host (pulled from small per-block
   GPU partials), not on the MLX float32 graph -- an MLX-motivated mechanism

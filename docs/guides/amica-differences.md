@@ -197,10 +197,13 @@ float32 evaluation to 1e-6 (absolute, since code 4's `y - tanh(y)` cancels
 catastrophically near `y=0` in float32 — measured 100% relative error at
 `y=1e-4` — so the true parity claim is against the formula, not against a
 Taylor-stabilized substitute), and a matched-budget fit lands on the float64
-PyTorch likelihood to within 0.05 for every family. The `dorho`/`drho_n`/
-lgamma-table work AMICATorchNG always pays for a frozen non-GG `rho` is
-skipped here instead (a deliberate MLX-only WORK divergence, not a numeric
-one). Like `share_comps`'s merge metric, the switcher has no bit-exact oracle
+PyTorch likelihood to within 0.05 for every family. `self.dorho` (a flag, set
+to `pdftype == 0`) gates the `drho_n` accumulation and the per-iteration
+lgamma-table refresh here, skipping work AMICATorchNG always pays for a
+frozen non-GG `rho` (a deliberate MLX-only WORK divergence, not a numeric
+one) — its digamma pull is already gated behind the same flag, so that part
+is unchanged. Like `share_comps`'s merge metric, the switcher has no
+bit-exact oracle
 — the reference declares `do_choose_pdfs` (`pdftype=1`) but never accumulates
 the moments that would drive it — so it is behavior-validated on real EEG, and
 `share_comps` does NOT synchronize `pdtype` across a merged pair (see

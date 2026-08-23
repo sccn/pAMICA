@@ -43,7 +43,7 @@ single-component families 1/4 require `n_mix=1`. The ground-truth `amica15.f90`/
 - **Fortran-faithful `do_choose_pdfs` reconstructed from amica17:** rejected once amica15 was
   found to be the binary's source; amica17 only declares the arrays and the switch body is
   absent in both, so there is nothing faithful to reconstruct beyond the family densities.
-- **Reuse the NumPy `amica_pdf.py` family set (Laplace/Student-t/logistic/GMM):** rejected;
+- **Reuse the NumPy `numpy_impl/pdf.py` family set (Laplace/Student-t/logistic/GMM):** rejected;
   its numbering and formulas do not match `amica15.f90`, and it is used by no fit loop, so it
   is not an oracle. The issue's "Laplace/Student-t" phrasing traces to this unvalidated code.
 - **Mixture-only families (0/2/3), defer cosh 1/4:** rejected; the user chose the full scope
@@ -63,6 +63,6 @@ single-component families 1/4 require `n_mix=1`. The ground-truth `amica15.f90`/
   ```
   and defaults `pdftype=0; kurt_start=3; num_kurt=5; kurt_int=1;`. The super/sub-Gaussian
   scores `y +/- tanh(y)` (amica15 codes 1/4) are the classic extended-Infomax nonlinearities.
-- `pamica/torch_impl/amica_torch_ng.py`: `_log_pdf_and_deriv`, `_score`, `_choose_pdfs`.
+- `pamica/torch_impl/core.py`: `_log_pdf_and_deriv`, `_score`, `_choose_pdfs`.
 - `pamica/tests/torch_tests/test_ng_pdf_families.py` (formula parity + real-data + opt-in
   binary integration behind `AMICA_RUN_FORTRAN=1`).
