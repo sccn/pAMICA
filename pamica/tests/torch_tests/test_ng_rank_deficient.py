@@ -172,8 +172,9 @@ def test_rank_reduced_newton_fit_completes(rank_deficient: np.ndarray) -> None:
     assert m.stop_reason_ != "nan_ll"
     assert m.model_.n_channels == RANK
     assert m.model_.n_channels_in == NW
-    assert m.model_.A is not None
-    assert np.all(np.isfinite(m.model_.A.cpu().numpy()))
+    for name in ("A", "W", "mu", "alpha", "beta", "rho", "gm", "c"):
+        value = getattr(m.model_, name)
+        assert value is not None and np.all(np.isfinite(value.cpu().numpy())), name
     assert np.all(np.isfinite(m.get_unmixing_matrix()))
 
 
