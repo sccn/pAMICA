@@ -22,6 +22,29 @@ logger = logging.getLogger(__name__)
 # changes (rather than duplicating the literal).
 _NG_DEFAULT_DTYPE = inspect.signature(AMICATorchNG).parameters["dtype"].default
 
+# fit()'s own named parameters that a parameter-file dict can default.
+_FIT_NAMED_PARAMS = {"max_iter", "lrate", "do_mean", "do_sphere", "do_newton"}
+
+# AMICATorchNG constructor keywords eligible to be defaulted from a
+# from_params_file dict via **kwargs (issue #132 review item 2).
+# n_channels/n_models/n_mix/device are excluded because fit() always passes
+# those positionally in the AMICATorchNG(...) call below; lrate/do_mean/
+# do_sphere/do_newton are excluded because, despite also being AMICATorchNG
+# constructor parameters, fit() resolves and passes those as its own named
+# arguments (_FIT_NAMED_PARAMS) -- merging them into **kwargs too would raise
+# "got multiple values for keyword argument".
+_NG_CTOR_PARAMS = (
+    set(inspect.signature(AMICATorchNG).parameters)
+    - {"n_channels", "n_models", "n_mix", "device"}
+    - _FIT_NAMED_PARAMS
+)
+
+# Sentinel distinguishing "caller did not pass this fit() argument" from
+# "caller explicitly passed the same value as the hard default", so a
+# from_params_file default can be overridden by an explicit call-site value
+# without also being masked by fit()'s own hard-coded defaults.
+_UNSET = object()
+
 
 class AMICA:
     """
@@ -131,6 +154,11 @@ class AMICA:
         self.stop_reason_ = None
         self.converged_ = False
         self.mir_history_ = []
+        # Set by from_params_file (issue #132 review item 2): the full
+        # translated parameter-file dict, applied by fit() as per-call
+        # defaults (an explicitly passed fit()/AMICATorchNG kwarg always
+        # wins). None for an instance built directly via AMICA(...).
+        self._file_params: Optional[dict] = None
 
     def _select_device(self, ng_dtype) -> Union[str, torch.device]:
         """Resolve the compute device, applying the MPS/float64 fallback.
@@ -160,11 +188,11 @@ class AMICA:
     def fit(
         self,
         X: np.ndarray,
-        max_iter: int = 100,
-        lrate: float = 0.05,
-        do_mean: bool = True,
-        do_sphere: bool = True,
-        do_newton: bool = False,
+        max_iter=_UNSET,
+        lrate=_UNSET,
+        do_mean=_UNSET,
+        do_sphere=_UNSET,
+        do_newton=_UNSET,
         mir_step: int = 0,
         **kwargs,
     ) -> "AMICA":
@@ -206,6 +234,16 @@ class AMICA:
             to input channels. ``mineig`` is an absolute eigenvalue floor and so
             unit-dependent; pass ``mineig_rel`` for data far from unit scale.
 
+            When the instance was built via :meth:`from_params_file` (issue
+            #132), any of the parameters above -- named or in ``**kwargs`` --
+            left unset here falls back to that file's translated value instead
+            of the hard-coded default; an explicitly passed argument always
+            wins over the file. Settings the file carries that match neither a
+            named ``fit()`` parameter nor an :class:`AMICATorchNG` constructor
+            keyword (data-location metadata like ``files``/``outdir``/
+            ``data_dim``, or a setting with no pamica equivalent) are not
+            applied and are named in a single ``logger.warning``.
+
         Returns
         -------
         self : AMICA
@@ -216,6 +254,43 @@ class AMICA:
             raise ValueError(f"X must be 2D array, got shape {X.shape}")
 
         n_channels, n_samples = X.shape
+
+        # Apply from_params_file's translated dict as per-call defaults
+        # (issue #132 review item 2): an explicitly passed argument here
+        # always wins, whether named (max_iter/lrate/do_mean/do_sphere/
+        # do_newton, via the _UNSET sentinel) or in **kwargs (AMICATorchNG
+        # constructor keywords, via plain dict membership). Settings the file
+        # carries that apply to neither surface are named in one warning
+        # rather than silently discarded.
+        file_params = self._file_params or {}
+
+        def _file_default(explicit, name, hard_default):
+            if explicit is not _UNSET:
+                return explicit
+            return file_params.get(name, hard_default)
+
+        max_iter = _file_default(max_iter, "max_iter", 100)
+        lrate = _file_default(lrate, "lrate", 0.05)
+        do_mean = _file_default(do_mean, "do_mean", True)
+        do_sphere = _file_default(do_sphere, "do_sphere", True)
+        do_newton = _file_default(do_newton, "do_newton", False)
+
+        if file_params:
+            for key, value in file_params.items():
+                if key in _NG_CTOR_PARAMS and key not in kwargs:
+                    kwargs[key] = value
+            handled = _FIT_NAMED_PARAMS | _NG_CTOR_PARAMS | {"num_models", "num_mix"}
+            unhandled = sorted(set(file_params) - handled)
+            if unhandled:
+                logger.warning(
+                    "AMICA.fit: %d parameter-file setting(s) match neither a "
+                    "fit()/AMICATorchNG parameter and were NOT applied "
+                    "(informational only -- data-location metadata like "
+                    "files/outdir/data_dim/num_comps is expected here; "
+                    "anything else means pamica has no equivalent): %s",
+                    len(unhandled),
+                    unhandled,
+                )
 
         if self.verbose:
             print(f"Fitting AMICA with {n_channels} channels, {n_samples} samples")
@@ -700,16 +775,23 @@ class AMICA:
         """
         Create AMICA instance from a parameter file.
 
-        Accepts two formats, auto-detected from ``params_file`` (issue #132):
-        pamica's own JSON schema (``sample_data/sample_params.json``) and the
-        literal Fortran ``input.param`` text format
-        (``sample_data/input.param``), so the same file that drives the
-        reference binary can drive pamica too. Detection prefers the file
-        extension (``.json`` / ``.param``); anything else is sniffed by
-        content (JSON if it starts with ``{``/``[``, Fortran text otherwise).
+        Accepts two formats, auto-detected from ``params_file``'s *content*
+        (issue #132): pamica's own JSON schema (``sample_data/
+        sample_params.json``) and the literal Fortran ``input.param`` text
+        format (``sample_data/input.param``), so the same file that drives
+        the reference binary can drive pamica too. Detection always sniffs
+        the content (JSON if it starts with ``{``/``[``, Fortran text
+        otherwise) rather than trusting the extension -- a compact JSON file
+        saved with a ``.param`` extension must still parse as JSON, not be
+        silently mis-read as garbled Fortran text (issue #132 review item 3).
         See :func:`pamica.fortran_params.read_fortran_param_file` for the
         Fortran-side key-mapping table and the deliberately-unmapped keys it
         warns about rather than silently drops.
+
+        The full translated dict (beyond the ``n_models``/``n_mix`` used to
+        size the instance here) is stashed on the returned instance and
+        applied by :meth:`fit` as per-call defaults -- see ``fit``'s
+        docstring for the precedence rule.
 
         Parameters
         ----------
@@ -727,10 +809,7 @@ class AMICA:
 
         path = Path(params_file)
         text = path.read_text()
-        is_json = path.suffix == ".json" or (
-            path.suffix != ".param" and text.lstrip().startswith(("{", "["))
-        )
-        if is_json:
+        if text.lstrip().startswith(("{", "[")):
             params = json.loads(text)
         else:
             from .fortran_params import read_fortran_param_file
@@ -745,4 +824,6 @@ class AMICA:
         n_models = kwargs.pop("n_models", n_models)
         n_mix = kwargs.pop("n_mix", n_mix)
 
-        return cls(n_models=n_models, n_mix=n_mix, **kwargs)
+        model = cls(n_models=n_models, n_mix=n_mix, **kwargs)
+        model._file_params = params
+        return model
