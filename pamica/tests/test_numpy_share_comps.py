@@ -29,6 +29,7 @@ import torch
 
 from pamica import AMICA_NumPy as AMICA
 from pamica.numpy_impl.data import load_data_file
+from pamica.numpy_impl.load import loadmodout
 from pamica.numpy_impl.utils import identify_shared_components
 from pamica.torch_impl.core import AMICATorchNG
 
@@ -176,9 +177,11 @@ def test_unused_columns_keep_their_last_finite_value():
     """Frozen, not zeroed: an unused column keeps the value it last held.
 
     The merge is forced rather than hoped for, so a stale all-True mask fails
-    here instead of skipping.
+    here instead of skipping. ``doscaling`` is off so the comparison can be
+    exact: the rescale pass normalizes every column, dead ones included, which
+    multiplies their mu by a norm that is 1.0 only to within a ULP.
     """
-    model = _shared_fit(max_iter=3, share_comps=False)
+    model = _shared_fit(max_iter=3, share_comps=False, doscaling=False)
     _, dead = _force_merged_column(model)
     unused = ~model.comp_used
     assert unused.any(), "setup failed: no column was merged away"
@@ -206,7 +209,7 @@ def test_default_comp_list_is_unaffected():
 
 # --- degenerate-fit reporting (#240) ----------------------------------------
 class _CollapseOneComponent(AMICA):
-    """Zero one LIVE column's mixture location statistics on the last iteration.
+    """Zero one LIVE column's mixture location statistics at ``collapse_iter``.
 
     A component whose responsibility mass collapses to exactly zero is the real
     0/0 that the guarded path deliberately does NOT hide: only merged-away
@@ -214,14 +217,39 @@ class _CollapseOneComponent(AMICA):
     (the fault-injection idiom ``test_sample_data.py`` uses for the restart
     path) drives the production update, which is what must leave the fit
     reporting failure rather than a NaN success.
+
+    ``collapse_iter`` is a 0-indexed iteration; the default lands on the last
+    one, so the reported LL stays finite and only the parameters are degenerate.
+    An earlier value leaves the fit running afterwards, which is what exercises
+    the mid-fit checkpoint path.
     """
+
+    def __init__(self, *args, collapse_iter=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.collapse_iter = (
+            self.max_iter - 1 if collapse_iter is None else collapse_iter
+        )
 
     def _get_updates_and_likelihood(self):
         updates = super()._get_updates_and_likelihood()
-        if self.iter == self.max_iter - 1:
+        if self.iter == self.collapse_iter:
             updates["dmu_n"][:, 0] = 0.0
             updates["dmu_d"][:, 0] = 0.0
         return updates
+
+
+def _collapsing_model(tmp_path, max_iter=3, **kwargs):
+    return _CollapseOneComponent(
+        num_models=1,
+        num_mix=3,
+        max_iter=max_iter,
+        seed=7,
+        use_tqdm=False,
+        do_opt_block=False,
+        block_size=_BLOCK,
+        outdir=str(tmp_path / "out"),
+        **kwargs,
+    )
 
 
 def test_non_finite_parameters_are_reported_as_failure(tmp_path):
@@ -231,17 +259,7 @@ def test_non_finite_parameters_are_reported_as_failure(tmp_path):
     and only the parameters are degenerate -- exactly the shape of the silent
     failure in #240.
     """
-    model = _CollapseOneComponent(
-        num_models=1,
-        num_mix=3,
-        max_iter=3,
-        seed=7,
-        use_tqdm=False,
-        do_opt_block=False,
-        block_size=_BLOCK,
-        writestep=10_000_000,  # no intermediate write, so only fit()'s can land
-        outdir=str(tmp_path / "out"),
-    )
+    model = _collapsing_model(tmp_path, writestep=10_000_000)
     # The counterpart to the silence on dead columns: a LIVE column's 0/0 is
     # still numpy's own warning, because nothing suppresses it.
     with pytest.warns(RuntimeWarning, match="invalid value"):
@@ -254,6 +272,44 @@ def test_non_finite_parameters_are_reported_as_failure(tmp_path):
     # Announced in the run log, not only on the object.
     log_text = (tmp_path / "out" / "out.txt").read_text().lower()
     assert "did not converge" in log_text
+    # Nothing was written: this run never reached a writestep boundary, and the
+    # final write is refused, so the degenerate state reaches no file at all.
+    assert not (tmp_path / "out" / "W").exists()
+
+
+def test_checkpoints_never_persist_non_finite_parameters(tmp_path):
+    """A mid-fit checkpoint must not write a degenerate state to disk.
+
+    ``fit``'s final write is not the only write: ``writestep`` checkpoints run
+    inside the loop, and a state that goes non-finite early is still on the
+    object for every later checkpoint. Persisting it would leave a run whose
+    only on-disk artifact is corrupt -- ``loadmodout`` reads NaN back without
+    complaint. The collapse lands at iteration 2 of 4 with ``writestep=1``, so
+    the first checkpoint is valid and every later one must be refused, loudly,
+    without disturbing what the valid one wrote.
+    """
+    model = _collapsing_model(tmp_path, max_iter=4, collapse_iter=1, writestep=1)
+    with pytest.warns(RuntimeWarning, match="invalid value"):
+        model.fit(_real_data(2048))
+
+    assert not np.all(np.isfinite(np.asarray(model.mu))), "setup failed: mu is finite"
+    assert model.converged is False
+
+    # The pre-collapse checkpoint is still there -- a refused write leaves it
+    # alone rather than truncating it -- and everything in it is finite.
+    assert (tmp_path / "out" / "W").exists(), "the valid checkpoint was lost"
+    out = loadmodout(tmp_path / "out")
+    for name in ("W", "A", "S", "mu", "alpha", "sbeta", "rho", "c"):
+        value = getattr(out, name, None)
+        assert value is not None, f"{name} missing from the written output"
+        assert np.all(np.isfinite(np.asarray(value))), f"{name} written non-finite"
+
+    # Refused loudly, naming the parameter. Once here rather than once per
+    # remaining iteration: the NaN mu makes the next likelihood non-finite, so
+    # restart-on-NaN takes over and its `continue` skips the checkpoint entirely.
+    log_text = (tmp_path / "out" / "out.txt").read_text()
+    assert "Skipping the results checkpoint" in log_text
+    assert "non-finite mu" in log_text
 
 
 # --- one gm-weighted A step per shared column (#242) ------------------------
@@ -427,7 +483,9 @@ def test_shared_column_update_matches_the_torch_backend():
     )
     np.testing.assert_allclose(model.A[:, kept], A_torch[:, kept], rtol=0, atol=1e-12)
     np.testing.assert_allclose(model.A, A_torch, rtol=0, atol=1e-12)
-    np.testing.assert_array_equal(model.A[:, dead], A_torch[:, dead])
+    # The dead column is frozen in both, but both still run it through their own
+    # rescale, whose column norm agrees only to a ULP across array libraries.
+    np.testing.assert_allclose(model.A[:, dead], A_torch[:, dead], rtol=0, atol=1e-12)
 
 
 def test_forced_merge_fit_is_finite_in_both_backends():
