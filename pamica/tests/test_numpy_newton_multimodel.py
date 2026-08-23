@@ -77,3 +77,51 @@ def test_multimodel_newton_fit_finalizes_curvature(num_models):
     # Curvature is a sum of squares over responsibilities: strictly positive.
     assert np.all(model.sigma2 > 0)
     assert np.all(model.kappa > 0)
+    # Newton through the full M-step must leave every other parameter finite
+    # too, not only the curvature accumulators checked above.
+    for name in ("A", "W", "mu", "alpha", "beta", "rho", "gm", "c"):
+        value = getattr(model, name)
+        assert value is not None and np.all(np.isfinite(value)), name
+
+
+def test_rank_reduced_newton_fit_completes():
+    """Newton on rank-reduced data (issue #273).
+
+    Real EEG projected onto a rank-20 subspace (what Maxwell filtering does to
+    MEG, the #221 report), fitted with automatic rank detection and Newton on.
+    ``self.data_dim`` (set from the detected rank before any Newton array is
+    allocated) sizes ``sigma2``/``lambda_``/``kappa`` and the per-model 2x2
+    direction loop alike, so nothing here is specific to the full 32-channel
+    width -- but the combination had never run before this test, unlike
+    ``test_rank_reduced_numpy_sharing_completes``
+    (``test_numpy_share_comps.py``), which keeps ``do_newton=False`` and notes
+    a separate, share-specific Newton shape issue it does not exercise.
+    """
+    x = _real_data()
+    x = x - x.mean(axis=1, keepdims=True)
+    rank = 20
+    U_r = np.linalg.svd(x, full_matrices=False)[0][:, :rank]
+    x_low = U_r @ (U_r.T @ x)
+
+    model = AMICA(
+        num_models=2,
+        num_mix=3,
+        max_iter=15,
+        seed=3,
+        do_newton=True,
+        newt_start=5,
+        use_tqdm=False,
+        do_opt_block=False,
+        block_size=1024,
+    )
+    model.fit(x_low)
+
+    assert model.converged is True, f"degenerate fit: {model.stop_reason}"
+    assert model.data_dim == rank
+    assert model.data_dim_in == NW
+    assert model.sphere is not None and model.sphere.shape == (rank, NW)
+    assert model.sigma2 is not None, "Newton was never active; the test is vacuous"
+    assert model.sigma2.shape == (rank, 2)
+    for name in ("A", "W", "mu", "alpha", "beta", "rho", "gm", "c"):
+        value = getattr(model, name)
+        assert value is not None and np.all(np.isfinite(value)), name
