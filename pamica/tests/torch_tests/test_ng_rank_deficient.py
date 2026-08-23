@@ -155,6 +155,29 @@ def test_absolute_floor_rejects_tesla_scale_data(real_data: np.ndarray) -> None:
         AMICA(verbose=False).fit(real_data * 1e-13, max_iter=5, seed=0, mineig_rel=None)
 
 
+def test_rank_reduced_newton_fit_completes(rank_deficient: np.ndarray) -> None:
+    """Newton on rank-reduced data (issue #273).
+
+    Newton's curvature and 2x2 direction solve are per-(source, model), sized
+    to the model's working dimensionality -- which rank reduction shrinks from
+    ``n_channels_in`` to the detected rank (issue #223) before any Newton array
+    is allocated. Nothing in ``test_newton_multimodel_finite_and_shaped``
+    (``test_ng_backend.py``) or the Newton tests above exercises that combination,
+    and it is exactly the Maxwell-filtered MEG route #221/#223 motivated.
+    """
+    m = AMICA(verbose=False)
+    m.fit(rank_deficient, max_iter=15, seed=0, do_newton=True, newt_start=3)
+    assert m.model_ is not None
+    assert m.converged_, f"degenerate fit: {m.stop_reason_}"
+    assert m.stop_reason_ != "nan_ll"
+    assert m.model_.n_channels == RANK
+    assert m.model_.n_channels_in == NW
+    for name in ("A", "W", "mu", "alpha", "beta", "rho", "gm", "c"):
+        value = getattr(m.model_, name)
+        assert value is not None and np.all(np.isfinite(value.cpu().numpy())), name
+    assert np.all(np.isfinite(m.get_unmixing_matrix()))
+
+
 def test_nan_data_still_reaches_the_degenerate_fit_contract(
     real_data: np.ndarray,
 ) -> None:

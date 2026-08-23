@@ -644,6 +644,45 @@ def test_multimodel_newton_fit_completes():
     assert len(hist) > m.newt_start, "Newton never switched on"
 
 
+def test_three_model_newton_mstep_and_fit_are_finite():
+    """3-model (n_models=3) Newton coverage (issue #272).
+
+    The curvature accumulators are indexed ``(n_models, n_channels)`` and the
+    direction/fallback loop iterates over models, so a 2-model fit cannot
+    distinguish a correct per-model index from a transposition error that
+    happens to still line up for exactly two models -- twin of
+    ``test_multimodel_newton_mstep_is_finite``/``test_multimodel_newton_fit_completes``
+    above, extended to a third model, and of
+    ``torch_tests/test_ng_backend.py::test_newton_three_model_finite_and_shaped``.
+    """
+    model, x_t = _model_at(warmup=3, n_models=3)
+    acc = model._accumulate_blocks(x_t)
+
+    sigma2, lambda_, kappa = model._finalize_newton_stats(acc)
+    for name, arr in (("sigma2", sigma2), ("lambda", lambda_), ("kappa", kappa)):
+        assert arr.shape == (3, NW), f"{name} shape {arr.shape}"
+        host = np.array(arr, dtype=np.float64)
+        assert np.all(np.isfinite(host)), f"{name} is not finite"
+        assert np.all(host > 0), f"{name} is not strictly positive"
+
+    model._update_parameters(acc, x_t.shape[1])
+    mx.eval(model.A, model.mu, model.alpha, model.beta, model.rho, model.gm, model.c)
+    for name in ("A", "mu", "alpha", "beta", "rho", "gm", "c"):
+        assert np.all(np.isfinite(np.array(getattr(model, name)))), name
+
+    m = AMICAMLXNG(
+        n_channels=NW, n_models=3, n_mix=NMIX, seed=SEED, do_newton=True, newt_start=5
+    )
+    m.fit(_load_real_data(8192), max_iter=40, verbose=False)
+
+    hist = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(hist))
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert np.all(np.isfinite(np.array(m.A)))
+    assert np.all(np.isfinite(np.array(m.W)))
+    assert len(hist) > m.newt_start, "Newton never switched on"
+
+
 # --- (i) sharing interplay --------------------------------------------------
 
 
@@ -714,3 +753,44 @@ def test_sharing_and_newton_fit_completes():
     assert np.all(np.isfinite(np.array(m.W)))  # derived from A by inv()
     assert len(hist) > m.share_start, "sharing never got a chance to fire"
     assert m.shared_components(), "no merge fired; the interplay is untested"
+
+
+# --- (j) rank-reduced data ---------------------------------------------------
+
+
+def test_rank_reduced_newton_fit_completes():
+    """Newton on rank-reduced data (issue #273).
+
+    Real EEG projected onto a rank-20 subspace (what Maxwell filtering does to
+    MEG, the #221 report), fitted with automatic rank detection and Newton on.
+    Every Newton array here is allocated at ``model.n_channels`` (the detected
+    rank), not the input channel count, but the combination had never run
+    before this test -- the MLX Newton tests above are all full-rank 32-channel
+    fits (issue #264's gap) and the MLX sharing rank-reduced test
+    (``test_mlx_sharing.py::test_rank_reduced_share_fit_completes``) keeps
+    Newton off.
+    """
+    x = _load_real_data(4096)
+    x = x - x.mean(axis=1, keepdims=True)
+    rank = 20
+    U_r = np.linalg.svd(x, full_matrices=False)[0][:, :rank]
+    x_low = U_r @ (U_r.T @ x)
+
+    m = AMICAMLXNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=NMIX,
+        seed=SEED,
+        block_size=1024,
+        do_newton=True,
+        newt_start=5,
+    )
+    m.fit(x_low, max_iter=25, verbose=False)
+
+    hist = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(hist))
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert m.n_channels == rank
+    assert m._sphere_np is not None and m._sphere_np.shape == (rank, NW)
+    for name in ("A", "W", "mu", "alpha", "beta", "rho", "gm", "c"):
+        assert np.all(np.isfinite(np.array(getattr(m, name)))), name
