@@ -4,14 +4,14 @@ Real bundled sample EEG only -- no synthetic/mock data, per project policy.
 Covers the three gaps identified against the Fortran reference (amica15.f90,
 the actual source of the validated ``amica15mac`` binary):
 
-1. ``use_min_dll``/``min_dll``/``maxincs`` (amica15.f90:1060-1072): stop after
+1. ``use_min_dll``/``min_dll``/``maxincs`` (amica15.f90:1078-1090): stop after
    more than ``maxincs`` *consecutive* iterations whose likelihood gain is
    below ``min_dll``, resetting the counter on any larger gain.
-2. ``use_grad_norm``/``min_nd`` (amica15.f90:1073-1079): stop once the
+2. ``use_grad_norm``/``min_nd`` (amica15.f90:1091-1097): stop once the
    weight-gradient RMS norm (``ndtmpsum``) falls to or below ``min_nd``,
    independent of whether the likelihood just decreased.
 3. The lrate-decrease branch's missing ``.or. (ndtmpsum .le. min_nd)`` half
-   (amica15.f90:1040) -- ``stop_reason="grad_norm_floor"``, distinct from the
+   (amica15.f90:1058) -- ``stop_reason="grad_norm_floor"``, distinct from the
    unconditional ``"grad_norm"`` stop above.
 
 Several tests cross-check the real-data trajectory against an independent
@@ -75,7 +75,7 @@ def _predict_min_dll_stop(
     ll_history: list, min_dll: float, maxincs: int
 ) -> Optional[int]:
     """Independent reimplementation of the Fortran maxincs consecutive-small-
-    gain rule (amica15.f90:1060-1072), applied post-hoc to a COMPLETE LL
+    gain rule (amica15.f90:1078-1090), applied post-hoc to a COMPLETE LL
     trajectory (e.g. from a stops-disabled reference run). Returns the
     0-indexed ``ll_history`` position at which the stop would fire, or None.
     """
@@ -92,7 +92,7 @@ def _predict_min_dll_stop(
 
 def _predict_grad_norm_stop(nd_history: list, min_nd: float) -> Optional[int]:
     """Independent reimplementation of the Fortran use_grad_norm rule
-    (amica15.f90:1073-1079). ``nd_history[i]`` is ndtmpsum computed during
+    (amica15.f90:1091-1097). ``nd_history[i]`` is ndtmpsum computed during
     fit-loop iteration ``i`` (0-indexed); the check only applies once a
     previous LL exists, i.e. i >= 1. Returns the first qualifying index, or
     None."""
@@ -164,7 +164,7 @@ def test_min_dll_never_fires_before_two_ll_values(real_data):
     """An absurdly generous min_dll (any gain at all counts as "small") with
     maxincs=0 would fire on the FIRST qualifying iteration if the have_prev
     guard were missing -- Fortran's whole check block is nested inside
-    ``if (iter > 1)`` (amica15.f90:1033), so it cannot fire while only one LL
+    ``if (iter > 1)`` (amica15.f90:1051), so it cannot fire while only one LL
     value exists."""
     ng = _fresh_ng(
         seed=42, use_min_dll=True, min_dll=1e6, maxincs=0, use_grad_norm=False
@@ -203,7 +203,7 @@ def test_grad_norm_stop_matches_independent_reference(real_data):
 
 
 def test_grad_norm_never_fires_on_first_iteration(real_data):
-    """Same have_prev guard as min_dll (amica15.f90:1033): an absurdly
+    """Same have_prev guard as min_dll (amica15.f90:1051): an absurdly
     generous min_nd must not fire while only one LL value exists."""
     ng = _fresh_ng(seed=42, use_min_dll=False, use_grad_norm=True, min_nd=1e6)
     ng.fit(real_data[:, :4096], max_iter=5, verbose=False)
@@ -246,14 +246,14 @@ def test_grad_norm_floor_fires_on_likelihood_decrease(real_data):
 
 def test_lrate_floor_still_reachable_without_grad_norm(real_data):
     """Regression guard: the pre-existing lrate_floor half of the decrease
-    branch (amica15.f90:1040's first disjunct) must still fire on its own
+    branch (amica15.f90:1058's first disjunct) must still fire on its own
     when grad_norm is nowhere near its floor -- gap 3 only ADDS a disjunct,
     it must not shadow the original condition. Same seed/config as
     ``test_grad_norm_floor_fires_on_likelihood_decrease`` (a known real-data
     decrease at iteration 23, lrate=2.4 there), but with ``minlrate`` raised
     above that lrate instead of ``min_nd`` raised above ndtmpsum -- the two
     tests together prove the ``or`` in Fortran's ``(lrate <= minlrate) .or.
-    (ndtmpsum <= min_nd)`` (amica15.f90:1040) works from either side."""
+    (ndtmpsum <= min_nd)`` (amica15.f90:1058) works from either side."""
     ng = _fresh_ng(
         seed=1,
         do_newton=True,
@@ -296,7 +296,7 @@ def test_grad_norm_shadows_grad_norm_floor_under_shipped_defaults(real_data):
     (which isolates the decrease-branch's grad_norm_floor half by setting
     ``use_grad_norm=False``), but with that one override removed so both
     stops sit at their shipped ``True`` defaults. The standalone grad_norm
-    check (amica15.f90:1073-1079) does not require a likelihood decrease --
+    check (amica15.f90:1091-1097) does not require a likelihood decrease --
     only ``ndtmpsum <= min_nd`` -- so it fires as soon as that threshold is
     crossed, which happens well before the later iteration where a genuine
     decrease would let grad_norm_floor's narrower condition also become true.
@@ -325,15 +325,15 @@ def test_a_frozen_window_still_computes_fresh_grad_norm(real_data):
     merged/frozen columns, so this is the one scenario that actually
     exercises it. Separately, and more fundamentally: Fortran computes
     dAk/ndtmpsum unconditionally every iteration in
-    accum_updates_and_likelihood (amica15.f90:1730-1743), strictly BEFORE the
+    accum_updates_and_likelihood (amica15.f90:1749-1761), strictly BEFORE the
     later, freeze-gated update_A block that actually steps A
-    (amica15.f90:1785). ``_update_parameters`` was refactored so the
+    (amica15.f90:1803). ``_update_parameters`` was refactored so the
     direction/dAk/ndtmpsum computation runs unconditionally too, with only
     the step itself gated on ``not self._a_frozen()``. This test proves both
     halves of that refactor: the mixing matrix's per-column DIRECTION does not
     move during a frozen iteration (only ``doscaling``'s unconditional
     unit-norm rescale touches its magnitude -- that rescale is a separate,
-    non-frozen Fortran block, amica15.f90:1823-1836, so it is expected to
+    non-frozen Fortran block, amica15.f90:1843-1854, so it is expected to
     still apply), AND ndtmpsum is NOT a stale repeat of the pre-freeze value
     across those same iterations (which would happen if the computation were
     still skipped).

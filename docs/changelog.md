@@ -40,7 +40,7 @@ Release notes are also published on the
   mixing columns back to sensor space with `inv(sphere)`, which raised
   "Component sharing needs an invertible sphere" on exactly the data class that
   rank detection had just made fittable. It now uses `pinv(sphere)`, the
-  reference's own `Spinv` back-map under reduction (amica15.f90:550-560), and
+  reference's own `Spinv` back-map under reduction (amica15.f90:568-578), and
   `share_comps` with `pcakeep`/`pcadb` is no longer rejected at construction.
   Full-rank fits are unaffected: `pinv` equals `inv` to ~1e-15 there, and the
   bundled sample reproduces its previous `comp_list` and log-likelihood bit for

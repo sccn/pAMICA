@@ -22,7 +22,7 @@ def test_loadmodout_llt_reshape_order():
     correct column-major reshape (issue #155 regression).
 
     The reference binary writes, per timepoint, each model's log-likelihood
-    then the total (Fortran ``write_output``, amica15.f90:2308-2333) -- a
+    then the total (Fortran ``write_output``, amica15.f90:2338-2343) -- a
     column-major ``(num_models+1, N)`` layout (matching EEGLAB's
     ``loadmodout15.m``, which does ``reshape(LLt, num_models+1, N)`` under
     MATLAB's column-major default). A C-order reshape scrambles this. The
@@ -474,9 +474,9 @@ def test_numpy_llt_roundtrip(tmp_path):
 def test_numpy_llt_reject_zeroes_rejected_samples(tmp_path):
     """Under ``do_reject``, rejected samples must be exactly zero in the
     written ``LLt`` (issue #155 Fix 1): Fortran zeroes a rejected sample's
-    ``modloglik``/``loglik`` on write (amica15.f90:2211-2216) and its
+    ``modloglik``/``loglik`` on write (amica15.f90:2231-2234) and its
     ``load_rej`` reader reconstructs the rejection mask from that exact zero
-    sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:887-896). Good
+    sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:907). Good
     samples must stay non-zero and finite.
     """
     data = load_data_file(eeglab_data_file, 32, 30504, dtype=np.float32).astype(

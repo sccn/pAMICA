@@ -522,9 +522,9 @@ def test_loadmodout_llt_gm_reorder_alignment(real_data, tmp_path):
 def test_write_amica_output_llt_reject_zeroes_rejected_samples(real_data, tmp_path):
     """Under ``do_reject``, rejected samples must be exactly zero in the
     written ``LLt`` (issue #155 Fix 1): Fortran zeroes a rejected sample's
-    ``modloglik``/``loglik`` on write (amica15.f90:2211-2216) and its
+    ``modloglik``/``loglik`` on write (amica15.f90:2231-2234) and its
     ``load_rej`` reader reconstructs the rejection mask from that exact zero
-    sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:887-896). Good
+    sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:907). Good
     samples must stay non-zero and finite.
     """
     from pamica.numpy_impl.load import loadmodout

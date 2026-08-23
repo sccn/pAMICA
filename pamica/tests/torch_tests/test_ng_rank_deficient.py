@@ -1,10 +1,10 @@
 """Rank-deficient input handling (issue #223) for AMICATorchNG.
 
 Ports the Fortran reference's numerical-rank machinery, which pamica had
-dropped: ``numeigs = min(pcakeep, count(eigs > mineig))`` (amica15.f90:395),
-``nw = numeigs`` sizing the model to the kept rank (amica15.f90:545), and the
+dropped: ``numeigs = min(pcakeep, count(eigs > mineig))`` (amica15.f90:413),
+``nw = numeigs`` sizing the model to the kept rank (amica15.f90:563), and the
 sphere pseudo-inverse ``Spinv`` for mapping components back to sensor space
-(amica15.f90:550-560).
+(amica15.f90:568-578).
 
 Rank deficiency is produced by projecting the real sample EEG onto its own
 leading subspace -- the same rank-reducing linear operator Maxwell filtering

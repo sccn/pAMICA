@@ -25,7 +25,7 @@ DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
 NW = 32
 FIELD = 30504
 
-# Fortran log-normalizer literals (amica15.f90:1315/1328/1341/1353).
+# Fortran log-normalizer literals (amica15.f90:1333/1346/1359/1371).
 _LOG4 = math.log(4.0)
 _LSQ2PI = math.log(2.506628274)
 _LNSUB = math.log(4.132731354)

@@ -317,8 +317,8 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
     a maxdecs-ratcheted CEILING, not a per-LL-decrease monotone decay.
 
     Fortran resets ``rholrate = rholrate0`` each iteration before the rho update
-    (amica15.f90:1788) and only tightens the ceiling at ``maxdecs``
-    (amica15.f90:1050, gated on ``iter > newt_start``). MLX previously decayed
+    (amica15.f90:1806/1813) and only tightens the ceiling at ``maxdecs``
+    (amica15.f90:1068, gated on ``iter > newt_start``). MLX previously decayed
     ``rholrate`` on EVERY LL decrease with no reset, collapsing it toward ~1e-5
     within a few hundred iterations and freezing rho at a stale shape.
 
@@ -354,7 +354,7 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
 
 def test_rholrate_ceiling_ratchet_gated_on_newt_start():
     """The rholrate ceiling ratchet is gated on ``iter > newt_start`` (Fortran
-    amica15.f90:1049, independent of do_newton). With ``newt_start`` past the whole
+    amica15.f90:1067, independent of do_newton). With ``newt_start`` past the whole
     budget, LL decreases must NOT tighten the rho ceiling -- it stays at
     ``rholrate0`` exactly (only ``lrate_cap`` ratchets, which is not gated)."""
     from pamica.mlx_impl import AMICAMLXNG
