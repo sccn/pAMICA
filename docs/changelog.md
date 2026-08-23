@@ -16,6 +16,32 @@ Release notes are also published on the
   Fortran-parity tests (`AMICA_RUN_FORTRAN`, `PAMICA_NATIVE_BINARY`,
   `AMICA_FORTRAN_BIN`), none of which had ever run in CI before, without
   slowing down or blocking any PR.
+- **Guarded the MLX backend's unmixing-matrix inversion against an
+  uncatchable process abort** (issue #274). MLX 0.32's CPU-stream
+  `mx.linalg.inv` does not raise a Python exception on a singular per-model
+  `A[:, comp_list[:, h]]` — LAPACK's LU failure aborts the whole process
+  (`libc++abi: ... [Inverse::eval_cpu] LU factorization failed`), which no
+  `try`/`except` around `fit` can catch (found while verifying #271's `W`
+  finiteness guard). `_update_unmixing_matrices` now condition-checks each
+  per-model matrix host-side immediately before calling `inv` and raises a
+  catchable `RuntimeError` naming the model, iteration and condition number
+  instead. The threshold (1e12) is calibrated empirically, not from
+  float32's ~1/eps precision-loss point: isolated-subprocess measurement
+  showed the true LU-abort onset is not a clean function of condition number
+  (observed anywhere from ~9e8 to beyond ~5e10, matrix-structure-dependent),
+  and an existing adversarial test legitimately reaches cond~4.4e9 without
+  aborting, so 1e7 (the precision-loss estimate) would have been a false
+  positive on real, currently-passing behavior. 1e12 clears that observed
+  legitimate maximum by ~225x while staying far below where a genuinely
+  singular `A` (e.g. a duplicated component column) actually lands
+  (~1e15-1e17). Read-only: verified bit-identical `A`/`W` on a short fit
+  with and without the guard, and negligible added cost (~30 microseconds
+  per model per iteration, measured on the bundled sample). The upstream MLX
+  behavior is also being reported separately. Tests:
+  `pamica/tests/mlx_tests/test_mlx_inv_guard.py` (singular and near-singular
+  `A` on a real fitted model raise `RuntimeError` rather than aborting, the
+  guard is bit-identical to an unguarded `inv`/`slogdet` call, and a
+  standard fit is unaffected).
 - **Pinned `mir_history_` against the `keep_best` rollback and against
   save/load** (issue #161, follow-up from #137/#160). Both claims already
   held before this PR and were already tested: `test_mir_history_survives_keep_best_restore`

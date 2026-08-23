@@ -145,6 +145,32 @@ Most MLX limitations fail loudly: `transform` and every unsupported parameter
 (outlier rejection, save/load) are simply absent from the constructor or raise
 `NotImplementedError`, rather than silently downgrading.
 
+One MLX failure mode used to be worse than loud — it was uncatchable. MLX
+0.32's CPU-stream `mx.linalg.inv` does not raise a Python exception on a
+singular per-model unmixing matrix `A[:, comp_list[:, h]]`: LAPACK's LU
+failure aborts the whole process (`libc++abi: ... [Inverse::eval_cpu] LU
+factorization failed`), which no `try`/`except` around `fit` can catch.
+Issue #274 closed that gap: `_update_unmixing_matrices` now condition-checks
+each per-model matrix host-side (`np.linalg.cond`, cheap — the method already
+crosses to the CPU stream for `inv`/`slogdet` once per iteration) immediately
+before calling `inv`, and raises a catchable `RuntimeError` naming the model
+index, iteration and condition number in its place. The threshold
+(`_INV_COND_THRESHOLD`, 1e12) is set empirically rather than from float32's
+~1/eps precision-loss point (~8-17e6, depending on convention): isolated
+per-trial subprocess measurement showed the actual LU-abort onset is not a
+clean function of condition number — near-duplicate-column matrices aborted
+anywhere from cond~9e8 to beyond cond~5e10, while column-scaled-toward-zero
+matrices never aborted even past cond~1e16 — and separately, an existing
+adversarial test (`test_fallback_ramps_toward_lrate_cap_and_counts`, which
+repeatedly steps `A` from the same deliberately under-determined block)
+legitimately reaches cond~4.4e9 without ever hitting the abort. 1e12 clears
+that observed legitimate maximum by ~225x while staying far below where a
+genuinely singular `A` — the issue's literal example, a duplicated component
+column — actually lands (~1e15-1e17). The guard is read-only (verified
+bit-identical `A`/`W` on a short fit with and without it) and adds negligible
+per-iteration overhead (~30 microseconds per model, measured on the bundled
+sample).
+
 The convergence stops used to be the exception — MLX implemented neither, so a
 fit there always spent the whole iteration budget. Issue #248 closed that gap:
 `pamica/mlx_impl/core.py` now carries `use_min_dll`/`min_dll`/`maxincs` and
