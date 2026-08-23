@@ -56,3 +56,6 @@ site/
 .context/issue-159/gate_2model/
 .context/issue-159/py_*.npz
 .context/issue-159/mat_*.mat
+
+# Claude Code local state (settings, agent worktrees) -- machine-local, never tracked
+.claude/
