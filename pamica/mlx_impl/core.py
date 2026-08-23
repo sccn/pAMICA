@@ -84,6 +84,19 @@ from ..rank import MINEIG, MINEIG_REL, numerical_rank
 
 logger = logging.getLogger(__name__)
 
+# Human-readable names for the ``pdftype``/``pdtype`` source-density family
+# codes (issue #265, mirroring AMICATorchNG's PDFTYPE_NAMES, torch core.py:
+# 65-71 -- duplicated rather than imported so this module keeps no torch
+# dependency). Exposed alongside the numeric codes so a fitted model's
+# per-source density family is inspectable (issue #142).
+PDFTYPE_NAMES = {
+    0: "generalized_gaussian",
+    1: "super_gaussian_cosh",
+    2: "gaussian",
+    3: "logistic",
+    4: "sub_gaussian_cosh",
+}
+
 _LOG2 = math.log(2.0)
 _LOG4 = math.log(4.0)  # logistic-family normalizer (amica15.f90:1346)
 # Log-normalizers for the non-GG density families, using Fortran's exact literal
@@ -1281,7 +1294,21 @@ class AMICAMLXNG:
         # model), in numpy float64 (policy 6).
         tiny = np.finfo(np.float64).tiny
         kurt = nsub[None, :] * m4 / np.maximum(m2**2, tiny) - 3.0
-        self.pdtype = mx.array(self._pdtype_from_kurtosis(kurt, nsub).astype(np.int32))
+        new_pdtype = self._pdtype_from_kurtosis(kurt, nsub)
+        # Silent-failure guard: the adaptive switcher only ever assigns codes 1
+        # (super-Gaussian) or 4 (sub-Gaussian), or keeps the prior value (which
+        # started as the ctor's all-1 fill and can therefore only ever BE 1 or
+        # 4 itself). Currently unreachable -- a bug elsewhere would have to
+        # write a different code first -- but an out-of-range code here would
+        # otherwise fall through the _score/_log_pdf mx.where chain to a stale
+        # GG density evaluated against a rho frozen by self.dorho, silently.
+        bad = set(np.unique(new_pdtype).tolist()) - {1, 4}
+        if bad:
+            raise RuntimeError(
+                f"_choose_pdfs produced pdtype code(s) outside {{1, 4}}: "
+                f"{sorted(bad)} (adaptive-switcher invariant violated)."
+            )
+        self.pdtype = mx.array(new_pdtype.astype(np.int32))
 
     def _pdtype_from_kurtosis(self, kurt: np.ndarray, nsub: np.ndarray) -> np.ndarray:
         """Map per-source excess kurtosis to a density-family code (pure numpy;
@@ -1824,4 +1851,15 @@ class AMICAMLXNG:
                 "AMICAMLXNG.get_pdftype() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
-        return np.array(self.pdtype[:, model_idx], dtype=np.int64)
+        codes = np.array(self.pdtype[:, model_idx], dtype=np.int64)
+        # Silent-failure guard: an out-of-range stored code would otherwise
+        # fall through the _score/_log_pdf mx.where chain to a stale GG
+        # density (with rho frozen by self.dorho) with no diagnostic at all --
+        # surface it here instead, at the point a caller reads it.
+        bad = set(np.unique(codes).tolist()) - set(PDFTYPE_NAMES)
+        if bad:
+            raise RuntimeError(
+                f"AMICAMLXNG.get_pdftype(): stored pdtype has code(s) outside "
+                f"the valid set {sorted(PDFTYPE_NAMES)}: {sorted(bad)}."
+            )
+        return codes

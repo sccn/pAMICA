@@ -16,6 +16,6 @@ float32 throughout, validated against a float64 PyTorch twin); outlier
 rejection and save/load remain fast-follows.
 """
 
-from .core import AMICAMLXNG
+from .core import PDFTYPE_NAMES, AMICAMLXNG
 
-__all__ = ["AMICAMLXNG"]
+__all__ = ["AMICAMLXNG", "PDFTYPE_NAMES"]
