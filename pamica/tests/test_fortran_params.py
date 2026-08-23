@@ -109,13 +109,41 @@ def test_unrecognized_keys_warn_and_are_dropped(caplog):
 
 
 def test_unsupported_keys_warn_and_are_dropped(caplog):
-    """blk_min etc. are real Fortran keywords with no pamica equivalent."""
+    """load_rho etc. are real Fortran keywords with no pamica equivalent."""
     with caplog.at_level(logging.WARNING, logger="pamica.fortran_params"):
         got = read_fortran_param_file(PARAM_FILE)
-    assert "blk_min" not in got
+    assert "load_rho" not in got
     warnings = "\n".join(r.message for r in caplog.records)
-    assert "blk_min" in warnings
     assert "load_rho" in warnings
+    assert "max_threads" in warnings
+
+
+def test_block_size_search_keys_translate(parsed):
+    """do_opt_block/blk_min/blk_max/blk_step moved out of the unsupported table
+    with issue #232: pamica now implements the search under Fortran's own four
+    names, with Fortran's arithmetic stepping, so they are identity mappings
+    rather than warned-about drops. Ground truth from the bundled input.param
+    (which pins the search off for parity, and still carries the bounds)."""
+    assert parsed["do_opt_block"] is False
+    assert parsed["blk_min"] == 256
+    assert parsed["blk_max"] == 1024
+    assert parsed["blk_step"] == 256
+    for key in ("do_opt_block", "blk_min", "blk_max", "blk_step"):
+        assert FORTRAN_TO_PAMICA_KEY[key] == key
+        assert key not in FORTRAN_UNSUPPORTED_KEYS
+
+
+def test_block_size_search_keys_reach_the_backend(tmp_path):
+    """The reader targets the actual Python call surface, so the four keys must
+    land on AMICATorchNG constructor keywords rather than being dropped by
+    AMICA.fit's per-call-default merge."""
+    import inspect
+
+    from pamica.torch_impl import AMICATorchNG
+
+    ctor = set(inspect.signature(AMICATorchNG).parameters)
+    for key in ("do_opt_block", "blk_min", "blk_max", "blk_step"):
+        assert FORTRAN_TO_PAMICA_KEY[key] in ctor
 
 
 def test_mapping_tables_partition_every_known_fortran_key():
