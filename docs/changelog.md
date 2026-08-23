@@ -5,6 +5,17 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Documented that `final_ll_`/`self.ll[-1]` trails a `share_comps` merge
+  landing on the final fit iteration** (issue #269). When a merge fires on the
+  last iteration, the returned `A`/`W`/`comp_list` are already post-merge but
+  the reported log-likelihood still reflects the pre-merge state, since
+  `identify_shared_comps` runs after that iteration's LL is recorded
+  (matching the reference ordering, amica15.f90:1856). Documentation only,
+  across all three backends (`torch_impl/core.py`, `numpy_impl/core.py`,
+  `mlx_impl/core.py`) plus `docs/guides/amica-differences.md`; the behavior is
+  unchanged and now pinned by a cross-backend test in each of
+  `tests/torch_tests/test_ng_sharing.py` and `tests/test_numpy_share_comps.py`
+  (mirroring the MLX test added in #268).
 - **The MLX backend now supports all five source-density families** (issue
   #265, epic #260 Phase 4, porting the PyTorch backend's issue #26).
   `AMICAMLXNG` takes `pdftype`/`kurt_start`/`num_kurt`/`kurt_int` with
