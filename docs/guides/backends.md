@@ -40,13 +40,17 @@ requires MLX.
 ## Performance on real EEG
 
 Measured on real 70-channel EEG (see the project benchmarks and
-`.context/issue-77/`):
+`.context/issue-77/`) at `block_size=512`:
 
 - On **Apple Silicon**, the **MLX backend is the GPU win** (~15-25 ms/iteration,
   roughly flat from 16 to 70 channels), several times faster than torch-CPU and
-  faster than an RTX 4090 at EEG scale. **PyTorch-MPS does not win** (162-255
-  ms/iteration, at or worse than CPU), so use MLX rather than `device="mps"` on
-  Apple hardware.
+  faster than an RTX 4090 at EEG scale. **PyTorch-MPS does not win at this block
+  size** (162-255 ms/iteration, at or worse than CPU). A block-size sweep (issue
+  #216, bundled sample) found PyTorch-MPS far more block-size-sensitive than CPU
+  or MLX: it falls from 431 to 30.5 ms/iteration between `block_size=512` and the
+  current 8192 default, and to 13.5 ms/iteration at a further-tuned single-block
+  size, below the CPU's 15.8 ms there. MLX stays fastest throughout, so it
+  remains the recommendation over `device="mps"` on Apple hardware.
 - On **NVIDIA**, CUDA float64 is the bit-safe path (~4.5x over a 16-thread CPU,
   warmed); float32 is faster still.
 - On **CPU**, intra-op threads are workload-limited; around 4 threads was the

@@ -321,7 +321,10 @@ so MLX-versus-CUDA reads as "best Apple-GPU path versus a strong NVIDIA GPU", no
 | 70 | 25.2 | 35.6 | 38.6 | 173 | 193 | 255 | 622 |
 
 MLX is the fastest option on Apple Silicon and stays roughly flat with channel count (~7x over torch-CPU).
-PyTorch-MPS is *not* a win (at or worse than CPU), so use MLX rather than `device="mps"` on Apple hardware.
+PyTorch-MPS is *not* a win at this `block_size=512` (at or worse than CPU); it is also markedly more
+block-size-sensitive than the CPU or MLX figures above, so this gap narrows well before `block_size`
+reaches pamica's current 8192 default (issue #216, bundled sample). MLX remains fastest either way,
+so it stays the recommendation over `device="mps"` on Apple hardware.
 CUDA float32 and float64 are near-identical here (launch-bound at this size). NumPy is the reference implementation, not a production path.
 
 ### CPU core-scaling and native Fortran
