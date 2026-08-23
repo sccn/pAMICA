@@ -13,28 +13,31 @@ recording:
 
 - **`ci.yml`** -- `pull_request` (any branch) plus `push` to `main` (release
   branch) and `dev` (integration/default branch), so post-merge drift on `dev`
-  is caught, not just PR-time state (concurrency cancels a superseded run on
-  the same ref). Jobs: `lint` (ruff) -> `typecheck` (ty) -> `test` (Linux,
-  `-m "not slow"`, `--cov-fail-under=80`, builds the dependency-free native
-  AMICA binary for engine E2E tests) -> `test-macos` (Apple Silicon, `--extra
-  mlx --extra mne`, asserts a real MLX GPU device, builds the same native
-  binary via Accelerate, `-m "not slow"`, `--no-cov`) -> `test-mne` (Linux,
-  `--extra mne`) -> `build` (sdist/wheel import matrix, Python 3.12/3.13).
-  `typecheck`/`lint` gate every test job via `needs:`.
+  is caught, not just PR-time state. Concurrency grouping differs by event:
+  `pull_request` groups by ref, so a rapid push to the same PR branch still
+  cancels its own older, superseded run; `push` groups **per-SHA**, so every
+  commit landing on main/dev gets its own group and its own CI result --
+  pushes never cancel each other. Jobs: `lint` (ruff) -> `typecheck` (ty) ->
+  `test` (Linux, `-m "not slow"`, `--cov-fail-under=80`, builds the
+  dependency-free native AMICA binary for engine E2E tests) -> `test-macos`
+  (Apple Silicon, `--extra mlx --extra mne`, asserts a real MLX GPU device,
+  builds the same native binary via Accelerate, `-m "not slow"`, `--no-cov`)
+  -> `test-mne` (Linux, `--extra mne`) -> `build` (sdist/wheel import matrix,
+  Python 3.12/3.13). `typecheck`/`lint` gate every test job via `needs:`.
   - **Bot-bump interaction (PR #290 review):** `auto-bump-dev.yml`/
     `auto-tag.yml` push a version-bump commit straight back to `dev`/`main`
-    with a PAT specifically so it re-triggers workflows. That push lands in
-    `ci.yml`'s own concurrency group for the same ref, so without a guard it
-    would cancel the real merge commit's still-running CI and let the trivial
-    bump commit be the one that ends up tested -- doubling compute and moving
-    the green check onto the wrong commit. `lint`/`typecheck` carry the same
-    author-email + `Bump version to` message-prefix `if:` guard those two
-    workflows already use on themselves; every other `ci.yml` job `needs`
-    one of them, so GitHub cascades the skip across the whole run. This does
-    not stop the bump push's run from being queued -- the concurrency
-    cancellation of the real commit's in-progress run still happens, which
-    GitHub gives no in-workflow way to suppress -- it only stops that queued
-    run from silently absorbing a full, misattributed test pass.
+    with a PAT specifically so it re-triggers workflows. Per-SHA push grouping
+    means that bump push can never land in the same concurrency group as the
+    merge commit's own run, so it cannot cancel it -- a same-ref grouping
+    would have let it do exactly that (cancel the real merge commit's
+    still-running CI and leave the trivial bump commit as the one tested,
+    doubling compute and moving the green check onto the wrong commit).
+    `lint`/`typecheck` additionally carry the same author-email + `Bump
+    version to` message-prefix `if:` guard those two workflows already use on
+    themselves; every other `ci.yml` job `needs` one of them, so GitHub
+    cascades the skip across the whole run. With per-SHA grouping this guard's
+    job is purely to avoid spending compute re-verifying state the merge
+    commit's own run already covered, not to prevent a cancellation.
 - **`weekly-macos-slow.yml`** -- schedule-only (Sunday cron) plus manual
   `workflow_dispatch`, never on `push`/`pull_request`, so it cannot block or
   slow a PR. Runs the full suite with no `-m` filter on macOS (Apple Silicon):
