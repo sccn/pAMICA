@@ -174,9 +174,16 @@ For a full-rank square sphere `pinv` equals `inv` to about 1e-15, far below the
 well-conditioned data are unchanged; the bundled sample reproduces its previous
 `comp_list` and log-likelihood bit for bit.
 
-The NumPy backend reaches the merge decision from a different metric: its
-`identify_shared_components` compares the columns of `A` directly in the sphered
-space, with no back-map at all, so it never needed an inverse and already ran at
-any rank.
-The two backends can therefore identify different pairs on the same data; the
-NumPy sharing path is being reworked in issues #240 and #242.
+The NumPy backend now reaches the merge decision from the same metric (issue
+#258): `identify_shared_components` takes the de-sphered sensor-space maps
+directly -- `pinv(sphere) @ A`, the same back-map described above -- instead of
+comparing columns of the sphered `A`.
+The two backends therefore make the identical merge decision from the same
+fitted state (`pamica/tests/test_numpy_share_comps.py::test_numpy_merge_decision_matches_torch_backend`).
+On one real fitted 2-model state the top candidate cross-model pair measured
+0.992 cosine similarity in sensor space against 0.970 in the old sphered
+space -- close enough that, with the default `comp_thresh=0.99`, the two
+metrics disagree on whether that pair merges. A NumPy fit that shares
+components can therefore reach a different `comp_list` than it did before
+#258, even on a full-rank, well-conditioned sphere; only the `pinv`-vs-`inv`
+comparison two paragraphs above is unaffected by that swap.
