@@ -22,7 +22,7 @@ Port the five `amica15.f90` families into `AMICATorchNG`, exposed through Fortra
 sub-Gaussian cosh+, and `pdftype=1` = the extended-Infomax adaptive switcher (Fortran's
 `do_choose_pdfs` trigger), which flips each source between the super-Gaussian (code 1) and
 sub-Gaussian (code 4) cosh densities by kurtosis sign on the `kurt_start`/`num_kurt`/
-`kurt_int` schedule. `rho` is frozen for every non-GG family (`amica15.f90:3682`), and the
+`kurt_int` schedule. `rho` is frozen for every non-GG family (`amica15.f90:3704`), and the
 single-component families 1/4 require `n_mix=1`. The ground-truth `amica15.f90`/
 `amica15_header.f90` are copied into `pamica/`.
 
@@ -51,9 +51,9 @@ single-component families 1/4 require `n_mix=1`. The ground-truth `amica15.f90`/
 
 ## Receipts
 
-- `pamica/amica15.f90` select-cases at :1277 (likelihood) / :1449 (score); `dorho=.false.`
-  at :3682; `do_choose_pdfs` at :594; the `m2sum`/`m4sum` moment buffers are allocated/zeroed
-  (:590-591) but never accumulated, confirming the dynamic switch is dead code in the binary.
+- `pamica/amica15.f90` select-cases at :1295 (likelihood) / :1467 (score); `dorho=.false.`
+  at :3704; `do_choose_pdfs` at :612; the `m2sum`/`m4sum` moment buffers are allocated/zeroed
+  (:608-609) but never accumulated, confirming the dynamic switch is dead code in the binary.
 - The extended-Infomax intent comes from the upstream AMICA MATLAB wrapper `runamica15.m`
   (sccn/amica), which documents the schedule parameters verbatim (not copied into this repo):
   ```
