@@ -8,6 +8,7 @@ Fortran parity; see ``.context/decisions/0001-torch-backend-natural-gradient-em.
 
 import numpy as np
 import torch
+from pathlib import Path
 from typing import Optional, Union
 import inspect
 import logging
@@ -697,14 +698,25 @@ class AMICA:
     @classmethod
     def from_params_file(cls, params_file: str, **kwargs) -> "AMICA":
         """
-        Create AMICA instance from parameter file.
+        Create AMICA instance from a parameter file.
+
+        Accepts two formats, auto-detected from ``params_file`` (issue #132):
+        pamica's own JSON schema (``sample_data/sample_params.json``) and the
+        literal Fortran ``input.param`` text format
+        (``sample_data/input.param``), so the same file that drives the
+        reference binary can drive pamica too. Detection prefers the file
+        extension (``.json`` / ``.param``); anything else is sniffed by
+        content (JSON if it starts with ``{``/``[``, Fortran text otherwise).
+        See :func:`pamica.fortran_params.read_fortran_param_file` for the
+        Fortran-side key-mapping table and the deliberately-unmapped keys it
+        warns about rather than silently drops.
 
         Parameters
         ----------
         params_file : str
-            Path to JSON parameter file
+            Path to a JSON or Fortran-format parameter file.
         **kwargs
-            Additional parameters to override
+            Additional parameters to override.
 
         Returns
         -------
@@ -713,8 +725,17 @@ class AMICA:
         """
         import json
 
-        with open(params_file, "r") as f:
-            params = json.load(f)
+        path = Path(params_file)
+        text = path.read_text()
+        is_json = path.suffix == ".json" or (
+            path.suffix != ".param" and text.lstrip().startswith(("{", "["))
+        )
+        if is_json:
+            params = json.loads(text)
+        else:
+            from .fortran_params import read_fortran_param_file
+
+            params = read_fortran_param_file(path)
 
         # Extract relevant parameters
         n_models = params.get("num_models", 1)
