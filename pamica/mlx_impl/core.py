@@ -32,9 +32,12 @@ accumulators ride the existing E-step locals, and the direction is Fortran's
 closed-form per-source-pair 2x2 solve (no linear algebra, so no CPU-stream
 handoff). The one host sync it adds is the ``posdef`` flag, a scalar boolean
 that has to reach Python because it selects the learning-rate ramp target and
-drives the fallback counter; it joins the small per-iteration syncs the M-step
-already makes (the dead-model check and the rho-NaN canary). Validated against a
-float64 PyTorch twin on real EEG; see ``.context/issue-264/newton_findings.md``.
+drives the fallback counter. It is read once per MODEL per Newton iteration
+(``_newton_direction`` is called inside the per-model loop), so a single-model
+fit adds one scalar sync per iteration and an ``n_models``-model fit adds
+``n_models`` -- unlike the M-step's existing dead-model and rho-NaN canaries,
+which are one array-wide reduction each. Validated against a float64 PyTorch
+twin on real EEG; see ``.context/issue-264/newton_findings.md``.
 
 Convergence stops (issue #248) are the full AMICATorchNG/Fortran set:
 ``use_min_dll``/``min_dll``/``maxincs``, ``use_grad_norm``/``min_nd``, and the
@@ -158,11 +161,12 @@ class AMICAMLXNG:
 
     ``do_newton`` (False)
         Precondition the ``A``/``W`` natural gradient with the approximate
-        Hessian once ``iteration >= newt_start`` (Fortran ``do_newton``,
-        amica15.f90:1817-1832). Natural gradient alone plateaus short of the
-        Fortran solution; the Newton step is what closes the gap. OFF by
-        default, and every accumulator it needs is gated on it, so a default fit
-        is bit-for-bit what it was before #264.
+        Hessian once ``iteration >= newt_start`` (Fortran ``do_newton``: the
+        2x2 solve and its positive-definiteness guard at amica15.f90:1718-1741,
+        the ramp and fallback at :1803-1816). Natural gradient alone plateaus
+        short of the Fortran solution; the Newton step is what closes the gap.
+        OFF by default, and every accumulator it needs is gated on it, so a
+        default fit is bit-for-bit what it was before #264.
     ``newt_start`` (20)
         Iteration at which the Newton step switches on (natural gradient runs
         before it, letting the mixture parameters settle first). It also gates
@@ -387,7 +391,8 @@ class AMICAMLXNG:
 
         if self.do_sphere:
             # Population covariance (/N), matching Fortran's DSYRK scatter, not
-            # numpy's default sample covariance (/(N-1)) -- see core.py:635-639.
+            # numpy's default sample covariance (/(N-1)) -- the same choice, and
+            # the reasoning for it, at torch_impl/core.py:823-827.
             cov = np.cov(Xc, bias=True)
             evals, evecs = np.linalg.eigh(cov)
             order = np.argsort(evals)[::-1]
@@ -502,9 +507,17 @@ class AMICAMLXNG:
         once per iteration. ``W`` is ``(n_models, n, n)`` and ``_logdet_W`` is
         ``(n_models,)``. For n_models=1 this is ``inv(A)`` unchanged.
 
-        These build lazy graph nodes; a singular ``A`` therefore raises not here
-        but where the graph is materialized (the ``mx.eval`` in ``fit``), so a
-        LinAlg traceback rooted in ``fit`` actually originates in this method.
+        These build lazy graph nodes, so a singular ``A`` surfaces not here but
+        where the graph is materialized (the ``mx.eval`` in ``fit``) -- a
+        failure reported against ``fit`` actually originates in this method.
+        Measured on MLX 0.32: that failure is NOT a catchable Python exception.
+        ``inv`` on a singular matrix aborts the process from LAPACK
+        (``libc++abi: ... [Inverse::eval_cpu] LU factorization failed``), which
+        is also why a near-singular ``A`` cannot be driven far enough to make
+        ``W`` overflow to inf in float32 -- LU fails first. ``fit``'s
+        ``nan_params`` guard still checks ``W``/``_logdet_W`` as defense in
+        depth, since a non-finite result that LU does not reject would
+        otherwise reach the caller silently on the final iteration.
         """
         assert self.A is not None and self.comp_list is not None
         ws, logdets = [], []
@@ -1219,6 +1232,7 @@ class AMICAMLXNG:
                 self.gm,
                 self.c,
                 self._nd_arr,
+                self._logdet_W,
             )
 
             # Surface a corrupted M-step (component collapse / float32 overflow)
@@ -1240,6 +1254,25 @@ class AMICAMLXNG:
                 "gm": self.gm,
                 "c": self.c,
                 "ndtmpsum": self._nd_arr,
+                # W and its log-determinant are DERIVED from A by
+                # mx.linalg.inv/slogdet, so a non-finite value can reach the
+                # caller while A itself is still finite -- and nothing else
+                # would catch it on the LAST iteration, where there is no next
+                # E-step to turn it into a nan_ll stop. The fit would then
+                # return stop_reason="max_iter" with a healthy-looking final_ll_
+                # (computed from the PREVIOUS iteration's W) and a silently
+                # non-finite unmixing matrix, which is precisely the outcome
+                # this guard exists to prevent. Verified by injection: with
+                # W/_logdet_W excluded, that state passes every other entry
+                # here.
+                #
+                # Defense in depth rather than a route known to be reachable:
+                # the obvious candidate, a near-singular A whose inverse
+                # overflows float32, is NOT reachable, because MLX's LU rejects
+                # such an A first (see _update_unmixing_matrices). Cheap enough
+                # to keep regardless -- both are already materialized above.
+                "W": self.W,
+                "logdet_W": self._logdet_W,
             }
             params_finite = mx.array(True)
             for value in checked.values():
