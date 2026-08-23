@@ -71,10 +71,10 @@ PDFTYPE_NAMES = {
 }
 
 _LOG2 = math.log(2.0)
-_LOG4 = math.log(4.0)  # logistic-family normalizer (amica15.f90:1328)
+_LOG4 = math.log(4.0)  # logistic-family normalizer (amica15.f90:1346)
 _HALF_LOG_PI = 0.5 * math.log(math.pi)
 # Log-normalizers for the non-GG density families, using Fortran's exact literal
-# constants (amica15.f90:1315/1341/1353) so the log-density matches the reference
+# constants (amica15.f90:1333/1359/1371) so the log-density matches the reference
 # binary bit-for-bit: 2.506628274 = sqrt(2*pi) (Gaussian, pdtype 2); 4.132731354 /
 # 1.858073988 = the sub-/super-Gaussian cosh normalizers (pdtype 4 / 1).
 _LOG_SQRT_2PI = math.log(2.506628274)
@@ -93,9 +93,9 @@ _EPSDBLE = 1e-16
 # restores it when the final LL falls more than this tolerance below that peak.
 # Units: mean log-likelihood per sample-channel (the same scale as Fortran's
 # min_dll comparison -- verified against BOTH Fortran sources, not just one:
-# amica15.f90:1752 and amica17.f90:1866 both compute LL(iter) = LLtmp2 /
+# amica15.f90:1770 and amica17.f90:1866 both compute LL(iter) = LLtmp2 /
 # dble(numgoodsum*nw) and then compare consecutive LL(iter) values against
-# min_dll (amica15.f90:1061 / amica17.f90:1085), so this is not an amica17-only
+# min_dll (amica15.f90:1079 / amica17.f90:1085), so this is not an amica17-only
 # quirk -- amica15, the actual reference binary's source, does the identical
 # normalization. The legacy NumPy backend compared un-normalized summed LL until
 # issue #212, which made its own min_dll unreachable; it now normalizes the same
@@ -157,7 +157,7 @@ def _log_pdf_and_deriv(
     if pdtype is None:
         return log_pdf, dpdf
 
-    # Non-GG families (amica15.f90:1309-1353). Each is `-cost - log_norm`, and
+    # Non-GG families (amica15.f90:1327-1371). Each is `-cost - log_norm`, and
     # dpdf = -fp * exp(log_pdf).
     log_pdf_2 = -0.5 * y * y - _LOG_SQRT_2PI  # Gaussian
     log_pdf_3 = -2.0 * _logcosh(0.5 * y) - _LOG4  # logistic (sech^2)
@@ -188,7 +188,7 @@ def _score(
 
     For the GG family this is ``fp(y) = rho*sign(y)*|y|^(rho-1)`` (``sign(y)``
     for Laplace, ``2y`` for Gaussian), used by the exact-EM and Newton
-    sufficient statistics (``amica15.f90:1449-1473``). It is distinct from the
+    sufficient statistics (``amica15.f90:1467-1491``). It is distinct from the
     density derivative ``dpdf`` (which carries an extra ``pdf`` factor).
 
     With ``pdtype is None`` only the GG score is computed (bit-identical to the
@@ -315,7 +315,7 @@ class AMICATorchNG:
         learning-rate *ceiling* is ratcheted down (Fortran ``maxdecs``).
     use_min_dll : bool, default=True
         Enable the small-likelihood-increase stop (Fortran ``use_min_dll``,
-        amica15_header.f90:24/109; amica15.f90:1060-1072): once the per-
+        amica15_header.f90:24/109; amica15.f90:1078-1090): once the per-
         sample-channel log-likelihood gain ``ll_history[-1] - ll_history[-2]``
         falls below ``min_dll`` for more than ``maxincs`` *consecutive*
         iterations, ``fit`` stops (``stop_reason="min_dll"``). The counter
@@ -326,7 +326,7 @@ class AMICATorchNG:
     min_dll : float, default=1e-9
         Threshold for ``use_min_dll``, on the log-likelihood's own scale
         (mean log-likelihood per sample-channel, matching ``ll_history`` --
-        see ``amica15.f90:1752``, which normalizes ``LL(iter)`` by
+        see ``amica15.f90:1770``, which normalizes ``LL(iter)`` by
         ``numgoodsum*nw`` before this comparison in the reference).
     maxincs : int, default=5
         Number of consecutive small-gain iterations tolerated before
@@ -335,13 +335,13 @@ class AMICATorchNG:
         default).
     use_grad_norm : bool, default=True
         Enable the weight-gradient-norm stop (Fortran ``use_grad_norm``,
-        amica15_header.f90:24/74; amica15.f90:1073-1079): once the RMS
+        amica15_header.f90:24/74; amica15.f90:1091-1097): once the RMS
         weight-update norm ``ndtmpsum`` (see ``min_nd``) falls to or below
         ``min_nd``, ``fit`` stops (``stop_reason="grad_norm"``). This is
         independent of ``use_min_dll`` and of whether the log-likelihood
         just decreased; it is also folded into the likelihood-decrease
         branch unconditionally (``stop_reason="grad_norm_floor"``, Fortran
-        amica15.f90:1040's ``.or. (ndtmpsum .le. min_nd)``, alongside the
+        amica15.f90:1058's ``.or. (ndtmpsum .le. min_nd)``, alongside the
         existing ``lrate <= minlrate`` check) -- this decrease-branch half is
         what fixes the reported CUDA/``do_newton=True`` case where ``lrate``
         sits at ``newtrate`` and oscillates instead of annealing, so the old
@@ -372,7 +372,7 @@ class AMICATorchNG:
         before reading ``stop_reason`` as a precise diagnosis.
     min_nd : float, default=1e-7
         Threshold for ``use_grad_norm`` (and the decrease-branch grad-norm
-        check). Matches Fortran's ``ndtmpsum`` (amica15.f90:1742-1743): the
+        check). Matches Fortran's ``ndtmpsum`` (amica15.f90:1760-1761): the
         RMS, over ``comp_used`` components only, of the per-iteration
         weight-update direction ``dAk`` (the natural-gradient/Newton step
         before the ``lrate`` scaling and before ``share_comps``'s A-freeze
@@ -455,7 +455,7 @@ class AMICATorchNG:
         iteration (with matching ``mu``/``beta`` rescale).
     share_comps : bool, default=False
         Enable multi-model component sharing (Fortran ``share_comps`` /
-        ``identify_shared_comps``, amica15.f90:1898): components that are
+        ``identify_shared_comps``, amica15.f90:1916): components that are
         near-collinear across different models are merged so they share one
         mixing column and one density. Requires ``n_models >= 2`` (a model
         cannot share with itself); a no-op otherwise. OFF by default, so
@@ -484,7 +484,7 @@ class AMICATorchNG:
         ``numeigs = min(pcakeep, count(eigs > mineig))``.
     mineig : float, default=1e-15
         Absolute floor on data-covariance eigenvalues used to detect the
-        numerical rank (Fortran ``mineig``, amica15.f90:395 and
+        numerical rank (Fortran ``mineig``, amica15.f90:413 and
         amica15_header.f90:66). Eigen-directions at or below it are dropped, the
         model is sized to the surviving rank, and sensor-space maps come from
         :meth:`get_sensor_mixing_matrix`. Full-rank data keep every eigenvalue,
@@ -649,9 +649,9 @@ class AMICATorchNG:
             raise ValueError(f"pdftype must be one of 0,1,2,3,4; got {pdftype}")
         self.pdftype = pdftype
         # Fortran freezes the GG shape update for every non-GG family (amica15.f90:
-        # `if (pdftype /= 0) dorho = .false.`, line 3682).
+        # `if (pdftype /= 0) dorho = .false.`, lines 3704-3705).
         self.dorho = pdftype == 0
-        # pdftype==1 is Fortran's adaptive trigger (amica15.f90:594).
+        # pdftype==1 is Fortran's adaptive trigger (amica15.f90:612).
         self.do_choose_pdfs = pdftype == 1
         self.kurt_start = kurt_start
         self.num_kurt = num_kurt
@@ -682,7 +682,7 @@ class AMICATorchNG:
         self.scalestep = scalestep
 
         # Component sharing (Fortran share_comps / identify_shared_comps trigger
-        # amica15.f90:1838, subroutine :1898-1945): periodically merge mixing
+        # amica15.f90:1856, subroutine :1916-1963): periodically merge mixing
         # columns near-collinear across DIFFERENT models so they share one
         # density and one mixing column. Multi-model only (a model cannot share
         # with itself); OFF by default so single-model (#24) and default
@@ -832,7 +832,7 @@ class AMICATorchNG:
             evals = evals[order]
             evecs = evecs[:, order]
 
-            # Numerical-rank detection (Fortran amica15.f90:395). The policy is
+            # Numerical-rank detection (Fortran amica15.f90:413). The policy is
             # shared with the NumPy and MLX backends so they cannot drift
             # (pamica/rank.py); only the eigenvalues cross the boundary, as a
             # read-only copy, so the sphere below stays bit-exact.
@@ -849,12 +849,12 @@ class AMICATorchNG:
             if n_comp < data_dim:
                 # Rank-reduced sphere: (n_comp, data_dim), so the sphered data
                 # come out at the kept rank rather than staying rank-deficient
-                # at data_dim rows (Fortran nw = numeigs, amica15.f90:545).
+                # at data_dim rows (Fortran nw = numeigs, amica15.f90:563).
                 # Vt rows are eigenvectors in descending-eigenvalue order,
-                # matching Fortran's reversed Stmp2 (amica15.f90:455-460).
+                # matching Fortran's reversed Stmp2 (amica15.f90:473-479).
                 w_pca = inv_sqrt @ V.T
                 if self.do_approx_sphere:
-                    # Fortran amica15.f90:483-490 symmetrizes the reduced
+                    # Fortran amica15.f90:501-508 symmetrizes the reduced
                     # whitening by the orthogonal polar factor of the leading
                     # n_comp x n_comp block of V^T:
                     #   B = (V^T)[:n, :n] = U_b S_b Vt_b
@@ -893,7 +893,7 @@ class AMICATorchNG:
 
         # Rank reduction shrank the sphered space, so size the model to the kept
         # rank before _initialize_parameters allocates against n_channels
-        # (Fortran ``nw = numeigs``, amica15.f90:545). No-op, and therefore
+        # (Fortran ``nw = numeigs``, amica15.f90:563). No-op, and therefore
         # bit-exact, whenever the data are full rank.
         n_kept = sphere.shape[0]
         if n_kept != self.n_channels:
@@ -955,7 +955,7 @@ class AMICATorchNG:
         self.c = torch.from_numpy(c_np).to(self.device, self.dtype)
 
         # Per-source density-family codes, Fortran ``pdtype = pdftype`` (amica15.f90:
-        # 593). In adaptive mode (pdftype==1) every source starts as the
+        # 611). In adaptive mode (pdftype==1) every source starts as the
         # super-Gaussian code 1 and the switcher may flip it to 4.
         self.pdtype = torch.full(
             (n, m), self.pdftype, dtype=torch.long, device=self.device
@@ -1051,7 +1051,7 @@ class AMICATorchNG:
 
             # z0 = log(alpha) + log(beta) + log_pdf. For the single-component
             # families (codes 1/4) n_mix==1 so alpha==1 and log(alpha)==0, which
-            # reproduces Fortran's alpha-free z0 (amica15.f90:1340/1352).
+            # reproduces Fortran's alpha-free z0 (amica15.f90:1358/1370).
             z0 = torch.log(alpha_h) + torch.log(beta_h) + log_pdf
             ll_i = torch.logsumexp(
                 z0, dim=-1
@@ -1101,9 +1101,9 @@ class AMICATorchNG:
 
         Under ``do_reject``, only the good set (``self.good_idx``) is scored --
         Fortran zeroes a rejected sample's ``modloglik``/``loglik`` on write
-        (amica15.f90:2211-2216) and ``load_rej`` uses that exact zero as the
+        (amica15.f90:2231-2234) and ``load_rej`` uses that exact zero as the
         rejection sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:
-        887-896), so rejected columns of the returned arrays are left at their
+        907), so rejected columns of the returned arrays are left at their
         zero-initialized value rather than computed and discarded -- this also
         avoids running rejected outliers through the model for the first time
         at write time.
@@ -1204,7 +1204,7 @@ class AMICATorchNG:
             v_h = v[:, h]
             beta_h = self.beta[:, idx].T.unsqueeze(0)  # sbeta, (1, n_ch, num_mix)
             rho_h = self.rho[:, idx].T  # (n_ch, num_mix)
-            # score fp; the family select-case is amica15.f90:1449-1473 (amica17
+            # score fp; the family select-case is amica15.f90:1467-1491 (amica17
             # is GG-only, so cite the binary's source explicitly here).
             fp = _score(y, rho_h.unsqueeze(0), self._pdtype_h(h))
             u = v_h.unsqueeze(-1).unsqueeze(-1) * zr  # u = v*z (:1439)
@@ -1388,7 +1388,7 @@ class AMICATorchNG:
             and self.comp_list is not None
         )
         # Fortran builds dAk from the previous iteration's model weights: gm is
-        # not reassigned until update_params (amica15.f90:1789+), after
+        # not reassigned until update_params (amica15.f90:1788+), after
         # accum_updates_and_likelihood (:1731-1743). Snapshot before overwriting so
         # dAk -- which both drives the A-update below and reports ndtmpsum, unlike
         # numpy_impl where it is only the diagnostic -- weights the way Fortran
@@ -1478,7 +1478,7 @@ class AMICATorchNG:
         # here (e.g. from upstream mu/beta corruption) is reset to rho0 -- but
         # logged first, so the reset does not silently erase the failure origin.
         # Skipped for every non-GG family: Fortran sets dorho=.false. when
-        # pdftype/=0 (amica15.f90:3682), freezing rho at rho0.
+        # pdftype/=0 (amica15.f90:3704), freezing rho at rho0.
         if (
             self.dorho
             and not torch.all(self.rho == 1.0)
@@ -1516,8 +1516,8 @@ class AMICATorchNG:
         #
         # The direction/dAk/gradient-norm computation below runs UNCONDITIONALLY,
         # not gated on _a_frozen(): Fortran computes dAk and ndtmpsum every
-        # iteration in accum_updates_and_likelihood (amica15.f90:1730-1743),
-        # strictly before the LATER, separate update_A block (amica15.f90:1785)
+        # iteration in accum_updates_and_likelihood (amica15.f90:1749-1761),
+        # strictly before the LATER, separate update_A block (amica15.f90:1803)
         # that actually steps A and is guarded by the share-freeze window. Only
         # the step itself -- and the lrate ramp / Newton-fallback bookkeeping
         # that Fortran nests inside that same guarded block -- are conditional on
@@ -1545,7 +1545,7 @@ class AMICATorchNG:
 
         # Accumulate each model's natural-gradient/Newton contribution per
         # mixing COLUMN as a gm-WEIGHTED AVERAGE (Fortran dAk/zeta,
-        # amica15.f90:1730-1743): dAk = sum_h gm[h]*dir_h scattered by
+        # amica15.f90:1749-1761): dAk = sum_h gm[h]*dir_h scattered by
         # comp_list, zeta = sum_h gm[h] per column, then dAk /= zeta. For the
         # default disjoint comp_list every column has exactly one contributor,
         # so gm cancels (dAk = dir) and single-model (gm=[1]) is byte-for-byte
@@ -1560,7 +1560,7 @@ class AMICATorchNG:
             zeta.index_add_(0, idx, gm_prev[h].expand(idx.shape[0]))
         dAk = dAk / zeta.clamp_min(torch.finfo(self.dtype).tiny)
 
-        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1742-1743):
+        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1760-1761):
         # ``sqrt(sum(dAk**2, mask=comp_used) / (nw*count(comp_used)))``. Read by
         # fit()'s convergence checks (issue #207); the comp_used mask matters
         # only when share_comps has merged/frozen columns (all-True otherwise,
@@ -1577,13 +1577,13 @@ class AMICATorchNG:
         )
 
         # A-update. When sharing holds A this iteration (the post-merge settle
-        # window, Fortran amica15.f90:1785), skip the step -- lrate ramp,
+        # window, Fortran amica15.f90:1803), skip the step -- lrate ramp,
         # Newton-fallback bookkeeping, and the DAXPY itself -- so a discarded
         # Newton direction cannot pollute the fallback counter.
         if not self._a_frozen():
             if newton_active and no_newt:
                 # Fortran prints "Hessian not positive definite, using natural
-                # gradient" (amica15.f90:1791-1793). Surface the same signal so an
+                # gradient" (amica15.f90:1809-1811). Surface the same signal so an
                 # all-fallback run (issue #21) is visible without re-instrumenting.
                 self.n_newton_fallbacks += 1
                 logger.warning(
@@ -1592,7 +1592,7 @@ class AMICATorchNG:
                 )
 
             # Learning-rate ramp: toward newtrate while Newton is active and
-            # stable, otherwise toward lrate0 (Fortran amica15.f90:1786-1797).
+            # stable, otherwise toward lrate0 (Fortran amica15.f90:1804-1815).
             # Ramped after mu/beta/rho (exact-EM, lrate-free) and before A.
             if newton_active and not no_newt:
                 self.lrate = min(
@@ -1622,7 +1622,7 @@ class AMICATorchNG:
         window once ``iter >= share_start`` -- i.e. the merge iteration and the 5
         after it -- so the density parameters can settle onto any freshly merged
         component before the mixing matrix moves again (Fortran A-freeze,
-        amica15.f90:1785). The window fires each cycle regardless of whether that
+        amica15.f90:1803). The window fires each cycle regardless of whether that
         cycle's ``_identify_shared_comps`` actually merged a pair.
 
         Anchored on ``(itf - share_start) % share_iter`` so it stays aligned with
@@ -1644,7 +1644,7 @@ class AMICATorchNG:
 
     def _identify_shared_comps(self) -> None:
         """Merge near-collinear mixing columns across models (Fortran
-        ``identify_shared_comps``, amica15.f90:1898).
+        ``identify_shared_comps``, amica15.f90:1916).
 
         Two components (model ``h`` source ``i`` and model ``hh`` source ``ii``,
         ``h < hh``) are identified when the angle between their mixing columns,
@@ -1658,7 +1658,7 @@ class AMICATorchNG:
 
         The pseudo-inverse -- not a true inverse -- is the faithful back-map:
         the reference carries exactly this, ``Spinv(nx, numeigs)``, whenever
-        rank/PCA reduction is active (amica15.f90:550-560). Invertibility was
+        rank/PCA reduction is active (amica15.f90:568-578). Invertibility was
         never a mathematical requirement of the merge metric, only of the way it
         used to be computed (issue #253). Two consequences:
 
@@ -1743,7 +1743,7 @@ class AMICATorchNG:
     def _pinv_sphere(self) -> torch.Tensor:
         """Cached ``pinv(sphere)``: the back-map from sphered to input-channel space.
 
-        This is the Fortran ``Spinv`` (amica15.f90:550-560), which the reference
+        This is the Fortran ``Spinv`` (amica15.f90:568-578), which the reference
         also builds as a pseudo-inverse, ``Spinv(nx, numeigs)``, under rank/PCA
         reduction. A pseudo-inverse rather than an inverse because reduction
         leaves the sphere non-square (issue #223) and a square sphere fitted on
@@ -1789,7 +1789,7 @@ class AMICATorchNG:
         ``kurt_start``/``num_kurt``/``kurt_int`` schedule (the super/sub-Gaussian
         scores ``y +/- tanh(y)`` are exactly the two families 1/4). The
         reference binary declares this (``pdftype==1`` sets ``do_choose_pdfs``,
-        amica15.f90:594) but never runs the switch (``m2sum``/``m4sum`` are
+        amica15.f90:612) but never runs the switch (``m2sum``/``m4sum`` are
         never accumulated), so there is no bit-exact oracle; validated by
         real-data log-likelihood (must not decrease vs the fixed GG default).
         """
@@ -1932,7 +1932,7 @@ class AMICATorchNG:
         )
         numdecs = 0
         # Consecutive-small-likelihood-gain counter for the min_dll stop (Fortran
-        # numincs, amica15.f90:1062-1071; issue #207). Reset here so a refit on
+        # numincs, amica15.f90:1079-1089; issue #207). Reset here so a refit on
         # the same instance gets a fresh count, matching numdecs.
         numincs = 0
 
@@ -2034,10 +2034,10 @@ class AMICATorchNG:
                     self.n_kurt_done += 1
 
             # Component sharing (Fortran identify_shared_comps schedule,
-            # amica15.f90:1838): once per share_iter cycle from share_start,
+            # amica15.f90:1856): once per share_iter cycle from share_start,
             # merge near-collinear mixing columns across models using the
             # just-updated A. Fortran runs identify_shared_comps BEFORE
-            # get_unmixing_matrices (amica15.f90:1840,1845), so rebuild W from the
+            # get_unmixing_matrices (amica15.f90:1858,1863), so rebuild W from the
             # merged comp_list -- otherwise the next E-step would read a stale W
             # (pre-merge comp_list) while indexing the densities by the merged
             # comp_list. No-op when share_comps is off or n_models == 1.
@@ -2091,8 +2091,8 @@ class AMICATorchNG:
             #
             # rholrate is a CEILING here, not a per-decrease-annealed working
             # rate. Fortran resets rholrate=rholrate0 each iteration before the
-            # rho update (amica15.f90:1788) and only tightens the rholrate0
-            # ceiling at maxdecs (amica15.f90:1050, gated on iter>newt_start), so
+            # rho update (amica15.f90:1806/1813) and only tightens the rholrate0
+            # ceiling at maxdecs (amica15.f90:1068, gated on iter>newt_start), so
             # its per-decrease rholrate*=rholratefact (:1045) is always overwritten
             # by the reset and never reaches the rho update. rho has no ramp, so
             # self.rholrate carries that ceiling directly (reset to rholrate0 each
@@ -2100,7 +2100,7 @@ class AMICATorchNG:
             # previous per-decrease self.rholrate*=rholratefact was a monotone
             # decay with no reset that collapsed the rho rate to ~1e-5 within a few
             # hundred iterations and froze rho at a stale shape (issue #193).
-            # have_prev mirrors Fortran's outer ``if (iter > 1)`` (amica15.f90:1033),
+            # have_prev mirrors Fortran's outer ``if (iter > 1)`` (amica15.f90:1051),
             # which wraps the decrease branch AND the two stops below: none of
             # the three checks can fire on the first iteration (no LL(iter-1)
             # yet) or before ll_history has two entries after a restart.
@@ -2126,12 +2126,12 @@ class AMICATorchNG:
             # ``test_grad_norm_shadows_grad_norm_floor_under_shipped_defaults``.
             # This is a reporting nuance, not a behavior change -- deliberately
             # NOT restructured into an explicit precedence, to keep this
-            # section a direct, reviewable port of amica15.f90:1033-1079.
+            # section a direct, reviewable port of amica15.f90:1051-1098.
             have_prev = len(self.ll_history) > 1
             leave = False
             if have_prev and ll < self.ll_history[-2]:
                 # ndtmpsum is the SAME per-iteration value use_grad_norm reads
-                # below (amica15.f90:1040's ``.or. (ndtmpsum .le. min_nd)``,
+                # below (amica15.f90:1058's ``.or. (ndtmpsum .le. min_nd)``,
                 # issue #207 gap 3): this is what makes lrate stopping robust
                 # under do_newton, where lrate sits at newtrate/oscillates
                 # instead of annealing toward minlrate, so the old
@@ -2164,7 +2164,7 @@ class AMICATorchNG:
                             self.newtrate *= self.lratefact
                         numdecs = 0
 
-            # Small-likelihood-increase stop (Fortran amica15.f90:1060-1072,
+            # Small-likelihood-increase stop (Fortran amica15.f90:1078-1090,
             # use_min_dll/min_dll/maxincs -- issue #207 gap 1). Independent of
             # the decrease branch above: it runs every iteration once have_prev,
             # including iterations where the LL just decreased (a decrease is
@@ -2188,7 +2188,7 @@ class AMICATorchNG:
                 else:
                     numincs = 0
 
-            # Weight-gradient-norm stop (Fortran amica15.f90:1073-1079,
+            # Weight-gradient-norm stop (Fortran amica15.f90:1091-1097,
             # use_grad_norm/min_nd -- issue #207 gap 2). Also independent of the
             # decrease branch: this is the unconditional every-iteration check
             # (as opposed to the decrease-branch's grad_norm_floor above, which
@@ -2391,7 +2391,7 @@ class AMICATorchNG:
         :meth:`get_mixing_matrix` returns ``A`` in the *sphered* space. These are
         the corresponding sensor-space maps (EEGLAB/MNE scalp maps),
         ``pinv(sphere) @ A``, of shape ``(n_channels_in, n_channels)``. This is
-        the Fortran ``Spinv`` mapping (amica15.f90:550-560), and it is the only
+        the Fortran ``Spinv`` mapping (amica15.f90:568-578), and it is the only
         way to recover sensor maps when rank reduction is active, since the
         sphere is then non-square (issue #223).
         """

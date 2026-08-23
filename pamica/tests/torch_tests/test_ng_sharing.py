@@ -1,7 +1,7 @@
 """Component sharing (issue #60) for AMICATorchNG.
 
 Covers the ``share_comps`` reassignment ported from the Fortran
-``identify_shared_comps`` (amica15.f90:1898). There is no bit-exact oracle (the
+``identify_shared_comps`` (amica15.f90:1916). There is no bit-exact oracle (the
 reference's ``Spinv2`` metric is declared but never allocated, like the dead
 ``do_choose_pdfs`` switch, #26), so the merge *mechanism* is tested with
 controlled mixing matrices and the end-to-end behavior on real sample EEG.
@@ -127,7 +127,7 @@ def test_identify_merges_one_collinear_pair():
 def test_guard_prevents_within_model_collapse():
     """When every column is collinear, sharing must NOT collapse a model's own
     sources together: with 2 sources x 2 models it settles to 2 shared comps,
-    not 1 (Fortran's 'common presence in a model' guard, amica15.f90:1918)."""
+    not 1 (Fortran's 'common presence in a model' guard, amica15.f90:1936)."""
     n = 2
     v = torch.tensor([1.0, 2.0], dtype=torch.float64)
     A = torch.stack([v] * (2 * n), dim=1)

@@ -38,7 +38,7 @@ The reference decides how many dimensions are real with an absolute floor on cov
 eigenvalues:
 
 ```fortran
-numeigs = min(pcakeep, count(eigs > mineig))   ! amica15.f90:395, mineig = 1e-15
+numeigs = min(pcakeep, count(eigs > mineig))   ! amica15.f90:413, mineig = 1e-15
 ```
 
 Because the floor is absolute, it depends on the physical units of the input:
@@ -161,7 +161,7 @@ rank-reduced or rank-deficient fit: with rank reduction active the sphere is
 `(n_kept, n_channels)` and has no inverse, and a square sphere fitted on
 rank-deficient data is singular.
 The back-map is now `pinv(sphere)`, which is what the reference itself carries
-under reduction (`Spinv(nx, numeigs)`, amica15.f90:550-560), so sharing works at
+under reduction (`Spinv(nx, numeigs)`, amica15.f90:568-578), so sharing works at
 any rank (issue #253, reported from Maxwell-filtered MEG in #221).
 
 ```python

@@ -1389,8 +1389,8 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
     per-LL-decrease monotone decay.
 
     Fortran resets ``rholrate = rholrate0`` every iteration before the rho update
-    (amica15.f90:1788) and only tightens the ceiling at ``maxdecs``
-    (amica15.f90:1050, gated on ``iter > newt_start``). torch previously decayed
+    (amica15.f90:1806/1813) and only tightens the ceiling at ``maxdecs``
+    (amica15.f90:1068, gated on ``iter > newt_start``). torch previously decayed
     ``rholrate`` on EVERY LL decrease with no reset, collapsing it to ~1e-5 within
     a few hundred iterations and freezing rho at a stale shape.
 

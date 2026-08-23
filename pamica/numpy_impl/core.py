@@ -307,7 +307,7 @@ class AMICA:
         # index array of the currently-kept samples that only ever shrinks, plus
         # its count (num_good_samples), which normalizes gm (the model weights)
         # and self.ll (see _get_updates_and_likelihood, matching Fortran's
-        # LL(iter) = LLtmp2 / dble(numgoodsum*nw), amica15.f90:1752). Both
+        # LL(iter) = LLtmp2 / dble(numgoodsum*nw), amica15.f90:1770). Both
         # None/full until fit() sets them up. numrej counts rejection passes
         # (the maxrej budget). _last_ll_samples
         # holds the pre-update per-sample LL that _reject_outliers thresholds
@@ -403,7 +403,7 @@ class AMICA:
         """Mixing matrix mapped back to input-channel space.
 
         ``pinv(sphere) @ A``, of shape ``(data_dim_in, data_dim)`` -- the Fortran
-        ``Spinv`` mapping (amica15.f90:550-560), and the only way to recover
+        ``Spinv`` mapping (amica15.f90:568-578), and the only way to recover
         sensor maps when rank reduction has made the sphere non-square
         (issue #223). Mirrors ``AMICATorchNG.get_sensor_mixing_matrix``.
         """
@@ -655,12 +655,12 @@ class AMICA:
                 # Rank-reduced: the sphere is (n_comp, data_dim), so the sphered
                 # data come out at the kept rank instead of staying
                 # rank-deficient at full width (Fortran nw = numeigs,
-                # amica15.f90:545).
+                # amica15.f90:563).
                 w_pca = inv_sqrt @ V.T
                 if self.do_approx_sphere:
                     # Fortran symmetrizes the reduced whitening by the orthogonal
                     # polar factor of the leading n_comp block of V^T
-                    # (amica15.f90:483-490).
+                    # (amica15.f90:501-508).
                     U_b, _, Vt_b = np.linalg.svd(evecs.T[:n_comp, :n_comp])
                     self.sphere = (Vt_b.T @ U_b.T) @ w_pca
                 else:
@@ -677,7 +677,7 @@ class AMICA:
 
             # Rank reduction shrank the sphered space: size the model to the
             # kept rank before _initialize_parameters allocates against
-            # data_dim (Fortran nw = numeigs, amica15.f90:545). No-op, and so
+            # data_dim (Fortran nw = numeigs, amica15.f90:563). No-op, and so
             # bit-exact, for full-rank data.
             n_kept = self.sphere.shape[0]
             if n_kept != self.data_dim:
@@ -922,15 +922,15 @@ class AMICA:
 
         # Normalize the accumulated total LL by (good-sample count x working
         # dimensionality), matching Fortran's LL(iter) = LLtmp2 / dble(numgoodsum*nw)
-        # (amica15.f90:1752) at the point the full-data sum becomes available.
+        # (amica15.f90:1770) at the point the full-data sum becomes available.
         # numgoodsum is self.num_good_samples: Fortran initializes numgoodsum to
-        # all_blks (all samples) and only shrinks it under do_reject (amica15.f90:234,
-        # 2234), and self.num_good_samples mirrors that exactly (set to num_samples
+        # all_blks (all samples) and only shrinks it under do_reject (amica15.f90:252,
+        # 2252), and self.num_good_samples mirrors that exactly (set to num_samples
         # in _initialize_parameters, only shrunk by _reject_outliers), so this one
         # expression is correct whether or not do_reject is set -- no branch needed.
-        # nw is the per-model working dimensionality (Fortran's numeigs, amica15.f90:545);
+        # nw is the per-model working dimensionality (Fortran's numeigs, amica15.f90:563);
         # self.data_dim is its NumPy analogue -- comp_list is (data_dim, num_models),
-        # matching Fortran's comp_list(nw, num_models) (amica15.f90:599).
+        # matching Fortran's comp_list(nw, num_models) (amica15.f90:617).
         assert self.num_good_samples is not None and self.data_dim is not None
         updates["ll"] /= self.num_good_samples * self.data_dim
 
@@ -1216,9 +1216,9 @@ class AMICA:
 
         Under ``do_reject``, only the good set (``self.good_idx``) is scored
         -- Fortran zeroes a rejected sample's ``modloglik``/``loglik`` on write
-        (amica15.f90:2211-2216) and ``load_rej`` uses that exact zero as the
+        (amica15.f90:2231-2234) and ``load_rej`` uses that exact zero as the
         rejection sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:
-        887-896), so rejected columns of ``Lht``/``Lt`` are left at their
+        907), so rejected columns of ``Lht``/``Lt`` are left at their
         zero-initialized value rather than computed and discarded -- this also
         avoids running rejected outliers through the model for the first time
         at write time.
@@ -1290,7 +1290,7 @@ class AMICA:
             and self.A is not None
         )
         # Fortran builds dAk from the model weights of the *previous* iteration:
-        # gm is not reassigned until update_params (amica15.f90:1789+), which runs
+        # gm is not reassigned until update_params (amica15.f90:1788+), which runs
         # after accum_updates_and_likelihood (:1731-1743). Snapshot it here so the
         # nd block below weights by the same gm Fortran would (issue #219).
         assert self.gm is not None
@@ -1464,7 +1464,7 @@ class AMICA:
             else:
                 directions.append(dA)
 
-        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1731-1743). Computed
+        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1749-1761). Computed
         # HERE, before the A step and before rescaling, because Fortran builds dAk
         # inside accum_updates_and_likelihood (:1731-1743) strictly before
         # update_params applies it (:1789). Using the post-update, post-rescale A
@@ -1492,7 +1492,7 @@ class AMICA:
         # ndtmpsum is then the RMS of the used columns of dAk:
         # ||dAk[:, used]|| / sqrt(nw * n_used), with NO lrate factor. Fortran
         # measures the gradient direction before the step, not the applied update
-        # lrate*dAk, and does not divide by lrate either (amica15.f90:1742-1743) --
+        # lrate*dAk, and does not divide by lrate either (amica15.f90:1760-1761) --
         # there is no missing factor here.
         zeta = np.zeros(self.num_comps)
         for h in range(self.num_models):
@@ -1525,7 +1525,7 @@ class AMICA:
         # the value it was merged away with. When sharing holds A this iteration
         # (the post-merge settle window) the step is skipped entirely, along with
         # the lrate ramp and the Newton-fallback bookkeeping Fortran nests inside
-        # the same guarded block (amica15.f90:1785), so a discarded Newton
+        # the same guarded block (amica15.f90:1803), so a discarded Newton
         # direction cannot ratchet the learning rate.
         if not self._a_frozen():
             if newton_active and no_newt:
@@ -1578,7 +1578,7 @@ class AMICA:
         window once the Fortran-style iteration reaches ``share_start`` -- the
         merge iteration and the 5 after it -- so the density parameters can
         settle onto a freshly merged component before the mixing matrix moves
-        again (Fortran A-freeze, amica15.f90:1785). Identical mechanism, anchor
+        again (Fortran A-freeze, amica15.f90:1803). Identical mechanism, anchor
         and duration as ``AMICATorchNG._a_frozen``; the window fires each cycle
         whether or not that cycle's merge pass actually merged a pair, matching
         both the reference and the PyTorch backend.
@@ -1741,11 +1741,11 @@ class AMICA:
                     self.numrej += 1
 
                 # Share components if requested (Fortran identify_shared_comps
-                # schedule, amica15.f90:1838): once per share_int cycle from
+                # schedule, amica15.f90:1856): once per share_int cycle from
                 # share_start, merging near-collinear mixing columns across
                 # models using the just-updated A, then rebuilding W from the
                 # merged comp_list (Fortran runs identify_shared_comps before
-                # get_unmixing_matrices, amica15.f90:1840,1845) -- otherwise the
+                # get_unmixing_matrices, amica15.f90:1858,1863) -- otherwise the
                 # next E-step would read a stale W while indexing the densities
                 # by the merged comp_list. itf is the Fortran-style 1-indexed
                 # iteration (itf, above), the same anchor AMICATorchNG uses, so
@@ -1882,8 +1882,8 @@ class AMICA:
                 self.lrate0 *= self.lratefact
                 if self.iter > self.newt_start:
                     # rho rate is a ceiling reset to rholrate0 each iteration
-                    # (Fortran amica15.f90:1788); it ratchets ONLY here at maxdecs
-                    # (amica15.f90:1050), never per LL-decrease. The old per-decrease
+                    # (Fortran amica15.f90:1806/1813); it ratchets ONLY here at maxdecs
+                    # (amica15.f90:1068), never per LL-decrease. The old per-decrease
                     # self.rholrate *= rholratefact was a monotone decay with no
                     # reset that collapsed the rho rate and froze rho at a stale
                     # shape (issue #193).

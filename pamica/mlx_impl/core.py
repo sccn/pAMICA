@@ -190,7 +190,7 @@ class AMICAMLXNG:
         self.min_nd = min_nd
         self.newt_ramp = newt_ramp
         # Schedule threshold for the rholrate ceiling ratchet (Fortran
-        # amica15.f90:1049 gates it on iter > newt_start, independent of
+        # amica15.f90:1067 gates it on iter > newt_start, independent of
         # do_newton). MLX does no Newton, but keeps newt_start as this gate so the
         # rho-rate schedule matches Fortran/torch.
         self.newt_start = newt_start
@@ -302,11 +302,11 @@ class AMICAMLXNG:
             if n_comp < data_dim:
                 # Rank-reduced sphere (n_comp, data_dim), so the sphered data
                 # come out at the kept rank (Fortran nw = numeigs,
-                # amica15.f90:545).
+                # amica15.f90:563).
                 w_pca = inv_sqrt @ V.T
                 if self.do_approx_sphere:
                     # Fortran's orthogonal polar-factor symmetrization of the
-                    # reduced whitening (amica15.f90:483-490).
+                    # reduced whitening (amica15.f90:501-508).
                     U_b, _, Vt_b = np.linalg.svd(evecs.T[:n_comp, :n_comp])
                     sphere = (Vt_b.T @ U_b.T) @ w_pca
                 else:
@@ -728,8 +728,8 @@ class AMICAMLXNG:
             #
             # rholrate is a maxdecs-ratcheted CEILING, not a per-decrease-annealed
             # working rate. Fortran resets rholrate=rholrate0 every iteration before
-            # the rho update (amica15.f90:1788) and only tightens the rholrate0
-            # ceiling at maxdecs (amica15.f90:1050, gated on iter > newt_start), so
+            # the rho update (amica15.f90:1806/1813) and only tightens the rholrate0
+            # ceiling at maxdecs (amica15.f90:1068, gated on iter > newt_start), so
             # its per-decrease rholrate*=rholratefact (:1045) never reaches the rho
             # update. rho has no ramp, so self.rholrate carries that ceiling directly
             # (reset to rholrate0 at fit start, nothing re-inflates it) and must
