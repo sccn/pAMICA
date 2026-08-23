@@ -287,7 +287,7 @@ class TestFromParamsFileIntegration:
 
     def test_compact_json_named_param_does_not_silently_default(self, tmp_path):
         """The exact bug from review item 3: compact single-line JSON saved
-        with a .param extension must not be silently mis-parsed as garbled
+        with a .param extension must not be silently misparsed as garbled
         Fortran text and returned as a default (num_models=1, num_mix=3)
         model when the file actually asks for something else."""
         payload = json.loads(JSON_FILE.read_text())

@@ -783,7 +783,7 @@ class AMICA:
         the content (JSON if it starts with ``{``/``[``, Fortran text
         otherwise) rather than trusting the extension -- a compact JSON file
         saved with a ``.param`` extension must still parse as JSON, not be
-        silently mis-read as garbled Fortran text (issue #132 review item 3).
+        silently misread as garbled Fortran text (issue #132 review item 3).
         See :func:`pamica.fortran_params.read_fortran_param_file` for the
         Fortran-side key-mapping table and the deliberately-unmapped keys it
         warns about rather than silently drops.
