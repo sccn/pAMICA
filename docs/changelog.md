@@ -11,6 +11,30 @@ Release notes are also published on the
   likelihood-decrease branch's gradient-norm half, with the same names, defaults
   and `stop_reason` strings as `AMICATorchNG`, and stops at the same iteration
   as it on the same data.
+- **`share_comps` on the NumPy backend now runs the same algorithm as the
+  PyTorch one** (issues #240, #242). A column shared by two models took one
+  A-step per contributing model, the second against an already-stepped `A`,
+  instead of the reference's single `gm`-weighted average applied once
+  (amica15.f90:1749-1761, :1807); the post-merge A-freeze was missing entirely;
+  and merged-away columns were divided 0/0 and masked, which also silenced a
+  genuine collapse in a live column. Merged-away columns are now indexed out of
+  the mixture updates instead of masked, and the share settings that would
+  freeze `A` permanently (`share_int <= 6`) are rejected at construction, as in
+  `AMICATorchNG`. Sharing is off by default, and fits with it off are bit-
+  identical.
+- **A NumPy fit that ends non-finite no longer reports success** (issue #240).
+  `fit()` checks the fitted parameters at exit, not only the likelihood, and
+  sets `converged=False` with a `stop_reason` naming what went non-finite.
+  Periodic `writestep`/`histstep` checkpoints are gated by the same check and
+  skipped with a logged reason rather than persisting NaN that `loadmodout`
+  would read back without complaint; the last valid checkpoint stays on disk.
+- **Checkpoint cadence matches the reference** (issue #240). `writestep` and
+  `histstep` are now anchored on the Fortran-style 1-indexed iteration
+  (`mod(iter, writestep) == 0`, amica15.f90:1124/1130), so the first checkpoint
+  lands at iteration `writestep`. The 0-indexed transcription fired at iteration
+  0, so every fit wrote a checkpoint after its first iteration whatever
+  `writestep` said. Final results are unaffected: `fit()` always writes the
+  converged result.
 - **`share_comps` works on rank-reduced and rank-deficient fits** (issue #253,
   reported from Maxwell-filtered MEG in #221). The PyTorch merge metric mapped
   mixing columns back to sensor space with `inv(sphere)`, which raised

@@ -77,7 +77,7 @@ import logging
 import json
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 from tqdm import tqdm
 from ..rank import MINEIG, MINEIG_REL, numerical_rank
 from .utils import (
@@ -213,6 +213,21 @@ class AMICA:
         self.comp_thresh = params.get("comp_thresh", 0.99)
         self.share_start = params.get("share_start", 100)
         self.share_int = params.get("share_int", 100)
+        if self.share_comps:
+            # Same validation (and the same reasons) as AMICATorchNG: the merge
+            # schedule is 1-indexed, and the post-merge A-freeze settle window is
+            # 6 iterations, so a share_int of 6 or less would hold A frozen for
+            # every iteration of every cycle -- a fit that silently never moves
+            # its mixing matrix again. comp_thresh is a cosine cutoff, so it is
+            # only meaningful in (0, 1]; at 0 every pair of columns merges.
+            if self.share_start < 1:
+                raise ValueError(f"share_start must be >= 1, got {self.share_start}")
+            if self.share_int <= 6:
+                raise ValueError(f"share_int must be > 6, got {self.share_int}")
+            if not 0.0 < self.comp_thresh <= 1.0:
+                raise ValueError(
+                    f"comp_thresh must be in (0, 1], got {self.comp_thresh}"
+                )
         self.doscaling = params.get("doscaling", True)
         self.scalestep = params.get("scalestep", 1)
         self.do_sphere = params.get("do_sphere", True)
@@ -234,9 +249,10 @@ class AMICA:
         self.restartiter = params.get("restartiter", 10)
         self.maxrestarts = params.get("maxrestarts", 3)
         self.numrestarts = 0
-        # Set by fit(): whether the fit ended with a finite likelihood, and the
-        # reason it stopped. converged=False signals a terminal non-finite LL
-        # (diverged, no results written), which callers/CLI must surface.
+        # Set by fit(): whether the fit ended usable, and the reason it stopped.
+        # converged=False signals a terminal non-finite LL or non-finite fitted
+        # parameters (diverged or degenerate; no results written), which
+        # callers/CLI must surface.
         self.converged = False
         self.stop_reason = None
         self.min_dll = params.get("min_dll", 1e-9)
@@ -499,17 +515,100 @@ class AMICA:
                 "(diverged after %d restart(s)); results were not written.",
                 self.numrestarts,
             )
+        else:
+            # A finite likelihood is not on its own proof of a usable fit: a
+            # parameter can go non-finite in a way the LL does not see (a
+            # collapsed mixture component leaves NaN in mu/beta while the LL of
+            # the remaining components stays finite, issue #240). Returning that
+            # as a success is the silent failure the project rules single out, so
+            # check the fitted parameters themselves, mirroring the PyTorch
+            # wrapper's degenerate-fit contract (issue #50): converged=False,
+            # stop_reason names what went non-finite, and nothing is written.
+            degenerate = self._nonfinite_params()
+            if degenerate:
+                self.converged = False
+                self.stop_reason = "Non-finite parameters at exit: " + ", ".join(
+                    degenerate
+                )
+                self.logger.error(
+                    "AMICA did not converge: %s; results were not written.",
+                    self.stop_reason,
+                )
 
         # Always persist the final converged result. _write_results is otherwise
         # only called on writestep boundaries during the loop, so a run whose
         # last iteration is not a writestep multiple (or that stops early) would
-        # never save the final state. Guard on a finite likelihood so a run that
-        # diverged to a non-finite LL (issue #39) does not overwrite the last
-        # good on-disk result with NaNs.
+        # never save the final state. Guarded by the same finiteness predicate as
+        # every checkpoint, so a run that diverged to a non-finite LL (issue #39)
+        # or ended holding non-finite parameters (issue #240) cannot overwrite
+        # the last good on-disk result with NaNs.
         if self.converged:
             self._write_results()
 
         return self
+
+    # Every parameter a caller can read back off disk or off the object. `A` and
+    # `W` are the decomposition; `c`/`mu`/`alpha`/`beta`/`rho`/`gm` are the model
+    # a downstream `loadmodout` reads. `sphere`/`mean` are preprocessing outputs
+    # and are checked too because write_amicaout persists them.
+    _FITTED_PARAMS = (
+        "A",
+        "W",
+        "c",
+        "mu",
+        "alpha",
+        "beta",
+        "rho",
+        "gm",
+        "sphere",
+        "mean",
+    )
+
+    def _nonfinite_params(self) -> List[str]:
+        """Names of fitted parameters currently holding a non-finite value.
+
+        The single definition of "this state is safe to persist or report as a
+        success", used by :meth:`fit`'s outcome and by every write site. An empty
+        list is the finiteness predicate; the names themselves go into
+        ``stop_reason`` and the skipped-write log, so a failure says *what* went
+        non-finite rather than only *that* something did.
+
+        Parameters not yet allocated (before ``_initialize_parameters``) are
+        skipped rather than treated as bad.
+        """
+        return [
+            name
+            for name in self._FITTED_PARAMS
+            if getattr(self, name, None) is not None
+            and not np.all(np.isfinite(np.asarray(getattr(self, name))))
+        ]
+
+    def _write_checkpoint(self, kind: str) -> bool:
+        """Write results/history for a mid-fit checkpoint, unless degenerate.
+
+        A checkpoint written from a non-finite state persists NaN parameters that
+        ``loadmodout`` reads back without complaint, so the run's only on-disk
+        artifact would be corrupt while the fit continued (issue #240). Skip the
+        write instead -- loudly, never silently, and without touching whatever
+        valid output an earlier checkpoint already left on disk.
+
+        Returns True if the write happened.
+        """
+        degenerate = self._nonfinite_params()
+        if degenerate:
+            self.logger.error(
+                "Skipping the %s checkpoint at iter %d: non-finite %s. The "
+                "previously written output on disk is left untouched.",
+                kind,
+                self.iter + 1,
+                ", ".join(degenerate),
+            )
+            return False
+        if kind == "history":
+            self._write_history()
+        else:
+            self._write_results()
+        return True
 
     def _preprocess_data(self, data: np.ndarray):
         """Preprocess the data by removing mean and sphering."""
@@ -1184,6 +1283,7 @@ class AMICA:
             and self.num_samples is not None
             and self.c is not None
             and self.mu is not None
+            and self.alpha is not None
             and self.beta is not None
             and self.rho is not None
             and self.comp_list is not None
@@ -1230,32 +1330,34 @@ class AMICA:
 
         # A component merged away by share_comps is no longer referenced by
         # comp_list, so no sufficient statistic accumulates into its column and
-        # the divisions below are 0/0 = NaN. Update only used columns and freeze
-        # the rest at their last finite value (rho is excluded: its own 1e-8
-        # floor keeps it finite, so it drifts rather than freezing -- harmless,
-        # since no dead column is read downstream), as AMICATorchNG does (Fortran
-        # carries the NaN harmlessly behind its comp_used mask; keeping them
-        # finite means a fit cannot report success while holding NaN parameters,
-        # issue #240). All-True with the default comp_list, so the ordinary path
-        # is unchanged.
+        # its mixture divisions would be 0/0 = NaN. Update only the used columns
+        # and leave the rest frozen at their last finite value, as AMICATorchNG
+        # does (Fortran instead carries the NaN harmlessly behind its comp_used
+        # mask; keeping them finite means a fit cannot report success while
+        # holding NaN parameters, issue #240).
+        #
+        # The dead columns are INDEXED OUT rather than computed and masked: a
+        # 0/0 that is never evaluated raises no RuntimeWarning, so nothing has to
+        # be suppressed with np.errstate and a genuine 0/0 in a LIVE column (a
+        # component whose responsibility mass collapses to exactly zero) still
+        # warns, as it does with sharing off. ``cols`` is a full slice whenever
+        # every column is live -- always so with the default comp_list -- which
+        # keeps the ordinary path bit-identical and copy-free. (comp_used is None
+        # until fit() sets it up, and the M-step is exercised directly in tests
+        # before that happens, so fall back to "all used".)
         used = (
             self.comp_used
             if self.comp_used is not None
             else np.ones(self.num_comps, dtype=bool)
         )
+        cols = slice(None) if used.all() else np.flatnonzero(used)
 
-        # Update mixture weights. errstate because np.where evaluates both
-        # branches: an unused column's 0/0 is computed and discarded, and would
-        # otherwise warn on every iteration after a merge.
-        with np.errstate(invalid="ignore", divide="ignore"):
-            alpha_next = updates["dalpha_n"] / np.sum(updates["dalpha_n"], axis=0)
-        self.alpha = np.where(used, alpha_next, self.alpha)
-        # errstate above silences the 0/0 that np.where computes for a dead
-        # column and discards. That also silenced numpy's warning for a genuine
-        # 0/0 in a LIVE column (a component whose responsibility mass collapses
-        # to exactly zero), which used to be the only signal it happened. Check
-        # explicitly instead, mirroring the mu/beta canary below, so the origin
-        # is not lost to a later unattributable nan-LL stop.
+        # Update mixture weights
+        dalpha_n = updates["dalpha_n"][:, cols]
+        self.alpha[:, cols] = dalpha_n / np.sum(dalpha_n, axis=0)
+        # Fortran has no alpha canary, but a collapsed live component gives the
+        # same 0/0 the mu/beta canary below reports; surface it here too so the
+        # origin is not lost to a later unattributable nan-LL stop.
         if not np.all(np.isfinite(self.alpha)):
             self.logger.warning(
                 "Non-finite alpha at iter %d (component responsibility mass "
@@ -1266,11 +1368,11 @@ class AMICA:
         # Exact-EM mixture location/scale (Fortran :1978/:1993). These are
         # fixed-point updates -- mu += dmu_n/dmu_d, beta *= sqrt(dbeta_n/dbeta_d)
         # -- NOT first-order gradient steps, so they carry no lrate.
-        with np.errstate(invalid="ignore", divide="ignore"):
-            mu_next = self.mu + updates["dmu_n"] / updates["dmu_d"]
-            beta_next = self.beta * np.sqrt(updates["dbeta_n"] / updates["dbeta_d"])
-        self.mu = np.where(used, mu_next, self.mu)
-        self.beta = np.where(used, beta_next, self.beta)
+        dmu = updates["dmu_n"][:, cols] / updates["dmu_d"][:, cols]
+        self.mu[:, cols] = self.mu[:, cols] + dmu
+        self.beta[:, cols] = self.beta[:, cols] * np.sqrt(
+            updates["dbeta_n"][:, cols] / updates["dbeta_d"][:, cols]
+        )
         self.beta = np.clip(self.beta, self.invsigmin, self.invsigmax)
         # Fortran keeps a live "NaN in sbeta!" canary here (amica17.f90:1996-2000);
         # the exact-EM mu/beta divisions are unguarded (matching Fortran), so
@@ -1288,10 +1390,18 @@ class AMICA:
         # dalpha_n (floored so a near-empty component cannot poison rho). A NaN
         # is reset to rho0 -- but logged first, so the reset does not silently
         # erase the failure origin.
+        # Restricted to the live columns for the same reason as mu/beta/alpha
+        # (and as AMICATorchNG, which masks rho with ``used`` too): a merged-away
+        # column has no responsibility mass, so its rho would ratchet up on the
+        # floored denominator every iteration instead of staying at the value it
+        # was merged away with.
         if not np.all(self.rho == 1.0) and not np.all(self.rho == 2.0):
-            drho = updates["drho_n"] / np.maximum(updates["dalpha_n"], 1e-8)
-            psi = digamma(1.0 + 1.0 / self.rho)
-            new_rho = self.rho + self.rholrate * (1.0 - (self.rho / psi) * drho)
+            rho_cols = self.rho[:, cols]
+            drho = updates["drho_n"][:, cols] / np.maximum(
+                updates["dalpha_n"][:, cols], 1e-8
+            )
+            psi = digamma(1.0 + 1.0 / rho_cols)
+            new_rho = rho_cols + self.rholrate * (1.0 - (rho_cols / psi) * drho)
             nan_mask = np.isnan(new_rho)
             if nan_mask.any():
                 self.logger.warning(
@@ -1302,7 +1412,7 @@ class AMICA:
                     self.rho0,
                 )
                 new_rho = np.where(nan_mask, self.rho0, new_rho)
-            self.rho = np.clip(new_rho, self.minrho, self.maxrho)
+            self.rho[:, cols] = np.clip(new_rho, self.minrho, self.maxrho)
 
         # Update unmixing matrices
         newton_active = self.do_newton and self.iter >= self.newt_start
@@ -1354,63 +1464,48 @@ class AMICA:
             else:
                 directions.append(dA)
 
-        if newton_active and no_newt:
-            # Fortran prints this whenever a model is not positive definite
-            # (amica17.f90:1911-1913); surface it rather than falling back
-            # silently.
-            self.logger.info(
-                "Hessian not positive definite at iter %d; using natural gradient.",
-                self.iter,
-            )
-
-        if newton_active and not no_newt:
-            self.lrate = min(
-                self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
-            )
-        else:
-            self.lrate = min(
-                self.lrate0, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
-            )
-
         # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1731-1743). Computed
         # HERE, before the A step and before rescaling, because Fortran builds dAk
         # inside accum_updates_and_likelihood (:1731-1743) strictly before
         # update_params applies it (:1789). Using the post-update, post-rescale A
-        # would measure a different quantity.
+        # would measure a different quantity. Computed every iteration, including
+        # a frozen one, because Fortran computes it in the accumulation pass that
+        # runs unconditionally -- the grad-norm stop needs the true gradient
+        # magnitude, not just the magnitude on iterations where A moves.
         #
-        # dAk is the gm-weighted average of the per-model directions mapped through
-        # A (dAk = sum_h gm[h] * dir_h^T @ A, scattered by comp_list, divided by
-        # zeta = sum_h gm[h] per column). ndtmpsum is then the RMS of the used
-        # columns of dAk: ||dAk[:, used]|| / sqrt(nw * n_used), with NO lrate
-        # factor. Fortran measures the gradient direction before the step, not the
-        # applied update lrate*dAk, and does not divide by lrate either
-        # (amica15.f90:1742-1743) -- there is no missing factor here.
+        # dAk is the gm-weighted average of the per-model directions mapped
+        # through A (Fortran dAk/zeta, amica15.f90:1749-1761): each contributing
+        # model adds gm[h]/zeta of its direction to the shared column, where
+        # zeta = sum of gm over the models that reference the column. Weighted by
+        # gm_prev, the PRE-update model weights, because Fortran builds dAk before
+        # update_params reassigns gm (issue #219).
         #
-        # Weighted by gm_prev, the pre-update model weights, because Fortran builds
-        # dAk before update_params reassigns gm (issue #219). Invisible for
-        # num_models=1 (gm == 1) and for the default disjoint comp_list, where the
-        # gm[h] factor cancels against zeta[idx]; it bites only under share_comps
-        # with a genuinely shared column, where the two weightings differ.
+        # The weights are normalized per model (gm[h]/zeta) rather than summed and
+        # then divided (Fortran's literal sum-then-divide, and AMICATorchNG's):
+        # mathematically the same average, but a column with a single contributor
+        # then has weight exactly gm[h]/gm[h] == 1.0, so the step is bit-identical
+        # to the pre-#242 per-model update instead of drifting by the ULP that a
+        # multiply-then-divide round trip can introduce. Every column has exactly
+        # one contributor unless share_comps merged one, so this keeps the default
+        # multi-model trajectory byte-for-byte.
         #
-        # Diagnostic only *here*: this dAk feeds nd_value alone. The A-update below
-        # is a separate per-model loop that never reads dAk, so the ordering cannot
-        # move a fitted parameter in this backend. AMICATorchNG applies the same
-        # dAk to A, so there the identical fix does change fitted parameters.
-        dAk = np.zeros_like(self.A)
+        # ndtmpsum is then the RMS of the used columns of dAk:
+        # ||dAk[:, used]|| / sqrt(nw * n_used), with NO lrate factor. Fortran
+        # measures the gradient direction before the step, not the applied update
+        # lrate*dAk, and does not divide by lrate either (amica15.f90:1742-1743) --
+        # there is no missing factor here.
         zeta = np.zeros(self.num_comps)
         for h in range(self.num_models):
+            zeta[self.comp_list[:, h]] += gm_prev[h]
+        dAk = np.zeros_like(self.A)
+        for h in range(self.num_models):
+            # comp_list[:, h] holds distinct indices within a model
+            # (identify_shared_components never merges two columns that appear in
+            # the same model), so buffered `+=` on fancy indices cannot drop a
+            # contribution here.
             idx = self.comp_list[:, h]
-            dAk[:, idx] += gm_prev[h] * np.dot(directions[h].T, self.A[:, idx])
-            zeta[idx] += gm_prev[h]
-        nonzero = zeta > 0
-        dAk[:, nonzero] /= zeta[nonzero]
-        # comp_used is None until fit() sets it up, and the M-step is exercised
-        # directly in tests before that happens, so fall back to "all used".
-        used = (
-            self.comp_used
-            if self.comp_used is not None
-            else np.ones(self.num_comps, dtype=bool)
-        )
+            weight = gm_prev[h] / np.maximum(zeta[idx], np.finfo(np.float64).tiny)
+            dAk[:, idx] += weight * np.dot(directions[h].T, self.A[:, idx])
         nd_value = float(
             np.sqrt(np.sum(dAk[:, used] ** 2) / (self.data_dim * int(used.sum())))
         )
@@ -1420,16 +1515,38 @@ class AMICA:
         # (LEFT-multiply by the TRANSPOSED direction). Right-multiply by the
         # untransposed dir is invisible at the fixed point but sends the fit
         # downhill -- issue #24 root cause.
-        # Per-model loop. For a disjoint comp_list this equals Fortran's single
-        # weighted DAXPY, but a column shared across models takes one step per
-        # contributing model instead of one averaged step -- issue #242, which
-        # ships separately because no test written for it so far distinguishes
-        # the two.
-        for h in range(self.num_models):
-            idx = self.comp_list[:, h]
-            self.A[:, idx] = self.A[:, idx] - self.lrate * np.dot(
-                directions[h].T, self.A[:, idx]
-            )
+        #
+        # ONE application of the averaged dAk (Fortran's single DAXPY,
+        # amica15.f90:1807/1814), not the per-model loop this used to run: a
+        # column shared by two models took one step per contributing model, the
+        # second against an already-stepped A, which is a different operation
+        # from Fortran's single weighted average (issue #242). A merged-away
+        # column has no contributor, so its dAk stays exactly zero and it holds
+        # the value it was merged away with. When sharing holds A this iteration
+        # (the post-merge settle window) the step is skipped entirely, along with
+        # the lrate ramp and the Newton-fallback bookkeeping Fortran nests inside
+        # the same guarded block (amica15.f90:1785), so a discarded Newton
+        # direction cannot ratchet the learning rate.
+        if not self._a_frozen():
+            if newton_active and no_newt:
+                # Fortran prints this whenever a model is not positive definite
+                # (amica17.f90:1911-1913); surface it rather than falling back
+                # silently.
+                self.logger.info(
+                    "Hessian not positive definite at iter %d; using natural gradient.",
+                    self.iter,
+                )
+
+            if newton_active and not no_newt:
+                self.lrate = min(
+                    self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
+                )
+            else:
+                self.lrate = min(
+                    self.lrate0, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
+                )
+
+            self.A = self.A - self.lrate * dAk
 
         # (c was updated above, before the mixture/A updates, from dc_numer/dgm.)
 
@@ -1453,6 +1570,31 @@ class AMICA:
         # the decrease-stop condition regardless of use_grad_norm; the flag only
         # gates the separate final gradient-norm stop.
         self.nd.append(nd_value)
+
+    def _a_frozen(self) -> bool:
+        """Whether the A-update (and its lrate ramp) is held this iteration.
+
+        A is frozen for the first 6 iterations of every ``share_int``-length
+        window once the Fortran-style iteration reaches ``share_start`` -- the
+        merge iteration and the 5 after it -- so the density parameters can
+        settle onto a freshly merged component before the mixing matrix moves
+        again (Fortran A-freeze, amica15.f90:1785). Identical mechanism, anchor
+        and duration as ``AMICATorchNG._a_frozen``; the window fires each cycle
+        whether or not that cycle's merge pass actually merged a pair, matching
+        both the reference and the PyTorch backend.
+
+        Gated behind ``share_comps`` and ``num_models >= 2`` (a model cannot
+        share a component with itself), so with sharing off -- the default --
+        this is always False and the validated trajectory is untouched. The
+        constructor rejects ``share_int <= 6``, so the window can never consume a
+        whole cycle and freeze A permanently.
+        """
+        if not self.share_comps or self.num_models < 2:
+            return False
+        itf = self.iter + 1  # Fortran-style 1-indexed iteration
+        if itf < self.share_start:
+            return False
+        return (itf - self.share_start) % self.share_int <= 5
 
     def _optimize(self):
         """Main optimization loop."""
@@ -1497,6 +1639,12 @@ class AMICA:
             for iter in iterator:
                 self.iter = iter
                 final_iter = iter
+                # Fortran-style 1-indexed iteration. Every schedule the reference
+                # expresses as `mod(iter, step)` (share_comps, writestep,
+                # histstep) is anchored on this, not on the 0-indexed loop
+                # counter, so an identical setting fires on the same iterations
+                # here, in AMICATorchNG, and in the binary.
+                itf = iter + 1
 
                 # Get updates and likelihood
                 updates = self._get_updates_and_likelihood()
@@ -1592,23 +1740,42 @@ class AMICA:
                     self._reject_outliers()
                     self.numrej += 1
 
-                # Share components if requested
+                # Share components if requested (Fortran identify_shared_comps
+                # schedule, amica15.f90:1838): once per share_int cycle from
+                # share_start, merging near-collinear mixing columns across
+                # models using the just-updated A, then rebuilding W from the
+                # merged comp_list (Fortran runs identify_shared_comps before
+                # get_unmixing_matrices, amica15.f90:1840,1845) -- otherwise the
+                # next E-step would read a stale W while indexing the densities
+                # by the merged comp_list. itf is the Fortran-style 1-indexed
+                # iteration (itf, above), the same anchor AMICATorchNG uses, so
+                # an identical (share_start, share_int) fires on the same
+                # iterations in both backends and lines up with _a_frozen.
                 if (
                     self.share_comps
-                    and iter >= self.share_start
-                    and (iter - self.share_start) % self.share_int == 0
+                    and itf >= self.share_start
+                    and (itf - self.share_start) % self.share_int == 0
                 ):
                     self.comp_list, self.comp_used = identify_shared_components(
                         self.A, self.W, self.comp_list, self.comp_thresh
                     )
+                    self._update_unmixing_matrices()
 
-                # Write intermediate results if requested
-                if self.writestep > 0 and iter % self.writestep == 0:
-                    self._write_results()
+                # Write intermediate results/history if requested, on Fortran's
+                # cadence: `mod(iter, writestep) == 0` over its 1-indexed
+                # iteration counter (amica15.f90:1124/1130), so the first
+                # checkpoint lands at iteration `writestep`, not before it. This
+                # loop's `iter` is 0-indexed, and the literal transcription fired
+                # at iter 0 -- so EVERY fit wrote a checkpoint after its first
+                # iteration whatever writestep said, including fits far shorter
+                # than one interval. Both are skipped (loudly) from a non-finite
+                # state so a checkpoint cannot persist NaN parameters that
+                # loadmodout reads back without complaint (issue #240).
+                if self.writestep > 0 and itf % self.writestep == 0:
+                    self._write_checkpoint("results")
 
-                # Write history if requested
-                if self.do_history and iter % self.histstep == 0:
-                    self._write_history()
+                if self.do_history and itf % self.histstep == 0:
+                    self._write_checkpoint("history")
         finally:
             # Close the progress bar if using tqdm
             if use_tqdm_progress:

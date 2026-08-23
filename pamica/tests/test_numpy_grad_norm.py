@@ -107,6 +107,12 @@ def _shared_two_model_fit(max_iter=3):
     model.fit(_real_data(4096))
     assert model.comp_list is not None
     model.comp_list[0, 1] = model.comp_list[0, 0]
+    # comp_used goes with comp_list: a fit-time merge derives the mask from the
+    # merged list (issue #240). Leaving it all-True would mark the merged-away
+    # column live, so the M-step would divide its empty statistics 0/0 --
+    # the stale-mask state that issue, not this one, is about.
+    model.comp_used = np.zeros(model.num_comps, dtype=bool)
+    model.comp_used[np.unique(model.comp_list)] = True
     return model
 
 
