@@ -24,6 +24,17 @@ Release notes are also published on the
   `fit()` nor `AMICATorchNG` parameter (data-location metadata like
   `files`/`outdir`/`data_dim`). See `docs/guides/validation.md#parameter-files`
   for the mapping table.
+- **Widened CI coverage** (issue #246, building on #247's macOS Apple Silicon
+  job): `ci.yml` now also triggers on pushes to `dev` (the integration
+  branch), not just `main` and pull requests, so post-merge drift is caught
+  immediately rather than only at the next PR. The macOS job installs the
+  `mne` extra alongside `mlx`, so `pamica/tests/mne_tests` (the AMICAICA/MNE
+  wrapper) runs against Accelerate as well as Linux/OpenBLAS. A new
+  schedule-only `weekly-macos-slow.yml` workflow runs the full suite on
+  macOS every Sunday, including the `@pytest.mark.slow` tests and the
+  Fortran-parity tests (`AMICA_RUN_FORTRAN`, `PAMICA_NATIVE_BINARY`,
+  `AMICA_FORTRAN_BIN`), none of which had ever run in CI before, without
+  slowing down or blocking any PR.
 - **Pinned `mir_history_` against the `keep_best` rollback and against
   save/load** (issue #161, follow-up from #137/#160). Both claims already
   held before this PR and were already tested: `test_mir_history_survives_keep_best_restore`
