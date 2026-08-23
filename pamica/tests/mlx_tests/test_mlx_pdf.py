@@ -331,3 +331,86 @@ def test_get_pdftype_requires_fit():
     m = AMICAMLXNG(n_channels=NW, n_models=1, n_mix=NMIX, seed=0)
     with pytest.raises(RuntimeError, match="fitted"):
         m.get_pdftype()
+
+
+# --- (l) three-way: sharing x Newton x pdf family ----------------------------
+
+
+def test_sharing_newton_and_fixed_family_fit_completes():
+    """``share_comps`` + ``do_newton`` + a non-default fixed ``pdftype``
+    together (issue #277).
+
+    The three features have only pairwise coverage elsewhere: sharing x Newton
+    is ``test_mlx_newton.py::test_sharing_and_newton_fit_completes``, Newton x
+    families is ``test_family_fit_with_newton`` above, and sharing x the
+    adaptive switcher is ``test_sharing_with_adaptive_switcher_smoke`` above.
+    Risk is structural rather than numerical -- the Newton curvature is indexed
+    by (model, channel), not by ``comp_list``, and the family dispatch reads
+    only ``pdtype``/``rho`` -- but nothing had run all three together before
+    this test. Newton fallbacks are PERMITTED (not asserted to zero): a
+    rejected direction under a non-GG family is expected, per
+    ``test_family_fit_with_newton``.
+    """
+    data = _load_real_data(8192)
+    m = AMICAMLXNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=3,
+        pdftype=2,
+        seed=42,
+        block_size=1024,
+        do_newton=True,
+        newt_start=5,
+        share_comps=True,
+        share_start=8,
+        share_iter=10,
+        comp_thresh=0.9,
+    )
+    m.fit(data, max_iter=30, verbose=False)
+
+    ll = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(ll))
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert np.all(np.isfinite(np.array(m.A)))
+    assert np.all(np.isfinite(np.array(m.W)))
+    assert np.all(m.get_pdftype() == 2)
+    used = int(np.array(m.comp_used).sum())
+    assert used < m.n_comps, "no merge fired; the three-way interplay is untested"
+    assert 0 <= m.n_newton_fallbacks <= len(ll)
+
+
+def test_sharing_newton_and_adaptive_switcher_fit_completes():
+    """The single-component adaptive-switcher variant of the three-way
+    interplay (issue #277): ``share_comps`` + ``do_newton`` + the extended-
+    Infomax switcher (``pdftype=1``, ``n_mix=1``) together."""
+    data = _load_real_data(8192)
+    m = AMICAMLXNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=1,
+        pdftype=1,
+        seed=42,
+        block_size=1024,
+        do_newton=True,
+        newt_start=5,
+        share_comps=True,
+        share_start=8,
+        share_iter=10,
+        comp_thresh=0.9,
+        kurt_start=3,
+        num_kurt=5,
+        kurt_int=1,
+    )
+    m.fit(data, max_iter=30, verbose=False)
+
+    ll = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(ll))
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert np.all(np.isfinite(np.array(m.A)))
+    assert np.all(np.isfinite(np.array(m.W)))
+    for h in range(m.n_models):
+        codes = np.unique(m.get_pdftype(h))
+        assert set(codes.tolist()).issubset({1, 4})
+    used = int(np.array(m.comp_used).sum())
+    assert used < m.n_comps, "no merge fired; the three-way interplay is untested"
+    assert 0 <= m.n_newton_fallbacks <= len(ll)
