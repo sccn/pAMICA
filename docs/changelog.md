@@ -5,6 +5,45 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Block-size auto-tuner with an OOM-safe fallback** (issue #232, split out of
+  #216/#230), on all three backends behind Fortran's own four parameter names
+  (`do_opt_block`, `blk_min`, `blk_max`, `blk_step`). With `do_opt_block=True`,
+  `fit` times one accumulate pass per candidate block size on the real data and
+  device before the first EM iteration and keeps the fastest; the choice and
+  every timing are logged at INFO. **Off by default**, and the static
+  `block_size=8192` default is unchanged: the winner is decided by measured
+  time, so two machines can pick different sizes and their trajectories then
+  differ at the ~1e-6 level any block-size change produces, which a
+  Fortran-parity run cannot have (pin `block_size` and leave the search off).
+  The tuner changes nothing about a fit beyond the block size itself -- the
+  timed passes only read model state and consume no RNG, so a post-tune fit is
+  bit-identical to one started directly at the chosen size, tested on every
+  backend.
+  The point of porting it is the failure mode the reference gets wrong: Fortran's
+  `determine_block_size` walks *upward* into larger blocks and calls
+  `allocate_blocks` with no `stat=`, so a candidate that cannot be allocated
+  aborts the whole run. Here such a candidate is skipped, the upward walk stops,
+  and the fit continues at the largest size that ran (or at the configured
+  `block_size` if nothing could be timed). Candidates are additionally clamped
+  to `n_samples` -- Fortran silently NaNs when `block_size` exceeds the frames
+  available per thread (issue #292) -- and to a conservative estimate of one
+  block's peak memory, so the search usually finds its ceiling without walking
+  into a failure at all. The sweep bounds are re-derived rather than copied:
+  Fortran's 128-1024 sits far below where any pamica backend peaks, so the
+  pamica defaults (4096-32768 by 4096) bracket the measured CPU optimum and
+  include the 8192 default, while `blk_step` keeps Fortran's arithmetic
+  meaning so an `input.param` reads the same on both sides.
+  Two consequences on the NumPy backend: `do_opt_block` there used to default
+  to **on** (following Fortran's header) with a 128-1024 sweep, so every NumPy
+  fit quietly re-tuned itself to a small block and ignored the `block_size` it
+  was given -- it is now off by default, and that backend's default
+  `block_size` is the shipped 8192 rather than 128. Its naive
+  `determine_block_size` helper (which timed a bare `X.T @ X`, the shape of no
+  work AMICA actually does, and could not fall back at all) is replaced
+  outright by the shared `pamica/blocktune.py`.
+  `do_opt_block`/`blk_min`/`blk_max`/`blk_step` also move from the Fortran
+  param reader's unsupported table to identity mappings. See
+  `docs/guides/amica-differences.md`.
 - **`AMICA.from_params_file` now reads the literal Fortran `input.param` text
   format directly** (issue #132, JOSS reviewer feedback), content-sniffed
   (not extension-trusted) alongside the existing JSON schema so the same

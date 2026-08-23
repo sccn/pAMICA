@@ -20,9 +20,11 @@ that is not listed, that is a bug worth
 | 6 | Precision | float64 | float64 (float32 on Apple GPUs) | Apple GPUs have no float64; float32 agrees to ~7 significant digits, not bit-parity | `dtype=torch.float64` |
 | 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
 | 8 | Columns merged away by `share_comps` | updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided) | a fit must not end holding NaN parameters, mask or no mask; the columns are dead either way | — (see issues #60, #240) |
+| 9 | Block-size search | on (`do_opt_block=1`), sweeps 128–1024, **aborts** if a candidate cannot allocate | off; sweeps 4096–32768; a candidate that cannot allocate is skipped and the fit continues | the choice is timing-based and therefore machine-dependent, which a parity run cannot have; Fortran's range sits far below where any pamica backend peaks; and running out of memory is a reason to use a smaller block, not to stop | `do_opt_block=True` (but pin `block_size` for a bit-for-bit comparison) |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
-row 3 with ADR 0003; row 5 with issue #50; row 8 with issues #60 and #240.
+row 3 with ADR 0003; row 5 with issue #50; row 8 with issues #60 and #240;
+row 9 with issue #232.
 
 Two `share_comps` details are pamica's own because the reference cannot decide
 them: the A-freeze window after a merge is anchored on `share_start` (the literal
@@ -271,3 +273,42 @@ the parameter count mid-fit -- restoring an earlier snapshot would silently
 undo the merge. So under sharing, every backend returns the last iterate, and
 `final_ll_`/`self.ll[-1]` trailing a final-iteration merge is not a
 `keep_best` artifact; it happens the same way with `keep_best=False`.
+
+## The block-size search picks a machine-dependent value (issue #232)
+
+`do_opt_block` times a few candidate `block_size` values on your data and
+device at the start of `fit` and keeps the fastest, under Fortran's own four
+parameter names (`do_opt_block`, `blk_min`, `blk_max`, `blk_step`) and
+Fortran's arithmetic stepping. It is available on all three backends.
+
+Because the winner is decided by measured time, **two machines can pick
+different block sizes for the same data**, and their trajectories then differ
+at the same ~1e-6 level any `block_size` change produces (see
+[Block-size sensitivity](validation.md#block-size-sensitivity)). That is why
+the search is **off by default** in every backend, unlike Fortran, whose header
+default turns it on. A run being compared bit-for-bit against the reference
+binary must leave `do_opt_block` off and pin `block_size` on both sides.
+
+The pamica sweep bounds are re-derived rather than copied. Fortran sweeps
+128–1024, which is entirely below where any pamica backend peaks; the pamica
+defaults (4096–32768 in steps of 4096) bracket the measured CPU optimum and
+include the shipped `block_size=8192`. A file that sets `blk_min`/`blk_max`/
+`blk_step` explicitly is honored as written, so a literal Fortran
+`input.param` means the same thing on both sides.
+
+The behavioral difference that motivated the port is what happens when a
+candidate does not fit in memory. The search walks *upward* into larger blocks,
+which is exactly where memory runs out, and Fortran's `determine_block_size`
+calls `allocate_blocks` with no `stat=`, so the run aborts. In pamica the
+failing candidate is skipped, the upward walk stops (every larger candidate
+would fail too), and the fit continues at the largest size that actually ran --
+or at the `block_size` you configured, if nothing could be timed. Candidates
+are additionally capped by `n_samples` and by a conservative estimate of one
+block's peak, so the search usually finds its ceiling without having to walk
+into a failure at all.
+
+One consequence worth stating plainly: on the NumPy backend this flag used to
+default to **on** (following Fortran's header) while its sweep ran over
+128–1024, so every NumPy fit quietly re-tuned itself to a small block and
+ignored the `block_size` it was given. It is now off by default there too, and
+that backend's default `block_size` is the shipped 8192.
