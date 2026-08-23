@@ -155,13 +155,13 @@ class TestMalformedLines:
         with pytest.raises(ValueError, match="malformed line"):
             read_fortran_param_file(dest)
 
-    def test_unparseable_int_value_raises(self, tmp_path):
+    def test_unparsable_int_value_raises(self, tmp_path):
         dest = tmp_path / "input.param"
         dest.write_text("block_size not_a_number\n")
         with pytest.raises(ValueError, match="block_size"):
             read_fortran_param_file(dest)
 
-    def test_unparseable_float_value_raises(self, tmp_path):
+    def test_unparsable_float_value_raises(self, tmp_path):
         dest = tmp_path / "input.param"
         dest.write_text("rho0 not_a_float\n")
         with pytest.raises(ValueError, match="rho0"):
