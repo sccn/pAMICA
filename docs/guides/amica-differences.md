@@ -158,10 +158,11 @@ post-merge A-freeze, and exposes `comp_used`/`shared_components()`.
 It does not re-derive the merge metric — it calls the same
 `identify_shared_components` kernel the NumPy backend uses, on host float64
 `pinv(sphere) @ A`, so all three backends decide identically from one fitted
-state (`pamica/tests/mlx_tests/test_mlx_sharing.py` pins that against
+state (`pamica/tests/test_mlx_sharing_cross_backend.py` pins that against
 `AMICATorchNG`).
-Row 8 of the divergence table above (merged-away columns frozen at their last
-finite value, not left NaN behind the mask) holds in MLX as well.
+Row 8 of the "At a glance" table at the top of this page (merged-away columns
+frozen at their last finite value, not left NaN behind the mask) holds in MLX as
+well.
 
 ## Component sharing on rank-reduced fits
 
