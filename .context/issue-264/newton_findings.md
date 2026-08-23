@@ -151,8 +151,10 @@ Pinned as a documented regime, not as a test.
 The two `newtrate`/`numdecs` ratchet tests need likelihood decreases to fall on particular sides of
 `newt_start`, and *when* a fit decreases is BLAS- and hardware-dependent.
 This repo already documents the same effect for the `min_dll` stop,
-which fires at iteration 326 on macOS-arm64, 412 on Linux-CUDA and 1076 on a GitHub runner
-(`docs/guides/validation.md`).
+whose firing iteration spans 326-1076 depending on the BLAS build (`docs/guides/validation.md`);
+the per-platform breakdown behind that range
+-- 326 on macOS-arm64, 412 on Linux-x86_64 with a CUDA-enabled torch build, and 1076 on the GitHub runner --
+is recorded at `pamica/tests/torch_tests/test_ng_convergence.py:682-683`.
 The first version of these tests hardcoded `newt_start=18` and `newt_start=2`,
 which straddled the cadence on the development machine
 but went vacuous on the CI Apple-Silicon runner,

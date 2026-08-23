@@ -1462,7 +1462,7 @@ class AMICA:
             # only happens to broadcast when num_models == 1: every multi-model
             # Newton fit raised "operands could not be broadcast together with
             # shapes (data_dim, num_models) (num_models, 1)". Same as the torch
-            # backend's ``dgm.unsqueeze(0)`` (torch_impl/core.py:1324).
+            # backend's ``dgm.unsqueeze(0)`` (torch_impl/core.py:1323).
             dgm = updates["dgm"][None, :]
             self.sigma2 = updates["dsigma2"] / dgm
             self.lambda_ = updates["dlambda"] / dgm
