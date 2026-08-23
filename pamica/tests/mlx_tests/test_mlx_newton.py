@@ -102,6 +102,98 @@ def _ratchet_count(rate: float, rate0: float, factor: float) -> int:
     return k
 
 
+# --- learning-rate schedule fixtures ----------------------------------------
+#
+# The two ratchet tests below need a run whose likelihood decreases straddle
+# ``newt_start``: some maxdecs cycles completing before the Newton switch-on and
+# some after. WHEN a fit decreases is BLAS- and hardware-dependent -- the same
+# effect this repo already documents for the `min_dll` stop, which fires at
+# iteration 326 on macOS-arm64, 412 on Linux-CUDA and 1076 on a GitHub runner
+# (docs/guides/validation.md) -- so a hardcoded `newt_start` that straddles on
+# one machine need not straddle on another, and the tests below originally went
+# vacuous on the CI Apple-Silicon runner for exactly that reason.
+#
+# They are therefore data-driven: a probe fit whose ``newt_start`` sits past the
+# budget reports where the decreases actually land ON THE EXECUTING MACHINE, and
+# the real ``newt_start`` is chosen from that. This works because the
+# natural-gradient PREFIX is independent of ``newt_start``: for ``it <
+# newt_start`` every branch that reads it (Newton activation, the two ``it >
+# newt_start`` ceiling ratchets, the ``it == newt_start`` counter reset) is false
+# on both sides, so the two runs are bit-identical there. The likelihood recorded
+# AT ``it == newt_start`` is shared too -- ``fit`` computes it from the previous
+# iteration's parameters, before the first Newton M-step runs.
+
+_SCHEDULE_DATA = 8192
+_SCHEDULE_ITERS = 120
+_SCHEDULE_MAXDECS = 2
+# Both halves of the config were chosen by sweeping four seeds x two block sizes
+# x three sample counts -- a deliberately harsher stand-in for the trajectory
+# variation between machines -- and requiring every variant to satisfy every
+# guard below. lrate=0.6 with maxdecs=2 overshoots often enough to complete
+# decrease cycles in the natural-gradient phase while still reaching the budget
+# (lrate=1.0 was tried first and rejected: the probe itself diverged to a
+# nan_params stop on half the variants). newtrate=2.0 then guarantees the same
+# in the NEWTON phase: at newtrate=1.0 the post-switch-on trajectory was
+# monotone on the larger sample counts, leaving the ratchet cadence with nothing
+# to fire on and both tests below vacuous.
+_SCHEDULE_LRATE = 0.6
+_SCHEDULE_NEWTRATE = 2.0
+
+
+def _schedule_model(newt_start: int, do_newton: bool = True) -> AMICAMLXNG:
+    """A config that overshoots often enough on the real sample to exercise the
+    maxdecs cadence, at a caller-chosen Newton switch-on."""
+    return AMICAMLXNG(
+        n_channels=NW, n_mix=NMIX, seed=3, block_size=1024,
+        lrate=_SCHEDULE_LRATE, lratefact=0.5, maxdecs=_SCHEDULE_MAXDECS,
+        do_newton=do_newton, newt_start=newt_start, newtrate=_SCHEDULE_NEWTRATE,
+    )  # fmt: skip
+
+
+def _fit_schedule(newt_start: int, do_newton: bool = True, max_iter: int | None = None):
+    m = _schedule_model(newt_start, do_newton=do_newton)
+    m.fit(
+        _load_real_data(_SCHEDULE_DATA),
+        max_iter=_SCHEDULE_ITERS if max_iter is None else max_iter,
+        verbose=False,
+    )
+    # Both floor branches skip the numdecs increment and stop the fit, so the
+    # replays below would not describe a run that took one; a degenerate stop
+    # would truncate the trajectory the straddle is read from.
+    assert m.stop_reason not in ("lrate_floor", "grad_norm_floor"), (
+        f"the fit stopped on {m.stop_reason}, a branch that bypasses the "
+        "decrease counter; the replay cannot describe it"
+    )
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS, (
+        f"the schedule fixture diverged ({m.stop_reason}); it is meant to "
+        "overshoot, not to blow up"
+    )
+    return m
+
+
+def _ratchet_iterations(ll, maxdecs: int, newt_start: int | None = None) -> list[int]:
+    """Iterations at which the decrease counter completes a ``maxdecs`` cycle and
+    the ceilings ratchet. ``newt_start`` applies Fortran's counter reset on the
+    switch-on iteration; ``None`` replays without it (the counterfactual)."""
+    numdecs, hits = 0, []
+    for i in range(1, len(ll)):
+        if ll[i] < ll[i - 1]:
+            numdecs += 1
+            if numdecs >= maxdecs:
+                hits.append(i)
+                numdecs = 0
+        if newt_start is not None and i == newt_start:
+            numdecs = 0
+    return hits
+
+
+@pytest.fixture(scope="module")
+def natural_gradient_prefix() -> list[float]:
+    """The likelihood trajectory with Newton never switching on -- the prefix
+    every ``newt_start`` shares (see the note above)."""
+    return _fit_schedule(_SCHEDULE_ITERS + 1).ll_history
+
+
 # --- (e) stability ----------------------------------------------------------
 
 
@@ -166,100 +258,146 @@ def test_fallback_ramps_toward_lrate_cap_and_counts():
     assert model.lrate < model.newtrate
 
 
-def test_newtrate_ratchets_only_at_maxdecs_after_newt_start():
-    """``newtrate`` is a ceiling that ratchets on the ``maxdecs`` cadence and
-    only once ``it > newt_start`` (Fortran amica15.f90:1056-1077), so it is a
-    strict subset of the ``lrate_cap`` ratchets on the same run.
+def test_newtrate_ratchet_is_suppressed_before_newt_start(natural_gradient_prefix):
+    """A ``maxdecs`` cycle completing BEFORE the Newton switch-on ratchets
+    ``lrate_cap`` but must leave ``newtrate`` alone (Fortran
+    amica15.f90:1056-1077 gates it on ``it > newt_start``).
 
-    The expected count is replayed from the run's own ``ll_history`` rather than
-    hardcoded, so the pin is on the SEMANTICS, not on one trajectory.
+    ``newt_start`` is read off the probe trajectory -- one past the first ratchet
+    of the natural-gradient phase -- so a suppressed ratchet exists BY
+    CONSTRUCTION on whatever machine is running, rather than by a constant that
+    happened to straddle on the author's. The expected counts are then replayed
+    from the run's own ``ll_history``, so what is pinned is the semantics, not a
+    trajectory. The complementary direction -- that a ratchet past the gate DOES
+    move ``newtrate`` -- is the next test; splitting them means neither depends
+    on one run producing cycles on both sides.
     """
-    m = AMICAMLXNG(
-        n_channels=NW, n_mix=NMIX, seed=3, block_size=1024,
-        lrate=1.0, lratefact=0.5, maxdecs=3,
-        do_newton=True, newt_start=18, newtrate=1.0,
-    )  # fmt: skip
-    m.fit(_load_real_data(8192), max_iter=60, verbose=False)
+    prefix_hits = _ratchet_iterations(natural_gradient_prefix, _SCHEDULE_MAXDECS)
+    assert prefix_hits, (
+        "the sample recording produced no maxdecs ratchet at all in "
+        f"{len(natural_gradient_prefix)} natural-gradient iterations, so no "
+        "newt_start can put one before the gate: the DATA, not the config, is "
+        "the problem here"
+    )
+    newt_start = prefix_hits[0] + 1
+    assert newt_start < _SCHEDULE_ITERS - 20, (
+        f"the first ratchet lands at iteration {prefix_hits[0]} of "
+        f"{_SCHEDULE_ITERS}, leaving no Newton-phase headroom on this data"
+    )
 
-    # Replay the decrease counter over the observed trajectory.
-    ll = m.ll_history
-    numdecs, cap_ratchets, newt_ratchets = 0, 0, 0
-    for i in range(1, len(ll)):
-        if ll[i] < ll[i - 1]:
-            numdecs += 1
-            if numdecs >= m.maxdecs:
-                cap_ratchets += 1
-                if i > m.newt_start:
-                    newt_ratchets += 1
-                numdecs = 0
-        if i == m.newt_start:
-            numdecs = 0
+    m = _fit_schedule(newt_start)
+    hits = _ratchet_iterations(m.ll_history, m.maxdecs, newt_start=newt_start)
+    cap_ratchets = len(hits)
+    newt_ratchets = sum(1 for i in hits if i > newt_start)
 
-    assert m.lrate > m.minlrate, "run hit the lrate floor; use a gentler config"
-    assert 0 < newt_ratchets < cap_ratchets, (
-        "config no longer straddles newt_start; it cannot discriminate the gate"
+    # Guaranteed by the choice of newt_start: the prefix ratchet at
+    # prefix_hits[0] < newt_start is shared with the probe bit-for-bit, so it
+    # ratchets lrate_cap while the gate holds newtrate.
+    assert newt_ratchets < cap_ratchets, (
+        f"expected a ratchet before newt_start={newt_start} from the shared "
+        f"prefix; got {hits}"
     )
     assert _ratchet_count(m.lrate_cap, m.lrate0, m.lratefact) == cap_ratchets
     assert _ratchet_count(m.newtrate, m.newtrate0, m.lratefact) == newt_ratchets
 
 
-def test_newtrate_never_ratchets_without_newton():
+def test_newtrate_ratchets_at_maxdecs_once_newton_runs():
+    """With Newton active from the first iteration every ``maxdecs`` cycle is
+    past the gate, so ``newtrate`` ratchets in lockstep with ``lrate_cap``.
+
+    This is the "admits" half of the gate, and it needs only that the run
+    ratchets at all -- a far weaker requirement than a single run straddling the
+    switch-on, which is what made the previous single-test formulation
+    machine-dependent.
+    """
+    m = _fit_schedule(newt_start=0)
+    hits = _ratchet_iterations(m.ll_history, m.maxdecs, newt_start=0)
+    assert hits, (
+        f"no maxdecs cycle completed in {len(m.ll_history)} iterations with "
+        "Newton running throughout; the DATA did not decrease often enough to "
+        "exercise the ratchet"
+    )
+    assert all(i > m.newt_start for i in hits)  # newt_start=0; i starts at 1
+    assert _ratchet_count(m.lrate_cap, m.lrate0, m.lratefact) == len(hits)
+    assert _ratchet_count(m.newtrate, m.newtrate0, m.lratefact) == len(hits)
+    assert m.newtrate < m.newtrate0  # non-vacuous: the ceiling actually moved
+
+
+def test_newtrate_never_ratchets_without_newton(natural_gradient_prefix):
     """``newtrate`` is inert for a natural-gradient fit, however many likelihood
     decreases it takes: the ratchet is gated on ``do_newton`` as well as on
     ``newt_start`` (only ``lrate_cap``, which is ungated, moves)."""
-    m = AMICAMLXNG(
-        n_channels=NW, n_mix=NMIX, seed=3, block_size=1024,
-        lrate=1.0, lratefact=0.5, maxdecs=3,
-        do_newton=False, newt_start=18, newtrate=1.0,
-    )  # fmt: skip
-    m.fit(_load_real_data(8192), max_iter=60, verbose=False)
+    prefix_hits = _ratchet_iterations(natural_gradient_prefix, _SCHEDULE_MAXDECS)
+    assert prefix_hits, "the data produced no ratchet; nothing to gate"
+    m = _fit_schedule(prefix_hits[0] + 1, do_newton=False)
 
-    ll = m.ll_history
-    n_dec = sum(1 for i in range(1, len(ll)) if ll[i] < ll[i - 1])
-    assert n_dec >= m.maxdecs, "config did not exercise the decrease path"
-    assert m.lrate_cap < m.lrate0, "lrate_cap should still ratchet"
+    hits = _ratchet_iterations(m.ll_history, m.maxdecs, newt_start=None)
+    assert any(i > m.newt_start for i in hits), (
+        "no ratchet landed past newt_start, so the do_newton gate is untested"
+    )
+    assert _ratchet_count(m.lrate_cap, m.lrate0, m.lratefact) == len(hits)
     assert m.newtrate == m.newtrate0
 
 
-def test_numdecs_resets_when_newton_switches_on():
+def test_numdecs_resets_when_newton_switches_on(natural_gradient_prefix):
     """The decrease counter is cleared on the iteration Newton switches on
     (Fortran amica15.f90:1099-1102), so a partially filled count from the
     natural-gradient phase cannot ratchet the ceilings under the new schedule.
 
-    This run decreases on exactly iterations 2 and 3 with ``maxdecs=2`` and
-    ``newt_start=2``: without the reset the second decrease would complete the
-    count and ratchet ``lrate_cap`` to 0.4; with it the counter restarts at
-    iteration 2 and no ratchet fires. The counterfactual is computed from the
-    run's own history, so this pins the semantics rather than the constant.
+    Made observable in three data-driven steps, none of them a hardcoded
+    trajectory. First ``newt_start`` is placed at an iteration where the probe
+    shows the counter PARTIALLY filled -- that state is in the shared prefix, so
+    it holds on any machine. Then a full-budget fit at that ``newt_start`` is
+    scanned for the smallest budget at which the reset and no-reset replays
+    disagree; one exists as soon as the Newton phase decreases at all, because
+    the no-reset counter is strictly ahead and therefore completes its cycle
+    strictly earlier. Finally the fit is repeated at exactly that budget, where
+    the two hypotheses predict different ``lrate_cap`` values, and the observed
+    one has to match the reset prediction. Truncating is sound because the loop
+    is causal: iteration k depends only on the state after k-1, so a shorter
+    budget reproduces the same prefix.
     """
-    m = AMICAMLXNG(
-        n_channels=NW, n_mix=NMIX, seed=3, block_size=1024,
-        lrate=0.8, lratefact=0.5, maxdecs=2,
-        do_newton=True, newt_start=2, newtrate=1.0,
-    )  # fmt: skip
-    m.fit(_load_real_data(8192), max_iter=8, verbose=False)
-
-    ll = m.ll_history
-    decreases = [i for i in range(1, len(ll)) if ll[i] < ll[i - 1]]
-    assert m.stop_reason == "max_iter"
-
-    def replay(reset: bool) -> int:
-        numdecs, ratchets = 0, 0
-        for i in range(1, len(ll)):
-            if ll[i] < ll[i - 1]:
-                numdecs += 1
-                if numdecs >= m.maxdecs:
-                    ratchets += 1
-                    numdecs = 0
-            if reset and i == m.newt_start:
+    partial = None
+    numdecs = 0
+    for i in range(1, len(natural_gradient_prefix)):
+        if natural_gradient_prefix[i] < natural_gradient_prefix[i - 1]:
+            numdecs += 1
+            if numdecs >= _SCHEDULE_MAXDECS:
                 numdecs = 0
-        return ratchets
-
-    assert replay(reset=True) != replay(reset=False), (
-        f"decreases at {decreases} do not straddle newt_start={m.newt_start}; "
-        "the reset is unobservable on this run"
+        if 0 < numdecs < _SCHEDULE_MAXDECS:
+            partial = i
+            break
+    assert partial is not None, (
+        "the sample recording never left the decrease counter partially filled "
+        "in the natural-gradient phase, so the reset has nothing to clear: the "
+        "DATA, not the config, is the problem here"
     )
-    assert _ratchet_count(m.lrate_cap, m.lrate0, m.lratefact) == replay(reset=True)
+
+    full = _fit_schedule(partial)
+    ll = full.ll_history
+    budget = next(
+        (
+            t
+            for t in range(2, len(ll) + 1)
+            if len(_ratchet_iterations(ll[:t], full.maxdecs, newt_start=partial))
+            != len(_ratchet_iterations(ll[:t], full.maxdecs))
+        ),
+        None,
+    )
+    assert budget is not None, (
+        f"over {len(ll)} iterations the two counter hypotheses never predicted "
+        f"different ratchet counts at newt_start={partial}; the DATA did not "
+        "decrease often enough in the Newton phase to expose the reset"
+    )
+
+    m = _fit_schedule(partial, max_iter=budget)
+    assert len(m.ll_history) == budget, "the truncated fit stopped early"
+    with_reset = _ratchet_iterations(m.ll_history, m.maxdecs, newt_start=partial)
+    without_reset = _ratchet_iterations(m.ll_history, m.maxdecs)
+    assert len(with_reset) != len(without_reset), (
+        f"the reset is unobservable at budget {budget}: {with_reset} vs {without_reset}"
+    )
+    assert _ratchet_count(m.lrate_cap, m.lrate0, m.lratefact) == len(with_reset)
 
 
 def test_newton_schedule_state_resets_at_fit_start():

@@ -8,7 +8,16 @@ No float64-curvature middle path is needed.
 Every number below was produced on Apple Silicon (M-series GPU, MLX 0.32.0) from
 the repo root of the worktree, on the bundled real sample EEG
 (`pamica/sample_data/eeglab_data.fdt`, 32 channels x 30504 samples).
-CI has no MLX (`mlx_impl` is coverage-excluded), so this file is the evidence of record.
+
+CI does run the MLX tests.
+The "Test (macOS 26, Apple Silicon)" job installs MLX and executes `pamica/tests/mlx_tests/` plus
+the MLX cross-backend files, so this port is guarded there like any other backend;
+only the ubuntu jobs skip them.
+What stays local is this gate itself, a multi-minute measurement sweep rather than a test,
+so the numbers below are the evidence of record for the float32 decision.
+Anything written as a test has to hold on that runner too,
+which turned out to be a real constraint: see
+"Machine-dependent decrease timing" below.
 
 ## How to reproduce
 
@@ -136,6 +145,39 @@ At the shipped `comp_thresh=0.99` default, where two genuinely near-collinear pa
 `share_comps` + Newton runs to budget on both backends.
 Both failure modes are loud -- the fit stops and reports a degenerate `stop_reason` -- never a silent wrong answer.
 Pinned as a documented regime, not as a test.
+
+## Machine-dependent decrease timing (why the schedule tests are data-driven)
+
+The two `newtrate`/`numdecs` ratchet tests need likelihood decreases to fall on particular sides of
+`newt_start`, and *when* a fit decreases is BLAS- and hardware-dependent.
+This repo already documents the same effect for the `min_dll` stop,
+which fires at iteration 326 on macOS-arm64, 412 on Linux-CUDA and 1076 on a GitHub runner
+(`docs/guides/validation.md`).
+The first version of these tests hardcoded `newt_start=18` and `newt_start=2`,
+which straddled the cadence on the development machine
+but went vacuous on the CI Apple-Silicon runner,
+failing its own non-vacuity guard.
+
+They now derive their configuration from the executing machine.
+A probe fit whose `newt_start` sits past the budget reports where the decreases actually land,
+and `newt_start` is chosen from that.
+This is sound because the natural-gradient prefix is independent of `newt_start`:
+for `it < newt_start` every branch that reads it is false on both sides
+(Newton activation, the two `it > newt_start` ceiling ratchets, the `it == newt_start` counter reset),
+so the two runs are bit-identical there,
+and the likelihood recorded at `it == newt_start` is shared too
+because `fit` computes it from the previous iteration's parameters.
+
+Two further changes were needed to make the guards hold rather than merely be checked.
+The `newtrate` test was split into complementary halves
+-- one run with a ratchet before the gate (suppression), one with `newt_start=0` (admission) --
+so neither depends on a single run producing cycles on both sides.
+And the fixture's `newtrate` was raised from 1.0 to 2.0:
+at 1.0 the post-switch-on trajectory was monotone on larger sample counts,
+leaving the ratchet cadence nothing to fire on.
+The final configuration was verified over 4 seeds x 2 block sizes x 3 sample counts
+-- a deliberately harsher stand-in for cross-machine variation --
+with all 16 variants satisfying every assertion and non-vacuity guard.
 
 ## Related: the NumPy multi-model Newton broadcast (issue #267)
 
