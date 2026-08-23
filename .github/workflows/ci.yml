@@ -10,24 +10,31 @@ name: CI
 # default branch): post-merge pushes to dev are what catch drift that only
 # shows up outside a PR's exact base -- e.g. issue #241, where a ~1e-6
 # trajectory shift moved a stopping iteration and only failed once the PR's
-# changes landed on dev. `concurrency` below cancels a superseded run on the
-# same ref, so a rapid run of pushes/PR updates does not queue redundant jobs.
+# changes landed on dev.
+#
+# `concurrency` below keys on github.sha for push events but on github.ref for
+# pull_request events. For a PR, that keeps the original behavior: rapid pushes
+# to the same PR branch share one group, so an update cancels the older,
+# now-superseded run. For a push, every commit gets its OWN group instead --
+# pushes never cancel each other -- because each commit landing on main/dev
+# needs its own CI result (that is the entire point of adding the push trigger
+# above); a same-ref grouping there would let a later push cancel an earlier
+# commit's still-running, still-meaningful CI.
 #
 # Interaction with auto-bump-dev.yml/auto-tag.yml (PR #290 review): both bump
 # the version and push straight back to dev/main with a PAT (deliberately, so
-# the push re-triggers workflows -- see their own headers). That bump push
-# lands in THIS workflow's concurrency group for the same ref, so without a
-# guard it would cancel the just-merged real commit's still-running CI (the
-# same `cancel-in-progress` that dedupes rapid pushes) and leave the trivial
-# bump commit as the one that gets tested -- doubling compute and moving the
-# green check onto the wrong commit. `lint`/`typecheck` below skip when the
-# push's head commit is a bot bump (same author-email + message-prefix guard
-# auto-bump-dev.yml/auto-tag.yml use on themselves to avoid looping); every
-# other job `needs` one of those two, so GitHub cascades the skip to the whole
-# run. This does not stop the bump push from being queued (so the concurrency
-# cancellation of the real commit's in-progress run still happens -- GitHub
-# gives a workflow no way to suppress that from the inside), but it does stop
-# the bump commit from silently absorbing a full, misattributed test run.
+# the push re-triggers workflows -- see their own headers). Per-SHA grouping
+# means that bump push can never land in the same concurrency group as the
+# merge commit's run, so it cannot cancel it -- the failure mode this section
+# used to describe (a rapid follow-up push cancelling the real commit's run
+# and leaving the trivial bump commit as the one that gets tested) cannot
+# happen at all now. `lint`/`typecheck` below still skip when the push's head
+# commit is a bot bump (same author-email + message-prefix guard
+# auto-bump-dev.yml/auto-tag.yml use on themselves to avoid looping), and every
+# other job `needs` one of those two so the skip cascades to the whole run --
+# now purely to avoid spending compute on a run that would only re-verify
+# state the merge commit's own run already covered, not to prevent a
+# cancellation.
 #
 # The weekly full-suite run (slow tests + Fortran-parity, macOS) lives in its
 # own schedule-only workflow, .github/workflows/weekly-macos-slow.yml, so it
@@ -54,7 +61,11 @@ on:
       - "LICENSE"
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # push: per-SHA group (each push to main/dev gets its own run, never
+  # cancelled by a later push -- see the header comment above).
+  # pull_request: per-ref group, unchanged (a PR's older, superseded runs are
+  # still cancelled by a newer push to the same branch).
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
