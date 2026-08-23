@@ -82,6 +82,22 @@ def test_kurt_schedule_validation():
     AMICAMLXNG(n_channels=NW, n_mix=3, pdftype=0, kurt_int=0)
 
 
+def test_pdtype_h_is_none_only_for_gg():
+    """``_pdtype_h`` returns ``None`` on the GG fast path (``pdftype=0``) and
+    a ``(1, NW, 1)`` array otherwise, for every other family (mirrors
+    ``torch_tests/test_ng_pdf_families.py::test_pdtype_h_is_none_only_for_gg``).
+    A cheap, no-fit failure-attribution pin: a regression here would otherwise
+    only surface indirectly, as a slower or numerically different fit."""
+    gg = AMICAMLXNG(n_channels=NW, n_mix=3, pdftype=0, seed=0)
+    gg._initialize_parameters()
+    assert gg._pdtype_h(0) is None
+    for pdftype, n_mix in [(2, 3), (3, 3), (4, 1), (1, 1)]:
+        m = AMICAMLXNG(n_channels=NW, n_mix=n_mix, pdftype=pdftype, seed=0)
+        m._initialize_parameters()
+        ph = m._pdtype_h(0)
+        assert ph is not None and ph.shape == (1, NW, 1)
+
+
 # --- (f) Per-family real-EEG fits -------------------------------------------
 
 
@@ -105,6 +121,27 @@ def test_family_fit_finite_and_monotone(pdftype: int, n_mix: int):
     assert np.all(np.isfinite(np.array(m.A)))
     assert ll[-1] >= ll[0] - 1e-6
     assert np.all(m.get_pdftype() == pdftype)
+
+
+def test_multimodel_fixed_family():
+    """A fixed non-GG family works with ``n_models>1``, exercising the
+    per-model ``_pdtype_h`` indexing path (mirrors ``torch_tests/
+    test_ng_pdf_families.py::test_multimodel_fixed_family``).
+
+    Mutation-tested hole this closes: before this test existed, hardcoding
+    ``_pdtype_h`` to always index model 0 (instead of the ``h`` argument)
+    passed the entire suite -- every other fixed-family test used
+    ``n_models=1``, where model 0 is the only model.
+    """
+    data = _load_real_data()
+    m = AMICAMLXNG(n_channels=NW, n_models=2, n_mix=NMIX, pdftype=2, seed=0)
+    m.fit(data, max_iter=10, verbose=False)
+    ll = np.asarray(m.ll_history)
+    assert np.all(np.isfinite(ll))
+    assert np.all(np.isfinite(np.array(m.A)))
+    assert ll[-1] >= ll[0] - 1e-6
+    assert m.pdtype is not None
+    assert np.array(m.pdtype).shape == (NW, 2)
 
 
 # --- (g) Adaptive switcher ---------------------------------------------------
@@ -195,7 +232,10 @@ def test_family_fit_with_newton(pdftype: int, n_mix: int):
     assert np.all(np.isfinite(ll))
     assert np.all(np.isfinite(np.array(m.A)))
     assert ll[-1] >= ll[0] - 1e-6
-    assert m.n_newton_fallbacks >= 0  # non-degenerate completion either way
+    # A meaningful (failable) bound, not the structurally-unfailable ">= 0"
+    # the counter starts at and only ever increments from: it cannot count
+    # more fallbacks than iterations actually ran.
+    assert 0 <= m.n_newton_fallbacks <= len(ll)
 
 
 # --- (j) _logcosh stability pin ----------------------------------------------
@@ -255,3 +295,39 @@ def test_sharing_with_adaptive_switcher_smoke():
     # No assertion that a shared pair's codes agree -- shared_components()'s
     # docstring says they need not, and this is the state that would show it.
     m.shared_components()
+
+
+# --- get_pdftype error contract ---------------------------------------------
+
+
+def test_get_pdftype_rejects_bad_model_idx():
+    """A fitted 2-model call raises ``ValueError`` ("out of range") for a
+    ``model_idx`` at or past ``n_models``, INCLUDING negative -- the
+    docstring's own rationale: MLX's negative indexing would otherwise wrap
+    silently to the wrong model -- and ``TypeError`` for a non-int (mirrors
+    ``torch_tests/test_ng_metadata.py::
+    test_metadata_accessors_reject_bad_model_idx``, scoped to
+    ``get_pdftype`` since MLX has no ``get_rho``).
+
+    Confirmed hole (mutation testing): deleting ``_check_model_idx``'s bounds
+    check passed the entire suite before this test existed.
+    """
+    data = _load_real_data()
+    m = AMICAMLXNG(n_channels=NW, n_models=2, n_mix=NMIX, seed=0)
+    m.fit(data, max_iter=5, verbose=False)
+    with pytest.raises(ValueError, match="out of range"):
+        m.get_pdftype(model_idx=2)
+    with pytest.raises(ValueError, match="out of range"):
+        m.get_pdftype(model_idx=-1)
+    with pytest.raises(TypeError):
+        m.get_pdftype(model_idx="0")  # ty: ignore[invalid-argument-type]
+
+
+def test_get_pdftype_requires_fit():
+    """An unfitted model raises ``RuntimeError``, not an opaque
+    ``AttributeError``/``TypeError`` from indexing a ``None`` ``pdtype``
+    (mirrors ``torch_tests/test_ng_metadata.py::
+    test_metadata_accessors_require_fit``)."""
+    m = AMICAMLXNG(n_channels=NW, n_models=1, n_mix=NMIX, seed=0)
+    with pytest.raises(RuntimeError, match="fitted"):
+        m.get_pdftype()
