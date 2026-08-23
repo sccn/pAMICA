@@ -145,6 +145,64 @@ Most MLX limitations fail loudly: `transform` and every unsupported parameter
 (outlier rejection, save/load) are simply absent from the constructor or raise
 `NotImplementedError`, rather than silently downgrading.
 
+One MLX failure mode used to be worse than loud — it was uncatchable. MLX
+0.32's CPU-stream `mx.linalg.inv` does not raise a Python exception on a
+singular per-model unmixing matrix `A[:, comp_list[:, h]]`: LAPACK's LU
+failure aborts the whole process (`libc++abi: ... [Inverse::eval_cpu] LU
+factorization failed`), which no `try`/`except` around `fit` can catch.
+Issue #274 closed that gap: `_update_unmixing_matrices` now condition-checks
+each per-model matrix host-side (`np.linalg.cond`, cheap — the method already
+crosses to the CPU stream for `inv`/`slogdet` once per iteration) immediately
+before calling `inv`, and raises a catchable `RuntimeError` naming the model
+index, iteration and condition number in its place. The threshold
+(`_INV_COND_THRESHOLD`, 1e12) is set empirically rather than from float32's
+~1/eps precision-loss point (~8-17e6, depending on convention): isolated
+per-trial subprocess measurement showed the actual LU-abort onset is not a
+clean function of condition number — near-duplicate-column matrices aborted
+anywhere from cond~9e8 to beyond cond~5e10, while column-scaled-toward-zero
+matrices never aborted even past cond~1e16 — and separately, an existing
+adversarial test (`test_fallback_ramps_toward_lrate_cap_and_counts`, which
+repeatedly steps `A` from the same deliberately under-determined block)
+legitimately reaches cond~4.4e9 without ever hitting the abort. 1e12 clears
+that observed legitimate maximum by ~225x while staying far below where a
+genuinely singular `A` — the issue's literal example, a duplicated component
+column — actually lands (~1e15-1e17). The guard is read-only (verified
+bit-identical `A`/`W` on a short fit with and without it) and adds negligible
+per-iteration overhead (~30 microseconds per model, measured on the bundled
+sample).
+
+Non-finite entries need separate handling, because they cannot be fed to
+`np.linalg.cond` directly (its SVD raises `LinAlgError` on NaN/inf, a
+different failure than the one this guard targets). A matrix that is
+non-finite in EVERY entry — the observed shape of a zero-responsibility
+("dead") model's corruption, where dividing by `dgm==0` propagates NaN/inf
+through the whole per-model direction matrix — carries no structural signal
+to check, so it is left to flow through to `inv`/`slogdet` unguarded exactly
+as before the guard existed; `inv` returns NaN rather than aborting, caught
+downstream by `fit`'s existing `nan_params` guard on that same iteration.
+Any OTHER non-finite pattern first has its non-finite entries replaced with
+`0.0` (a neutral fill, not an extreme sentinel — an extreme fill makes any
+stray non-finite entry read as infinitely ill-conditioned by pure scale
+mismatch, unable to distinguish a merely-corrupted-but-fine matrix from a
+genuinely singular one) before the condition check runs. This closes a gap a
+review pass found in the guard's first version: a matrix that is BOTH
+non-finite in one unrelated entry AND structurally singular elsewhere (an
+exact duplicate column plus a stray NaN) used to skip the check entirely and
+reach the same uncatchable abort the guard exists to prevent.
+
+**Containment is not complete**, and this is by design rather than an
+oversight: no scalar condition-number threshold, on the sanitized matrix or
+otherwise, can guarantee catching every conceivable abort-capable matrix. The
+empirically observed LU-abort onset (cond~9e8 to beyond cond~5e10,
+matrix-structure-dependent, not a clean function of cond alone) sits below
+the 1e12 threshold, so a believed-rare residual window remains between "the
+guard's check passes" and "this specific matrix would actually have aborted".
+Running `inv` itself in a disposable per-call subprocess would close that
+window completely, but was rejected as disproportionate: a subprocess spawn
+on the per-iteration hot path is a far larger and less predictable cost than
+one host-side `np.linalg.cond` call, for a defect this guard already makes
+rare in practice.
+
 The convergence stops used to be the exception — MLX implemented neither, so a
 fit there always spent the whole iteration budget. Issue #248 closed that gap:
 `pamica/mlx_impl/core.py` now carries `use_min_dll`/`min_dll`/`maxincs` and

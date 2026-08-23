@@ -120,6 +120,47 @@ _EPSDBLE = 1e-16
 # MLX linalg runs on the CPU stream only (float32-accurate); the GPU stream
 # raises "not yet supported on the GPU" for inv/slogdet/eigh/solve.
 _CPU = mx.cpu
+# Guard threshold for _update_unmixing_matrices (issue #274): MLX 0.32's
+# CPU-stream mx.linalg.inv aborts the whole process (uncatchable LAPACK LU
+# failure) instead of raising on a singular matrix, so a per-model condition
+# check must reject before that call.
+#
+# This is NOT set from float32's ~1/eps precision-loss point (~8-17e6,
+# depending on the "machine epsilon" convention): that theoretical value
+# turns out to be far too low in practice. Measured by isolated-subprocess
+# bisection (a real LU failure aborts the process, so each trial has to be
+# disposable): whether a given near-singular float32 matrix makes MLX's LU
+# actually abort is NOT a clean function of condition number alone -- it
+# depends on the specific numerical cancellation pattern during pivoting.
+# Across 5 random near-duplicate-column 32x32 matrices, the abort onset
+# ranged from cond~9e8 up to beyond cond~5e10 with no abort at all short of
+# an exact duplicate; conversely, matrices built by scaling one column toward
+# (but not to) zero never aborted even past cond~1e16, returning a huge but
+# finite inverse instead. Separately, the existing (legitimate, unrelated to
+# this guard) test suite already exercises cond up to ~4.4e9 without ever
+# hitting the abort: pamica/tests/mlx_tests/test_mlx_newton.py::
+# test_fallback_ramps_toward_lrate_cap_and_counts repeatedly steps A from the
+# same deliberately under-determined 256-sample block, so its conditioning
+# compounds across 30 iterations. A threshold near the textbook ~1e7 value
+# would raise on that legitimate scenario (confirmed: it did, before this
+# constant was recalibrated).
+#
+# So the threshold is set empirically instead: comfortably above every cond
+# observed anywhere in the full MLX test suite (~4.4e9, ~225x margin), and
+# comfortably below where a genuinely singular A -- the issue's literal
+# example, a duplicated component column -- actually lands (~1e15-1e17,
+# effectively double-precision-computed infinity). It cannot guarantee
+# catching every conceivable near-singular matrix (no scalar cond threshold
+# can, given the above), but it reliably catches the realistic failure mode:
+# a collapsed or duplicated component, not a merely ill-conditioned one.
+#
+# A complete mechanism -- running mx.linalg.inv itself in a disposable
+# isolated subprocess, so a real LU abort kills only that subprocess -- was
+# considered and rejected: it would trade an occasional missed abort for a
+# per-iteration subprocess spawn on the hot path, which is a far larger and
+# less predictable cost than one host-side np.linalg.cond call, for a defect
+# this guard already makes rare in practice.
+_INV_COND_THRESHOLD = 1e12
 
 
 def _logcosh(x: mx.array) -> mx.array:
@@ -722,22 +763,115 @@ class AMICAMLXNG:
         once per iteration. ``W`` is ``(n_models, n, n)`` and ``_logdet_W`` is
         ``(n_models,)``. For n_models=1 this is ``inv(A)`` unchanged.
 
-        These build lazy graph nodes, so a singular ``A`` surfaces not here but
-        where the graph is materialized (the ``mx.eval`` in ``fit``) -- a
-        failure reported against ``fit`` actually originates in this method.
-        Measured on MLX 0.32: that failure is NOT a catchable Python exception.
-        ``inv`` on a singular matrix aborts the process from LAPACK
-        (``libc++abi: ... [Inverse::eval_cpu] LU factorization failed``), which
-        is also why a near-singular ``A`` cannot be driven far enough to make
-        ``W`` overflow to inf in float32 -- LU fails first. ``fit``'s
-        ``nan_params`` guard still checks ``W``/``_logdet_W`` as defense in
-        depth, since a non-finite result that LU does not reject would
-        otherwise reach the caller silently on the final iteration.
+        These build lazy graph nodes, so on a HEALTHY matrix the ``inv``/
+        ``slogdet`` calls below do not themselves materialize -- the graph is
+        realized later where ``mx.eval`` runs (in ``fit``). A singular ``A``
+        is different: MLX 0.32's CPU-stream ``mx.linalg.inv`` does not raise a
+        catchable Python exception on one. LAPACK's LU failure aborts the
+        whole process (``libc++abi: ... [Inverse::eval_cpu] LU factorization
+        failed``), which no ``try``/``except`` around ``fit`` can catch
+        (issue #274). Near-singular-but-finite float32 matrices either invert
+        to large finite values or hit this same abort -- there is no route to
+        a catchable float32 overflow instead, which is why ``fit``'s
+        ``nan_params`` guard treats a non-finite ``W``/``_logdet_W`` as
+        defense in depth rather than a reachable case on its own.
+        Consequently, each per-model matrix is condition-checked host-side,
+        eagerly, immediately before its ``inv`` call: see
+        ``_INV_COND_THRESHOLD``. This eager host read (via ``np.array``)
+        forces the SAME materialization the CPU-stream ``inv``/``slogdet``
+        below would have forced anyway, so the guard adds no new cross-stream
+        handoff -- only a small ``np.linalg.cond`` on a matrix already on the
+        host. Measured on the bundled sample: negligible relative to
+        per-iteration time (see the issue #274 PR body for the number). A
+        condition number above the threshold raises ``RuntimeError`` naming
+        the model index, iteration, and value, in place of the uncatchable
+        abort.
+
+        A matrix with non-finite entries needs its own handling, verified by
+        isolated-subprocess reproduction: a matrix that is ONLY non-finite
+        (no other defect) never aborts -- ``inv`` propagates NaN/inf into
+        ``W``, caught downstream by ``nan_params``. But a matrix that is
+        BOTH non-finite AND structurally singular elsewhere (an exact
+        duplicate column plus one unrelated NaN, confirmed to reach and
+        abort the process) is not covered by "only non-finite" reasoning --
+        skipping the check on any non-finite entry, as an earlier version of
+        this guard did, lets that combination through unguarded. The check
+        below therefore 0-fills non-finite entries (a no-op when already
+        finite) before computing the condition number, UNLESS every entry is
+        non-finite (the observed shape of a dead-model corruption -- a
+        zero-responsibility model dividing by ``dgm==0`` -- which carries no
+        structural signal to check and is left to flow to ``inv``/
+        ``nan_params`` exactly as before).
+
+        Caveat, carried from ``_INV_COND_THRESHOLD``: no scalar condition
+        number, on the sanitized matrix or otherwise, can guarantee catching
+        every conceivable abort-capable matrix -- the empirically observed
+        LU-abort onset (cond~9e8 to beyond cond~5e10, matrix-dependent) sits
+        below the 1e12 threshold, so a believed-rare residual window remains
+        between "passes this check" and "would actually abort".
         """
         assert self.A is not None and self.comp_list is not None
         ws, logdets = [], []
         for h in range(self.n_models):
-            wh = mx.linalg.inv(self.A[:, self.comp_list[:, h]], stream=_CPU)
+            A_h = self.A[:, self.comp_list[:, h]]
+            a_h_np = np.array(A_h, dtype=np.float32, copy=False)
+            finite_mask = np.isfinite(a_h_np)
+            # A matrix with ZERO finite entries carries no signal to check --
+            # this is exactly the observed shape of a dead-model corruption
+            # (a zero-responsibility model dividing by dgm==0 propagates
+            # NaN/inf through the WHOLE per-model direction matrix, so all
+            # comp_list columns for that model go non-finite together, not
+            # just one entry -- confirmed on a real fitted 2-model dead-model
+            # state). Skipping here reproduces the pre-guard behavior exactly:
+            # mx.linalg.inv on a wholly non-finite A does not abort -- it
+            # propagates NaN/inf into W, which fit()'s existing nan_params
+            # guard already catches.
+            #
+            # Otherwise (fully finite, OR a MINORITY of entries non-finite),
+            # sanitize any non-finite entries to 0.0 before computing cond.
+            # This is a no-op when already fully finite. When partially
+            # non-finite, 0.0 is a neutral fill at the same natural scale as
+            # A's entries (near-unit-norm columns) -- unlike a huge/extreme
+            # sentinel, which was tried and rejected: it makes ANY non-finite
+            # entry look "infinitely far" from the rest of the matrix via pure
+            # scale mismatch, so a well-conditioned matrix with one stray NaN
+            # and a genuinely singular one both come back cond=inf, which
+            # cannot distinguish them. The neutral fill can (verified: a
+            # well-conditioned real matrix with one injected NaN reads
+            # cond~35 after 0-fill; the same matrix with an EXACT DUPLICATE
+            # column plus that same stray NaN -- the reviewer-reported killer
+            # combination, confirmed by isolated-subprocess reproduction to
+            # abort the process under the OLD skip-on-any-non-finite logic --
+            # reads cond~3.7e16, comfortably over the threshold). A raise here
+            # is unconditional on the underlying non-finite entries (the
+            # sanitized cond is a probe of the surrounding structure, not a
+            # claim about what the unknown entries "really" are), so it also
+            # still catches an exact-duplicate-column A with no non-finite
+            # entries at all, unchanged from before.
+            if np.any(finite_mask):
+                sentinel = np.where(finite_mask, a_h_np, np.float32(0.0)).astype(
+                    np.float32
+                )
+                cond = float(np.linalg.cond(sentinel))
+                if not math.isfinite(cond) or cond > _INV_COND_THRESHOLD:
+                    n_bad = int(a_h_np.size - finite_mask.sum())
+                    nonfinite_note = (
+                        f" ({n_bad} of {a_h_np.size} entries were already "
+                        "non-finite and were 0-filled for this check.)"
+                        if n_bad
+                        else ""
+                    )
+                    raise RuntimeError(
+                        f"Singular unmixing matrix for model {h} at iteration "
+                        f"{self.iteration}: cond(A[:, comp_list[:, {h}]]) = "
+                        f"{cond:.3e} exceeds the float32 threshold "
+                        f"{_INV_COND_THRESHOLD:.1e} (MLX's CPU-stream inv "
+                        "would otherwise abort the process instead of "
+                        "raising; #274). Likely a component collapse -- "
+                        "consider re-seeding or a lower lrate."
+                        f"{nonfinite_note}"
+                    )
+            wh = mx.linalg.inv(A_h, stream=_CPU)
             ws.append(wh)
             logdets.append(mx.linalg.slogdet(wh, stream=_CPU)[1])
         self.W = mx.stack(ws, axis=0)  # (n_models, n, n)
@@ -1640,9 +1774,13 @@ class AMICAMLXNG:
                 #
                 # Defense in depth rather than a route known to be reachable:
                 # the obvious candidate, a near-singular A whose inverse
-                # overflows float32, is NOT reachable, because MLX's LU rejects
-                # such an A first (see _update_unmixing_matrices). Cheap enough
-                # to keep regardless -- both are already materialized above.
+                # overflows float32, is NOT reachable -- _update_unmixing_matrices
+                # now raises RuntimeError on such an A before calling inv at all
+                # (issue #274's condition-number guard), and before #274 it was
+                # unreachable for a different reason (MLX's LU aborted the whole
+                # process first, which this guard replaces with a catchable
+                # error). Cheap enough to keep regardless -- both are already
+                # materialized above.
                 "W": self.W,
                 "logdet_W": self._logdet_W,
             }
