@@ -1388,11 +1388,12 @@ class AMICATorchNG:
             and self.comp_list is not None
         )
         # Fortran builds dAk from the previous iteration's model weights: gm is
-        # not reassigned until update_params (amica15.f90:1788+), after
-        # accum_updates_and_likelihood (:1731-1743). Snapshot before overwriting so
+        # not reassigned until update_params (amica15.f90:1788+), after the
+        # dAk/zeta accumulation in accum_updates_and_likelihood (:1749-1761).
+        # Snapshot before overwriting so
         # dAk -- which both drives the A-update below and reports ndtmpsum, unlike
         # numpy_impl where it is only the diagnostic -- weights the way Fortran
-        # does (issue #219). Cloned rather than aliased: gm is only ever rebound
+        # does (the ordering question raised by issue #219). Cloned rather than aliased: gm is only ever rebound
         # today, but an in-place write elsewhere would silently corrupt this.
         assert self.gm is not None
         gm_prev = self.gm.clone()
@@ -1773,8 +1774,15 @@ class AMICATorchNG:
         A component drops out of use when it is folded into another by
         :meth:`_identify_shared_comps`; unused columns receive no gradient and
         are never read by the E-step. Derived from ``comp_list`` (not stored).
+
+        Raises rather than asserts: ``assert`` is stripped under ``python -O``,
+        which would turn a pre-fit read into an obscure ``NoneType`` error
+        instead of the same message every other accessor gives.
         """
-        assert self.comp_list is not None
+        if self.comp_list is None:
+            raise RuntimeError(
+                "AMICATorchNG.comp_used requires a fitted model; call fit() first."
+            )
         used = torch.zeros(self.n_comps, dtype=torch.bool, device=self.comp_list.device)
         used[self.comp_list.reshape(-1)] = True
         return used

@@ -125,7 +125,7 @@ Separate from reference divergences: the optional MLX backend is a subset.
 |---|---|---|---|---|
 | Newton | yes | yes | `NotImplementedError` | yes |
 | PDF families | all five | all five | GG only | all five |
-| Component sharing | yes | yes | no | yes |
+| Component sharing | yes | yes | yes | yes |
 | Outlier rejection | yes | yes | no | yes |
 | Precision | f64/f32 | f64 | f32 only | f64 |
 | Rank detection | yes | yes | yes | yes (absolute floor) |
@@ -150,6 +150,19 @@ same iteration (`pamica/tests/test_mlx_convergence_stops.py` asserts exactly
 that on the bundled sample). Statements elsewhere in these guides about the
 `min_nd` threshold being unreachable on small recordings now cover MLX too;
 `numpy_impl` spells that same threshold `min_grad_norm`.
+
+Component sharing was the other gap, closed by issue #263: `AMICAMLXNG` now takes
+`share_comps`/`share_start`/`share_iter`/`comp_thresh` with the PyTorch
+backend's names, defaults and validation, runs the same merge schedule and
+post-merge A-freeze, and exposes `comp_used`/`shared_components()`.
+It does not re-derive the merge metric — it calls the same
+`identify_shared_components` kernel the NumPy backend uses, on host float64
+`pinv(sphere) @ A`, so all three backends decide identically from one fitted
+state (`pamica/tests/test_mlx_sharing_cross_backend.py` pins that against
+`AMICATorchNG`).
+Row 8 of the "At a glance" table at the top of this page (merged-away columns
+frozen at their last finite value, not left NaN behind the mask) holds in MLX as
+well.
 
 ## Component sharing on rank-reduced fits
 
@@ -180,6 +193,8 @@ directly -- `pinv(sphere) @ A`, the same back-map described above -- instead of
 comparing columns of the sphered `A`.
 The two backends therefore make the identical merge decision from the same
 fitted state (`pamica/tests/test_numpy_share_comps.py::test_numpy_merge_decision_matches_torch_backend`).
+The MLX backend calls that same kernel on the same host float64 inputs (issue
+#263), so all three agree.
 On one real fitted 2-model state the top candidate cross-model pair measured
 0.992 cosine similarity in sensor space against 0.970 in the old sphered
 space -- close enough that, with the default `comp_thresh=0.99`, the two
