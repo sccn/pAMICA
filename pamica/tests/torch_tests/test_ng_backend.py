@@ -727,6 +727,51 @@ def test_newton_multimodel_finite_and_shaped():
 
 
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
+def test_newton_three_model_finite_and_shaped():
+    """3-model (n_models=3) Newton coverage (issue #272).
+
+    The curvature arrays are per-(source, model) and the direction/fallback
+    loop iterates over models, so a 2-model fit cannot distinguish a correct
+    per-model index from a transposition error that happens to still line up
+    for exactly two models. This is the torch counterpart of the numpy #267
+    regression (``tests/test_numpy_newton_multimodel.py``), which already
+    parametrizes ``num_models`` up to 3, and of the MLX
+    ``test_multimodel_newton_mstep_is_finite``/``test_multimodel_newton_fit_completes``
+    pair -- extended here to a third model.
+    """
+    data = _load_real_data()
+    blk = 256
+    ng = AMICATorchNG(
+        n_channels=NW,
+        n_models=3,
+        n_mix=NMIX,
+        seed=SEED,
+        device="cpu",
+        dtype=torch.float64,
+        block_size=blk,
+        do_newton=True,
+        newt_start=0,
+    )
+    X_t = ng._preprocess(data)
+    ng._initialize_parameters()
+    block = X_t[:, :blk].contiguous()
+    ng_upd = ng._get_block_updates(block)
+    sigma2, lambda_, kappa = ng._finalize_newton_stats(ng_upd)
+    for name, stat in [("sigma2", sigma2), ("lambda", lambda_), ("kappa", kappa)]:
+        assert stat.shape == (NW, 3), name
+        assert torch.all(torch.isfinite(stat)), name
+
+    ng.fit(data, max_iter=8, verbose=False)
+    assert len(ng.ll_history) == 8, "the fit did not complete all iterations"
+    assert ng.stop_reason not in ("nan_ll", "singular_ll")
+    assert ng.c is not None
+    assert torch.all(torch.isfinite(ng.c))
+    assert ng.A is not None and torch.all(torch.isfinite(ng.A))
+    for h in range(3):
+        assert np.all(np.isfinite(ng.get_unmixing_matrix(h)))
+
+
+@pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
 def test_multimodel_bias_c_matches_numpy_reference():
     """Cross-backend parity of the FINALIZED bias c (not just the accumulator):
     NG's ``self.c`` after one M-step equals the NumPy reference's
