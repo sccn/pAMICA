@@ -16,7 +16,7 @@ pamica/
 ├── mlx_impl/                # Optional MLX backend (Apple GPU; AMICAMLXNG, #76/#81)
 │   └── core.py              #   float32 GPU E/M-step + CPU-stream linalg (single- & multi-model GG, NG)
 ├── numpy_impl/              # Legacy NumPy reference (topic-named modules, issue #34)
-│   ├── core.py              #   AMICA_NumPy; newton.py, pdf.py, data.py, load.py, viz.py, utils.py, cli.py
+│   ├── core.py              #   AMICA_NumPy (incl. inlined Newton); pdf.py, data.py, load.py, viz.py, utils.py, cli.py
 │   └── ...
 ├── amica17.f90, funmod2.f90 # Fortran reference source (read-only, for parity)
 ├── sample_data/             # Sample EEG data + Fortran binary (amica15mac)
@@ -24,7 +24,7 @@ pamica/
 
 validate_implementations.py  # Runs both implementations, Hungarian component matching, reports
 ```
-Module names are topic-based (`core`/`newton`/`pdf`/`data`/... under `numpy_impl/`,
+Module names are topic-based (`core`/`pdf`/`data`/... under `numpy_impl/`,
 `core`/`utils` under `torch_impl/`); the old `pamica.py`/`amica_*.py`/`amica_torch_ng.py`
 prefixes were dropped in issue #34. The public import surface is stable:
 `from pamica import AMICA, AMICA_NumPy, AMICATorchNG`. The optional MLX backend is
