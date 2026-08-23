@@ -9,10 +9,17 @@ condition-checks each per-model matrix host-side immediately before calling
 
 This module covers the guard mechanics: a genuinely singular ``A`` (and a
 near-singular one) raise ``RuntimeError`` rather than aborting the process,
-and the guard is read-only -- it reproduces the exact ``W``/``_logdet_W`` a
-call with no guard at all would have produced, on the same real fitted state.
-Real sample EEG throughout, following the manipulate-real-fitted-state pattern
-used by ``test_mlx_sharing.py``'s ``_force_merged_column``.
+non-finite entries are handled correctly in both directions (a matrix that is
+ONLY non-finite flows through to ``inv``/``nan_params`` unraised, matching
+pre-guard behavior for the real dead-model corruption shape; a matrix that is
+BOTH non-finite AND structurally singular elsewhere -- the "killer
+combination" a review pass on an earlier version of this guard found reaches
+an uncatchable abort under a naive "skip on any non-finite" policy -- still
+raises), and the guard is read-only -- it reproduces the exact
+``W``/``_logdet_W`` a call with no guard at all would have produced, on the
+same real fitted state. Real sample EEG throughout, following the
+manipulate-real-fitted-state pattern used by ``test_mlx_sharing.py``'s
+``_force_merged_column``.
 """
 
 from pathlib import Path
@@ -135,6 +142,73 @@ def test_near_singular_column_raises():
 
     with pytest.raises(RuntimeError, match=r"Singular unmixing matrix"):
         model._update_unmixing_matrices()
+
+
+def test_killer_combination_duplicate_and_nan_raises_not_abort():
+    """The reviewer-reported gap in the FIRST version of this guard: a matrix
+    that is BOTH structurally singular (an exact duplicate column) AND has an
+    unrelated non-finite entry elsewhere. Isolated-subprocess reproduction
+    confirmed this combination reaches MLX's CPU-stream ``inv`` and aborts
+    the process when the guard merely skips its check on any non-finite
+    entry (the earlier policy) -- because the duplicate-column singularity is
+    real regardless of what value the unrelated NaN carries. The guard must
+    0-fill the non-finite entry and still see (and reject) the underlying
+    singularity, on a real fitted ``A``, not just a synthetic matrix."""
+    model, _ = _warm_model()
+    a_np = np.array(model.A)
+    a_np[:, 1] = a_np[:, 0]  # exact duplicate column -> singular submatrix
+    a_np[5, 7] = np.nan  # one unrelated non-finite entry, elsewhere
+    model.A = mx.array(a_np)
+    model.iteration = 9
+
+    with pytest.raises(RuntimeError, match=r"Singular unmixing matrix for model 0"):
+        model._update_unmixing_matrices()
+
+
+def test_purely_nonfinite_a_flows_to_nan_params_not_abort():
+    """The complementary case: a matrix that is non-finite EVERYWHERE but not
+    otherwise singular -- the real shape of a zero-responsibility ("dead")
+    model's corruption, reproduced here the same way
+    ``test_mlx_backend.py::test_multimodel_dead_model_keeps_prior_c`` does
+    (forcing ``dgm[1] = 0`` before the M-step, the established manipulate-
+    real-state pattern for this scenario). This must NOT raise from the
+    guard -- there is no structural signal in an all-non-finite matrix to
+    check, so it is left to flow through to ``inv``, which (verified) returns
+    NaN rather than aborting. That NaN ``W`` is exactly what ``fit()``'s
+    existing ``nan_params`` guard checks on every iteration, so the
+    corruption is still caught -- on the SAME iteration it occurs, one level
+    up from this method."""
+    from pamica.mlx_impl import AMICAMLXNG
+
+    model = AMICAMLXNG(
+        n_channels=NW, n_models=2, n_mix=NMIX, seed=SEED, block_size=BLOCK
+    )
+    x_t = model._preprocess(_real_data())
+    model._initialize_parameters()
+    model.iteration = 4
+    acc = model._accumulate_blocks(x_t)
+    dgm = np.array(acc["dgm"], dtype=np.float32)
+    dgm[1] = 0.0
+    acc["dgm"] = mx.array(dgm)
+
+    # _update_parameters calls _update_unmixing_matrices internally (the same
+    # per-iteration M-step path fit() drives) -- if the guard raised here,
+    # this call would raise; if MLX's LU aborted, this whole test process
+    # would not survive to make the assertions below.
+    model._update_parameters(acc, x_t.shape[1])
+    mx.eval(model.A, model.W, model._logdet_W)
+
+    cl = np.array(model.comp_list)
+    a_h1 = np.array(model.A)[:, cl[:, 1]]
+    assert not np.any(np.isfinite(a_h1)), "model 1's A should be wholly non-finite"
+
+    w1 = np.array(model.W)[1]
+    assert np.any(~np.isfinite(w1)), "inv should propagate NaN/inf, not raise"
+
+    # The exact check fit()'s nan_params guard makes on W/_logdet_W: it would
+    # fire on THIS iteration, immediately after this same _update_parameters
+    # call, not one iteration later.
+    assert not bool(mx.all(mx.isfinite(model.W)).item())
 
 
 def test_second_model_singular_names_model_one():
