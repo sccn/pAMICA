@@ -120,6 +120,40 @@ _EPSDBLE = 1e-16
 # MLX linalg runs on the CPU stream only (float32-accurate); the GPU stream
 # raises "not yet supported on the GPU" for inv/slogdet/eigh/solve.
 _CPU = mx.cpu
+# Guard threshold for _update_unmixing_matrices (issue #274): MLX 0.32's
+# CPU-stream mx.linalg.inv aborts the whole process (uncatchable LAPACK LU
+# failure) instead of raising on a singular matrix, so a per-model condition
+# check must reject before that call.
+#
+# This is NOT set from float32's ~1/eps precision-loss point (~8-17e6,
+# depending on the "machine epsilon" convention): that theoretical value
+# turns out to be far too low in practice. Measured by isolated-subprocess
+# bisection (a real LU failure aborts the process, so each trial has to be
+# disposable): whether a given near-singular float32 matrix makes MLX's LU
+# actually abort is NOT a clean function of condition number alone -- it
+# depends on the specific numerical cancellation pattern during pivoting.
+# Across 5 random near-duplicate-column 32x32 matrices, the abort onset
+# ranged from cond~9e8 up to beyond cond~5e10 with no abort at all short of
+# an exact duplicate; conversely, matrices built by scaling one column toward
+# (but not to) zero never aborted even past cond~1e16, returning a huge but
+# finite inverse instead. Separately, the existing (legitimate, unrelated to
+# this guard) test suite already exercises cond up to ~4.4e9 without ever
+# hitting the abort: pamica/tests/mlx_tests/test_mlx_newton.py::
+# test_fallback_ramps_toward_lrate_cap_and_counts repeatedly steps A from the
+# same deliberately under-determined 256-sample block, so its conditioning
+# compounds across 30 iterations. A threshold near the textbook ~1e7 value
+# would raise on that legitimate scenario (confirmed: it did, before this
+# constant was recalibrated).
+#
+# So the threshold is set empirically instead: comfortably above every cond
+# observed anywhere in the full MLX test suite (~4.4e9, ~225x margin), and
+# comfortably below where a genuinely singular A -- the issue's literal
+# example, a duplicated component column -- actually lands (~1e15-1e17,
+# effectively double-precision-computed infinity). It cannot guarantee
+# catching every conceivable near-singular matrix (no scalar cond threshold
+# can, given the above), but it reliably catches the realistic failure mode:
+# a collapsed or duplicated component, not a merely ill-conditioned one.
+_INV_COND_THRESHOLD = 1e12
 
 
 def _logcosh(x: mx.array) -> mx.array:
@@ -722,22 +756,56 @@ class AMICAMLXNG:
         once per iteration. ``W`` is ``(n_models, n, n)`` and ``_logdet_W`` is
         ``(n_models,)``. For n_models=1 this is ``inv(A)`` unchanged.
 
-        These build lazy graph nodes, so a singular ``A`` surfaces not here but
-        where the graph is materialized (the ``mx.eval`` in ``fit``) -- a
-        failure reported against ``fit`` actually originates in this method.
-        Measured on MLX 0.32: that failure is NOT a catchable Python exception.
-        ``inv`` on a singular matrix aborts the process from LAPACK
-        (``libc++abi: ... [Inverse::eval_cpu] LU factorization failed``), which
-        is also why a near-singular ``A`` cannot be driven far enough to make
-        ``W`` overflow to inf in float32 -- LU fails first. ``fit``'s
-        ``nan_params`` guard still checks ``W``/``_logdet_W`` as defense in
-        depth, since a non-finite result that LU does not reject would
-        otherwise reach the caller silently on the final iteration.
+        These build lazy graph nodes, so on a HEALTHY matrix the ``inv``/
+        ``slogdet`` calls below do not themselves materialize -- the graph is
+        realized later where ``mx.eval`` runs (in ``fit``). A singular ``A``
+        is different: MLX 0.32's CPU-stream ``mx.linalg.inv`` does not raise a
+        catchable Python exception on one. LAPACK's LU failure aborts the
+        whole process (``libc++abi: ... [Inverse::eval_cpu] LU factorization
+        failed``), which no ``try``/``except`` around ``fit`` can catch
+        (issue #274). Near-singular-but-finite float32 matrices either invert
+        to large finite values or hit this same abort -- there is no route to
+        a catchable float32 overflow instead, which is why ``fit``'s
+        ``nan_params`` guard treats a non-finite ``W``/``_logdet_W`` as
+        defense in depth rather than a reachable case on its own.
+        Consequently, each per-model matrix is condition-checked host-side,
+        eagerly, immediately before its ``inv`` call: see
+        ``_INV_COND_THRESHOLD``. This eager host read (via ``np.array``)
+        forces the SAME materialization the CPU-stream ``inv``/``slogdet``
+        below would have forced anyway, so the guard adds no new cross-stream
+        handoff -- only a small ``np.linalg.cond`` on a matrix already on the
+        host. Measured on the bundled sample: negligible relative to
+        per-iteration time (see the issue #274 PR body for the number). A
+        condition number above the threshold raises ``RuntimeError`` naming
+        the model index, iteration, and value, in place of the uncatchable
+        abort.
         """
         assert self.A is not None and self.comp_list is not None
         ws, logdets = [], []
         for h in range(self.n_models):
-            wh = mx.linalg.inv(self.A[:, self.comp_list[:, h]], stream=_CPU)
+            A_h = self.A[:, self.comp_list[:, h]]
+            a_h_np = np.array(A_h, dtype=np.float32, copy=False)
+            # Skip the check when A_h is already non-finite (a prior NaN/inf,
+            # e.g. from a zero-responsibility dead model dividing by dgm==0):
+            # np.linalg.cond's SVD raises LinAlgError ("SVD did not converge")
+            # on NaN/inf input rather than returning a value, which is a
+            # DIFFERENT failure than the one this guard targets. Pre-guard,
+            # mx.linalg.inv on a non-finite A does not abort -- it propagates
+            # NaN/inf into W, which fit()'s existing nan_params guard already
+            # catches -- so skipping here preserves that exact behavior
+            # instead of a new, unrelated host-side crash.
+            if np.all(np.isfinite(a_h_np)):
+                cond = float(np.linalg.cond(a_h_np))
+                if not math.isfinite(cond) or cond > _INV_COND_THRESHOLD:
+                    raise RuntimeError(
+                        f"Singular unmixing matrix for model {h} at iteration "
+                        f"{self.iteration}: cond(A[:, comp_list[:, {h}]]) = "
+                        f"{cond:.3e} exceeds the float32 threshold "
+                        f"{_INV_COND_THRESHOLD:.1e} (MLX's CPU-stream inv "
+                        "would otherwise abort the process instead of "
+                        "raising; #274)."
+                    )
+            wh = mx.linalg.inv(A_h, stream=_CPU)
             ws.append(wh)
             logdets.append(mx.linalg.slogdet(wh, stream=_CPU)[1])
         self.W = mx.stack(ws, axis=0)  # (n_models, n, n)
@@ -1640,9 +1708,13 @@ class AMICAMLXNG:
                 #
                 # Defense in depth rather than a route known to be reachable:
                 # the obvious candidate, a near-singular A whose inverse
-                # overflows float32, is NOT reachable, because MLX's LU rejects
-                # such an A first (see _update_unmixing_matrices). Cheap enough
-                # to keep regardless -- both are already materialized above.
+                # overflows float32, is NOT reachable -- _update_unmixing_matrices
+                # now raises RuntimeError on such an A before calling inv at all
+                # (issue #274's condition-number guard), and before #274 it was
+                # unreachable for a different reason (MLX's LU aborted the whole
+                # process first, which this guard replaces with a catchable
+                # error). Cheap enough to keep regardless -- both are already
+                # materialized above.
                 "W": self.W,
                 "logdet_W": self._logdet_W,
             }
