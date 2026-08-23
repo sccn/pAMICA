@@ -698,14 +698,22 @@ class AMICAMLXNG:
         # (:1749-1761) ahead of update_params' A step (:1803-1815). Read by
         # fit()'s two grad-norm checks (AMICATorchNG._update_parameters computes
         # the same quantity). The comp_used mask matters only once share_comps
-        # has merged columns away: without sharing it is all-True, so the
-        # multiply is by 1.0 and the count is n_comps, leaving this bit-for-bit
+        # has merged columns away: without sharing it is all-True, so the select
+        # returns nd unchanged and the count is n_comps, leaving this bit-for-bit
         # the plain RMS over dAk. Kept as a lazy scalar (no .item() here) so it
         # rides fit()'s single per-iteration mx.eval.
+        #
+        # SELECT, not multiply-by-mask: 0*NaN is NaN, so a single non-finite
+        # column would poison the whole reduction, and a NaN ndtmpsum silently
+        # disables BOTH grad-norm stops (NaN <= min_nd is False), burning the
+        # entire iteration budget with no diagnostic. mx.where drops the masked
+        # lanes structurally instead. Unreachable today (a merged-away column's
+        # dAk is exactly 0), but Phase 3's Newton direction feeds this same dAk.
         used_f = self._comp_used_arr.astype(mx.float32)
         nd = (dAk**2).sum(axis=0)  # (n_comps,)
+        nd = mx.where(self._comp_used_arr, nd, mx.zeros_like(nd))
         self._nd_arr = mx.sqrt(
-            (nd * used_f).sum() / (self.n_channels * mx.maximum(used_f.sum(), 1.0))
+            nd.sum() / (self.n_channels * mx.maximum(used_f.sum(), 1.0))
         )
 
         # A-update. When sharing holds A this iteration (the post-merge settle
@@ -843,7 +851,7 @@ class AMICAMLXNG:
         return self._sphere_pinv
 
     @property
-    def comp_used(self) -> Optional[mx.array]:
+    def comp_used(self) -> mx.array:
         """Boolean mask (n_comps,) of components still referenced by comp_list.
 
         A component drops out of use when it is folded into another by
@@ -852,12 +860,16 @@ class AMICAMLXNG:
 
         CACHED (set all-True at init, rewritten by each merge) rather than
         derived from ``comp_list`` on every read, which is how
-        ``AMICATorchNG.comp_used`` does it. Same semantics -- the merge kernel
-        derives the mask from the merged ``comp_list`` -- but deriving it here
-        would need a scatter over host-side indices on every M-step, forcing a
-        host sync in the middle of the lazy graph that ``fit`` deliberately
-        keeps to one ``mx.eval`` per iteration.
+        ``AMICATorchNG.comp_used`` does it. Same semantics and same source of
+        truth: the merge kernel already derives the mask host-side, from the
+        merged ``comp_list``, as part of the decision it returns -- so caching
+        that result costs nothing and keeps the mask fixed between merges, which
+        is exactly the lifetime the M-step needs.
         """
+        if self._comp_used_arr is None:
+            raise RuntimeError(
+                "AMICAMLXNG.comp_used requires a fitted model; call fit() first."
+            )
         return self._comp_used_arr
 
     def shared_components(self) -> list:
@@ -961,19 +973,37 @@ class AMICAMLXNG:
             # parameters (the torch backend has state_dict as a backstop; the
             # MLX backend does not, so guard in fit()). Params are already
             # materialized by the mx.eval above, so this is a cheap read.
-            params_finite = (
-                mx.all(mx.isfinite(self.A))
-                & mx.all(mx.isfinite(self.mu))
-                & mx.all(mx.isfinite(self.alpha))
-                & mx.all(mx.isfinite(self.beta))
-                & mx.all(mx.isfinite(self.rho))
-                & mx.all(mx.isfinite(self.gm))
-                & mx.all(mx.isfinite(self.c))
-            )
+            # _nd_arr is included as defense in depth: a non-finite gradient norm
+            # silently disables both grad-norm stops (NaN <= min_nd is False), so
+            # it must not be the one quantity nothing checks.
+            checked = {
+                "A": self.A,
+                "mu": self.mu,
+                "alpha": self.alpha,
+                "beta": self.beta,
+                "rho": self.rho,
+                "gm": self.gm,
+                "c": self.c,
+                "ndtmpsum": self._nd_arr,
+            }
+            params_finite = mx.array(True)
+            for value in checked.values():
+                params_finite = params_finite & mx.all(mx.isfinite(value))
             if not bool(params_finite.item()):
+                # Name the offenders. Everything here is already materialized, so
+                # the per-tensor reads add no mid-graph sync -- this is the MLX
+                # stand-in for AMICATorchNG's inline mu/beta/alpha canary
+                # (torch_impl/core.py:1461-1474), which MLX cannot afford inside
+                # _update_parameters because it would sync the lazy graph.
+                bad = [
+                    name
+                    for name, value in checked.items()
+                    if not bool(mx.all(mx.isfinite(value)).item())
+                ]
                 logger.warning(
-                    "Non-finite parameters at iter %d (a mixture component "
-                    "likely collapsed); stopping.",
+                    "Non-finite %s at iter %d (a mixture component likely "
+                    "collapsed); stopping.",
+                    ", ".join(bad),
                     it,
                 )
                 self.stop_reason = "nan_params"
