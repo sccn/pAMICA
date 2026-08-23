@@ -321,8 +321,37 @@ so MLX-versus-CUDA reads as "best Apple-GPU path versus a strong NVIDIA GPU", no
 | 70 | 25.2 | 35.6 | 38.6 | 173 | 193 | 255 | 622 |
 
 MLX is the fastest option on Apple Silicon and stays roughly flat with channel count (~7x over torch-CPU).
-PyTorch-MPS is *not* a win (at or worse than CPU), so use MLX rather than `device="mps"` on Apple hardware.
+PyTorch-MPS is *not* a win at this `block_size=512` (at or worse than CPU); it is also markedly more
+block-size-sensitive than the CPU or MLX figures above (issue #216, bundled sample): it falls to 30.5
+ms/iteration at the current 8192 default, still behind CPU's 21.7 ms/iteration there, and to 13.5
+ms/iteration at a further-tuned single-block size that puts the whole sample in one block -- memory-limited
+rather than a free win, since peak block memory scales with `block_size`, which is why 8192 stays the
+shipped default -- below the CPU's 15.8 ms there. MLX remains fastest throughout,
+so it stays the recommendation over `device="mps"` on Apple hardware.
 CUDA float32 and float64 are near-identical here (launch-bound at this size). NumPy is the reference implementation, not a production path.
+
+### Block-size sensitivity
+
+`block_size` trades memory for dispatch overhead, and backends differ sharply in how much they benefit.
+Measured on an Apple M4 Pro (14 cores), the bundled 32-channel sample (30504 frames), float32,
+`n_mix=3`, `pdftype=0`, seed 42, warm, per-iteration cost in ms (issue #216):
+
+| block_size | PyTorch-MPS | MLX | PyTorch-CPU |
+|---:|---:|---:|---:|
+| 512 (former default) | 431.3 | 29.5 | 144.0 |
+| 2048 | 89.7 | 12.4 | 49.3 |
+| 8192 (current default) | 30.5 | 11.3 | 21.7 |
+| 30504 (single block) | 13.5 | 11.4 | 15.8 |
+
+All three backends are dispatch-bound at small block sizes, but by very different margins: PyTorch-MPS
+improves 32x from 512 to a single block, PyTorch-CPU 9x, MLX only 2.6x. Log-likelihood after 40
+iterations is unchanged across every block size on both devices (-3.43856 to six significant digits),
+so this is a pure throughput knob on this data, not a correctness one, and the comparison across block
+sizes is valid. MLX is the fastest Apple backend at every block size measured here, including the
+current 8192 default and the further-tuned single-block setting, so it stays the recommendation on
+Apple hardware regardless of how `block_size` is tuned. The `30504` row is a memory-bound extreme
+(the whole sample as one block), not a free win: peak block memory scales with `block_size`, which is
+why 8192, not 30504, stays the shipped default.
 
 ### CPU core-scaling and native Fortran
 
@@ -367,7 +396,10 @@ the full 16/32/48/70-channel grid is in the result JSONs alongside `.context/iss
 | 32 | 38 | 187 | 291 | 869 |
 | 70 | 45 | 224 | 270 | 928 |
 
-The Apple-GPU win extends to multi-model: MLX ~38-45 ms/iteration, ~5x over torch-CPU, with MPS still losing.
+The Apple-GPU win extends to multi-model at this `block_size=512`: MLX ~38-45 ms/iteration, ~5x over
+torch-CPU, with MPS still losing. Unlike the single-model figures above, this configuration has not
+been re-swept at the current 8192 default (issue #216 covered single-model only), so whether the gap
+narrows here too is untested.
 
 ### Cross-backend log-likelihood agreement (single-model)
 

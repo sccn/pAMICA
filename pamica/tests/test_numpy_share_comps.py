@@ -597,11 +597,17 @@ def test_rank_reduced_numpy_sharing_completes():
     rank-reduced sphere ``(16, 32)`` must not block ``share_comps`` -- the
     sensor-space back-map is a pseudo-inverse, valid at any rank (issue #253's
     fix, now shared by both backends via issue #258)."""
-    # do_newton stays off: Newton is unrelated to this change, and turning it
-    # on here crosses into a pre-existing, separately-scoped shape bug in the
-    # NumPy Newton path when a share pass collapses many components at once
-    # (encountered while writing this test; not touched by issue #258 -- see
-    # PR body).
+    # This combination (a share-collapse on rank-reduced data with Newton on)
+    # used to crash: the NumPy Newton finalization divided its (data_dim,
+    # num_models) curvature accumulators by a (num_models, 1) model mass,
+    # which only happens to broadcast for num_models == 1, and every
+    # multi-model Newton fit raised a shape-mismatch ValueError on the first
+    # Newton update after a merge collapsed a model (issue #267, found while
+    # writing this test). Fixed in PR #271 (dgm[None, :], matching the torch
+    # backend's dgm.unsqueeze(0)) and regression-tested for 1/2/3 models in
+    # test_numpy_newton_multimodel.py; exercised here deliberately, with
+    # sharing actually collapsing components on rank-reduced data, to close
+    # the numpy leg of the rank-reduction x sharing x Newton three-way gap.
     model = AMICA(
         num_models=2,
         num_mix=3,
@@ -615,7 +621,8 @@ def test_rank_reduced_numpy_sharing_completes():
         use_tqdm=False,
         do_opt_block=False,
         block_size=_BLOCK,
-        do_newton=False,
+        do_newton=True,
+        newt_start=3,
     )
     model.fit(_real_data())
     assert model.sphere is not None

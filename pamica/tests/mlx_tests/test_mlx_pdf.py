@@ -331,3 +331,105 @@ def test_get_pdftype_requires_fit():
     m = AMICAMLXNG(n_channels=NW, n_models=1, n_mix=NMIX, seed=0)
     with pytest.raises(RuntimeError, match="fitted"):
         m.get_pdftype()
+
+
+# --- (l) three-way: sharing x Newton x pdf family ----------------------------
+
+
+def test_sharing_newton_and_fixed_family_fit_completes():
+    """``share_comps`` + ``do_newton`` + a non-default fixed ``pdftype``
+    together (issue #277).
+
+    The three features have only pairwise coverage elsewhere: sharing x Newton
+    is ``test_mlx_newton.py::test_sharing_and_newton_fit_completes``, Newton x
+    families is ``test_family_fit_with_newton`` above, and sharing x the
+    adaptive switcher is ``test_sharing_with_adaptive_switcher_smoke`` above.
+    Risk is structural rather than numerical -- the Newton curvature is indexed
+    by (model, channel), not by ``comp_list``, and the family dispatch reads
+    only ``pdtype``/``rho`` -- but nothing had run all three together before
+    this test. Newton fallbacks are PERMITTED (not asserted to zero): a
+    rejected direction under a non-GG family is expected, per
+    ``test_family_fit_with_newton``.
+
+    ``comp_thresh=0.99``/``seed=3``, not the loose 0.9 the pairwise sharing x
+    Newton test uses: at 0.9 on a 2-model fit ``.context/issue-264/
+    newton_findings.md`` measures 26-31 of 32 cross-model pairs merging --
+    near-total model collapse -- as "trajectory chaos" where Newton can drive
+    a component to zero curvature and the fit degenerates, seed-dependently
+    (seed 42 specifically degenerates on a nearby config). 0.99 is the doc's
+    verified stable zone (two genuinely near-collinear pairs merge there),
+    already used by ``test_low_rank_projected_data_share_fit_completes``;
+    seed=3 is its doc-verified stable seed. Measured at this config: 11 of 32
+    pairs merge, comfortably short of the chaos threshold, so the
+    ``comp_used`` guard below stays non-vacuous without courting the
+    documented degeneracy.
+    """
+    data = _load_real_data(8192)
+    m = AMICAMLXNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=3,
+        pdftype=2,
+        seed=3,
+        block_size=1024,
+        do_newton=True,
+        newt_start=5,
+        share_comps=True,
+        share_start=8,
+        share_iter=10,
+        comp_thresh=0.99,
+    )
+    m.fit(data, max_iter=30, verbose=False)
+
+    ll = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(ll))
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert np.all(np.isfinite(np.array(m.A)))
+    assert np.all(np.isfinite(np.array(m.W)))
+    assert np.all(m.get_pdftype() == 2)
+    used = int(np.array(m.comp_used).sum())
+    assert used < m.n_comps, "no merge fired; the three-way interplay is untested"
+    assert 0 <= m.n_newton_fallbacks <= len(ll)
+
+
+def test_sharing_newton_and_adaptive_switcher_fit_completes():
+    """The single-component adaptive-switcher variant of the three-way
+    interplay (issue #277): ``share_comps`` + ``do_newton`` + the extended-
+    Infomax switcher (``pdftype=1``, ``n_mix=1``) together.
+
+    Same ``comp_thresh=0.99``/``seed=3`` safe-zone choice as
+    ``test_sharing_newton_and_fixed_family_fit_completes`` above, for the same
+    reason (``.context/issue-264/newton_findings.md``'s documented chaos
+    regime at the loose 0.9 cutoff). Measured here: 8 of 32 pairs merge.
+    """
+    data = _load_real_data(8192)
+    m = AMICAMLXNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=1,
+        pdftype=1,
+        seed=3,
+        block_size=1024,
+        do_newton=True,
+        newt_start=5,
+        share_comps=True,
+        share_start=8,
+        share_iter=10,
+        comp_thresh=0.99,
+        kurt_start=3,
+        num_kurt=5,
+        kurt_int=1,
+    )
+    m.fit(data, max_iter=30, verbose=False)
+
+    ll = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(ll))
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert np.all(np.isfinite(np.array(m.A)))
+    assert np.all(np.isfinite(np.array(m.W)))
+    for h in range(m.n_models):
+        codes = np.unique(m.get_pdftype(h))
+        assert set(codes.tolist()).issubset({1, 4})
+    used = int(np.array(m.comp_used).sum())
+    assert used < m.n_comps, "no merge fired; the three-way interplay is untested"
+    assert 0 <= m.n_newton_fallbacks <= len(ll)

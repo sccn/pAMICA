@@ -64,10 +64,18 @@ laptop sweep; 8+ regressed).
 
 **Cross-platform benchmark (#77, `.context/issue-77/benchmark_findings.md`, `benchmarks/benchmark_dimsweep.py`,
 real 70-ch EEG):** on Apple Silicon the **MLX backend is the GPU win: ~15-25 ms/it, flat across 16-70
-channels, ~7x over torch-CPU and faster than an RTX 4090 (CUDA ~36 ms/it) at EEG scale**; **PyTorch-MPS
-never wins (162-255 ms/it, at or worse than CPU)**, so use MLX, not `device="mps"`, on Apple hardware.
-CUDA float64 stays the bit-safe NVIDIA path. All backends agree on the LL to ~3 digits on real data.
-Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses). Component sharing (#263),
+channels, ~7x over torch-CPU and faster than an RTX 4090 (CUDA ~36 ms/it) at EEG scale**. The #77
+PyTorch-MPS figures (162-255 ms/it, at or worse than CPU) were measured at the then-default
+`block_size=512`; #216's block_size sweep (bundled 32-ch sample) found PyTorch-MPS far more
+block-size-sensitive than CPU or MLX -- 431 -> 30.5 ms/it from 512 to the current 8192 default (still
+behind CPU's 21.7 ms/it there), and down to 13.5 ms/it (beating CPU's 15.8) at a further-tuned
+single-block size -- the whole 30504-frame sample as one block, memory-limited rather than a free win
+(peak block memory scales with `block_size`, which is why 8192 stays the shipped default) -- so
+"PyTorch-MPS never wins" is not a general claim. MLX stays fastest throughout the sweep, so it
+remains the recommendation over `device="mps"` on Apple hardware. CUDA float64 stays the bit-safe
+NVIDIA path. All backends agree on the LL to ~3 digits on real data.
+Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses at the inherited `block_size=512`
+-- not yet re-swept at 8192 like the single-model figures above). Component sharing (#263),
 Newton (#264, float32, validated against a float64 torch twin -- see `.context/issue-264/`) and the
 non-GG pdf families (#265, including the adaptive switcher; see `.context/issue-265/`) are all
 ported; the remaining MLX gaps are `transform`, outlier rejection and save/load (fast-follows, not
