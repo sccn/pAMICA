@@ -393,3 +393,90 @@ def test_family_converged_ll_matches_fortran(pdftype: int, n_mix: int):
     )
     m.fit(data, max_iter=150, verbose=False)
     assert abs(m.ll_history[-1] - fres["final_ll"]) < 0.02
+
+
+# --- three-way: sharing x Newton x pdf family (issue #277) -------------------
+
+
+@pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
+def test_sharing_newton_and_fixed_family_fit_completes():
+    """``share_comps`` + ``do_newton`` + a non-default fixed ``pdftype``
+    together.
+
+    The three features have only pairwise coverage elsewhere: sharing x Newton
+    is ``test_ng_sharing.py::test_two_model_share_fit_survives_merge``, Newton
+    x families is ``test_family_fit_with_newton`` above. Risk is structural
+    rather than numerical -- the Newton curvature is indexed by (model,
+    channel), not by ``comp_list``, and the family dispatch reads only
+    ``pdtype``/``rho`` -- but nothing had run all three together before this
+    test (mirrors ``mlx_tests/test_mlx_pdf.py::
+    test_sharing_newton_and_fixed_family_fit_completes``). Newton fallbacks are
+    PERMITTED, not asserted to zero: a rejected direction under a non-GG
+    family is expected, per ``test_family_fit_with_newton``.
+    """
+    data = _load_real_data()[:, :8192]
+    m = AMICATorchNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=3,
+        pdftype=2,
+        device="cpu",
+        seed=42,
+        block_size=1024,
+        do_newton=True,
+        newt_start=5,
+        share_comps=True,
+        share_start=8,
+        share_iter=10,
+        comp_thresh=0.9,
+    )
+    m.fit(data, max_iter=30, verbose=False)
+
+    ll = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(ll))
+    assert m.A is not None and torch.isfinite(m.A).all()
+    assert m.W is not None and torch.isfinite(m.W).all()
+    assert m.pdtype is not None
+    assert np.all(m.pdtype.cpu().numpy() == 2)
+    used = int(m.comp_used.sum())
+    assert used < m.n_comps, "no merge fired; the three-way interplay is untested"
+    assert 0 <= m.n_newton_fallbacks <= len(ll)
+
+
+@pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
+def test_sharing_newton_and_adaptive_switcher_fit_completes():
+    """The single-component adaptive-switcher variant of the three-way
+    interplay: ``share_comps`` + ``do_newton`` + the extended-Infomax switcher
+    (``pdftype=1``, ``n_mix=1``) together (mirrors ``mlx_tests/test_mlx_pdf.py::
+    test_sharing_newton_and_adaptive_switcher_fit_completes``)."""
+    data = _load_real_data()[:, :8192]
+    m = AMICATorchNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=1,
+        pdftype=1,
+        device="cpu",
+        seed=42,
+        block_size=1024,
+        do_newton=True,
+        newt_start=5,
+        share_comps=True,
+        share_start=8,
+        share_iter=10,
+        comp_thresh=0.9,
+        kurt_start=3,
+        num_kurt=5,
+        kurt_int=1,
+    )
+    m.fit(data, max_iter=30, verbose=False)
+
+    ll = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(ll))
+    assert m.A is not None and torch.isfinite(m.A).all()
+    assert m.W is not None and torch.isfinite(m.W).all()
+    assert m.pdtype is not None
+    codes = set(np.unique(m.pdtype.cpu().numpy()).tolist())
+    assert codes.issubset({1, 4})
+    used = int(m.comp_used.sum())
+    assert used < m.n_comps, "no merge fired; the three-way interplay is untested"
+    assert 0 <= m.n_newton_fallbacks <= len(ll)
