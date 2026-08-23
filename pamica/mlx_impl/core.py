@@ -19,13 +19,13 @@ Design constraints (verified against MLX 0.32, see ``.context/mps_pathways.md``)
   and the rho-update ``digamma(1+1/rho)`` depend only on the small ``rho`` array,
   so they are computed host-side with SciPy once per iteration.
 
-Scope: single- and multi-model (``n_models >= 1``, issue #81), generalized
-Gaussian (``pdftype=0``), natural gradient and the Newton preconditioner
-(``do_newton``, issue #264), component sharing (``share_comps``, issue #263).
-The other PDF families are rejected in ``__init__`` with a clear
-``NotImplementedError`` (``transform`` likewise). Outlier rejection,
-``keep_best`` and save/load are simply absent (no such parameter/method) -- all
-fast-follows.
+Scope: single- and multi-model (``n_models >= 1``, issue #81), all five
+``amica15.f90`` source-density families (``pdftype`` 0/1/2/3/4, issue #265,
+porting the PyTorch backend's issue #26), natural gradient and the Newton
+preconditioner (``do_newton``, issue #264), component sharing
+(``share_comps``, issue #263). ``transform`` still raises
+``NotImplementedError``. Outlier rejection, ``keep_best`` and save/load are
+simply absent (no such parameter/method) -- all fast-follows.
 
 Newton (issue #264) runs entirely in float32 on the GPU stream: the curvature
 accumulators ride the existing E-step locals, and the direction is Fortran's
@@ -38,6 +38,24 @@ fit adds one scalar sync per iteration and an ``n_models``-model fit adds
 ``n_models`` -- unlike the M-step's existing dead-model and rho-NaN canaries,
 which are one array-wide reduction each. Validated against a float64 PyTorch
 twin on real EEG; see ``.context/issue-264/newton_findings.md``.
+
+The non-GG source-density families (issue #265) are a fast E-step dispatch, not
+a separate code path: ``_score``/``_log_pdf`` take an optional per-source
+``pdtype`` array and select among the fixed Fortran families (2 Gaussian, 3
+logistic, 4 sub-Gaussian cosh+, 1 super-Gaussian cosh-) via nested ``mx.where``;
+``pdtype is None`` (the ``pdftype=0`` default) skips that chain entirely and
+runs the pre-#265 GG-only body unchanged, so default fits stay bit-identical.
+The GG shape parameter ``rho`` is frozen for every non-GG family
+(``self.dorho = pdftype == 0``, Fortran ``dorho=.false.``), which also gates
+the ``drho_n`` accumulation, the per-iteration lgamma-table refresh and the
+digamma pull -- dead work AMICATorchNG still pays every iteration (it always
+accumulates and discards), so this is a deliberate MLX-only WORK divergence,
+never a numeric one. ``pdftype=1`` enables the extended-Infomax adaptive
+switcher (``_choose_pdfs``); it accumulates its kurtosis moments in numpy
+float64 on the host (a knife-edge sign decision, done off the lossy float32
+GPU graph) and has no bit-exact oracle -- Fortran declares the switch but never
+runs it (``m2sum``/``m4sum`` allocated, never accumulated) -- so it is
+behavior-validated on real EEG, exactly as in the PyTorch backend (ADR 0002).
 
 Convergence stops (issue #248) are the full AMICATorchNG/Fortran set:
 ``use_min_dll``/``min_dll``/``maxincs``, ``use_grad_norm``/``min_nd``, and the
@@ -67,6 +85,15 @@ from ..rank import MINEIG, MINEIG_REL, numerical_rank
 logger = logging.getLogger(__name__)
 
 _LOG2 = math.log(2.0)
+_LOG4 = math.log(4.0)  # logistic-family normalizer (amica15.f90:1346)
+# Log-normalizers for the non-GG density families, using Fortran's exact literal
+# constants (amica15.f90:1333/1359/1371) so the log-density matches the reference
+# binary bit-for-bit: 2.506628274 = sqrt(2*pi) (Gaussian, pdtype 2); 4.132731354 /
+# 1.858073988 = the sub-/super-Gaussian cosh normalizers (pdtype 4 / 1). Ported
+# verbatim from AMICATorchNG (core.py:76-82, policy 1).
+_LOG_SQRT_2PI = math.log(2.506628274)
+_LOG_NORM_COSH_SUB = math.log(4.132731354)
+_LOG_NORM_COSH_SUP = math.log(1.858073988)
 # Fortran epsdble: zero the rho*ln|y| term when |y|^rho underflows below this
 # (amica17.f90:1570), matching AMICATorchNG.
 _EPSDBLE = 1e-16
@@ -75,28 +102,100 @@ _EPSDBLE = 1e-16
 _CPU = mx.cpu
 
 
-def _score_gg(y: mx.array, rho: mx.array) -> mx.array:
-    """GG score ``fp = rho*sign(y)*|y|^(rho-1)`` (AMICATorchNG ``_score``, GG
-    branch, core.py:199-206). ``fp(0)=0`` for ``rho>=1``, which the ``ufp/y``
-    guard relies on."""
+def _logcosh(x: mx.array) -> mx.array:
+    """Numerically stable ``log cosh(x) = |x| - log2 + log1p(exp(-2|x|))``
+    (AMICATorchNG ``_logcosh``, core.py:113-116). Naive ``mx.log(mx.cosh(x))``
+    overflows to inf in float32 at ``|x| >= 90`` (``cosh`` itself overflows
+    first) -- reachable, since ``beta`` clips at ``invsigmax=1000`` -- while this
+    form is exact to 1e-6 out to at least 1e3 (policy 3; no ``mlx.nn`` import)."""
+    ax = mx.abs(x)
+    return ax - _LOG2 + mx.log1p(mx.exp(-2.0 * ax))
+
+
+def _score(y: mx.array, rho: mx.array, pdtype: Optional[mx.array] = None) -> mx.array:
+    """Source-density score ``fp = -d(log pdf)/dy`` (AMICATorchNG ``_score``,
+    core.py:184-222).
+
+    ``pdtype is None`` (the ``pdftype=0`` fast path): GG score only -- exactly
+    the pre-#265 ``_score_gg`` body, so it adds ZERO extra graph nodes relative
+    to before this phase (policy 2). ``fp(0)=0`` for ``rho>=1``, which the
+    ``ufp/y`` guard in ``_get_block_updates`` relies on.
+
+    Otherwise selects per source among the fixed families (Fortran ``fp``
+    select, amica15.f90:1467-1491): 2 Gaussian ``y``; 3 logistic
+    ``tanh(y/2)``; 4 sub-Gaussian ``y - tanh(y)``; 1 super-Gaussian
+    ``y + tanh(y)``; any other code falls through to the GG form (structurally
+    dead here -- a non-None ``pdtype`` is always uniformly 1/2/3/4, never mixed
+    with 0 -- kept only so this mirrors AMICATorchNG's nesting exactly).
+    """
     abs_y = mx.abs(y)
     sign_y = mx.sign(y)
     fp_gg = rho * sign_y * mx.power(abs_y, rho - 1.0)
     # rho is generically in (1, 2); keep the exact Laplace/Gaussian endpoints.
-    return mx.where(rho == 2.0, 2.0 * y, mx.where(rho == 1.0, sign_y, fp_gg))
+    fp_gg = mx.where(rho == 2.0, 2.0 * y, mx.where(rho == 1.0, sign_y, fp_gg))
+    if pdtype is None:
+        return fp_gg
+
+    tanh_half = mx.tanh(0.5 * y)
+    tanh_y = mx.tanh(y)
+    return mx.where(
+        pdtype == 2,
+        y,
+        mx.where(
+            pdtype == 3,
+            tanh_half,
+            mx.where(pdtype == 4, y - tanh_y, mx.where(pdtype == 1, y + tanh_y, fp_gg)),
+        ),
+    )
 
 
-def _log_pdf_gg(
-    y: mx.array, rho: mx.array, lgamma_table: mx.array
-) -> tuple[mx.array, mx.array]:
-    """GG log-density and ``|y|^rho`` (AMICATorchNG ``_log_pdf_only``, GG branch,
-    core.py:239-244). ``lgamma_table = lgamma(1+1/rho)`` is precomputed host-side
-    (MLX has no ``lgamma``); it makes the uniform GG form reduce to the exact
-    Laplace (rho=1) and Gaussian (rho=2) log-densities."""
+def _log_pdf(
+    y: mx.array,
+    rho: mx.array,
+    lgamma_table: mx.array,
+    pdtype: Optional[mx.array] = None,
+) -> tuple[mx.array, Optional[mx.array]]:
+    """GG log-density and ``|y|^rho``, extended with the fixed non-GG families
+    (AMICATorchNG ``_log_pdf_only``, core.py:225-267).
+
+    ``pdtype is None`` (the ``pdftype=0`` fast path): byte-for-byte the
+    pre-#265 ``_log_pdf_gg`` body -- ``lgamma_table = lgamma(1+1/rho)``
+    (precomputed host-side; MLX has no ``lgamma``) makes the uniform GG form
+    reduce to the exact Laplace (rho=1) and Gaussian (rho=2) log-densities, and
+    ``az_rho`` is returned for the rho-update accumulator (policy 2).
+
+    Otherwise selects per source among the fixed families (Fortran ``z0``
+    select, amica15.f90:1333/1346/1359/1371), in AMICATorchNG's nesting order
+    (2, 3, 4, 1, GG-fallthrough -- see ``_score`` for why the fallthrough is
+    structurally dead here). ``az_rho`` is returned as ``None`` in this branch
+    (policy 5): ``rho`` is frozen for every non-GG family (``self.dorho`` is
+    False), so no caller needs ``|y|^rho`` there, and returning ``None`` instead
+    of the true (unused) value makes an accidental read fail loudly rather than
+    silently accepting a quantity nobody validated for these families.
+    """
     abs_y = mx.abs(y)
-    az_rho = mx.power(abs_y, rho)  # reused by the rho-update accumulator
-    log_pdf = -az_rho - _LOG2 - lgamma_table
-    return log_pdf, az_rho
+    az_rho = mx.power(abs_y, rho)  # reused by the rho-update accumulator (GG only)
+    log_pdf_gg = -az_rho - _LOG2 - lgamma_table
+    if pdtype is None:
+        return log_pdf_gg, az_rho
+
+    log_pdf_2 = -0.5 * y * y - _LOG_SQRT_2PI  # Gaussian
+    log_pdf_3 = -2.0 * _logcosh(0.5 * y) - _LOG4  # logistic (sech^2)
+    lc = _logcosh(y)
+    log_pdf_4 = -0.5 * y * y + lc - _LOG_NORM_COSH_SUB  # sub-Gaussian cosh+
+    log_pdf_1 = -0.5 * y * y - lc - _LOG_NORM_COSH_SUP  # super-Gaussian cosh-
+    log_pdf = mx.where(
+        pdtype == 2,
+        log_pdf_2,
+        mx.where(
+            pdtype == 3,
+            log_pdf_3,
+            mx.where(
+                pdtype == 4, log_pdf_4, mx.where(pdtype == 1, log_pdf_1, log_pdf_gg)
+            ),
+        ),
+    )
+    return log_pdf, None
 
 
 class AMICAMLXNG:
@@ -184,6 +283,30 @@ class AMICAMLXNG:
     model falls back to the natural gradient for that iteration and
     ``n_newton_fallbacks`` counts it (as AMICATorchNG does), so an all-fallback
     run is visible without re-instrumenting.
+
+    The source-density family parameters (issue #265, porting AMICATorchNG's
+    issue #26) likewise carry AMICATorchNG's names, defaults and semantics:
+
+    ``pdftype`` (0)
+        Per-source density family (Fortran ``amica15.f90`` ``pdtype`` codes): 0
+        generalized Gaussian (default; rho adapts), 2 Gaussian, 3 logistic, 4
+        sub-Gaussian cosh+. ``pdftype=1`` enables the extended-Infomax adaptive
+        switcher, which flips each source between the super-Gaussian (code 1)
+        and sub-Gaussian (code 4) cosh densities by kurtosis sign (see
+        :meth:`_choose_pdfs`). The GG shape update is frozen for every non-GG
+        family (Fortran ``dorho=.false.``, ``self.dorho = pdftype == 0``); the
+        single-component families 1/4 (and the adaptive mode) require
+        ``n_mix=1``. ``pdftype=0`` stays byte-for-byte the pre-#265
+        implementation (the ``_pdtype_h`` ``None`` fast path, policy 2 --
+        verified by a before/after bit-identity check, see the PR).
+    ``kurt_start`` (3) / ``num_kurt`` (5) / ``kurt_int`` (1)
+        Adaptive-switch schedule (only used when ``pdftype=1``): first
+        iteration to re-estimate kurtosis, number of switch passes, and the
+        iteration interval between them. ``num_kurt=0`` disables switching (the
+        family stays at its super-Gaussian init). No bit-exact oracle -- the
+        reference's own switch is dead code (``do_choose_pdfs`` is set but
+        ``m2sum``/``m4sum`` are never accumulated, amica15.f90:608-615) -- so
+        this is behavior-validated on real data (ADR 0002).
     """
 
     def __init__(
@@ -211,6 +334,9 @@ class AMICAMLXNG:
         rholrate: float = 0.05,
         rholratefact: float = 0.1,
         pdftype: int = 0,
+        kurt_start: int = 3,
+        num_kurt: int = 5,
+        kurt_int: int = 1,
         invsigmin: float = 1e-4,
         invsigmax: float = 1000.0,
         doscaling: bool = True,
@@ -226,13 +352,6 @@ class AMICAMLXNG:
         mineig_rel: Optional[float] = MINEIG_REL,
         seed: Optional[int] = None,
     ):
-        # --- Boundaries: reject the still-deferred configurations up front. ---
-        if pdftype != 0:
-            raise NotImplementedError(
-                "AMICAMLXNG supports the generalized-Gaussian family "
-                "(pdftype=0) only; the other families are a fast-follow."
-            )
-
         self.n_channels = n_channels
         self.n_models = n_models  # multi-model (#81) + component sharing (#263)
         self.n_mix = n_mix
@@ -280,9 +399,52 @@ class AMICAMLXNG:
         self.rholrate0 = rholrate
         self.rholrate = rholrate
         self.rholratefact = rholratefact
-        self.dorho = True  # GG shape adapts (Fortran dorho, pdftype==0)
 
-        self.pdftype = 0
+        # Source-density family selection (issue #265, porting AMICATorchNG's
+        # issue #26 -- see torch_impl/core.py:640-676 for the identical block).
+        # Values match Fortran's per-source pdtype codes: 0 generalized Gaussian
+        # (the default, GG-mixture with adaptive rho), 2 Gaussian mixture, 3
+        # logistic (sech^2) mixture, 4 sub-Gaussian cosh+ (single component).
+        # pdftype=1 enables the extended-Infomax adaptive switcher (Fortran's
+        # do_choose_pdfs trigger), which flips each source between the
+        # super-Gaussian (code 1) and sub-Gaussian (code 4) cosh densities by
+        # kurtosis sign on the kurt_start/num_kurt/kurt_int schedule. Families 1
+        # and 4 are single-component (no alpha mixture).
+        if pdftype not in (0, 1, 2, 3, 4):
+            raise ValueError(f"pdftype must be one of 0,1,2,3,4; got {pdftype}")
+        self.pdftype = pdftype
+        # Fortran freezes the GG shape update for every non-GG family
+        # (amica15.f90: `if (pdftype /= 0) dorho = .false.`, lines 3704-3705).
+        self.dorho = pdftype == 0
+        # pdftype==1 is Fortran's adaptive trigger (amica15.f90:612).
+        self.do_choose_pdfs = pdftype == 1
+        self.kurt_start = kurt_start
+        self.num_kurt = num_kurt
+        self.kurt_int = kurt_int
+        # Families 1/4 (and the adaptive mode, which uses only codes 1 and 4) are
+        # single-component densities: Fortran's z0 references only mixture
+        # component j=1 and omits log(alpha). They are meaningful only with
+        # n_mix == 1.
+        if pdftype in (1, 4) and n_mix != 1:
+            raise ValueError(
+                f"pdftype={pdftype} is a single-component density (adaptive mode "
+                f"uses codes 1 and 4); it requires n_mix=1, got n_mix={n_mix}."
+            )
+        # Validate the adaptive-switch schedule up front (mirrors the
+        # share_comps checks below): kurt_int==0 would otherwise raise a bare
+        # ZeroDivisionError deep in fit(), and a negative kurt_int silently
+        # changes the schedule.
+        if self.do_choose_pdfs:
+            if kurt_int < 1:
+                raise ValueError(f"kurt_int must be >= 1, got {kurt_int}")
+            if kurt_start < 1:
+                raise ValueError(f"kurt_start must be >= 1, got {kurt_start}")
+            if num_kurt < 0:
+                raise ValueError(f"num_kurt must be >= 0, got {num_kurt}")
+        # Adaptive-switch counter (Fortran-1-indexed schedule check in fit());
+        # reset per fit in _initialize_parameters.
+        self.n_kurt_done = 0
+
         self.invsigmin = invsigmin
         self.invsigmax = invsigmax
         self.doscaling = doscaling
@@ -329,6 +491,12 @@ class AMICAMLXNG:
         self.gm: Optional[mx.array] = None
         self.c: Optional[mx.array] = None
         self.comp_list: Optional[mx.array] = None
+        # Per-source density-family codes (issue #265), (n_channels, n_models)
+        # int32, allocated in _initialize_parameters. None only before the first
+        # fit -- once allocated it is always a full pdftype-filled tensor, even
+        # for pdftype=0 (the _pdtype_h None fast path is a SEPARATE, cheaper
+        # check on the scalar self.pdftype, not on this being None).
+        self.pdtype: Optional[mx.array] = None
         self.mean: Optional[mx.array] = None
         self.sphere: Optional[mx.array] = None
         # float64 host copy of the sphere, kept because the sharing metric's
@@ -482,6 +650,13 @@ class AMICAMLXNG:
         self.gm = mx.array((np.ones(m) / m).astype(np.float32))
         self.c = mx.array(np.zeros((n, m), dtype=np.float32))
 
+        # Per-source density-family codes, Fortran `pdtype = pdftype`
+        # (amica15.f90:611; AMICATorchNG core.py:960-963). In adaptive mode
+        # (pdftype==1) every source starts as the super-Gaussian code (1),
+        # since self.pdftype IS 1 there -- no special-case fill needed.
+        self.pdtype = mx.array(np.full((n, m), self.pdftype, dtype=np.int32))
+        self.n_kurt_done = 0
+
         # Reset the mutable optimization state to the pristine constructor values
         # (lrate_cap, newtrate and rholrate are ratcheted down during fit, and
         # n_newton_fallbacks counts one fit), so a re-fit starts fresh --
@@ -528,6 +703,18 @@ class AMICAMLXNG:
         self.W = mx.stack(ws, axis=0)  # (n_models, n, n)
         self._logdet_W = mx.stack(logdets)  # (n_models,)
 
+    def _pdtype_h(self, h: int) -> Optional[mx.array]:
+        """Per-source density-family codes for model ``h``, shaped for
+        broadcasting against ``(batch, n_channels, n_mix)`` arrays (AMICATorchNG
+        ``_pdtype_h``, core.py:984-993), or ``None`` on the default
+        ``pdftype=0`` (GG-only) fast path so the E-step stays bit-identical to
+        the pre-#265 implementation (policy 2).
+        """
+        if self.pdftype == 0:
+            return None
+        assert self.pdtype is not None
+        return self.pdtype[:, h][None, :, None]  # (1, n_channels, 1)
+
     # ------------------------------------------------------------------
     # E-step
     # ------------------------------------------------------------------
@@ -536,7 +723,9 @@ class AMICAMLXNG:
         core.py:998-1071). ``Xb`` is ``(n_channels, batch)``. Returns ``logV``
         ``(batch, n_models)`` and per-model lists ``(b, z, y, az_rho)``. For
         n_models=1 (c=0, gm=1, comp_list=identity) this is numerically identical
-        to the single-model path."""
+        to the single-model path. Each model's ``az_rho`` entry is ``None`` when
+        that model's family is non-GG (``_pdtype_h`` not None; policy 5) -- see
+        ``_log_pdf``."""
         assert (
             self.comp_list is not None
             and self.c is not None
@@ -560,7 +749,7 @@ class AMICAMLXNG:
             lgamma_h = self._lgamma_table[:, idx].T[None]
 
             y = beta_h * (b[..., None] - mu_h)  # (batch, n_channels, n_mix)
-            log_pdf, az_rho = _log_pdf_gg(y, rho_h, lgamma_h)
+            log_pdf, az_rho = _log_pdf(y, rho_h, lgamma_h, self._pdtype_h(h))
             z0 = mx.log(alpha_h) + mx.log(beta_h) + log_pdf
             ll_i = mx.logsumexp(z0, axis=-1)  # (batch, n_channels)
             z = mx.softmax(z0, axis=-1)
@@ -588,6 +777,15 @@ class AMICAMLXNG:
         is then either present in every block of a fit or absent from all of
         them, so ``_accumulate_blocks``' generic key loop sums them with no
         special case, and a natural-gradient fit does none of the work.
+
+        ``drho_n`` (the rho digamma-update numerator) is likewise gated on
+        ``self.dorho`` (issue #265, policy 5): rho is frozen for every non-GG
+        family (Fortran ``dorho=.false.``), so accumulating it there is dead
+        work AMICATorchNG still pays (it always accumulates and discards) --
+        this is a deliberate WORK-only divergence, not a numeric one. Gating
+        uniformly on ``self.dorho`` (fixed for the whole model, not per-block)
+        keeps the key consistently present-or-absent across every block of a
+        fit, exactly like the Newton keys above.
         """
         logV, b_list, z_list, y_list, azrho_list = self._forward(Xb)
         block_ll = mx.logsumexp(logV, axis=1).sum()
@@ -599,7 +797,9 @@ class AMICAMLXNG:
             return mx.zeros((nmix, ncomp), dtype=mx.float32)
 
         dalpha_n, dmu_n, dmu_d = zeros(), zeros(), zeros()
-        dbeta_n, dbeta_d, drho_n = zeros(), zeros(), zeros()
+        dbeta_n, dbeta_d = zeros(), zeros()
+        if self.dorho:
+            drho_n = zeros()
         dgm_cols, dwtmp_mods, dc_cols = [], [], []
         # Newton curvature, model-major like dWtmp: one entry per model, stacked
         # below (the MLX convention -- MLX has no in-place slice assignment, so
@@ -617,8 +817,9 @@ class AMICAMLXNG:
             v_h = v[:, h]
             beta_h = self.beta[:, idx].T[None]  # (1, n_channels, n_mix)
             rho_h = self.rho[:, idx].T[None]
+            pdtype_h = self._pdtype_h(h)
 
-            fp = _score_gg(y, rho_h)
+            fp = _score(y, rho_h, pdtype_h)
             u = v_h[:, None, None] * zr  # u = v*z, (batch, n_channels, n_mix)
             ufp = u * fp
 
@@ -627,14 +828,23 @@ class AMICAMLXNG:
             dmu_n = dmu_n.at[:, idx].add(ufp.sum(0).T)
             # Phase A guard: float32 can round y to exactly 0 (fp(0)=0 => ufp=0),
             # so ufp/y is 0/0=NaN; where y==0, 0/1 contributes 0 (issue #75).
+            # torch's safe_y substitution (core.py:1231) is mirrored exactly for
+            # every family here, even though the true fp/y limit at y->0 is a
+            # finite nonzero constant for codes 2/3/1 (fp'(0): 1 Gaussian
+            # (fp=y), 0.5 logistic (fp=tanh(y/2)), 2 super-Gaussian
+            # (fp=y+tanh(y))) and 0 for code 4 (fp=y-tanh(y), whose Taylor
+            # expansion is O(y^3)) -- parity with AMICATorchNG is the spec, not
+            # the true limit; see the PR body for the measured per-family
+            # y==0 frequency.
             safe_y = mx.where(y == 0, mx.ones_like(y), y)
             dmu_d = dmu_d.at[:, idx].add((beta_h[0] * (ufp / safe_y).sum(0)).T)
             dbeta_n = dbeta_n.at[:, idx].add(u.sum(0).T)
             dbeta_d = dbeta_d.at[:, idx].add((ufp * y).sum(0).T)
 
-            logab = rho_h * mx.log(mx.maximum(mx.abs(y), tiny))
-            logab = mx.where(az_rho < _EPSDBLE, mx.zeros_like(logab), logab)
-            drho_n = drho_n.at[:, idx].add((u * (az_rho * logab)).sum(0).T)
+            if self.dorho:
+                logab = rho_h * mx.log(mx.maximum(mx.abs(y), tiny))
+                logab = mx.where(az_rho < _EPSDBLE, mx.zeros_like(logab), logab)
+                drho_n = drho_n.at[:, idx].add((u * (az_rho * logab)).sum(0).T)
 
             g = (beta_h * ufp).sum(-1)  # (batch, n_channels)
             dwtmp_mods.append(g.T @ b)  # (n_channels, n_channels)
@@ -658,11 +868,12 @@ class AMICAMLXNG:
             "dmu_d": dmu_d,
             "dbeta_n": dbeta_n,
             "dbeta_d": dbeta_d,
-            "drho_n": drho_n,
             "dWtmp": mx.stack(dwtmp_mods, axis=0),  # (n_models, n_ch, n_ch)
             "dc_numer": mx.stack(dc_cols, axis=1),  # (n_channels, n_models)
             "ll": block_ll,
         }
+        if self.dorho:
+            updates["drho_n"] = drho_n
         if self.do_newton:
             updates["dsigma2_numer"] = mx.stack(dsigma2_mods)  # (n_models, n_ch)
             updates["dkappa_numer"] = mx.stack(dkappa_mods)  # (n_models, n_mix, n_ch)
@@ -861,9 +1072,14 @@ class AMICAMLXNG:
         # the Newton posdef flag -- each because a Python branch genuinely
         # depends on the value; the rho-boundary exit is not one of those, since
         # mx.clip clamps straight back to the boundary and the results are
-        # identical either way. So it would buy nothing but a sync, in a
-        # configuration MLX cannot even reach today (pdftype != 0 is rejected, so
-        # rho starts at rho0 and adapts).
+        # identical either way. So it would buy nothing but a sync -- unrelated to
+        # (and not fixed by) issue #265: pdftype != 0 is now supported, and for
+        # those families this whole block is skipped by the outer ``self.dorho``
+        # gate below (rho is frozen, Fortran ``dorho=.false.``), which is the
+        # real reason the digamma work does not run there -- not an MLX
+        # limitation. See ``_get_block_updates`` for the matching ``drho_n``
+        # accumulator gate (a work-only divergence from AMICATorchNG, which
+        # always accumulates and discards it).
         if self.dorho:
             drho = acc["drho_n"] / mx.maximum(acc["dalpha_n"], 1e-8)
             rho_np = np.array(self.rho, dtype=np.float64)
@@ -1004,8 +1220,97 @@ class AMICAMLXNG:
             self.mu = self.mu * safe_scale
             self.beta = self.beta / safe_scale
 
-        self._refresh_lgamma_table()
+        # rho is frozen for every non-GG family (self.dorho is False), so the
+        # table it feeds (used only on the GG _log_pdf path) cannot have
+        # changed; refreshing it every iteration there would be dead host-CPU
+        # work (issue #265, policy 5 -- gated like the drho_n accumulation and
+        # the digamma pull above). Still built unconditionally once at init
+        # (_initialize_parameters): _log_pdf's non-GG branches structurally
+        # need a valid lgamma_table for their (dead-code) GG-fallthrough term,
+        # even though its value is never selected there.
+        if self.dorho:
+            self._refresh_lgamma_table()
         self._update_unmixing_matrices()
+
+    # ------------------------------------------------------------------
+    # Adaptive PDF switch (issue #265; AMICATorchNG's #26 port)
+    # ------------------------------------------------------------------
+    def _choose_pdfs(self, X: mx.array) -> None:
+        """Extended-Infomax adaptive PDF switch (Fortran ``do_choose_pdfs``,
+        AMICATorchNG ``_choose_pdfs``, core.py:1790-1823).
+
+        Re-estimates each source's kurtosis from the current model activations
+        and sets its density family to the super-Gaussian (code 1) or
+        sub-Gaussian (code 4) cosh density by kurtosis sign. The reference
+        binary declares this (``pdftype==1`` sets ``do_choose_pdfs``,
+        amica15.f90:612) but never runs the switch (``m2sum``/``m4sum`` are
+        never accumulated, :608-609), so there is no bit-exact oracle;
+        validated by real-data log-likelihood (must not decrease vs the fixed
+        GG default).
+
+        Mechanism difference from AMICATorchNG (MLX-motivated, not a decision
+        difference): the second moments are accumulated block-by-block on the
+        GPU in float32, but each block's small ``(n_channels,)``/scalar partial
+        sums are pulled to the host and accumulated in numpy float64, and the
+        kurtosis + validity guard + 1/4 decision run in numpy rather than on
+        the MLX graph. The kurt>0 sign test is a knife-edge decision with no
+        oracle, and ``m4`` loses float32 precision long before it would
+        overflow, so the accumulation itself is done at float64 host precision;
+        the host pulls happen on at most ``num_kurt`` iterations of a fit, so
+        this costs nothing on the hot per-block path. The decision semantics
+        (kurtosis formula, validity guard, super/sub-Gaussian mapping) are
+        identical to AMICATorchNG's -- see :meth:`_pdtype_from_kurtosis`.
+        """
+        n_ch, n_models = self.n_channels, self.n_models
+        m2 = np.zeros((n_ch, n_models), dtype=np.float64)
+        m4 = np.zeros((n_ch, n_models), dtype=np.float64)
+        nsub = np.zeros(n_models, dtype=np.float64)
+        n_samples = X.shape[1]
+        for start in range(0, n_samples, self.block_size):
+            block = X[:, start : start + self.block_size]
+            logV, b_list, *_ = self._forward(block)
+            v = mx.softmax(logV, axis=1)  # (batch, n_models)
+            for h in range(n_models):
+                b = b_list[h]  # (batch, n_ch)
+                vh = v[:, h][:, None]
+                m2[:, h] += np.array((vh * b**2).sum(0), dtype=np.float64)
+                m4[:, h] += np.array((vh * b**4).sum(0), dtype=np.float64)
+                nsub[h] += float(v[:, h].sum().item())
+
+        # Kurtosis = E[b^4]/E[b^2]^2 - 3 = nsub * m4 / m2^2 - 3, per (source,
+        # model), in numpy float64 (policy 6).
+        tiny = np.finfo(np.float64).tiny
+        kurt = nsub[None, :] * m4 / np.maximum(m2**2, tiny) - 3.0
+        self.pdtype = mx.array(self._pdtype_from_kurtosis(kurt, nsub).astype(np.int32))
+
+    def _pdtype_from_kurtosis(self, kurt: np.ndarray, nsub: np.ndarray) -> np.ndarray:
+        """Map per-source excess kurtosis to a density-family code (pure numpy;
+        AMICATorchNG ``_pdtype_from_kurtosis``, core.py:1825-1852).
+
+        Super-Gaussian (positive kurtosis) -> code 1; sub-Gaussian -> code 4.
+        Only sources with a meaningful signal switch: a dead model
+        (``nsub[h]==0`` => ``kurt==-3.0``, finite) or a numerically blown-up
+        source (``kurt`` NaN, and ``NaN>0`` is False) would otherwise be
+        silently assigned code 4 with no diagnostic, so those keep their prior
+        ``self.pdtype`` and are logged -- mirroring the dead-model / non-finite
+        guards in ``_update_parameters``. Split out from ``_choose_pdfs`` so
+        the decision (including the sub-Gaussian branch, which real EEG rarely
+        triggers) is unit-testable on constructed ``kurt``/``nsub`` arrays,
+        matching AMICATorchNG's ``test_pdtype_from_kurtosis_decision``.
+        """
+        assert self.pdtype is not None
+        prior = np.array(self.pdtype, dtype=np.int64)
+        new_pdtype = np.where(kurt > 0.0, 1, 4)
+        valid = np.isfinite(kurt) & (nsub[None, :] > 0.0)
+        result = np.where(valid, new_pdtype, prior)
+        if not bool(valid.all()):
+            logger.warning(
+                "Non-finite or zero-mass kurtosis for %d source/model pair(s) "
+                "at iter %d; kept their prior pdtype (adaptive-switch guard).",
+                int((~valid).sum()),
+                self.iteration,
+            )
+        return result
 
     # ------------------------------------------------------------------
     # Component sharing (issue #263; AMICATorchNG's #60 port)
@@ -1149,6 +1454,13 @@ class AMICAMLXNG:
         ``(model_idx, source_idx)`` pairs that all reference it. Empty when no
         component is shared across two or more models (always for one model, and
         for a default multi-model fit with ``share_comps`` off).
+
+        Note that a merge synchronizes only the mixture parameters routed
+        through ``comp_list`` (``mu``/``alpha``/``beta``/``rho``); the
+        per-source density *family* code ``pdtype`` is a separate array and is
+        not synchronized (issue #265, matching AMICATorchNG core.py:2669-2673),
+        so under the adaptive switcher (``pdftype=1``) a shared pair can still
+        report different :meth:`get_pdftype` codes.
 
         Returns
         -------
@@ -1296,6 +1608,26 @@ class AMICAMLXNG:
                 )
                 self.stop_reason = "nan_params"
                 break
+
+            # Extended-Infomax adaptive PDF switch (Fortran do_choose_pdfs,
+            # AMICATorchNG core.py:2030-2042). Runs on the
+            # kurt_start/num_kurt/kurt_int schedule using the just-updated W;
+            # the new per-source families take effect from the next E-step.
+            # itf is the Fortran-style 1-indexed iteration. num_kurt=0 disables
+            # switching (the family stays at its pdftype=1 super-Gaussian
+            # init). Runs BEFORE the sharing hook below, matching torch's
+            # ordering -- component sharing does not synchronize pdtype across
+            # merged columns (see shared_components()), so running the switch
+            # first means a just-merged pair still gets independently
+            # re-evaluated kurtosis this same iteration.
+            if self.do_choose_pdfs and self.n_kurt_done < self.num_kurt:
+                itf = it + 1
+                if (
+                    itf >= self.kurt_start
+                    and (itf - self.kurt_start) % self.kurt_int == 0
+                ):
+                    self._choose_pdfs(X_t)
+                    self.n_kurt_done += 1
 
             # Component sharing (Fortran identify_shared_comps schedule,
             # amica15.f90:1856): once per share_iter cycle from share_start,
@@ -1453,3 +1785,43 @@ class AMICAMLXNG:
             "AMICAMLXNG does not implement transform yet; it is a fast-follow. "
             "Use AMICATorchNG for source extraction."
         )
+
+    # ------------------------------------------------------------------
+    # Fitted-parameter metadata (issue #265; AMICATorchNG's #142 port)
+    # ------------------------------------------------------------------
+    def _check_model_idx(self, model_idx: int) -> None:
+        """Validate a model index against the fitted ``n_models`` (AMICATorchNG
+        ``_check_model_idx``, core.py:2338-2353). Raises a clear ``ValueError``
+        (rejecting negatives, which MLX's negative indexing would otherwise turn
+        into a silent wrong-model result) instead of an opaque array error."""
+        if not isinstance(model_idx, (int, np.integer)):
+            raise TypeError(
+                f"model_idx must be an int, got {type(model_idx).__name__}."
+            )
+        if not (0 <= model_idx < self.n_models):
+            raise ValueError(
+                f"model_idx={model_idx} out of range for a {self.n_models}-model "
+                f"fit (valid: 0..{self.n_models - 1})."
+            )
+
+    def get_pdftype(self, model_idx: int = 0) -> np.ndarray:
+        """Per-source density-family code for model ``model_idx`` (AMICATorchNG
+        ``get_pdftype``, core.py:2609-2627).
+
+        One integer per source component (0-4; 0 generalized Gaussian, 1
+        super-Gaussian cosh, 2 Gaussian, 3 logistic, 4 sub-Gaussian cosh). All
+        sources share ``pdftype`` unless the adaptive switcher (``pdftype=1``)
+        moved them individually (issue #265). ``rho`` does not describe the
+        fitted density for codes 1-4 (it is frozen at ``rho0`` and only ever
+        meaningful for the generalized-Gaussian family, code 0).
+
+        Returns
+        -------
+        np.ndarray of int, shape (n_sources,)
+        """
+        if self.pdtype is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_pdftype() requires a fitted model; call fit() first."
+            )
+        self._check_model_idx(model_idx)
+        return np.array(self.pdtype[:, model_idx], dtype=np.int64)
