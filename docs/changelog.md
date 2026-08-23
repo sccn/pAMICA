@@ -5,6 +5,19 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **`AMICA.from_params_file` now reads the literal Fortran `input.param` text
+  format directly** (issue #132, JOSS reviewer feedback), auto-detected
+  alongside the existing JSON schema so the same file can drive both the
+  reference binary and pamica for a parity run. The translation
+  (`pamica/fortran_params.py`, `read_fortran_param_file`) parses all 89
+  keywords `amica15.f90`'s parser accepts, translates the three that are
+  spelled differently in the JSON schema (`num_mix_comps`/`num_mix` ->
+  `num_mix`, `share_iter` -> `share_int`, `numrej` -> `maxrej`), and warns
+  loudly (never drops silently) about the 36 known keywords with no pamica
+  equivalent (checkpoint warm-start, per-family EM freeze toggles, the
+  `do_opt_block` search, FIR/DFT pre-filtering, reporting cadence, ...) and
+  about any keyword it does not recognize at all. See
+  `docs/guides/validation.md#parameter-files` for the mapping table.
 - **Documented that `final_ll_`/`self.ll[-1]` trails a `share_comps` merge
   landing on the final fit iteration** (issue #269). When a merge fires on the
   last iteration, the returned `A`/`W`/`comp_list` are already post-merge but

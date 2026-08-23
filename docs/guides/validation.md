@@ -511,6 +511,42 @@ the underlying findings are in `.context/issue-84/` and `.context/issue-90/`.
 `sample_data/sample_params.json` is the JSON parameter file used above (loaded via
 `AMICA.from_params_file`); its keys mostly reuse Fortran's `.param` names (`lrate`, `do_newton`,
 `rho0`, `block_size`, `max_iter`, `num_models`, ...), but not all of them match one-to-one
-(for example `num_mix` here vs `num_mix_comps` in Fortran's `input.param`), and pamica does not
-yet parse the literal Fortran `.param` text format. A native `.param` reader, so the same file
-drives both implementations, is tracked as a future issue.
+(for example `num_mix` here vs `num_mix_comps` in Fortran's `input.param`).
+
+`AMICA.from_params_file` also reads the literal Fortran `input.param` text format directly
+(issue #132), so the exact file that drives the reference binary can drive pamica too, instead of
+maintaining a hand-translated JSON copy. The format is auto-detected from the file (`.json` vs
+`.param` extension, falling back to content sniffing), so no new API is needed:
+
+```python
+from pamica import AMICA
+
+model = AMICA.from_params_file("sample_data/input.param")   # Fortran text format
+model = AMICA.from_params_file("sample_data/sample_params.json")  # JSON, as before
+```
+
+The translation lives in `pamica/fortran_params.py` (`read_fortran_param_file`), which parses
+Fortran's whitespace-separated `key value` lines (`#` full-line comments, ints/floats/strings,
+`0`/`1` boolean flags) into the same dict shape as `sample_params.json`. It was built by reading
+every `case('...')` arm of `amica15.f90`'s parameter parser (~amica15.f90:3100-3700) against
+`AMICATorchNG`'s constructor and `validate_implementations.py`'s `_NG_PARAMS`/`_HANDLED_KEYS`.
+89 Fortran keywords are recognized; 53 (52 distinct pamica-side names) are translated and 36 are
+deliberately unsupported (checkpoint warm-start, per-family EM freeze toggles, the
+`do_opt_block` block-size search, FIR/DFT pre-filtering, console/output-file reporting, ...) --
+a keyword this reader drops always fires a `logger.warning` naming it, whether that is because
+it is a real Fortran keyword pamica has no equivalent for, or because it is not a Fortran keyword
+this reader recognizes at all (the bundled `sample_data/input.param` template itself carries three
+such stale entries -- `field_blocksize`, `doPCA`, `load_W` -- that predate this parser and are not
+`case('...')` arms in `amica15.f90` either, so the reference binary already ignores them too). A
+malformed line (a keyword with no value) raises `ValueError` rather than being dropped silently.
+
+Only three keywords are renamed, because the JSON schema spells them differently from Fortran:
+
+| Fortran keyword (`input.param`) | pamica/JSON key (`sample_params.json`) | Note                                  |
+| -------------------------------- | --------------------------------------- | -------------------------------------- |
+| `num_mix_comps` (or `num_mix`)   | `num_mix`                               | `AMICA(n_mix=...)`                     |
+| `share_iter`                     | `share_int`                             | JSON schema's own spelling             |
+| `numrej`                         | `maxrej`                                | matches `AMICATorchNG.maxrej`          |
+
+Every other translated keyword keeps its Fortran spelling; see `FORTRAN_TO_PAMICA_KEY` and
+`FORTRAN_UNSUPPORTED_KEYS` in `pamica/fortran_params.py` for the full tables.
