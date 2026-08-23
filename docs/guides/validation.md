@@ -327,6 +327,27 @@ reaches pamica's current 8192 default (issue #216, bundled sample). MLX remains 
 so it stays the recommendation over `device="mps"` on Apple hardware.
 CUDA float32 and float64 are near-identical here (launch-bound at this size). NumPy is the reference implementation, not a production path.
 
+### Block-size sensitivity
+
+`block_size` trades memory for dispatch overhead, and backends differ sharply in how much they benefit.
+Measured on an Apple M4 Pro (14 cores), the bundled 32-channel sample (30504 frames), float32,
+`n_mix=3`, `pdftype=0`, seed 42, warm, per-iteration cost in ms (issue #216):
+
+| block_size | PyTorch-MPS | MLX | PyTorch-CPU |
+|---:|---:|---:|---:|
+| 512 (former default) | 431.3 | 29.5 | 144.0 |
+| 2048 | 89.7 | 12.4 | 49.3 |
+| 8192 (current default) | 30.5 | 11.3 | 21.7 |
+| 30504 (single block) | 13.5 | 11.4 | 15.8 |
+
+All three backends are dispatch-bound at small block sizes, but by very different margins: PyTorch-MPS
+improves 32x from 512 to a single block, PyTorch-CPU 9x, MLX only 2.6x. Log-likelihood after 40
+iterations is unchanged across every block size on both devices (-3.43856 to six significant digits),
+so this is a pure throughput knob on this data, not a correctness one, and the comparison across block
+sizes is valid. MLX is the fastest Apple backend at every block size measured here, including the
+current 8192 default and the further-tuned single-block setting, so it stays the recommendation on
+Apple hardware regardless of how `block_size` is tuned.
+
 ### CPU core-scaling and native Fortran
 
 The table above uses each platform's default thread count and has no Fortran row.
