@@ -271,6 +271,32 @@ def test_non_finite_sphere_still_fails_loudly(real_data):
         ng._identify_shared_comps()
 
 
+def test_get_sensor_mixing_matrix_non_finite_sphere_fails_loudly(real_data):
+    """``get_sensor_mixing_matrix()`` is a second, independent public-API caller
+    of ``_pinv_sphere()`` -- it must fail the same way as the internal
+    ``_identify_shared_comps`` route above (issue #261; twin of
+    ``test_numpy_share_comps.py::test_non_finite_sphere_fails_loudly``, which
+    already pins this for the NumPy backend)."""
+    bad = real_data[:, :4096].copy()
+    bad[0, 0] = np.nan
+    model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
+    model.fit(
+        bad,
+        max_iter=2,
+        block_size=1024,
+        seed=0,
+        share_comps=True,
+        share_start=1,
+        share_iter=8,
+        comp_thresh=0.9,
+    )
+    ng = model.model_
+    assert ng is not None and ng.sphere is not None
+    assert not bool(torch.isfinite(ng.sphere).all())
+    with pytest.raises(RuntimeError, match="non-finite"):
+        ng.get_sensor_mixing_matrix()
+
+
 # --- end-to-end on real data ------------------------------------------------
 
 
