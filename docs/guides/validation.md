@@ -415,11 +415,12 @@ compiles in the values in `amica15_header.f90` and the bundled
 | `min_dll` (`use_min_dll`) | on, `1e-9` | on, `1e-9` | on, `1e-9` | on, `1e-9` |
 | `min_nd` (`use_grad_norm`) | on, `1e-7` | on, `1e-7` (named `min_grad_norm`) | on, `1e-7` | on, `1e-7` |
 | `minlrate` (`lrate_floor`) | `1e-12` | `1e-12` | `1e-12` | `1e-12` / `1e-8` |
-| `do_newton` | **off** | **on** | n/a (`NotImplementedError`) | off / on |
+| `do_newton` | **off** | **on** | **off** | off / on |
 
 The MLX column dates from issue #248, which ported both stops to that backend;
 before it, an MLX fit had no convergence criterion at all and always ran to
-`max_iter`.
+`max_iter`. `do_newton` joined it in issue #264 (float32 throughout; see the
+backend-differences guide), taking `AMICATorchNG`'s off-by-default.
 
 Which of them actually ends a fit:
 

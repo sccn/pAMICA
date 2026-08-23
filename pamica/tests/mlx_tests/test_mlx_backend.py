@@ -43,6 +43,15 @@ _STAT_KEYS = [
     "drho_n",
     "dWtmp",
 ]
+# The three Newton curvature accumulators (issue #264) are emitted only under
+# do_newton, and cannot join _STAT_KEYS: the NumPy reference accumulates them
+# already summed over the mixture index with the mu^2 term folded into lambda,
+# whereas MLX (like PyTorch) keeps the mixture axis and folds mu^2 in at
+# finalization. They line up at the FINALIZED level -- which is also where a
+# broadcast slip would show -- so test_newton_stats_match_numpy_reference
+# compares _finalize_newton_stats against dsigma2/dkappa/dlambda over dgm, the
+# same construction torch_tests/test_ng_backend.py uses.
+_NEWTON_STAT_KEYS = ("dsigma2", "dkappa", "dlambda")
 
 
 def _load_real_data() -> np.ndarray:
@@ -54,17 +63,22 @@ def _load_real_data() -> np.ndarray:
 
 
 def test_rejects_unsupported_config():
-    """The still-deferred configs (Newton, non-GG families) fail loudly, not
-    silently. Multi-model IS supported (issue #81), so it is not rejected."""
+    """The still-deferred configs fail loudly, not silently. Multi-model (issue
+    #81), component sharing (#263) and Newton (#264) ARE supported, so only the
+    non-GG PDF families are rejected now."""
     from pamica.mlx_impl import AMICAMLXNG
 
     kwarg_sets: list[dict[str, Any]] = [
-        {"do_newton": True},
         {"pdftype": 2, "n_mix": NMIX},
+        {"pdftype": 1, "n_mix": NMIX},
     ]
     for kw in kwarg_sets:
         with pytest.raises(NotImplementedError):
             AMICAMLXNG(n_channels=NW, n_mix=kw.pop("n_mix", 1), **kw)
+
+    # Newton is accepted and honored -- not silently downgraded to the natural
+    # gradient, which is how the pre-#264 backend would have "supported" it.
+    assert AMICAMLXNG(n_channels=NW, n_mix=NMIX, do_newton=True).do_newton is True
 
 
 def test_sufficient_stats_match_numpy_reference():
@@ -110,6 +124,57 @@ def test_sufficient_stats_match_numpy_reference():
         )
 
 
+def test_newton_stats_match_numpy_reference():
+    """The Newton curvature (issue #264) matches the validated NumPy float64
+    reference on an identical block with identical (shared-seed) parameters.
+
+    Compared after ``_finalize_newton_stats`` rather than accumulator-by-
+    accumulator, because the two backends split the work differently (see
+    ``_NEWTON_STAT_KEYS``) -- and because finalization is where the model-mass
+    broadcast lives, which is the step that was wrong in the NumPy backend until
+    issue #267. rtol=1e-3 accommodates float32 vs float64, as above.
+    """
+    from pamica.mlx_impl import AMICAMLXNG
+    from pamica.numpy_impl.core import AMICA as AMICA_NumPy
+
+    data = _load_real_data()
+    m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED, block_size=256, do_newton=True)
+    x_t = m._preprocess(data)
+    m._initialize_parameters()
+
+    blk = 256
+    block = np.array(x_t[:, :blk])
+    mlx_upd = m._get_block_updates(mx.array(block))
+    finalized = dict(
+        zip(("dsigma2", "dlambda", "dkappa"), m._finalize_newton_stats(mlx_upd))
+    )
+
+    npm = AMICA_NumPy(num_models=1, num_mix=NMIX, do_newton=True)
+    npm.data_dim = NW
+    npm.num_comps = NW
+    npm.num_models = 1
+    npm.num_mix = NMIX
+    npm.block_size = blk
+    npm.comp_list = np.arange(NW).reshape(NW, 1)
+    npm.A = np.array(m.A, dtype=np.float64)
+    npm.W = np.array(m.W, dtype=np.float64).transpose(1, 2, 0)
+    npm.c = np.zeros((NW, 1))
+    npm.mu = np.array(m.mu, dtype=np.float64)
+    npm.alpha = np.array(m.alpha, dtype=np.float64)
+    npm.beta = np.array(m.beta, dtype=np.float64)
+    npm.rho = np.array(m.rho, dtype=np.float64)
+    npm.gm = np.array(m.gm, dtype=np.float64)
+    np_upd = npm._get_block_updates(block.astype(np.float64))
+
+    for key in _NEWTON_STAT_KEYS:
+        a = np.array(finalized[key], dtype=np.float64)  # (n_models, n_ch)
+        b = (np_upd[key] / np_upd["dgm"][None, :]).T  # (num_models, data_dim)
+        assert np.allclose(a, b, rtol=1e-3, atol=1e-4), (
+            f"{key} differs from NumPy reference by {np.max(np.abs(a - b)):.3e}"
+        )
+        assert np.all(a > 0), f"{key} is not strictly positive"
+
+
 def test_backend_stable_on_full_data():
     """The MLX backend fits the full 30504-sample EEG on the Apple GPU (float32)
     without diverging (the Phase A ``ufp/y`` guard is carried into MLX), and the
@@ -124,6 +189,10 @@ def test_backend_stable_on_full_data():
     assert m.final_ll_ is not None
     assert np.isfinite(m.final_ll_)
     assert np.all(np.isfinite(np.array(m.A)))
+    # W is derived from A by inv(), so it can overflow to inf/NaN while A is
+    # still finite -- a fit ending with a NaN unmixing matrix is unusable
+    # however healthy final_ll_ looks (fit()'s nan_params guard covers it too).
+    assert np.all(np.isfinite(np.array(m.W)))
     assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
     assert hist[-1] > hist[0]  # ascent
     # Single-model must never touch the bias c (the n_models>1-only update); a

@@ -1455,9 +1455,18 @@ class AMICA:
             # The dsigma2/dkappa/dlambda accumulators already carry the sbeta^2
             # and baralpha-weighted mu^2 factors, so finalization is a plain
             # division by the model mass dgm = sum_t v_h.
-            self.sigma2 = updates["dsigma2"] / updates["dgm"][:, None]
-            self.lambda_ = updates["dlambda"] / updates["dgm"][:, None]
-            self.kappa = updates["dkappa"] / updates["dgm"][:, None]
+            #
+            # dgm is (num_models,) and the accumulators are (data_dim,
+            # num_models), so the model mass broadcasts along the LAST axis
+            # (issue #267). The old ``[:, None]`` made it (num_models, 1), which
+            # only happens to broadcast when num_models == 1: every multi-model
+            # Newton fit raised "operands could not be broadcast together with
+            # shapes (data_dim, num_models) (num_models, 1)". Same as the torch
+            # backend's ``dgm.unsqueeze(0)`` (torch_impl/core.py:1323).
+            dgm = updates["dgm"][None, :]
+            self.sigma2 = updates["dsigma2"] / dgm
+            self.lambda_ = updates["dlambda"] / dgm
+            self.kappa = updates["dkappa"] / dgm
 
         # Per-model direction: Newton H if the model is positive definite,
         # otherwise natural gradient. Matching Fortran (amica17.f90:1814-1837),

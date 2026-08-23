@@ -20,11 +20,24 @@ Design constraints (verified against MLX 0.32, see ``.context/mps_pathways.md``)
   so they are computed host-side with SciPy once per iteration.
 
 Scope: single- and multi-model (``n_models >= 1``, issue #81), generalized
-Gaussian (``pdftype=0``), natural gradient (``do_newton=False``), component
-sharing (``share_comps``, issue #263). Newton and the other PDF families are
-rejected in ``__init__`` with a clear ``NotImplementedError`` (``transform``
-likewise). Outlier rejection, ``keep_best`` and save/load are simply absent (no
-such parameter/method) -- all fast-follows.
+Gaussian (``pdftype=0``), natural gradient and the Newton preconditioner
+(``do_newton``, issue #264), component sharing (``share_comps``, issue #263).
+The other PDF families are rejected in ``__init__`` with a clear
+``NotImplementedError`` (``transform`` likewise). Outlier rejection,
+``keep_best`` and save/load are simply absent (no such parameter/method) -- all
+fast-follows.
+
+Newton (issue #264) runs entirely in float32 on the GPU stream: the curvature
+accumulators ride the existing E-step locals, and the direction is Fortran's
+closed-form per-source-pair 2x2 solve (no linear algebra, so no CPU-stream
+handoff). The one host sync it adds is the ``posdef`` flag, a scalar boolean
+that has to reach Python because it selects the learning-rate ramp target and
+drives the fallback counter. It is read once per MODEL per Newton iteration
+(``_newton_direction`` is called inside the per-model loop), so a single-model
+fit adds one scalar sync per iteration and an ``n_models``-model fit adds
+``n_models`` -- unlike the M-step's existing dead-model and rho-NaN canaries,
+which are one array-wide reduction each. Validated against a float64 PyTorch
+twin on real EEG; see ``.context/issue-264/newton_findings.md``.
 
 Convergence stops (issue #248) are the full AMICATorchNG/Fortran set:
 ``use_min_dll``/``min_dll``/``maxincs``, ``use_grad_norm``/``min_nd``, and the
@@ -142,6 +155,35 @@ class AMICAMLXNG:
         ``(0, 1]``. The de-sphering uses ``pinv(sphere)``, so sharing also works
         on rank-reduced and rank-deficient fits (issues #253, #221); see
         :meth:`_identify_shared_comps`.
+
+    The Newton parameters (issue #264) likewise carry AMICATorchNG's names,
+    defaults and semantics:
+
+    ``do_newton`` (False)
+        Precondition the ``A``/``W`` natural gradient with the approximate
+        Hessian once ``iteration >= newt_start`` (Fortran ``do_newton``: the
+        2x2 solve and its positive-definiteness guard at amica15.f90:1718-1741,
+        the ramp and fallback at :1803-1816). Natural gradient alone plateaus
+        short of the Fortran solution; the Newton step is what closes the gap.
+        OFF by default, and every accumulator it needs is gated on it, so a
+        default fit is bit-for-bit what it was before #264.
+    ``newt_start`` (20)
+        Iteration at which the Newton step switches on (natural gradient runs
+        before it, letting the mixture parameters settle first). It also gates
+        the ``rholrate`` ceiling ratchet, independently of ``do_newton``
+        (Fortran amica15.f90:1067).
+    ``newtrate`` (0.5)
+        Maximum learning rate the ramp climbs to while Newton is active and
+        positive definite; the natural-gradient phase (and any fallback
+        iteration) is capped at ``lrate_cap`` instead.
+    ``newt_ramp`` (10)
+        Denominator of the per-iteration learning-rate ramp toward the current
+        ceiling: ``lrate = min(ceiling, lrate + min(1/newt_ramp, lrate))``.
+
+    Whenever any source pair fails the positive-definiteness guard the whole
+    model falls back to the natural gradient for that iteration and
+    ``n_newton_fallbacks`` counts it (as AMICATorchNG does), so an all-fallback
+    run is visible without re-instrumenting.
     """
 
     def __init__(
@@ -161,6 +203,7 @@ class AMICAMLXNG:
         min_nd: float = 1e-7,
         newt_ramp: int = 10,
         newt_start: int = 20,
+        newtrate: float = 0.5,
         do_newton: bool = False,
         rho0: float = 1.5,
         minrho: float = 1.0,
@@ -189,11 +232,6 @@ class AMICAMLXNG:
                 "AMICAMLXNG supports the generalized-Gaussian family "
                 "(pdftype=0) only; the other families are a fast-follow."
             )
-        if do_newton:
-            raise NotImplementedError(
-                "AMICAMLXNG supports the natural gradient only "
-                "(do_newton=False); Newton is a fast-follow."
-            )
 
         self.n_channels = n_channels
         self.n_models = n_models  # multi-model (#81) + component sharing (#263)
@@ -220,12 +258,21 @@ class AMICAMLXNG:
         self.use_grad_norm = use_grad_norm
         self.min_nd = min_nd
         self.newt_ramp = newt_ramp
-        # Schedule threshold for the rholrate ceiling ratchet (Fortran
-        # amica15.f90:1067 gates it on iter > newt_start, independent of
-        # do_newton). MLX does no Newton, but keeps newt_start as this gate so the
-        # rho-rate schedule matches Fortran/torch.
+        # Newton schedule (issue #264), same names/defaults/semantics as
+        # AMICATorchNG. newt_start doubles as the gate on the rholrate ceiling
+        # ratchet, which Fortran conditions on iter > newt_start independently of
+        # do_newton (amica15.f90:1067) -- so it stays meaningful for a
+        # natural-gradient fit too. newtrate is a CEILING that ratchets down at
+        # maxdecs during fit, so keep the constructor value for the per-fit reset
+        # in _initialize_parameters (as lrate0/rholrate0 do).
         self.newt_start = newt_start
-        self.do_newton = False
+        self.newtrate = newtrate
+        self.newtrate0 = newtrate
+        self.do_newton = do_newton
+        # Iterations on which the Newton direction was rejected as not positive
+        # definite and the natural gradient used instead (AMICATorchNG's counter
+        # of the same name); reset per fit in _initialize_parameters.
+        self.n_newton_fallbacks = 0
 
         self.rho0 = rho0
         self.minrho = minrho
@@ -344,7 +391,8 @@ class AMICAMLXNG:
 
         if self.do_sphere:
             # Population covariance (/N), matching Fortran's DSYRK scatter, not
-            # numpy's default sample covariance (/(N-1)) -- see core.py:635-639.
+            # numpy's default sample covariance (/(N-1)) -- the same choice, and
+            # the reasoning for it, at torch_impl/core.py:823-827.
             cov = np.cov(Xc, bias=True)
             evals, evecs = np.linalg.eigh(cov)
             order = np.argsort(evals)[::-1]
@@ -434,9 +482,15 @@ class AMICAMLXNG:
         self.gm = mx.array((np.ones(m) / m).astype(np.float32))
         self.c = mx.array(np.zeros((n, m), dtype=np.float32))
 
+        # Reset the mutable optimization state to the pristine constructor values
+        # (lrate_cap, newtrate and rholrate are ratcheted down during fit, and
+        # n_newton_fallbacks counts one fit), so a re-fit starts fresh --
+        # AMICATorchNG does the same at core.py:966-971/:1936.
         self.lrate = self.lrate0
         self.lrate_cap = self.lrate0
+        self.newtrate = self.newtrate0
         self.rholrate = self.rholrate0
+        self.n_newton_fallbacks = 0
         self.iteration = 0
         self._refresh_lgamma_table()
         self._update_unmixing_matrices()
@@ -453,9 +507,17 @@ class AMICAMLXNG:
         once per iteration. ``W`` is ``(n_models, n, n)`` and ``_logdet_W`` is
         ``(n_models,)``. For n_models=1 this is ``inv(A)`` unchanged.
 
-        These build lazy graph nodes; a singular ``A`` therefore raises not here
-        but where the graph is materialized (the ``mx.eval`` in ``fit``), so a
-        LinAlg traceback rooted in ``fit`` actually originates in this method.
+        These build lazy graph nodes, so a singular ``A`` surfaces not here but
+        where the graph is materialized (the ``mx.eval`` in ``fit``) -- a
+        failure reported against ``fit`` actually originates in this method.
+        Measured on MLX 0.32: that failure is NOT a catchable Python exception.
+        ``inv`` on a singular matrix aborts the process from LAPACK
+        (``libc++abi: ... [Inverse::eval_cpu] LU factorization failed``), which
+        is also why a near-singular ``A`` cannot be driven far enough to make
+        ``W`` overflow to inf in float32 -- LU fails first. ``fit``'s
+        ``nan_params`` guard still checks ``W``/``_logdet_W`` as defense in
+        depth, since a non-finite result that LU does not reject would
+        otherwise reach the caller silently on the final iteration.
         """
         assert self.A is not None and self.comp_list is not None
         ws, logdets = [], []
@@ -513,11 +575,20 @@ class AMICAMLXNG:
         return logV, b_list, z_list, y_list, azrho_list
 
     def _get_block_updates(self, Xb: mx.array) -> dict:
-        """Exact-EM sufficient statistics for one block (non-Newton subset of
-        AMICATorchNG._get_block_updates, core.py:1141-1283). Mixture stats are
-        scattered into their ``comp_list`` columns; ``dWtmp``/``dgm``/``dc_numer``
-        are per-model. For n_models=1 (v==1, identity comp_list) this reproduces
-        the single-model accumulators exactly."""
+        """Exact-EM sufficient statistics for one block (AMICATorchNG.
+        _get_block_updates, core.py:1141-1283). Mixture stats are scattered into
+        their ``comp_list`` columns; ``dWtmp``/``dgm``/``dc_numer`` are
+        per-model. For n_models=1 (v==1, identity comp_list) this reproduces the
+        single-model accumulators exactly.
+
+        Under ``do_newton`` the three Newton curvature accumulators
+        (``dsigma2_numer``, ``dkappa_numer``, ``dlambda_numer``; see
+        :meth:`_finalize_newton_stats`) are emitted as well. They are gated on
+        ``do_newton`` rather than always computed, matching AMICATorchNG: the key
+        is then either present in every block of a fit or absent from all of
+        them, so ``_accumulate_blocks``' generic key loop sums them with no
+        special case, and a natural-gradient fit does none of the work.
+        """
         logV, b_list, z_list, y_list, azrho_list = self._forward(Xb)
         block_ll = mx.logsumexp(logV, axis=1).sum()
         v = mx.softmax(logV, axis=1)  # (batch, n_models) model responsibilities
@@ -530,6 +601,10 @@ class AMICAMLXNG:
         dalpha_n, dmu_n, dmu_d = zeros(), zeros(), zeros()
         dbeta_n, dbeta_d, drho_n = zeros(), zeros(), zeros()
         dgm_cols, dwtmp_mods, dc_cols = [], [], []
+        # Newton curvature, model-major like dWtmp: one entry per model, stacked
+        # below (the MLX convention -- MLX has no in-place slice assignment, so
+        # per-model lists + mx.stack replace torch's `dsigma2_numer[:, h] = ...`).
+        dsigma2_mods, dkappa_mods, dlambda_mods = [], [], []
 
         assert (
             self.comp_list is not None
@@ -565,7 +640,18 @@ class AMICAMLXNG:
             dwtmp_mods.append(g.T @ b)  # (n_channels, n_channels)
             dc_cols.append(Xb @ v_h)  # data-space bias numerator sum_t v_h*x
 
-        return {
+            if self.do_newton:
+                # Newton curvature accumulators (Fortran amica15.f90:1439-1446,
+                # 1496-1513), in terms of the score fp -- not the density
+                # derivative dpdf -- and reusing this block's live E-step locals,
+                # so Newton adds no extra pass over the data.
+                dsigma2_mods.append((v_h[:, None] * b**2).sum(0))  # (n_ch,)
+                dkappa_mods.append(
+                    ((u * fp**2).sum(0) * beta_h[0] ** 2).T
+                )  # (n_mix, n_ch)
+                dlambda_mods.append((u * (fp * y - 1.0) ** 2).sum(0).T)  # (n_mix, n_ch)
+
+        updates = {
             "dgm": mx.stack(dgm_cols),  # (n_models,)
             "dalpha_n": dalpha_n,
             "dmu_n": dmu_n,
@@ -577,6 +663,11 @@ class AMICAMLXNG:
             "dc_numer": mx.stack(dc_cols, axis=1),  # (n_channels, n_models)
             "ll": block_ll,
         }
+        if self.do_newton:
+            updates["dsigma2_numer"] = mx.stack(dsigma2_mods)  # (n_models, n_ch)
+            updates["dkappa_numer"] = mx.stack(dkappa_mods)  # (n_models, n_mix, n_ch)
+            updates["dlambda_numer"] = mx.stack(dlambda_mods)  # (n_models, n_mix, n_ch)
+        return updates
 
     def _accumulate_blocks(self, X: mx.array) -> dict:
         """Sum sufficient statistics over all blocks as one lazy graph (no
@@ -597,9 +688,93 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     # M-step
     # ------------------------------------------------------------------
+    def _finalize_newton_stats(self, acc: dict):
+        """Reduce the Newton block accumulators into ``(sigma2, lambda_, kappa)``
+        (AMICATorchNG._finalize_newton_stats, core.py:1307-1331; Fortran
+        amica15.f90:1666-1680).
+
+        The Fortran ``baralpha``/``dkappa_denom``/``dlambda_denom``
+        responsibility masses all cancel algebraically against the per-mixture
+        ``dalpha`` weighting, leaving (with ``dgm = sum_t v_h`` the raw model
+        mass):
+
+            sigma2[h,i] = dsigma2_numer[h,i] / dgm[h]
+            kappa[h,i]  = sum_j dkappa_numer[h,j,i] / dgm[h]
+            lambda[h,i] = sum_j (dlambda_numer[h,j,i]
+                                 + dkappa_numer[h,j,i] * mu[j,comp(i,h)]^2) / dgm[h]
+
+        MUST be called with the PRE-update ``mu``: lambda folds ``mu^2`` in, and
+        Fortran does that during E-step accumulation, before the M-step moves mu
+        (see the call site in :meth:`_update_parameters`).
+
+        ``dgm`` is ``(n_models,)`` and everything else is model-major, so the
+        model mass broadcasts on axis 0 (``dgm[:, None]``). Getting that axis
+        wrong is the NumPy backend's issue #267 crash -- there the layout is
+        model-MINOR, so the same reduction needs ``dgm[None, :]``.
+
+        Returns ``(sigma2, lambda_, kappa)``, each ``(n_models, n_channels)``.
+        """
+        assert self.mu is not None and self.comp_list is not None
+        dgm = acc["dgm"][:, None]  # (n_models, 1)
+        sigma2 = acc["dsigma2_numer"] / dgm
+        kappa = acc["dkappa_numer"].sum(axis=1) / dgm
+        # mu at each source's component: mu[j, comp_list[i,h]]. MLX 2-D advanced
+        # indexing matches NumPy's, giving (n_mix, n_ch, n_models); transpose to
+        # the model-major layout the accumulators use.
+        mu_at = self.mu[:, self.comp_list].transpose(2, 0, 1)
+        lambda_ = (acc["dlambda_numer"] + acc["dkappa_numer"] * mu_at**2).sum(
+            axis=1
+        ) / dgm
+        return sigma2, lambda_, kappa
+
+    def _newton_direction(self, dA_h, sigma2_h, lambda_h, kappa_h):
+        """Per-model Newton direction ``H`` from the natural gradient ``dA_h``
+        (AMICATorchNG._newton_direction, core.py:1333-1361).
+
+        Vectorized port of the per-source-pair 2x2 solve (Fortran
+        amica15.f90:1718-1741):
+
+            H[i,i] = dA_h[i,i] / lambda[i]
+            sk1 = sigma2[i]*kappa[k];  sk2 = sigma2[k]*kappa[i]   (i != k)
+            H[i,k] = (sk1*dA_h[i,k] - dA_h[k,i]) / (sk1*sk2 - 1)  if sk1*sk2 > 1
+
+        Closed form, so this needs no linear algebra and stays on the GPU stream
+        (unlike ``inv``/``slogdet``, which MLX runs CPU-only). The ``prod > 1.0``
+        test and the ``diagonal(dA_h)/lambda_h`` divide are deliberately raw --
+        no epsilon margin, no guard -- matching the PyTorch and NumPy backends;
+        a non-finite result is contained downstream by the ``nan_params`` abort
+        in :meth:`fit` and by the masked ``ndtmpsum`` reduction.
+
+        Returns ``(H, posdef)``. ``posdef`` is False if any off-diagonal pair
+        fails ``sk1*sk2 > 1`` (the positive-definiteness guard); the caller then
+        falls back to the natural gradient for this model. Reading it costs one
+        host sync of a scalar per Newton iteration per model -- accepted (it
+        selects the lrate ramp target and drives the fallback counter, neither of
+        which can stay on the device), alongside the M-step's existing
+        dead-model and rho-NaN scalar syncs.
+        """
+        n = self.n_channels
+        sk1 = sigma2_h[:, None] * kappa_h[None, :]  # [i,k] = sigma2[i]*kappa[k]
+        sk2 = sigma2_h[None, :] * kappa_h[:, None]  # [i,k] = sigma2[k]*kappa[i]
+        prod = sk1 * sk2
+        valid = prod > 1.0
+        denom = mx.where(valid, prod - 1.0, mx.ones_like(prod))
+        h_off = (sk1 * dA_h - dA_h.T) / denom
+        H = mx.where(valid, h_off, mx.zeros_like(h_off))
+        # Diagonal overrides (uses lambda, not the off-diagonal formula).
+        diag = mx.diagonal(dA_h) / lambda_h
+        H = H - mx.diag(mx.diagonal(H)) + mx.diag(diag)
+        # Positive-definite iff every OFF-diagonal pair passed the guard. MLX has
+        # no boolean-mask indexing (torch's ``valid[offdiag].all()``), so force
+        # the diagonal True instead -- same reduction, no gather.
+        eye_bool = mx.eye(n, dtype=mx.bool_)
+        posdef = bool(mx.all(mx.logical_or(valid, eye_bool)).item())
+        return H, posdef
+
     def _update_parameters(self, acc: dict, n_samples: int):
-        """Exact-EM mixture updates + natural-gradient A-update (non-Newton subset
-        of AMICATorchNG._update_parameters, core.py:1363-1616)."""
+        """Exact-EM mixture updates + natural-gradient A-update, optionally
+        Newton-preconditioned (AMICATorchNG._update_parameters,
+        core.py:1363-1616)."""
         # Fortran builds dAk from the PREVIOUS iteration's model weights: gm is
         # not reassigned until update_params (amica15.f90:1788+), after the
         # dAk/zeta accumulation in accum_updates_and_likelihood (:1749-1761).
@@ -650,6 +825,18 @@ class AMICAMLXNG:
             acc["dalpha_n"] / acc["dalpha_n"].sum(axis=0, keepdims=True),
             self.alpha,
         )
+
+        # Finalize the Newton curvature with the PRE-update mu. Fortran folds the
+        # mu^2 term into lambda during E-step accumulation, before the M-step
+        # moves mu (amica15.f90:1666-1680); doing it here -- between the alpha
+        # update and the mu reassignment below -- is what reproduces that. Move
+        # it one line later and lambda silently uses the updated mu: no error, no
+        # NaN, just a subtly wrong Hessian (the torch backend's issue #24 bug,
+        # pinned there and here by test_newton_finalize_uses_preupdate_mu).
+        newton_active = self.do_newton and self.iteration >= self.newt_start
+        if newton_active:
+            sigma2, lambda_, kappa = self._finalize_newton_stats(acc)
+
         self.mu = mx.where(used, self.mu + acc["dmu_n"] / acc["dmu_d"], self.mu)
         self.beta = mx.where(
             used,
@@ -668,11 +855,15 @@ class AMICAMLXNG:
         # poison the lgamma table and every subsequent E-step.
         # Deliberate divergence from AMICATorchNG (core.py:1483-1487), which also
         # skips the update when rho is pinned to a boundary (all 1.0 or all 2.0):
-        # that early-exit needs a host sync on rho every iteration, which would
-        # break this backend's one-mx.eval-per-iteration lazy graph. mx.clip
-        # clamps straight back to the boundary, so the results are identical --
-        # the only cost is wasted work in a configuration MLX cannot even reach
-        # today (pdftype != 0 is rejected, so rho starts at rho0 and adapts).
+        # that early-exit needs a host sync on a (n_mix, n_comps) reduction over
+        # rho every iteration. This backend does make a few scalar host syncs per
+        # iteration -- the dead-model check above, the rho-NaN canary below, and
+        # the Newton posdef flag -- each because a Python branch genuinely
+        # depends on the value; the rho-boundary exit is not one of those, since
+        # mx.clip clamps straight back to the boundary and the results are
+        # identical either way. So it would buy nothing but a sync, in a
+        # configuration MLX cannot even reach today (pdftype != 0 is rejected, so
+        # rho starts at rho0 and adapts).
         if self.dorho:
             drho = acc["drho_n"] / mx.maximum(acc["dalpha_n"], 1e-8)
             rho_np = np.array(self.rho, dtype=np.float64)
@@ -717,10 +908,29 @@ class AMICAMLXNG:
         # conditional (issue #207: the grad-norm stop must see the true gradient
         # magnitude every iteration, not only when A moves). _a_frozen() is
         # always False with sharing off, so the default path is unchanged.
+        # Newton only swaps out the per-model DIRECTION; the dAk/zeta scatter,
+        # the gradient norm and the freeze structure below are untouched by it
+        # (AMICATorchNG core.py:1531-1545). A model whose curvature fails the
+        # positive-definiteness guard falls back to its natural gradient for this
+        # iteration, and -- as in Fortran -- ANY model falling back also sends
+        # the lrate ramp to lrate_cap instead of newtrate.
         eye = mx.eye(self.n_channels)
-        directions = [
-            -acc["dWtmp"][h] / acc["dgm"][h] + eye for h in range(self.n_models)
-        ]
+        directions = []
+        no_newt = False
+        for h in range(self.n_models):
+            dA_h = -acc["dWtmp"][h] / acc["dgm"][h] + eye  # I - <g b^T>/dgm
+            if newton_active:
+                H, posdef = self._newton_direction(
+                    dA_h, sigma2[h], lambda_[h], kappa[h]
+                )
+                if posdef:
+                    directions.append(H)
+                else:
+                    no_newt = True
+                    directions.append(dA_h)  # fall back to natural gradient
+            else:
+                directions.append(dA_h)
+
         assert self.A is not None and self.comp_list is not None
         dAk = mx.zeros_like(self.A)
         zeta = mx.zeros((self.n_comps,), dtype=mx.float32)
@@ -756,12 +966,31 @@ class AMICAMLXNG:
         )
 
         # A-update. When sharing holds A this iteration (the post-merge settle
-        # window, Fortran amica15.f90:1803), skip the step -- the lrate ramp and
-        # the step itself.
+        # window, Fortran amica15.f90:1803), skip the step -- the lrate ramp, the
+        # Newton-fallback bookkeeping, and the step itself -- so a discarded
+        # Newton direction cannot pollute the fallback counter.
         if not self._a_frozen():
-            self.lrate = min(
-                self.lrate_cap, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
-            )
+            if newton_active and no_newt:
+                # Fortran prints "Hessian not positive definite, using natural
+                # gradient" (amica15.f90:1809-1811). Surface the same signal so
+                # an all-fallback run is visible without re-instrumenting.
+                self.n_newton_fallbacks += 1
+                logger.warning(
+                    "Newton not positive definite at iter %d; using natural gradient.",
+                    self.iteration,
+                )
+
+            # Learning-rate ramp: toward newtrate while Newton is active and
+            # stable, otherwise toward lrate_cap (Fortran amica15.f90:1803-1816).
+            if newton_active and not no_newt:
+                self.lrate = min(
+                    self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
+                )
+            else:
+                self.lrate = min(
+                    self.lrate_cap, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
+                )
+
             self.A = self.A - self.lrate * dAk
 
         if self.doscaling and (self.iteration % self.scalestep == 0):
@@ -1003,6 +1232,7 @@ class AMICAMLXNG:
                 self.gm,
                 self.c,
                 self._nd_arr,
+                self._logdet_W,
             )
 
             # Surface a corrupted M-step (component collapse / float32 overflow)
@@ -1024,6 +1254,25 @@ class AMICAMLXNG:
                 "gm": self.gm,
                 "c": self.c,
                 "ndtmpsum": self._nd_arr,
+                # W and its log-determinant are DERIVED from A by
+                # mx.linalg.inv/slogdet, so a non-finite value can reach the
+                # caller while A itself is still finite -- and nothing else
+                # would catch it on the LAST iteration, where there is no next
+                # E-step to turn it into a nan_ll stop. The fit would then
+                # return stop_reason="max_iter" with a healthy-looking final_ll_
+                # (computed from the PREVIOUS iteration's W) and a silently
+                # non-finite unmixing matrix, which is precisely the outcome
+                # this guard exists to prevent. Verified by injection: with
+                # W/_logdet_W excluded, that state passes every other entry
+                # here.
+                #
+                # Defense in depth rather than a route known to be reachable:
+                # the obvious candidate, a near-singular A whose inverse
+                # overflows float32, is NOT reachable, because MLX's LU rejects
+                # such an A first (see _update_unmixing_matrices). Cheap enough
+                # to keep regardless -- both are already materialized above.
+                "W": self.W,
+                "logdet_W": self._logdet_W,
             }
             params_finite = mx.array(True)
             for value in checked.values():
@@ -1129,6 +1378,13 @@ class AMICAMLXNG:
                         self.lrate_cap *= self.lratefact
                         if it > self.newt_start:
                             self.rholrate *= self.rholratefact
+                        if self.do_newton and it > self.newt_start:
+                            # The Newton ceiling ratchets on the same maxdecs
+                            # cadence as lrate_cap/rholrate (Fortran
+                            # amica15.f90:1056-1077), so a run that keeps
+                            # overshooting at newtrate anneals instead of
+                            # oscillating there.
+                            self.newtrate *= self.lratefact
                         numdecs = 0
 
             # Small-likelihood-increase stop (Fortran amica15.f90:1078-1090,
@@ -1171,6 +1427,14 @@ class AMICAMLXNG:
                 )
                 self.stop_reason = "grad_norm"
                 leave = True
+
+            # Switching Newton on changes the step direction, so the decrease
+            # counter accumulated during the natural-gradient phase no longer
+            # describes the schedule now running: Fortran clears it on the
+            # switch-on iteration (amica15.f90:1099-1102, AMICATorchNG
+            # core.py:2218-2219).
+            if self.do_newton and it == self.newt_start:
+                numdecs = 0
 
             if leave:
                 break

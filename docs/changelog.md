@@ -5,6 +5,30 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **The MLX backend now supports Newton** (issue #264). `AMICAMLXNG` takes
+  `do_newton`/`newt_start`/`newtrate`/`newt_ramp` with `AMICATorchNG`'s names,
+  defaults and semantics: the same curvature accumulators, the same
+  per-source-pair 2x2 solve behind the same unguarded `prod > 1`
+  positive-definiteness test, the same learning-rate ramp to `newtrate` (and to
+  `lrate_cap` on a fallback), the same `maxdecs` ratchets, and the same
+  `n_newton_fallbacks` counter. It runs entirely in float32, which was
+  pre-registered as a go/no-go rather than assumed: on the bundled sample the
+  finalized curvature matches a float64 PyTorch twin to 4e-7 relative, one
+  warmed Newton M-step moves `A` to within 2.4e-7 of the twin's, a matched
+  100-iteration fit reaches -3.41149 against float64's -3.41149, and the
+  positive-definiteness guard never comes within 1.9 of its boundary across six
+  full-data fits (zero fallbacks, monotone likelihood). Evidence and the gate
+  script: `.context/issue-264/`. `do_newton` is off by default and every
+  accumulator it needs is gated on it, so natural-gradient fits — including
+  multi-model and `share_comps` ones — are bit-identical to before.
+- **Multi-model Newton no longer crashes on the NumPy backend** (issue #267).
+  `numpy_impl` finalized the curvature by dividing its `(data_dim, num_models)`
+  accumulators by `dgm[:, None]`, a `(num_models, 1)` model mass that broadcasts
+  only for one model, so every multi-model Newton fit raised `ValueError:
+  operands could not be broadcast together` on the first iteration Newton was
+  active. The issue reported it from a `share_comps` collapse, but it needed no
+  sharing at all. Now `dgm[None, :]`, matching the PyTorch backend's
+  `dgm.unsqueeze(0)`. Single-model fits are unaffected.
 - **The MLX backend now supports component sharing** (issue #263). `AMICAMLXNG`
   takes `share_comps`/`share_start`/`share_iter`/`comp_thresh` with
   `AMICATorchNG`'s names, defaults and validation, runs the same merge schedule

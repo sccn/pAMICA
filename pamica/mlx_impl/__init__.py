@@ -9,8 +9,10 @@ The backend (:class:`AMICAMLXNG`) runs the natural-gradient EM E/M-step on the
 Apple GPU in float32 (Apple GPUs have no FP64), with the small per-iteration
 linear algebra on MLX's CPU stream (issues #76/#81, epic #74 Phase C/D). It
 supports single- and multi-model, generalized-Gaussian (``pdftype=0``), natural
-gradient and component sharing (``share_comps``, issue #263); Newton, the other
-PDF families, outlier rejection and save/load remain fast-follows.
+gradient, component sharing (``share_comps``, issue #263) and the Newton
+preconditioner (``do_newton``, issue #264 -- float32 throughout, validated
+against a float64 PyTorch twin); the other PDF families, outlier rejection and
+save/load remain fast-follows.
 """
 
 from .core import AMICAMLXNG
