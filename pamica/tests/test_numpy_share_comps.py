@@ -517,6 +517,34 @@ def test_forced_merge_fit_is_finite_in_both_backends():
         assert tensor is not None and bool(torch.isfinite(tensor).all()), name
 
 
+def test_merge_on_the_final_iteration_completes():
+    """A merge scheduled on the LAST iteration must still leave a usable model.
+
+    The schedule hook runs after this iteration's likelihood is stored
+    (Fortran runs identify_shared_comps after accum_updates_and_likelihood,
+    amica15.f90:1856), so ``self.ll[-1]`` deliberately describes the state
+    BEFORE this merge -- the merged model is never scored. That is faithful to
+    the reference and matches AMICATorchNG/AMICAMLXNG (mirrors
+    tests/torch_tests/test_ng_sharing.py and
+    tests/mlx_tests/test_mlx_sharing.py::test_merge_on_the_final_iteration_completes);
+    issue #269 tracks documenting it across backends. Here it is pinned as
+    behavior: the fit completes, the merge survives on the returned model, and
+    the reported LL is finite.
+    """
+    model = _shared_fit(
+        max_iter=10,
+        share_start=10,
+        share_int=100,  # only one merge attempt, on the final iteration
+        comp_thresh=0.9,
+    )
+    assert len(model.ll) == 10  # the merge did not truncate the run
+    assert model.comp_used is not None and int(model.comp_used.sum()) < model.num_comps
+    assert model.converged is True
+    assert np.isfinite(model.ll[-1])
+    for name in ("A", "mu", "beta", "gm", "alpha", "rho"):
+        assert np.all(np.isfinite(np.asarray(getattr(model, name)))), name
+
+
 # --- sensor-space sharing similarity (issue #258) ----------------------------
 def test_numpy_merge_decision_matches_torch_backend():
     """Acceptance test: from one matched fitted state, the two backends reach

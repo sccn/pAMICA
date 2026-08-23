@@ -351,6 +351,40 @@ def _assert_share_result_consistent(ng: AMICATorchNG) -> None:
         assert len(groups) == ng.n_comps - used
 
 
+def test_merge_on_the_final_iteration_completes(real_data):
+    """A merge scheduled on the LAST iteration must still leave a usable model.
+
+    The schedule hook runs after the iteration's likelihood has been recorded
+    (Fortran runs identify_shared_comps after accum_updates_and_likelihood,
+    amica15.f90:1856), so ``final_ll_`` deliberately describes the state BEFORE
+    this merge -- the merged model is never scored. That is faithful to the
+    reference and matches AMICAMLXNG (mirrors
+    tests/mlx_tests/test_mlx_sharing.py::test_merge_on_the_final_iteration_completes),
+    but it is a real trap for a caller comparing ``final_ll_`` against
+    ``comp_used``; issue #269 tracks documenting it across backends. Here it is
+    pinned as behavior: the fit completes, the merge survives on the returned
+    model, and the reported LL is finite. keep_best is disabled under
+    share_comps (see fit()'s docstring), so this is not a keep_best artifact.
+    """
+    ng = AMICATorchNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=3,
+        device="cpu",
+        block_size=1024,
+        seed=3,
+        share_comps=True,
+        share_start=10,
+        share_iter=100,  # only one merge attempt, on the final iteration
+        comp_thresh=0.9,
+    )
+    ng.fit(real_data[:, :4096], max_iter=10, verbose=False)
+
+    assert len(ng.ll_history) == 10  # the merge did not truncate the run
+    assert ng.comp_used is not None and int(ng.comp_used.sum()) < ng.n_comps
+    _assert_share_result_consistent(ng)
+
+
 # --- rank-reduced sharing (issue #253, MEG report in #221) -------------------
 
 
