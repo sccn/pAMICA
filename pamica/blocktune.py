@@ -39,6 +39,12 @@ any ``block_size`` change produces. It is off by default for that reason, and a
 run being compared bit-for-bit against the reference binary must pin
 ``block_size`` and leave ``do_opt_block`` off. See
 ``docs/guides/amica-differences.md``.
+
+It also is not free: the sweep costs ``REPEATS * len(candidates)`` accumulate
+passes, i.e. about 16 EM iterations' worth under the defaults (measured at 0.54 s
+on torch-CPU and 2.8 s on NumPy for the bundled 32-channel sample). That pays for
+itself over a normal multi-hundred-iteration fit and does not over a very short
+one, which is the other half of why this is opt-in.
 """
 
 from __future__ import annotations
@@ -66,6 +72,16 @@ DEFAULT_BLK_STEP = 4096
 # anything else sharing the device, and being wrong in the low direction only
 # costs throughput while being wrong in the high direction costs the fit.
 MEMORY_BUDGET_FRACTION = 0.25
+
+# Timed passes per candidate; each candidate is scored on its fastest one.
+# 2 rather than 1 because the first pass at a given block size pays costs that
+# belong to no candidate in particular -- on Metal a new block shape triggers
+# shader compilation, which inflated single measurements 4x on an M4 Pro and
+# made a cold search pick a block size a warm search beat by 1.4x. 2 rather
+# than more because the whole search costs `2 * len(candidates)` passes, which
+# has to stay small against the fit it is tuning (16 passes against the 100+
+# EM iterations of any real run).
+REPEATS = 2
 
 # Live ``(block, n_channels, n_mix)``-shaped tensors at the peak of one block's
 # E/M pass, over and above the three (``y``, ``z``, ``|y|^rho``) each model
@@ -207,6 +223,7 @@ def tune_block_size(
     candidates: Sequence[int],
     *,
     fallback: int,
+    repeats: int = REPEATS,
     log: Optional[logging.Logger] = None,
 ) -> int:
     """Time each candidate with ``probe`` and return the fastest that ran.
@@ -215,6 +232,14 @@ def tune_block_size(
     returns its elapsed seconds. It must leave no state behind: the timed
     passes are throwaway work, and the fit that follows has to be bit-identical
     to one started directly at the chosen size.
+
+    Each candidate is probed ``repeats`` times and scored on its *fastest*
+    pass. One pass each is not enough: the first pass at a given block size
+    pays one-off costs that belong to no candidate in particular -- most
+    sharply on Metal, where a new block shape triggers shader compilation and
+    can inflate a single measurement several-fold. Taking the minimum discards
+    that, at the cost of ``repeats`` passes per candidate; see
+    :data:`REPEATS`.
 
     The sweep walks ``candidates`` in ascending order so a working size is
     always in hand before a larger one is attempted. On an allocation failure
@@ -231,24 +256,8 @@ def tune_block_size(
     log = log or logger
     if not candidates:
         raise ValueError("candidates must not be empty")
-
-    # One discarded warm-up pass at the smallest candidate. The first pass on a
-    # device pays one-off costs (kernel compilation, allocator growth, thread
-    # pool spin-up) that would otherwise be charged entirely to whichever
-    # candidate happens to run first, biasing the choice against it.
-    try:
-        probe(candidates[0])
-    except Exception as exc:
-        if not is_allocation_failure(exc):
-            raise
-        log.warning(
-            "Block-size search: the smallest candidate (%d) could not allocate "
-            "(%s); keeping block_size=%d.",
-            candidates[0],
-            type(exc).__name__,
-            fallback,
-        )
-        return fallback
+    if repeats < 1:
+        raise ValueError(f"repeats must be >= 1, got {repeats}")
 
     timings: Dict[int, float] = {}
     best_size = fallback
@@ -257,7 +266,7 @@ def tune_block_size(
 
     for size in candidates:
         try:
-            elapsed = probe(size)
+            elapsed = min(probe(size) for _ in range(repeats))
         except Exception as exc:
             if not is_allocation_failure(exc):
                 raise

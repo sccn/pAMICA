@@ -220,21 +220,26 @@ def test_logs_the_choice_and_every_timing_at_info(caplog):
         assert str(size) in message
 
 
-def test_warms_up_before_timing_anything():
-    """The first pass on a device pays one-off costs (kernel compilation,
-    allocator growth, thread-pool spin-up). Without a discarded warm-up they
-    would all land on whichever candidate ran first and bias the choice against
-    it -- here the smallest candidate is charged 10x on its first call and must
-    still win."""
+def test_scores_each_candidate_on_its_fastest_pass():
+    """Every candidate's first pass pays a one-off cost that belongs to no
+    candidate in particular (on Metal, shader compilation for a new block
+    shape, measured at ~4x on an M4 Pro). Scoring on the minimum discards it.
+    Here the genuinely-faster size is charged 10x on its first touch and must
+    still win, which it cannot do if the first measurement is the one kept."""
     calls: list = []
 
     def probe(size: int) -> float:
         calls.append(size)
-        first_touch = calls.count(size) == 1
-        return (0.01 * 10) if first_touch else 0.01 if size == 4096 else 0.02
+        steady = 0.01 if size == 8192 else 0.02
+        return steady * 10 if calls.count(size) == 1 else steady
 
-    assert blocktune.tune_block_size(probe, [4096, 8192], fallback=512) == 4096
-    assert calls == [4096, 4096, 8192]  # warm-up, then one timed pass each
+    assert blocktune.tune_block_size(probe, [4096, 8192], fallback=512) == 8192
+    assert calls == [4096, 4096, 8192, 8192]  # REPEATS passes per candidate
+
+
+def test_repeats_must_be_at_least_one():
+    with pytest.raises(ValueError, match="repeats must be >= 1"):
+        blocktune.tune_block_size(lambda size: 0.0, [4096], fallback=512, repeats=0)
 
 
 def test_falls_back_to_last_working_size_on_allocation_failure(caplog):
@@ -321,8 +326,9 @@ def test_a_non_allocation_error_propagates():
         blocktune.tune_block_size(probe, [4096, 8192], fallback=512)
 
 
-def test_a_non_allocation_error_in_the_warmup_propagates():
-    """Same contract on the warm-up pass, which is the first thing that runs."""
+def test_a_non_allocation_error_stops_on_the_very_first_pass():
+    """Same contract on the first pass of the first candidate: nothing is
+    retried in the hope that the second attempt behaves."""
     calls: list = []
 
     def probe(size: int) -> float:

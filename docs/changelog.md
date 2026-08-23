@@ -18,7 +18,9 @@ Release notes are also published on the
   The tuner changes nothing about a fit beyond the block size itself -- the
   timed passes only read model state and consume no RNG, so a post-tune fit is
   bit-identical to one started directly at the chosen size, tested on every
-  backend.
+  backend. It is not free either -- two passes per candidate, about 16 EM
+  iterations' worth under the defaults -- which pays for itself over a normal
+  multi-hundred-iteration fit and not over a very short one.
   The point of porting it is the failure mode the reference gets wrong: Fortran's
   `determine_block_size` walks *upward* into larger blocks and calls
   `allocate_blocks` with no `stat=`, so a candidate that cannot be allocated

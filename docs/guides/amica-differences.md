@@ -296,6 +296,19 @@ include the shipped `block_size=8192`. A file that sets `blk_min`/`blk_max`/
 `blk_step` explicitly is honored as written, so a literal Fortran
 `input.param` means the same thing on both sides.
 
+The search is not free: it costs two accumulate passes per candidate, about 16
+EM iterations' worth under the defaults (0.54 s on torch-CPU, 2.8 s on NumPy for
+the bundled 32-channel sample). Two passes rather than one because the first
+pass at a given block size pays one-off costs that belong to no candidate — most
+sharply on Metal, where a new block shape triggers shader compilation and
+inflated single measurements about fourfold on an M4 Pro. The cost pays for
+itself across a normal multi-hundred-iteration fit and does not across a very
+short one, which is the other half of why this is opt-in. On the bundled
+32-channel sample the block-size curve is flat enough that the win is modest
+(torch-CPU picks 16384 for ~1.13x over the 8192 default; NumPy picks 16384 for
+~1.03x); the 16–60% gaps in the table above are on the configurations where the
+optimum sits far from 8192.
+
 The behavioral difference that motivated the port is what happens when a
 candidate does not fit in memory. The search walks *upward* into larger blocks,
 which is exactly where memory runs out, and Fortran's `determine_block_size`
