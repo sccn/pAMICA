@@ -94,15 +94,16 @@ one). Settings are matched to the other backends: `num_mix=3`, `pdftype=0`, `do_
 ## Build portability (gfortran, no MKL/AMD)
 
 `amica15.f90` targets Intel's toolchain (`ifort` + MKL), so a plain `gfortran` + LAPACK
-build needs three portability fixes. `build_amica.sh` applies them **without touching the
-tracked reference source** (it patches a build copy under `build/src/`):
+build needs two portability fixes. `build_amica.sh` applies them **without touching the
+tracked reference source** (it compiles a build copy under `build/src/`):
 
 1. **`-cpp`** so the source's `#ifdef MKL` guards resolve (MKL undefined -> the
    `include 'mkl_vml.f90'` is skipped and the non-MKL branch is used).
-2. **`random_seed` seed size** -- the source's size-2 seed array (sized for ifort) is
-   rejected by gfortran; the build copy uses a portable default seed. Only affects random
-   init, which was already clock-based (non-reproducible), so it is timing-neutral.
-3. **`vmath_shim.c`** provides `vrda_exp`/`vrda_log` (the non-MKL branch calls AMD LibM's
+   (A third fix, a `random_seed` patch for the old ifort-only size-2 seed array, became
+   obsolete when #235 made the source seed portably and deterministically itself --
+   `random_seed(size=nseed)` + an allocated `seedvec`, sccn/amica PR #54; the build
+   script now only verifies that portable seeding is present.)
+2. **`vmath_shim.c`** provides `vrda_exp`/`vrda_log` (the non-MKL branch calls AMD LibM's
    vector exp/log) as libm loops, so no vendor math library is needed. IEEE-accurate; a
    vendor SIMD math library could make the exp/log-heavy E-step somewhat faster, so treat
    this as a portable-baseline timing, not a max-tuned one.
