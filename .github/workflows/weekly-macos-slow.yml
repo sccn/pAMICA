@@ -24,7 +24,17 @@ name: Weekly macOS full suite (slow + Fortran parity)
 # Schedule-only (plus a manual workflow_dispatch escape hatch): this never
 # triggers on a push or pull_request, so it cannot block or slow a PR. A
 # failure here is a real finding (e.g. an Accelerate-vs-OpenBLAS divergence,
-# per #241's precedent) and should be reported, not papered over.
+# per #241's precedent) and should be reported, not papered over -- the last
+# step below opens (or comments on) a tracking issue on failure, because this
+# is the repo's only scheduled workflow and GitHub's default failure
+# notification (an email to whoever last edited the schedule) is otherwise
+# the only signal.
+#
+# GitHub disables a schedule trigger automatically after 60 days with no
+# repository activity (pushes/PRs), regardless of whether this workflow
+# itself ran. If Sunday runs stop appearing in the Actions tab, check
+# Actions -> this workflow -> "..." menu for a disabled banner and re-enable
+# it there (or `gh workflow enable weekly-macos-slow.yml`).
 on:
   schedule:
     # Sunday 06:00 UTC.
@@ -35,12 +45,18 @@ concurrency:
   group: weekly-macos-slow-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   full-suite-macos:
     name: Full suite incl. slow + Fortran parity (macOS 26, Apple Silicon)
     runs-on: macos-26
-    # Generous but bounded: full suite + two from-source native builds +
-    # slow/parity tests on a real (non--large) hosted runner.
+    # First estimate (full suite + two from-source native builds + slow/parity
+    # tests on a real, non--large hosted runner) -- generous but bounded.
+    # Revisit against the actual wall-clock once the first Sunday run (or a
+    # manual workflow_dispatch) has completed.
     timeout-minutes: 180
     env:
       PYTORCH_ENABLE_MPS_FALLBACK: "1"
@@ -92,3 +108,50 @@ jobs:
       # the same commit than the PR that landed it did.
       - name: pytest (full suite, including slow + Fortran-parity tests)
         run: uv run pytest -n auto --no-cov
+      # This is the repo's only scheduled workflow, so a failure here would
+      # otherwise surface only as an email to whoever last edited the cron
+      # schedule. Open a tracking issue instead (or comment on the existing
+      # one, so repeated Sunday failures do not spam a fresh issue every
+      # week) -- matching "a failure here is a real finding" in the header.
+      - name: Open or update failure-tracking issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "Weekly macOS slow run failed";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `The scheduled full-suite run (slow tests + Fortran parity, macOS) failed.`,
+              ``,
+              `Run: ${runUrl}`,
+              `Commit: ${context.sha}`,
+              `Trigger: ${context.eventName}`,
+              ``,
+              `This could be a real regression (e.g. an Accelerate-vs-OpenBLAS `,
+              `divergence, per issue #241's precedent) or CI infrastructure `,
+              `(a brew/native-build failure). See the run log for which step failed.`,
+            ].join("\n");
+
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100,
+            });
+            const match = existing.find((i) => i.title === title);
+
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+            }
