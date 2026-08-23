@@ -644,6 +644,45 @@ def test_multimodel_newton_fit_completes():
     assert len(hist) > m.newt_start, "Newton never switched on"
 
 
+def test_three_model_newton_mstep_and_fit_are_finite():
+    """3-model (n_models=3) Newton coverage (issue #272).
+
+    The curvature accumulators are indexed ``(n_models, n_channels)`` and the
+    direction/fallback loop iterates over models, so a 2-model fit cannot
+    distinguish a correct per-model index from a transposition error that
+    happens to still line up for exactly two models -- twin of
+    ``test_multimodel_newton_mstep_is_finite``/``test_multimodel_newton_fit_completes``
+    above, extended to a third model, and of
+    ``torch_tests/test_ng_backend.py::test_newton_three_model_finite_and_shaped``.
+    """
+    model, x_t = _model_at(warmup=3, n_models=3)
+    acc = model._accumulate_blocks(x_t)
+
+    sigma2, lambda_, kappa = model._finalize_newton_stats(acc)
+    for name, arr in (("sigma2", sigma2), ("lambda", lambda_), ("kappa", kappa)):
+        assert arr.shape == (3, NW), f"{name} shape {arr.shape}"
+        host = np.array(arr, dtype=np.float64)
+        assert np.all(np.isfinite(host)), f"{name} is not finite"
+        assert np.all(host > 0), f"{name} is not strictly positive"
+
+    model._update_parameters(acc, x_t.shape[1])
+    mx.eval(model.A, model.mu, model.alpha, model.beta, model.rho, model.gm, model.c)
+    for name in ("A", "mu", "alpha", "beta", "rho", "gm", "c"):
+        assert np.all(np.isfinite(np.array(getattr(model, name)))), name
+
+    m = AMICAMLXNG(
+        n_channels=NW, n_models=3, n_mix=NMIX, seed=SEED, do_newton=True, newt_start=5
+    )
+    m.fit(_load_real_data(8192), max_iter=40, verbose=False)
+
+    hist = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(hist))
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert np.all(np.isfinite(np.array(m.A)))
+    assert np.all(np.isfinite(np.array(m.W)))
+    assert len(hist) > m.newt_start, "Newton never switched on"
+
+
 # --- (i) sharing interplay --------------------------------------------------
 
 
