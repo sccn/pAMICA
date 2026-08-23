@@ -763,10 +763,10 @@ def test_newton_three_model_finite_and_shaped():
 
     ng.fit(data, max_iter=8, verbose=False)
     assert len(ng.ll_history) == 8, "the fit did not complete all iterations"
-    assert ng.stop_reason not in ("nan_ll", "singular_ll")
-    assert ng.c is not None
-    assert torch.all(torch.isfinite(ng.c))
-    assert ng.A is not None and torch.all(torch.isfinite(ng.A))
+    assert ng.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS
+    for name in ("A", "W", "mu", "alpha", "beta", "rho", "gm", "c"):
+        value = getattr(ng, name)
+        assert value is not None and torch.all(torch.isfinite(value)), name
     for h in range(3):
         assert np.all(np.isfinite(ng.get_unmixing_matrix(h)))
 
@@ -989,7 +989,7 @@ def test_multimodel_rejection_keeps_bias_c_finite():
         maxrej=2,
     )
     m.fit(data, max_iter=12, verbose=False)
-    if m.stop_reason in ("nan_ll", "singular_ll"):
+    if m.stop_reason in AMICATorchNG._DEGENERATE_STOP_REASONS:
         # A degenerate stop is acceptable (surfaced, not silent); nothing more
         # to assert -- the point is it did not silently return a NaN model.
         return
