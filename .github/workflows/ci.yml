@@ -5,9 +5,43 @@ name: CI
 # citation/archive metadata (CITATION.cff, .zenodo.json, LICENSE) -- none of
 # which affect the package. Spell-checking (typos.yml) and the paper PDF build
 # (draft-pdf.yml) have their own triggers, so prose is still checked.
+#
+# push runs on both `main` (release branch) and `dev` (integration branch, the
+# default branch): post-merge pushes to dev are what catch drift that only
+# shows up outside a PR's exact base -- e.g. issue #241, where a ~1e-6
+# trajectory shift moved a stopping iteration and only failed once the PR's
+# changes landed on dev.
+#
+# `concurrency` below keys on github.sha for push events but on github.ref for
+# pull_request events. For a PR, that keeps the original behavior: rapid pushes
+# to the same PR branch share one group, so an update cancels the older,
+# now-superseded run. For a push, every commit gets its OWN group instead --
+# pushes never cancel each other -- because each commit landing on main/dev
+# needs its own CI result (that is the entire point of adding the push trigger
+# above); a same-ref grouping there would let a later push cancel an earlier
+# commit's still-running, still-meaningful CI.
+#
+# Interaction with auto-bump-dev.yml/auto-tag.yml (PR #290 review): both bump
+# the version and push straight back to dev/main with a PAT (deliberately, so
+# the push re-triggers workflows -- see their own headers). Per-SHA grouping
+# means that bump push can never land in the same concurrency group as the
+# merge commit's run, so it cannot cancel it -- the failure mode this section
+# used to describe (a rapid follow-up push cancelling the real commit's run
+# and leaving the trivial bump commit as the one that gets tested) cannot
+# happen at all now. `lint`/`typecheck` below still skip when the push's head
+# commit is a bot bump (same author-email + message-prefix guard
+# auto-bump-dev.yml/auto-tag.yml use on themselves to avoid looping), and every
+# other job `needs` one of those two so the skip cascades to the whole run --
+# now purely to avoid spending compute on a run that would only re-verify
+# state the merge commit's own run already covered, not to prevent a
+# cancellation.
+#
+# The weekly full-suite run (slow tests + Fortran-parity, macOS) lives in its
+# own schedule-only workflow, .github/workflows/weekly-macos-slow.yml, so it
+# never gates a PR or a push here (issue #246).
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths-ignore:
       - "**.md"
       - "**.bib"
@@ -27,13 +61,23 @@ on:
       - "LICENSE"
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # push: per-SHA group (each push to main/dev gets its own run, never
+  # cancelled by a later push -- see the header comment above).
+  # pull_request: per-ref group, unchanged (a PR's older, superseded runs are
+  # still cancelled by a newer push to the same branch).
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
+    # Skip the workflow (see the header comment above) when the push's head
+    # commit is auto-bump-dev.yml's or auto-tag.yml's own bump-and-push --
+    # matches the guard those workflows already use on themselves.
+    if: |
+      github.event.head_commit.author.email != 'pamica-bot@users.noreply.github.com'
+      && !startsWith(github.event.head_commit.message, 'Bump version to')
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -49,6 +93,11 @@ jobs:
   typecheck:
     name: Type check (ty)
     runs-on: ubuntu-latest
+    # Same guard as lint above; every other job needs one of these two, so
+    # GitHub cascades the skip to the whole run for a bot bump push.
+    if: |
+      github.event.head_commit.author.email != 'pamica-bot@users.noreply.github.com'
+      && !startsWith(github.event.head_commit.message, 'Bump version to')
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -114,13 +163,19 @@ jobs:
           fail_ci_if_error: false
 
   # Apple Silicon coverage (issue #246). The Linux jobs above cannot exercise
-  # two things the project depends on:
+  # three things the project depends on:
   #   * pamica/tests/mlx_tests/ -- MLX is Apple-GPU only and is the recommended
   #     Apple backend (AGENTS.md), so it had never run in CI at all.
   #   * the Accelerate BLAS numerical path. Summation order differs from
   #     OpenBLAS enough to move a stopping iteration, which is how a broken
   #     assertion in test_ng_convergence.py stayed green on Linux through #241
   #     and failed immediately on macOS.
+  #   * pamica/tests/mne_tests/ (the AMICAICA/MNE wrapper, issue #139) --
+  #     previously exercised only by test-mne below, which is Linux/OpenBLAS
+  #     only. Installing --extra mne here runs the same suite against
+  #     Accelerate; per #241's precedent a real Accelerate-vs-OpenBLAS
+  #     divergence there is a genuine finding, not CI flakiness -- report it,
+  #     do not loosen the assertion to mask it.
   # macos-26 is the current arm64 image (macos-14/15 are also arm64; 14 is
   # deprecated). Standard runners are free and unmetered for public repos --
   # do not switch to a -large/-xlarge variant, which is billed even here.
@@ -141,7 +196,10 @@ jobs:
           enable-cache: true
       # --extra mlx is the whole point of this job: without it mlx_tests/
       # self-skips and the run adds nothing the Linux job did not already do.
-      - run: uv sync --extra mlx
+      # --extra mne (issue #246) makes pamica/tests/mne_tests/ (self-skipped
+      # via importorskip("mne") otherwise) run against Accelerate instead of
+      # only ever against Linux/OpenBLAS in test-mne below.
+      - run: uv sync --extra mlx --extra mne
       - name: Assert MLX sees an Apple GPU
         # mlx_tests/ is gated on BOTH an mlx import and
         # mx.default_device().type == gpu (test_mlx_backend.py:28-33). A hosted
@@ -167,12 +225,17 @@ jobs:
           echo "PAMICA_NATIVE_BINARY=$PWD/native/amica15_shim" >> "$GITHUB_ENV"
       # "not slow" matches the Linux job, but NOT for the Linux job's reason.
       # There it is because the slow tests need the macOS-only reference binary;
-      # here they are excluded purely for wall-clock (2000-iteration fits).
-      # Note the two that do shell out (test_ng_backend.py:1096,:1179) would
-      # work on this runner: they pass binary_path=None, which resolves via
-      # PAMICA_NATIVE_BINARY (native/resolver.py:112) -- set above -- so they
-      # would use the arm64 binary this job just built, never Rosetta. Enabling
-      # them would give CI its first Fortran parity coverage; tracked in #246.
+      # here they are excluded purely for wall-clock (2000-iteration fits) --
+      # this job still runs on every push/PR and stays fast. The tests that do
+      # shell out (e.g. test_ng_backend.py:1096,:1179) pass binary_path=None,
+      # which resolves via PAMICA_NATIVE_BINARY (native/resolver.py:112) --
+      # set above -- so they use the arm64 binary this job just built, never
+      # Rosetta; they just aren't run here because they are @pytest.mark.slow.
+      # The weekly schedule-only job (weekly-macos-slow.yml, issue #246) runs
+      # the full suite without this filter, giving CI its first Fortran
+      # parity + slow-test coverage, without slowing every PR down.
+      # pamica/tests/mne_tests/ is picked up here too (pytest.ini's testpaths
+      # covers all of pamica/tests) now that --extra mne is installed above.
       # --no-cov: the Linux job owns the coverage gate and the Codecov upload;
       # a second partial run would report a different total for the same commit.
       - name: pytest (excluding slow tests)
