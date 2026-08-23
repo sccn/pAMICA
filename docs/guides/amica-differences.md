@@ -124,7 +124,7 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | Feature | PyTorch | NumPy | MLX | Native Fortran |
 |---|---|---|---|---|
 | Newton | yes | yes | yes (float32) | yes |
-| PDF families | all five | all five | GG only | all five |
+| PDF families | all five | GG only | all five (float32) | all five |
 | Component sharing | yes | yes | yes | yes |
 | Outlier rejection | yes | yes | no | yes |
 | Precision | f64/f32 | f64 | f32 only | f64 |
@@ -135,9 +135,15 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | MIR diagnostic | yes | no | no | n/a |
 | Persistence | `state_dict` | EEGLAB `amicaout` | none | EEGLAB `amicaout` |
 
-Most MLX limitations fail loudly: a non-GG `pdftype` raises
-`NotImplementedError`, and every unsupported parameter is simply absent from the
-constructor, so passing it raises `TypeError`.
+The NumPy row's "GG only" corrects an earlier version of this table, which
+listed "all five": `AMICA_NumPy._compute_log_pdf` (its fit-path density
+function) has no `pdtype` parameter at all, so the legacy backend never
+implemented the non-GG families the PyTorch and MLX backends carry (issue
+#265).
+
+Most MLX limitations fail loudly: `transform` and every unsupported parameter
+(outlier rejection, save/load) are simply absent from the constructor or raise
+`NotImplementedError`, rather than silently downgrading.
 
 The convergence stops used to be the exception — MLX implemented neither, so a
 fit there always spent the whole iteration budget. Issue #248 closed that gap:
@@ -164,7 +170,7 @@ Row 8 of the "At a glance" table at the top of this page (merged-away columns
 frozen at their last finite value, not left NaN behind the mask) holds in MLX as
 well.
 
-Newton was the last of the three, closed by issue #264: `AMICAMLXNG` takes
+Newton was next, closed by issue #264: `AMICAMLXNG` takes
 `do_newton`/`newt_start`/`newtrate`/`newt_ramp` with the PyTorch backend's names,
 defaults and semantics, accumulates the same curvature statistics, applies the
 same per-source-pair 2x2 solve behind the same raw `prod > 1` guard, and counts
@@ -177,6 +183,31 @@ boundary. Evidence and the gate script are in `.context/issue-264/`. `newtrate`
 is a float32 ceiling like `lrate_cap`, so a Newton fit on MLX should be treated
 as ~7-significant-digit, not float64-parity — use the PyTorch backend for
 Fortran-parity runs, as the Precision row above already implies.
+
+The non-GG PDF families were the last of the four, closed by issue #265:
+`AMICAMLXNG` takes `pdftype`/`kurt_start`/`num_kurt`/`kurt_int` with the
+PyTorch backend's names, defaults and semantics — all five `amica15.f90`
+families (0 GG, 2 Gaussian, 3 logistic, 4 sub-Gaussian cosh+, and the
+`pdftype=1` extended-Infomax adaptive switcher between codes 1/4 by kurtosis
+sign) — and exposes `get_pdftype()`. `pdftype=0` stays byte-for-byte the
+pre-#265 implementation (the `_pdtype_h` `None` fast path adds zero graph
+nodes; verified by a before/after fit comparison on the bundled sample). The
+fixed families' `z0`/`fp` match the literal Fortran forms through MLX's
+float32 evaluation to 1e-6 (absolute, since code 4's `y - tanh(y)` cancels
+catastrophically near `y=0` in float32 — measured 100% relative error at
+`y=1e-4` — so the true parity claim is against the formula, not against a
+Taylor-stabilized substitute), and a matched-budget fit lands on the float64
+PyTorch likelihood to within 0.05 for every family. `self.dorho` (a flag, set
+to `pdftype == 0`) gates the `drho_n` accumulation and the per-iteration
+lgamma-table refresh here, skipping work AMICATorchNG always pays for a
+frozen non-GG `rho` (a deliberate MLX-only WORK divergence, not a numeric
+one) — its digamma pull is already gated behind the same flag, so that part
+is unchanged. Like `share_comps`'s merge metric, the switcher has no
+bit-exact oracle
+— the reference declares `do_choose_pdfs` (`pdftype=1`) but never accumulates
+the moments that would drive it — so it is behavior-validated on real EEG, and
+`share_comps` does NOT synchronize `pdtype` across a merged pair (see
+`shared_components()`'s docstring). Evidence is in `.context/issue-265/`.
 
 ## Component sharing on rank-reduced fits
 

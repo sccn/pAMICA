@@ -42,19 +42,19 @@ def _load_real_data() -> np.ndarray:
 
 def _fortran_z0(y: np.ndarray, code: int) -> np.ndarray:
     """Literal amica15.f90 log-density (alpha=beta=1, mu=0 so y=b)."""
-    if code == 2:  # Gaussian, :1314
+    if code == 2:  # Gaussian, :1333
         return -0.5 * y * y - _LSQ2PI
-    if code == 3:  # logistic, :1327
+    if code == 3:  # logistic, :1346
         return -2.0 * np.log(np.cosh(0.5 * y)) - _LOG4
-    if code == 4:  # sub-Gaussian cosh+, :1340
+    if code == 4:  # sub-Gaussian cosh+, :1359
         return -0.5 * y * y + np.log(np.cosh(y)) - _LNSUB
-    if code == 1:  # super-Gaussian cosh-, :1352
+    if code == 1:  # super-Gaussian cosh-, :1371
         return -0.5 * y * y - np.log(np.cosh(y)) - _LNSUP
     raise ValueError(code)
 
 
 def _fortran_fp(y: np.ndarray, code: int) -> np.ndarray:
-    """Literal amica15.f90 score (:1465-1472)."""
+    """Literal amica15.f90 score (:1467-1491)."""
     return {
         2: y,
         3: np.tanh(y / 2.0),

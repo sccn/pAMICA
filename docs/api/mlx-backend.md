@@ -3,7 +3,8 @@
 The optional Apple-Silicon GPU backend. It runs the natural-gradient EM E/M-step
 on the Apple GPU in float32 (Apple GPUs have no float64), with the small
 per-iteration linear algebra on MLX's CPU stream. It supports single- and
-multi-model generalized-Gaussian (`pdftype=0`) natural-gradient AMICA and is the
+multi-model natural-gradient AMICA across all five source-density families
+(`pdftype` 0-4, including the extended-Infomax adaptive switcher) and is the
 fastest option on Apple hardware; see [Backends & Devices](../guides/backends.md)
 for the performance comparison.
 

@@ -5,6 +5,40 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **The MLX backend now supports all five source-density families** (issue
+  #265, epic #260 Phase 4, porting the PyTorch backend's issue #26).
+  `AMICAMLXNG` takes `pdftype`/`kurt_start`/`num_kurt`/`kurt_int` with
+  `AMICATorchNG`'s names, defaults and semantics: the fixed families (2
+  Gaussian, 3 logistic, 4 sub-Gaussian cosh+, 1 super-Gaussian cosh-) via a
+  per-source `pdtype` dispatch in `_score`/`_log_pdf`, and the `pdftype=1`
+  extended-Infomax adaptive switcher between codes 1/4 by kurtosis sign on the
+  usual schedule, plus a new `get_pdftype()` accessor. `pdftype=0` (the
+  default) is byte-for-byte the pre-#265 implementation: the `_pdtype_h`
+  `None` fast path adds zero graph nodes, verified by an epic-tip-vs-new
+  before/after fit comparison (bit-identical `A`/`ll_history`, single- and
+  multi-model). The fixed families' `z0`/`fp` match the literal
+  `amica15.f90` forms through MLX's float32 evaluation to 1e-6
+  (`rtol=atol`), and a matched 100-iteration fit lands on the float64
+  PyTorch likelihood to within ~1e-7 for every family (four orders inside
+  the 0.05 gate). `rho` is frozen for every non-GG family
+  (`self.dorho = pdftype == 0`), which also skips the per-iteration
+  lgamma-table refresh here and the `drho_n` accumulation, which
+  `AMICATorchNG` still pays unconditionally in its `_get_block_updates` for
+  a frozen `rho` (its digamma pull is already gated behind the same
+  `self.dorho` flag, so that part is not a divergence -- a deliberate
+  MLX-only WORK divergence, not a numeric one). The
+  switcher accumulates its kurtosis moments in numpy float64 on the host
+  (an MLX-motivated mechanism difference, not a decision difference) and
+  has no bit-exact oracle -- the reference declares `do_choose_pdfs` but
+  never accumulates the moments that would drive it -- so it is
+  behavior-validated on real EEG, as ADR 0002 already scoped for the
+  PyTorch backend. `share_comps` does not synchronize `pdtype` across a
+  merged pair, documented on `shared_components()`. Corrected an inaccurate
+  cell in `docs/guides/amica-differences.md`'s backend table along the way:
+  the legacy NumPy backend's fit path (`_compute_log_pdf`) has no `pdtype`
+  parameter and only ever implemented the generalized-Gaussian family, not
+  "all five" as the table previously (incorrectly) claimed. Evidence:
+  `.context/issue-265/pdf_family_findings.md`.
 - **The MLX backend now supports Newton** (issue #264). `AMICAMLXNG` takes
   `do_newton`/`newt_start`/`newtrate`/`newt_ramp` with `AMICATorchNG`'s names,
   defaults and semantics: the same curvature accumulators, the same

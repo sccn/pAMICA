@@ -11,8 +11,6 @@ backend-vs-backend acceptance).
 
 from pathlib import Path
 
-from typing import Any
-
 import numpy as np
 import pytest
 
@@ -63,22 +61,26 @@ def _load_real_data() -> np.ndarray:
 
 
 def test_rejects_unsupported_config():
-    """The still-deferred configs fail loudly, not silently. Multi-model (issue
-    #81), component sharing (#263) and Newton (#264) ARE supported, so only the
-    non-GG PDF families are rejected now."""
+    """The boundary moved (issue #265): every non-GG ``pdftype`` used to raise
+    ``NotImplementedError`` here; now all five families (0/1/2/3/4) construct
+    and are honored, so this is the canary that the boundary moved rather than
+    silently vanishing. Multi-model (#81), component sharing (#263) and Newton
+    (#264) were already supported. What is still deferred -- ``transform``,
+    outlier rejection, save/load -- is exercised below and in
+    ``test_mlx_pdf_families_cross_backend.py``/``mlx_tests/test_mlx_pdf.py``."""
     from pamica.mlx_impl import AMICAMLXNG
 
-    kwarg_sets: list[dict[str, Any]] = [
-        {"pdftype": 2, "n_mix": NMIX},
-        {"pdftype": 1, "n_mix": NMIX},
-    ]
-    for kw in kwarg_sets:
-        with pytest.raises(NotImplementedError):
-            AMICAMLXNG(n_channels=NW, n_mix=kw.pop("n_mix", 1), **kw)
+    for pdftype, n_mix in [(0, NMIX), (2, NMIX), (3, NMIX), (4, 1), (1, 1)]:
+        m = AMICAMLXNG(n_channels=NW, n_mix=n_mix, pdftype=pdftype)
+        assert m.pdftype == pdftype
 
     # Newton is accepted and honored -- not silently downgraded to the natural
     # gradient, which is how the pre-#264 backend would have "supported" it.
     assert AMICAMLXNG(n_channels=NW, n_mix=NMIX, do_newton=True).do_newton is True
+
+    # transform is still a genuine, still-deferred boundary.
+    with pytest.raises(NotImplementedError):
+        AMICAMLXNG(n_channels=NW, n_mix=NMIX).transform(np.zeros((NW, 10)))
 
 
 def test_sufficient_stats_match_numpy_reference():
