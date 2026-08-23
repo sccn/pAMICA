@@ -51,55 +51,6 @@ def psifun(x):
     return special.digamma(x)
 
 
-def determine_block_size(data, min_size, max_size, step_size, num_threads=1):
-    """
-    Determine optimal block size for data processing through empirical testing.
-
-    This function tests different block sizes by performing representative matrix
-    operations and measuring execution time. The block size that results in the
-    fastest processing time is selected as optimal.
-
-    Parameters
-    ----------
-    data : ndarray
-        Input data array
-    min_size : int
-        Minimum block size to try
-    max_size : int
-        Maximum block size to try
-    step_size : int
-        Step size between block sizes to try
-    num_threads : int
-        Number of threads to use
-
-    Returns
-    -------
-    optimal_size : int
-        Optimal block size
-    """
-    import time
-
-    block_times = []
-    block_sizes = range(min_size, max_size + 1, step_size)
-
-    # Test each block size
-    for block_size in block_sizes:
-        start_time = time.time()
-
-        # Process one block
-        for start in range(0, data.shape[1], block_size):
-            end = min(start + block_size, data.shape[1])
-            X = data[:, start:end]
-
-            # Do some representative computation
-            _ = np.dot(X.T, X)
-
-        block_times.append(time.time() - start_time)
-
-    # Return block size with minimum processing time
-    return block_sizes[np.argmin(block_times)]
-
-
 def identify_shared_components(atil, comp_list, comp_thresh=0.99):
     """
     Identify components that are shared between different models, in sensor space.

@@ -79,10 +79,10 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from tqdm import tqdm
+from .. import blocktune
 from ..rank import MINEIG, MINEIG_REL, numerical_rank
 from .utils import (
     gammaln,
-    determine_block_size,
     identify_shared_components,
     get_unmixing_matrices,
 )
@@ -145,7 +145,18 @@ class AMICA:
         verbose : bool, default=False
             Whether to enable verbose output (will use per-line printing regardless of use_tqdm)
         **kwargs : dict
-            Override default parameters with these values
+            Override default parameters with these values.
+
+            ``do_opt_block`` (False), ``blk_min`` (4096), ``blk_max`` (32768),
+            ``blk_step`` (4096) carry AMICATorchNG's names, defaults and
+            semantics (issue #232): with ``do_opt_block`` on, ``fit`` times each
+            candidate block size on the real data and keeps the fastest instead
+            of using ``block_size`` as given. The choice is timing-based and so
+            machine-dependent, which is why it is off by default -- a run
+            compared against the reference binary must leave it off and pin
+            ``block_size``. Unlike Fortran, a candidate that cannot be
+            allocated is skipped rather than aborting the run. See
+            :mod:`pamica.blocktune`.
         """
         # Store progress bar settings
         self.use_tqdm = use_tqdm
@@ -204,11 +215,25 @@ class AMICA:
         self.invsigmin = params.get("invsigmin", 1e-4)
         self.do_history = params.get("do_history", False)
         self.histstep = params.get("histstep", 10)
-        self.do_opt_block = params.get("do_opt_block", True)
+        # Block-size search (issue #232). OFF by default, unlike Fortran, whose
+        # header default is .true.: the choice is timing-based and therefore
+        # machine-dependent, so a parity run has to be able to pin block_size.
+        # The sweep bounds are re-derived rather than copied from Fortran's
+        # 128-1024, which sits far below where any pamica backend peaks; the
+        # stepping stays Fortran's arithmetic range so a literal input.param
+        # means the same thing on both sides. See pamica/blocktune.py.
+        self.do_opt_block = params.get("do_opt_block", False)
         self.block_size = params.get("block_size", 8192)
-        self.blk_min = params.get("blk_min", 128)
-        self.blk_max = params.get("blk_max", 1024)
-        self.blk_step = params.get("blk_step", 128)
+        self.blk_min = params.get("blk_min", blocktune.DEFAULT_BLK_MIN)
+        self.blk_max = params.get("blk_max", blocktune.DEFAULT_BLK_MAX)
+        self.blk_step = params.get("blk_step", blocktune.DEFAULT_BLK_STEP)
+        if self.do_opt_block:
+            # Validated only when the search is on, matching do_reject and
+            # share_comps below: inert otherwise, and a Fortran input.param
+            # carrying these alongside do_opt_block=0 must stay loadable.
+            blocktune.validate_block_tune_params(
+                self.blk_min, self.blk_max, self.blk_step
+            )
         self.share_comps = params.get("share_comps", False)
         self.comp_thresh = params.get("comp_thresh", 0.99)
         self.share_start = params.get("share_start", 100)
@@ -544,12 +569,13 @@ class AMICA:
         # Initialize parameters
         self._initialize_parameters()
 
-        # Optimize block size if requested
+        # Block-size search (issue #232): after preprocessing and parameter
+        # initialization, before the first EM iteration, so it times the real
+        # data with the parameters the fit starts from. A no-op when off, and
+        # its probes leave no state behind, so a fit with the search off is
+        # byte-for-byte what it was before this existed.
         if self.do_opt_block:
-            self.block_size = determine_block_size(
-                self.data, self.blk_min, self.blk_max, self.blk_step
-            )
-            self.logger.info(f"Optimal block size: {self.block_size}")
+            self._tune_block_size()
 
         # Main optimization loop
         self._optimize()
@@ -910,6 +936,58 @@ class AMICA:
         if rho == 2.0:
             return 2.0 * y
         return rho * np.sign(y) * np.power(np.abs(y), rho - 1.0)
+
+    def _tune_block_size(self) -> None:
+        """Set ``self.block_size`` to the fastest timed candidate (issue #232).
+
+        The probe is one ``_get_updates_and_likelihood`` pass -- the same
+        E-step-plus-sufficient-statistics work every EM iteration does, so it
+        times what the fit will actually spend its time on. This replaces the
+        old ``determine_block_size`` helper, which timed a bare ``X.T @ X``
+        (not the shape of any work AMICA does) over Fortran's 128-1024 range
+        (far below where any pamica backend peaks) and had no fallback at all
+        when an allocation failed. See :mod:`pamica.blocktune`.
+
+        The pass reads model state and consumes no RNG; the one thing it does
+        write, ``_last_ll_samples`` under ``do_reject``, is restored here, so
+        the fit that follows is bit-identical to one started directly at the
+        chosen block size.
+        """
+        assert self.data is not None and self.data_dim is not None
+        saved_block_size = self.block_size
+        saved_ll_samples = self._last_ll_samples
+        n_samples = (
+            int(self.good_idx.size)
+            if self.do_reject and self.good_idx is not None
+            else int(self.data.shape[1])
+        )
+
+        def probe(size: int) -> float:
+            self.block_size = size
+            try:
+                start = time.perf_counter()
+                self._get_updates_and_likelihood()
+                return time.perf_counter() - start
+            finally:
+                # Never leave the model holding a candidate -- least of all one
+                # that just failed to allocate -- or a probe's throwaway state.
+                self.block_size = saved_block_size
+                self._last_ll_samples = saved_ll_samples
+
+        self.block_size = blocktune.search(
+            probe=probe,
+            fallback=saved_block_size,
+            blk_min=self.blk_min,
+            blk_max=self.blk_max,
+            blk_step=self.blk_step,
+            n_samples=n_samples,
+            n_channels=self.data_dim,
+            n_mix=self.num_mix,
+            n_models=self.num_models,
+            itemsize=self.data.dtype.itemsize,
+            available_bytes=blocktune.host_memory_bytes(),
+            log=self.logger,
+        )
 
     def _get_updates_and_likelihood(self) -> Dict:
         """
