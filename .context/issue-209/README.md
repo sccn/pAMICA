@@ -110,7 +110,16 @@ What to do with the numbers once they're in `precision_experiment_*.json`:
 
 3. **`implementation_correlation` + the `implementation=fortran` rows of `matched`** are the
    separated implementation contrast (same precision, f64, Fortran vs torch) the issue asks for
-   as a second, independent axis -- do not fold this back into the precision table.
+   as a second, independent axis -- do not fold this back into the precision table. Caveat: the
+   Fortran arm runs at `block_size` clamped to `frames // threads` (amica15 splits frames across
+   `max_threads` OpenMP segments before chunking by `block_size`, and a block that spans a
+   segment boundary silently produces an all-NaN fit -- see the script's `_fit_fortran`
+   comments), while the torch arm keeps the full requested `block_size`. On a many-core CUDA box
+   that clamp can land below the validated 512-8192 block-size range (`fortran_block_size` and
+   `threads` are recorded in every `implementation_correlation` row, and the run's printed
+   summary flags it explicitly), so an implementation gap at a given k could be a block-size
+   artifact rather than a genuine implementation difference -- check `fortran_block_size` before
+   attributing a low implementation-contrast correlation to Fortran-vs-torch behavior.
 
 4. **The k=30 "definitive" claim** at `docs/guides/validation.md:200-204` ("all agree at 1.000")
    was already a controlled comparison (both arms ran the full 2000 iterations) and is not
@@ -126,3 +135,8 @@ What to do with the numbers once they're in `precision_experiment_*.json`:
 
 Nothing above is a conclusion -- it is the mapping from "what number" to "what claim it
 replaces," to be filled in once the CUDA run's `precision_experiment_*.json` exists.
+
+### Other caveats worth keeping in mind
+
+- CUDA kernel non-determinism is not controlled here (no `torch.use_deterministic_algorithms`), so an anomalous single-seed dip should be checked against a re-run before being attributed to precision rather than run-to-run GPU noise.
+- Preprocessing (mean removal, sphering) always runs in float64 on CPU regardless of `--device`/precision (`AMICATorchNG._preprocess`'s own docstring), so the precision contrast is strictly about the EM iterations, not the initial sphere.
