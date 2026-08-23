@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Optional
 
 # mlx ships as a compiled extension with no type stubs, so ty cannot resolve
@@ -86,6 +87,7 @@ import mlx.core as mx  # ty: ignore[unresolved-import]
 import numpy as np
 from scipy.special import digamma, gammaln
 
+from .. import blocktune
 from ..numpy_impl.utils import identify_shared_components
 from ..rank import MINEIG, MINEIG_REL, numerical_rank
 
@@ -336,6 +338,26 @@ class AMICAMLXNG:
         reference's own switch is dead code (``do_choose_pdfs`` is set but
         ``m2sum``/``m4sum`` are never accumulated, amica15.f90:608-615) -- so
         this is behavior-validated on real data (ADR 0002).
+
+    The block-size search parameters (issue #232) likewise carry
+    AMICATorchNG's names, defaults and semantics:
+
+    ``do_opt_block`` (False)
+        Time candidate block sizes on the real data and GPU at the start of
+        ``fit`` and keep the fastest, instead of using ``block_size`` as given
+        (Fortran ``do_opt_block``). MLX is the least block-size-sensitive
+        backend measured (2.6x from 512 to a single block, against 32x for
+        PyTorch-MPS, issue #216), so there is less here to win than on the
+        other backends. The choice is timing-based and therefore
+        machine-dependent, so it is OFF by default and a run compared against
+        the reference binary must leave it off and pin ``block_size``.
+    ``blk_min`` (4096) / ``blk_max`` (32768) / ``blk_step`` (4096)
+        Candidate sweep, Fortran's arithmetic stepping, clamped to
+        ``n_samples`` and to a conservative estimate of what fits in the GPU's
+        recommended working set. A candidate MLX cannot allocate raises a
+        catchable ``RuntimeError`` (``[metal::malloc] ...`` -- not the process
+        abort MLX's LU takes on singular input, issue #274), so it is skipped
+        and the fit continues at the largest size that ran.
     """
 
     def __init__(
@@ -344,6 +366,10 @@ class AMICAMLXNG:
         n_models: int = 1,
         n_mix: int = 3,
         block_size: int = 8192,
+        do_opt_block: bool = False,
+        blk_min: int = blocktune.DEFAULT_BLK_MIN,
+        blk_max: int = blocktune.DEFAULT_BLK_MAX,
+        blk_step: int = blocktune.DEFAULT_BLK_STEP,
         lrate: float = 0.1,
         minlrate: float = 1e-12,
         lratefact: float = 0.5,
@@ -386,6 +412,15 @@ class AMICAMLXNG:
         self.n_mix = n_mix
         self.n_comps = n_channels * n_models
         self.block_size = block_size
+        self.do_opt_block = do_opt_block
+        self.blk_min = blk_min
+        self.blk_max = blk_max
+        self.blk_step = blk_step
+        if do_opt_block:
+            # Validated only when the search is on, matching share_comps and
+            # AMICATorchNG: inert otherwise, and a Fortran input.param carrying
+            # these alongside do_opt_block=0 must stay loadable (issue #232).
+            blocktune.validate_block_tune_params(blk_min, blk_max, blk_step)
 
         self.lrate0 = lrate
         self.lrate = lrate
@@ -935,6 +970,65 @@ class AMICAMLXNG:
                     acc[key] = acc[key] + block_acc[key]
         assert acc is not None
         return acc
+
+    @staticmethod
+    def _available_memory_bytes() -> Optional[int]:
+        """What the Apple GPU reports it can comfortably work with.
+
+        ``max_recommended_working_set_size`` rather than the raw memory size:
+        MLX will happily allocate past the recommended set and start paging,
+        which shows up as a mysteriously slow candidate rather than a failure,
+        so the cap is applied against the number the driver actually
+        recommends. ``None`` (no cap) if MLX cannot report it.
+        """
+        try:
+            info = mx.device_info()
+        except (AttributeError, RuntimeError):
+            return None
+        size = info.get("max_recommended_working_set_size") or info.get("memory_size")
+        return int(size) if size else None
+
+    def _tune_block_size(self, X: mx.array) -> None:
+        """Set ``self.block_size`` to the fastest timed candidate (issue #232).
+
+        The probe is one ``_accumulate_blocks`` pass, evaluated in full: MLX
+        builds a lazy graph, so without ``mx.eval`` over every accumulator the
+        clock would measure graph *construction* and pick the block size that
+        builds fastest rather than the one that runs fastest. The pass only
+        reads model state and consumes no RNG, and ``block_size`` is restored
+        around every probe, so the fit that follows is bit-identical to one
+        started directly at the chosen size.
+        """
+        saved = self.block_size
+
+        def probe(size: int) -> float:
+            self.block_size = size
+            try:
+                start = time.perf_counter()
+                acc = self._accumulate_blocks(X)
+                mx.eval(list(acc.values()))
+                return time.perf_counter() - start
+            finally:
+                # Never leave the model holding a candidate -- least of all one
+                # that just failed to allocate (issue #232).
+                self.block_size = saved
+
+        self.block_size = blocktune.search(
+            probe=probe,
+            fallback=saved,
+            blk_min=self.blk_min,
+            blk_max=self.blk_max,
+            blk_step=self.blk_step,
+            n_samples=int(X.shape[1]),
+            n_channels=self.n_channels,
+            n_mix=self.n_mix,
+            n_models=self.n_models,
+            # The MLX backend is float32 throughout (Apple GPUs have no
+            # float64); see the module docstring.
+            itemsize=4,
+            available_bytes=self._available_memory_bytes(),
+            log=logger,
+        )
 
     # ------------------------------------------------------------------
     # M-step
@@ -1558,6 +1652,15 @@ class AMICAMLXNG:
         self._initialize_parameters()
         self.ll_history = []
         self.stop_reason = "max_iter"
+
+        # Block-size search (issue #232): after preprocessing and parameter
+        # initialization, before the first EM iteration, so it times the real
+        # data on the real device with the parameters the fit starts from. A
+        # no-op when off, and its probes leave no state behind, so a fit with
+        # the search off is byte-for-byte what it was before this existed.
+        if self.do_opt_block:
+            self._tune_block_size(X_t)
+
         numdecs = 0
         # Consecutive-small-likelihood-gain counter for the min_dll stop (Fortran
         # numincs, amica15.f90:1079-1089). Reset here so a refit starts clean.
