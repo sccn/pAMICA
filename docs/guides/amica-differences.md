@@ -247,3 +247,27 @@ metrics disagree on whether that pair merges. A NumPy fit that shares
 components can therefore reach a different `comp_list` than it did before
 #258, even on a full-rank, well-conditioned sphere; only the `pinv`-vs-`inv`
 comparison two paragraphs above is unaffected by that swap.
+
+## `final_ll_` trails a final-iteration merge (issue #269)
+
+If a `share_comps` merge fires on the LAST fit iteration, the returned
+`A`/`W`/`comp_list` are already post-merge, but the reported log-likelihood
+(`final_ll_` in `AMICATorchNG`/`AMICAMLXNG`, `self.ll[-1]` in the NumPy
+backend) still reports the value computed under the PRE-merge `comp_list`.
+The merge's effect on the likelihood only shows up in the next iteration's
+E-step, which never runs.
+
+This is not a bug: it matches the reference ordering. `identify_shared_comps`
+runs after the iteration's likelihood has already been accumulated
+(amica15.f90:1856 vs the earlier LL accumulation), so Fortran has the same
+gap. All three backends share it by construction, and it is pinned as
+behavior rather than fixed (`test_merge_on_the_final_iteration_completes` in
+each of `tests/torch_tests/test_ng_sharing.py`,
+`tests/test_numpy_share_comps.py` and `tests/mlx_tests/test_mlx_sharing.py`).
+
+One interaction worth knowing: PyTorch's `keep_best` safeguard (row 3 above)
+is disabled whenever `share_comps` is on, precisely because a merge changes
+the parameter count mid-fit -- restoring an earlier snapshot would silently
+undo the merge. So under sharing, every backend returns the last iterate, and
+`final_ll_`/`self.ll[-1]` trailing a final-iteration merge is not a
+`keep_best` artifact; it happens the same way with `keep_best=False`.
