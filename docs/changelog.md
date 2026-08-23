@@ -5,6 +5,24 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **The MLX backend now supports component sharing** (issue #263). `AMICAMLXNG`
+  takes `share_comps`/`share_start`/`share_iter`/`comp_thresh` with
+  `AMICATorchNG`'s names, defaults and validation, runs the same merge schedule
+  and 6-iteration post-merge A-freeze, masks the mixture updates and the
+  gradient norm by `comp_used`, and exposes `comp_used` and
+  `shared_components()`. The merge decision is not reimplemented: it calls the
+  NumPy `identify_shared_components` kernel on host float64 `pinv(sphere) @ A`,
+  the metric the PyTorch and NumPy backends already share, so all three decide
+  identically from the same fitted state. Sharing is off by default and inert
+  for `n_models=1`; fits with it off are bit-identical to before.
+- **The MLX multi-model A-update now weights with the previous iteration's
+  `gm`** (issue #263, the twin of the PyTorch fix in #219). Fortran builds `dAk`
+  in the accumulation pass, before `update_params` reassigns `gm`
+  (amica15.f90:1749-1761, :1788); MLX used the just-updated `gm`. The weights
+  cancel exactly for a disjoint `comp_list`, so single-model and default
+  multi-model fits are unchanged; a fit that shares components moves its shared
+  columns differently (by ~1e-2 in `A` on the bundled sample) and now matches
+  the PyTorch backend to float32 precision.
 - **NumPy `share_comps` now measures similarity on de-sphered sensor-space
   maps, matching the PyTorch backend and the Fortran reference** (issue #258).
   `identify_shared_components` used to compare mixing columns directly in the
