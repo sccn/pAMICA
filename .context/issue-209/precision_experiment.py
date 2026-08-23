@@ -35,13 +35,22 @@ BOTH:
 
 Suppressing early stopping without patching AMICATorchNG (the open question
 in the issue thread): use_min_dll=False and use_grad_norm=False turn off the
-two standalone per-iteration stop checks; minlrate=0.0 and min_nd=-1.0 make
-the *unconditional* decrease-branch checks unreachable too (lrate stays > 0
-under repeated multiplicative decay; a vector norm is never < 0). All four
+two standalone per-iteration stop checks. Of the two unconditional
+decrease-branch checks, min_nd=-1.0 is genuinely unreachable (ndtmpsum is a
+vector norm, never negative). minlrate needed a NEGATIVE floor, not 0.0 (PR
+#291 review): lrate is float32 in the f32 arm, and lratefact=0.5 applied on
+every LL decrease underflows it to an exact 0.0 after ~147 consecutive
+decreases -- plausible within a 2000-6000 iteration budget -- at which point
+``lrate <= 0.0`` would itself fire lrate_floor mid-"matched" run, reproducing
+the exact confound #209 exists to kill. minlrate=-1.0 closes that gap: lrate
+is provably always >= 0, so ``<= a negative floor`` can never hold. All four
 are public AMICATorchNG constructor kwargs. The Fortran binary takes the
 mirror-image four param-file overrides (see ``_write_fortran_param``); amica15
-reads min_grad_norm with a fixed-decimal F15.12 field, so 0 there (not a
-negative literal) is the safe unreachable floor.
+is float64-only, so the same underflow is not a practical risk there, but
+minlrate uses the same -1.0 floor for consistency (its E15.3 field reads
+scientific notation cleanly), while min_grad_norm stays at 0 (already
+unreachable -- a vector norm is never negative -- and its fixed-decimal
+F15.12 field does not reliably round-trip a negative literal anyway).
 
 Usage (bundled 32-channel sample, CPU, small budget -- the local smoke check):
     uv run python .context/issue-209/precision_experiment.py \\
@@ -60,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -166,7 +176,14 @@ def _fit_torch(
     if matched:
         # See module docstring: this is the full suppression of every
         # AMICATorchNG early-stop path, using only public constructor kwargs.
-        kwargs.update(use_min_dll=False, use_grad_norm=False, minlrate=0.0, min_nd=-1.0)
+        # minlrate must be NEGATIVE, not 0: float32 lrate underflows to an
+        # exact 0.0 after ~147 consecutive LL-decrease halvings (well within
+        # budget), which would otherwise fire lrate_floor mid-run (PR #291
+        # review). min_nd=-1.0 is genuinely unreachable (a vector norm is
+        # never negative), so it did not need the same fix.
+        kwargs.update(
+            use_min_dll=False, use_grad_norm=False, minlrate=-1.0, min_nd=-1.0
+        )
     m = AMICATorchNG(**kwargs)
     if device == "cuda":
         torch.cuda.synchronize()
@@ -242,14 +259,15 @@ def _write_fortran_param(
     if matched:
         overrides["use_min_dll"] = "use_min_dll 0"
         overrides["use_grad_norm"] = "use_grad_norm 0"
-        # Format-field floor, not a negative literal: minlrate is read with an
-        # E15.3 field (scientific notation is fine) but min_grad_norm with a
-        # fixed-decimal F15.12 field, which does not reliably round-trip a
-        # negative value. 0 is already unreachable: lrate stays > 0 under
-        # repeated multiplicative decay and ndtmpsum (a vector norm) is never
-        # < 0, so ``<= 0`` requires an exact-zero hit, same reasoning as the
-        # torch side's minlrate=0.0/min_nd=-1.0.
-        overrides["minlrate"] = "minlrate 0.000e+00"
+        # minlrate needs a NEGATIVE floor, not 0 (PR #291 review): amica15 is
+        # float64-only, so lrate underflowing to an exact 0.0 is not a
+        # practical risk here the way it is on the torch f32 arm (see
+        # _fit_torch), but -1.0 costs nothing and keeps the two backends
+        # consistent -- the E15.3 field reads scientific notation cleanly.
+        # min_grad_norm stays at 0: ndtmpsum (a vector norm) is never
+        # negative, so 0 is already unreachable, and the fixed-decimal F15.12
+        # field does not reliably round-trip a negative literal anyway.
+        overrides["minlrate"] = "minlrate -1.000e+00"
         overrides["min_grad_norm"] = "min_grad_norm 0.000000000000"
     else:
         overrides["use_min_dll"] = "use_min_dll 1"
@@ -345,7 +363,15 @@ def _fit_fortran(
                 "reason": f"exit {res.returncode}: {res.stderr[-300:].strip()}",
             }
         out_txt = work / "run_out" / "out.txt"
-        text = out_txt.read_text(errors="replace") if out_txt.exists() else ""
+        out_text = out_txt.read_text(errors="replace") if out_txt.exists() else ""
+        # amica15.f90:1054 ("Got NaN! Exiting") and :1060 ("minimum change
+        # threshold met") print to STDOUT ONLY -- no write(20,...) twin --
+        # while the min_dll (:1083-1085) and grad_norm (:1094-1095) messages
+        # are written to both. Scanning out.txt alone therefore misses a
+        # NaN'd run entirely: it would parse as a clean "max_iter" stop with
+        # a NaN final_ll and a NaN W reaching _match_correlation (PR #291
+        # review). Scan both streams.
+        text = out_text + "\n" + res.stdout
         n_iters, final_ll, stop_reason = _parse_fortran_run(text, max_iter)
         w_path = work / "run_out" / "W"
         w = (
@@ -364,8 +390,13 @@ def _fit_fortran(
         # the frame count -- observed while smoke-testing this script at a
         # too-small k. Callers clamp block_size to <= frames precisely to
         # avoid this, but flag it defensively too: a real fit's LL on EEG data
-        # is never exactly 0.0.
-        "degenerate": stop_reason == "nan_ll" or final_ll == 0.0,
+        # is never exactly 0.0. math.isnan is a second, independent defense
+        # (PR #291 review): if the last-parsed LL is itself the literal text
+        # "NaN", degenerate must hold regardless of which message (if any)
+        # the stdout/out.txt scan above matched.
+        "degenerate": (
+            stop_reason == "nan_ll" or final_ll == 0.0 or math.isnan(final_ll)
+        ),
         "wall_s": elapsed,
         "W": w,
     }
@@ -374,7 +405,9 @@ def _fit_fortran(
 # --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
-def _config_header(args: argparse.Namespace, channels: int, source: str) -> dict:
+def _config_header(
+    args: argparse.Namespace, channels: int, source: str, threads: int
+) -> dict:
     import torch
 
     info: dict[str, Any] = {
@@ -390,6 +423,10 @@ def _config_header(args: argparse.Namespace, channels: int, source: str) -> dict
         "torch_version": torch.__version__,
         "platform": f"{platform.system()}-{platform.machine()}",
         "nproc": os.cpu_count(),
+        # The effective (fallback-resolved) Fortran thread count: drives
+        # OMP_NUM_THREADS and the per-thread block-size clamp below, whether
+        # or not the Fortran arm actually ran (PR #291 review).
+        "threads": threads,
     }
     if args.device == "cuda" and torch.cuda.is_available():
         info["cuda_device"] = torch.cuda.get_device_name(0)
@@ -547,7 +584,22 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
                         f"LL={r['final_ll']:.5f}  ({r['wall_s']:.1f}s)"
                     )
 
-                if not fits["f32"]["degenerate"] and not fits["f64"]["degenerate"]:
+                # Gate correlation/LL-gap aggregation on stop_reason ==
+                # "max_iter" IN ADDITION TO not-degenerate (PR #291 review):
+                # "not degenerate" alone only excludes a NaN'd/singular fit,
+                # not one that hit a genuine early stop despite the matched
+                # suppression (e.g. a not-yet-fully-closed gap in that
+                # suppression). Any such survivor is excluded rather than
+                # silently averaged into the reported numbers.
+                f32_clean = (
+                    not fits["f32"]["degenerate"]
+                    and fits["f32"]["stop_reason"] == "max_iter"
+                )
+                f64_clean = (
+                    not fits["f64"]["degenerate"]
+                    and fits["f64"]["stop_reason"] == "max_iter"
+                )
+                if f32_clean and f64_clean:
                     corr = _match_correlation(fits["f32"]["W"], fits["f64"]["W"])
                     precision_corr_rows.append(
                         {
@@ -600,7 +652,10 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
                             f"fortran-f64 stop={fr['stop_reason']:<10s} "
                             f"LL={fr['final_ll']:.5f}  ({fr['wall_s']:.1f}s)"
                         )
-                        if not fr["degenerate"] and not fits["f64"]["degenerate"]:
+                        fr_clean = (
+                            not fr["degenerate"] and fr["stop_reason"] == "max_iter"
+                        )
+                        if fr_clean and f64_clean:
                             corr = _match_correlation(fr["W"], fits["f64"]["W"])
                             implementation_corr_rows.append(
                                 {
@@ -613,6 +668,13 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
                                     "ll_gap_fortran_minus_torch": (
                                         fr["final_ll"] - fits["f64"]["final_ll"]
                                     ),
+                                    # Reported alongside implementation_correlation
+                                    # in the summary too (PR #291 review): a
+                                    # clamped block_size below the validated
+                                    # 512-8192 range is a possible confound on a
+                                    # many-core box, separate from precision.
+                                    "threads": threads,
+                                    "fortran_block_size": fortran_block_size,
                                 }
                             )
                     else:
@@ -625,7 +687,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
 
     elapsed_total = time.perf_counter() - t_start
     fortran_ran = any(r["implementation"] == "fortran" for r in matched_rows)
-    config = _config_header(args, channels, source)
+    config = _config_header(args, channels, source, threads)
     config["fortran_available"] = fortran_ran
     config["fortran_status"] = "ok" if fortran_ran else fbin_reason
     config["wall_s_total"] = elapsed_total
@@ -674,11 +736,31 @@ def _print_summary(results: dict) -> None:
             f"(min {np.min(corrs):.4f})"
         )
     if results["implementation_correlation"]:
-        corrs = [r["mean_abs_corr"] for r in results["implementation_correlation"]]
+        impl = results["implementation_correlation"]
+        corrs = [r["mean_abs_corr"] for r in impl]
         print(
             f"implementation contrast (fortran-f64 vs torch-f64): mean|corr| "
             f"over {len(corrs)} (k,seed,budget) points = {np.mean(corrs):.4f} "
             f"(min {np.min(corrs):.4f})"
+        )
+        # threads + the per-thread-clamped fortran block_size, printed here
+        # (not only in the raw JSON) since a clamped value below the
+        # validated 512-8192 range on a many-core box is a possible
+        # implementation-contrast confound separate from precision (PR #291
+        # review, README item 3).
+        bsizes = sorted({r["fortran_block_size"] for r in impl})
+        threads = impl[0]["threads"]
+        below_floor = [b for b in bsizes if b < 512]
+        print(
+            f"  fortran ran at threads={threads}, block_size in {bsizes} "
+            f"(validated range: 512-8192)"
+            + (
+                f" -- BELOW FLOOR at {below_floor}: an implementation gap at "
+                "that k could be a block-size artifact, not precision -- "
+                "see README"
+                if below_floor
+                else ""
+            )
         )
     else:
         print(
@@ -772,6 +854,8 @@ def _write_markdown(results: dict, path: Path) -> None:
                 "mean_abs_corr",
                 "min_abs_corr",
                 "ll_gap_fortran_minus_torch",
+                "threads",
+                "fortran_block_size",
             ],
         ),
         "",
