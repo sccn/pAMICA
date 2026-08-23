@@ -13,6 +13,22 @@ name: CI
 # changes landed on dev. `concurrency` below cancels a superseded run on the
 # same ref, so a rapid run of pushes/PR updates does not queue redundant jobs.
 #
+# Interaction with auto-bump-dev.yml/auto-tag.yml (PR #290 review): both bump
+# the version and push straight back to dev/main with a PAT (deliberately, so
+# the push re-triggers workflows -- see their own headers). That bump push
+# lands in THIS workflow's concurrency group for the same ref, so without a
+# guard it would cancel the just-merged real commit's still-running CI (the
+# same `cancel-in-progress` that dedupes rapid pushes) and leave the trivial
+# bump commit as the one that gets tested -- doubling compute and moving the
+# green check onto the wrong commit. `lint`/`typecheck` below skip when the
+# push's head commit is a bot bump (same author-email + message-prefix guard
+# auto-bump-dev.yml/auto-tag.yml use on themselves to avoid looping); every
+# other job `needs` one of those two, so GitHub cascades the skip to the whole
+# run. This does not stop the bump push from being queued (so the concurrency
+# cancellation of the real commit's in-progress run still happens -- GitHub
+# gives a workflow no way to suppress that from the inside), but it does stop
+# the bump commit from silently absorbing a full, misattributed test run.
+#
 # The weekly full-suite run (slow tests + Fortran-parity, macOS) lives in its
 # own schedule-only workflow, .github/workflows/weekly-macos-slow.yml, so it
 # never gates a PR or a push here (issue #246).
@@ -45,6 +61,12 @@ jobs:
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
+    # Skip the workflow (see the header comment above) when the push's head
+    # commit is auto-bump-dev.yml's or auto-tag.yml's own bump-and-push --
+    # matches the guard those workflows already use on themselves.
+    if: |
+      github.event.head_commit.author.email != 'pamica-bot@users.noreply.github.com'
+      && !startsWith(github.event.head_commit.message, 'Bump version to')
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -60,6 +82,11 @@ jobs:
   typecheck:
     name: Type check (ty)
     runs-on: ubuntu-latest
+    # Same guard as lint above; every other job needs one of these two, so
+    # GitHub cascades the skip to the whole run for a bot bump push.
+    if: |
+      github.event.head_commit.author.email != 'pamica-bot@users.noreply.github.com'
+      && !startsWith(github.event.head_commit.message, 'Bump version to')
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
