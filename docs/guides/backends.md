@@ -48,8 +48,11 @@ Measured on real 70-channel EEG (see the project benchmarks and
   size** (162-255 ms/iteration, at or worse than CPU). A block-size sweep (issue
   #216, bundled sample) found PyTorch-MPS far more block-size-sensitive than CPU
   or MLX: it falls from 431 to 30.5 ms/iteration between `block_size=512` and the
-  current 8192 default, and to 13.5 ms/iteration at a further-tuned single-block
-  size, below the CPU's 15.8 ms there. MLX stays fastest throughout, so it
+  current 8192 default, still behind CPU's 21.7 ms/iteration there, and down to
+  13.5 ms/iteration at a further-tuned single-block size that puts the whole
+  30504-frame sample in one block -- memory-limited rather than a free win, since
+  peak block memory scales with `block_size`, which is why 8192 stays the shipped
+  default -- below the CPU's 15.8 ms there. MLX stays fastest throughout, so it
   remains the recommendation over `device="mps"` on Apple hardware. See
   [Block-size sensitivity](validation.md#block-size-sensitivity) for the full sweep.
 - On **NVIDIA**, CUDA float64 is the bit-safe path (~4.5x over a 16-thread CPU,
