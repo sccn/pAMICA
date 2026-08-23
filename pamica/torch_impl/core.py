@@ -432,7 +432,10 @@ class AMICATorchNG:
         peak's parameters. A monotone single-model run (issue #24 parity) is a
         bit-exact no-op. Automatically inactive under ``do_reject`` (the
         good-sample set, and thus the LL normalization, changes across
-        iterations, making per-iteration LLs incomparable).
+        iterations, making per-iteration LLs incomparable) and under
+        ``share_comps`` (a merge changes the parameter count, so pre- and
+        post-merge LLs are not comparable and reverting to an earlier snapshot
+        would silently undo the merge; issue #269).
     pdftype : int, default=0
         Source-density family (issue #26), matching Fortran ``amica15.f90``'s
         ``pdtype`` codes: 0 generalized Gaussian (default; rho adapts), 2
@@ -464,7 +467,7 @@ class AMICATorchNG:
         never initialized (like ``do_choose_pdfs``, #26) -- so this implements
         the intended algorithm, validated by real-data behavior. A merge that
         fires on the LAST fit iteration is reflected in the returned model but
-        trails in ``final_ll_``; see that attribute's docstring (issue #269).
+        trails in ``final_ll_``; see that attribute's comment (issue #269).
     share_start, share_iter : int
         Sharing schedule: first iteration to attempt merges and the interval
         between attempts (Fortran ``share_start``/``share_iter``). The A-update
@@ -742,7 +745,7 @@ class AMICATorchNG:
         # reflected in the returned A/W/comp_list but NOT in final_ll_: the
         # merge runs after that iteration's LL has already been computed and
         # recorded (Fortran identify_shared_comps runs after the iteration's
-        # LL accumulation, amica15.f90:1856 vs the earlier LL accumulation), so
+        # LL accumulation, amica15.f90:1856-1858 vs the earlier LL accumulation), so
         # the merge's effect on the likelihood only shows up in the next
         # iteration's E-step -- which never runs. keep_best is disabled under
         # share_comps (see fit()), so this is not a keep_best artifact; it
@@ -1928,7 +1931,7 @@ class AMICATorchNG:
         ``final_ll_`` still reports the pre-merge log-likelihood -- the merge's
         effect on the LL only shows up in the next E-step, which never runs.
         This matches the reference ordering (issue #269); see ``final_ll_``'s
-        docstring for detail.
+        comment for detail.
         """
         if X.ndim != 2:
             raise ValueError(
@@ -2075,7 +2078,7 @@ class AMICATorchNG:
             # This runs AFTER ``ll`` (this iteration's LL) was captured above,
             # so a merge on the final iteration lands in the returned
             # A/W/comp_list but not in the ``ll_history``/``final_ll_`` value
-            # appended just below -- see final_ll_'s docstring (issue #269).
+            # appended just below -- see final_ll_'s comment (issue #269).
             if self.share_comps:
                 itf = it + 1
                 if (

@@ -364,7 +364,8 @@ def test_merge_on_the_final_iteration_completes(real_data):
     ``comp_used``; issue #269 tracks documenting it across backends. Here it is
     pinned as behavior: the fit completes, the merge survives on the returned
     model, and the reported LL is finite. keep_best is disabled under
-    share_comps (see fit()'s docstring), so this is not a keep_best artifact.
+    share_comps (see the final_ll_ comment), so this is not a keep_best
+    artifact.
     """
     ng = AMICATorchNG(
         n_channels=NW,

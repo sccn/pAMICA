@@ -525,7 +525,8 @@ def test_merge_on_the_final_iteration_completes():
     amica15.f90:1856), so ``self.ll[-1]`` deliberately describes the state
     BEFORE this merge -- the merged model is never scored. That is faithful to
     the reference and matches AMICATorchNG/AMICAMLXNG (mirrors
-    tests/torch_tests/test_ng_sharing.py and
+    tests/torch_tests/test_ng_sharing.py::test_merge_on_the_final_iteration_completes
+    and
     tests/mlx_tests/test_mlx_sharing.py::test_merge_on_the_final_iteration_completes);
     issue #269 tracks documenting it across backends. Here it is pinned as
     behavior: the fit completes, the merge survives on the returned model, and

@@ -516,7 +516,7 @@ class AMICAMLXNG:
         # recorded, so its effect on the LL only shows up in the next
         # iteration's E-step, which never runs. This matches the reference
         # ordering (Fortran identify_shared_comps runs after the iteration's
-        # LL accumulation, amica15.f90:1856) and AMICATorchNG's ordering, so
+        # LL accumulation, amica15.f90:1856-1858) and AMICATorchNG's ordering, so
         # it is documented behavior, not a bug (issue #269).
         self.final_ll_: Optional[float] = None
         self.stop_reason: Optional[str] = None

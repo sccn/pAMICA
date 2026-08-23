@@ -332,7 +332,7 @@ class AMICA:
         # is stored, so its effect on the LL only shows up in the next
         # iteration's E-step, which never runs. This matches the reference
         # ordering (Fortran identify_shared_comps runs after the iteration's
-        # LL accumulation, amica15.f90:1856), so it is documented behavior,
+        # LL accumulation, amica15.f90:1856-1858), so it is documented behavior,
         # not a bug (issue #269).
         self.nd = []  # Gradient norm history
 

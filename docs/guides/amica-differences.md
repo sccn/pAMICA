@@ -259,7 +259,7 @@ E-step, which never runs.
 
 This is not a bug: it matches the reference ordering. `identify_shared_comps`
 runs after the iteration's likelihood has already been accumulated
-(amica15.f90:1856 vs the earlier LL accumulation), so Fortran has the same
+(amica15.f90:1856-1858 vs the earlier LL accumulation), so Fortran has the same
 gap. All three backends share it by construction, and it is pinned as
 behavior rather than fixed (`test_merge_on_the_final_iteration_completes` in
 each of `tests/torch_tests/test_ng_sharing.py`,
