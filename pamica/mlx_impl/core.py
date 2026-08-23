@@ -64,7 +64,7 @@ _CPU = mx.cpu
 
 def _score_gg(y: mx.array, rho: mx.array) -> mx.array:
     """GG score ``fp = rho*sign(y)*|y|^(rho-1)`` (AMICATorchNG ``_score``, GG
-    branch, core.py:176-183). ``fp(0)=0`` for ``rho>=1``, which the ``ufp/y``
+    branch, core.py:199-206). ``fp(0)=0`` for ``rho>=1``, which the ``ufp/y``
     guard relies on."""
     abs_y = mx.abs(y)
     sign_y = mx.sign(y)
@@ -77,7 +77,7 @@ def _log_pdf_gg(
     y: mx.array, rho: mx.array, lgamma_table: mx.array
 ) -> tuple[mx.array, mx.array]:
     """GG log-density and ``|y|^rho`` (AMICATorchNG ``_log_pdf_only``, GG branch,
-    core.py:216-224). ``lgamma_table = lgamma(1+1/rho)`` is precomputed host-side
+    core.py:239-244). ``lgamma_table = lgamma(1+1/rho)`` is precomputed host-side
     (MLX has no ``lgamma``); it makes the uniform GG form reduce to the exact
     Laplace (rho=1) and Gaussian (rho=2) log-densities."""
     abs_y = mx.abs(y)
@@ -116,6 +116,32 @@ class AMICAMLXNG:
 
     All three checks require two log-likelihood values, so none can fire on the
     first iteration (Fortran's ``if (iter > 1)``, amica15.f90:1051).
+
+    The component-sharing parameters (issue #263) likewise carry AMICATorchNG's
+    names, defaults, validation and semantics:
+
+    ``share_comps`` (False)
+        Enable multi-model component sharing (Fortran ``share_comps`` /
+        ``identify_shared_comps``, amica15.f90:1916): components that are
+        near-collinear across different models are merged so they share one
+        mixing column and one density. Requires ``n_models >= 2`` (a model
+        cannot share with itself); accepted but inert otherwise. OFF by default,
+        so default fits are unchanged. There is no bit-exact oracle -- the
+        reference's similarity metric is never initialized (like the dead
+        ``do_choose_pdfs``, #26) -- so this implements the intended algorithm,
+        validated by real-data behavior and against the PyTorch backend.
+    ``share_start`` (100) / ``share_iter`` (100)
+        Sharing schedule: first iteration to attempt merges and the interval
+        between attempts. The A-update is held for the first 6 iterations of
+        every cycle (whether or not a merge fired) so the densities can settle;
+        ``share_iter`` must be ``> 6`` so that window never consumes the whole
+        cycle, and ``share_start`` must be ``>= 1``.
+    ``comp_thresh`` (0.99)
+        Cosine-similarity cutoff, in the de-sphered (sensor-space) metric, above
+        which two mixing columns are identified and merged. Must be in
+        ``(0, 1]``. The de-sphering uses ``pinv(sphere)``, so sharing also works
+        on rank-reduced and rank-deficient fits (issues #253, #221); see
+        :meth:`_identify_shared_comps`.
     """
 
     def __init__(
@@ -373,7 +399,7 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _initialize_parameters(self):
         """Initialize parameters with the *same* ``np.random.RandomState`` draw
-        order as AMICATorchNG/AMICA_NumPy (core.py:688-725), so a shared seed
+        order as AMICATorchNG/AMICA_NumPy (core.py:918-973), so a shared seed
         gives a bit-identical (float32-cast) starting point."""
         rng = np.random.RandomState(self.seed)
         n, m, ncomp, nmix = self.n_channels, self.n_models, self.n_comps, self.n_mix
@@ -445,7 +471,7 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _forward(self, Xb: mx.array):
         """E-step forward pass for one block, per model (AMICATorchNG._forward,
-        core.py:762-825). ``Xb`` is ``(n_channels, batch)``. Returns ``logV``
+        core.py:998-1071). ``Xb`` is ``(n_channels, batch)``. Returns ``logV``
         ``(batch, n_models)`` and per-model lists ``(b, z, y, az_rho)``. For
         n_models=1 (c=0, gm=1, comp_list=identity) this is numerically identical
         to the single-model path."""
@@ -488,7 +514,7 @@ class AMICAMLXNG:
 
     def _get_block_updates(self, Xb: mx.array) -> dict:
         """Exact-EM sufficient statistics for one block (non-Newton subset of
-        AMICATorchNG._get_block_updates, core.py:833-953). Mixture stats are
+        AMICATorchNG._get_block_updates, core.py:1141-1283). Mixture stats are
         scattered into their ``comp_list`` columns; ``dWtmp``/``dgm``/``dc_numer``
         are per-model. For n_models=1 (v==1, identity comp_list) this reproduces
         the single-model accumulators exactly."""
@@ -573,11 +599,13 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _update_parameters(self, acc: dict, n_samples: int):
         """Exact-EM mixture updates + natural-gradient A-update (non-Newton subset
-        of AMICATorchNG._update_parameters, core.py:1049-1247)."""
+        of AMICATorchNG._update_parameters, core.py:1363-1616)."""
         # Fortran builds dAk from the PREVIOUS iteration's model weights: gm is
-        # not reassigned until update_params (amica15.f90:1788+), after
-        # accum_updates_and_likelihood (:1731-1743). Snapshot before overwriting,
-        # as AMICATorchNG does (issue #219); MLX arrays are immutable and gm is
+        # not reassigned until update_params (amica15.f90:1788+), after the
+        # dAk/zeta accumulation in accum_updates_and_likelihood (:1749-1761).
+        # Snapshot before overwriting, as AMICATorchNG does (the ordering
+        # question issue #219 raised, fixed there and now here); MLX arrays are
+        # immutable and gm is
         # only ever rebound, so a plain rebinding is a safe snapshot (torch
         # clones because its tensors could be written in place). Exactly gm for
         # n_models=1 (both are 1.0) and cancelling for a disjoint comp_list, so
@@ -588,7 +616,7 @@ class AMICAMLXNG:
         tiny = float(np.finfo(np.float32).tiny)
 
         # Per-model data-space bias c[i,h] = sum_t v_h*x / sum_t v_h (Fortran
-        # update_c, core.py:1083-1092). Skipped for n_models=1 (v==1 => c is the
+        # update_c, core.py:1401-1423). Skipped for n_models=1 (v==1 => c is the
         # zero data mean; the update would add a float-sum residual and break the
         # #24 bit-exact single-model path). A dead model (dgm[h]==0) keeps its
         # prior c rather than writing 0/0, and is surfaced (matching AMICATorchNG).
@@ -636,8 +664,15 @@ class AMICAMLXNG:
         # GG shape update with the 1/psi(1+1/rho) digamma factor (Fortran
         # :2013-2014); digamma is computed host-side (MLX has none). A NaN here
         # (e.g. from an upstream mu/beta blow-up) is reset to rho0 and surfaced,
-        # matching AMICATorchNG (core.py:1140-1151), so it does not silently
+        # matching AMICATorchNG (core.py:1483-1504), so it does not silently
         # poison the lgamma table and every subsequent E-step.
+        # Deliberate divergence from AMICATorchNG (core.py:1483-1487), which also
+        # skips the update when rho is pinned to a boundary (all 1.0 or all 2.0):
+        # that early-exit needs a host sync on rho every iteration, which would
+        # break this backend's one-mx.eval-per-iteration lazy graph. mx.clip
+        # clamps straight back to the boundary, so the results are identical --
+        # the only cost is wasted work in a configuration MLX cannot even reach
+        # today (pdftype != 0 is rejected, so rho starts at rho0 and adapts).
         if self.dorho:
             drho = acc["drho_n"] / mx.maximum(acc["dalpha_n"], 1e-8)
             rho_np = np.array(self.rho, dtype=np.float64)
@@ -657,17 +692,21 @@ class AMICAMLXNG:
             )
 
         # Natural-gradient A-update. A is stored as Fortran's A^T, so the update
-        # is a LEFT-multiply by the transposed direction (core.py:1176-1184,
+        # is a LEFT-multiply by the transposed direction (core.py:1506-1514,
         # #24 root cause). Each model's direction is scattered into its mixing
-        # columns as a gm-weighted average (Fortran dAk/zeta, core.py:1231-1247)
+        # columns as a gm-weighted average (Fortran dAk/zeta, core.py:1546-1561)
         # using the PREVIOUS iteration's gm (gm_prev, see the snapshot above):
         # for the default disjoint comp_list every column has one contributor, so
         # gm cancels and n_models=1 is byte-for-byte the old `A - lrate*(dA.T@A)`;
         # a SHARED column (#263) takes Fortran's responsibility-weighted average,
         # NOT a raw sum (a raw sum would over-step by the contributor count). A
         # merged-away column needs no special case: nothing scatters into it, so
-        # its zeta is 0, dAk is 0/tiny = 0, and the rescale below leaves a
-        # zero-norm column untouched.
+        # its zeta is 0 and its dAk is 0/tiny = 0, i.e. it takes no step. It is
+        # NOT a zero-norm column, and the rescale below does renormalize it like
+        # any other -- but by its own retained (already ~unit) norm, so that is a
+        # near-identity that perturbs it only at ULP scale. Hence
+        # test_merged_away_columns_keep_their_last_finite_value disables
+        # doscaling, to compare a frozen column exactly.
         #
         # The direction/dAk/gradient-norm computation below runs
         # UNCONDITIONALLY, not gated on _a_frozen(): Fortran computes dAk and
@@ -730,7 +769,7 @@ class AMICAMLXNG:
             # A zero-norm (collapsed) column is left untouched, not rescaled:
             # safe_scale is 1 there, so A/beta are unchanged and mu*safe_scale
             # keeps its prior value (matching AMICATorchNG's nonzero mask,
-            # core.py:1229-1234 -- using raw `scale` would zero mu instead).
+            # core.py:1608-1614 -- using raw `scale` would zero mu instead).
             safe_scale = mx.where(scale > 0, scale, mx.ones_like(scale))
             self.A = self.A / safe_scale
             self.mu = self.mu * safe_scale
