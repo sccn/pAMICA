@@ -413,6 +413,19 @@ def test_sharing_newton_and_fixed_family_fit_completes():
     test_sharing_newton_and_fixed_family_fit_completes``). Newton fallbacks are
     PERMITTED, not asserted to zero: a rejected direction under a non-GG
     family is expected, per ``test_family_fit_with_newton``.
+
+    ``comp_thresh=0.99``/``seed=3``, not the loose 0.9 the pairwise sharing x
+    Newton test uses: at 0.9 on a 2-model fit ``.context/issue-264/
+    newton_findings.md`` measures 26-31 of 32 cross-model pairs merging --
+    near-total model collapse -- as "trajectory chaos" where Newton can drive
+    a component to zero curvature and the fit degenerates, seed-dependently
+    (seed 42 specifically degenerates on a nearby config). 0.99 is the doc's
+    verified stable zone (two genuinely near-collinear pairs merge there),
+    already used by ``test_ng_sharing.py::
+    test_low_rank_projected_data_share_fit_completes``; seed=3 is its
+    doc-verified stable seed. Measured at this config: 11 of 32 pairs merge,
+    comfortably short of the chaos threshold, so the ``comp_used`` guard
+    below stays non-vacuous without courting the documented degeneracy.
     """
     data = _load_real_data()[:, :8192]
     m = AMICATorchNG(
@@ -421,14 +434,14 @@ def test_sharing_newton_and_fixed_family_fit_completes():
         n_mix=3,
         pdftype=2,
         device="cpu",
-        seed=42,
+        seed=3,
         block_size=1024,
         do_newton=True,
         newt_start=5,
         share_comps=True,
         share_start=8,
         share_iter=10,
-        comp_thresh=0.9,
+        comp_thresh=0.99,
     )
     m.fit(data, max_iter=30, verbose=False)
 
@@ -448,7 +461,13 @@ def test_sharing_newton_and_adaptive_switcher_fit_completes():
     """The single-component adaptive-switcher variant of the three-way
     interplay: ``share_comps`` + ``do_newton`` + the extended-Infomax switcher
     (``pdftype=1``, ``n_mix=1``) together (mirrors ``mlx_tests/test_mlx_pdf.py::
-    test_sharing_newton_and_adaptive_switcher_fit_completes``)."""
+    test_sharing_newton_and_adaptive_switcher_fit_completes``).
+
+    Same ``comp_thresh=0.99``/``seed=3`` safe-zone choice as
+    ``test_sharing_newton_and_fixed_family_fit_completes`` above, for the same
+    reason (``.context/issue-264/newton_findings.md``'s documented chaos
+    regime at the loose 0.9 cutoff). Measured here: 8 of 32 pairs merge.
+    """
     data = _load_real_data()[:, :8192]
     m = AMICATorchNG(
         n_channels=NW,
@@ -456,14 +475,14 @@ def test_sharing_newton_and_adaptive_switcher_fit_completes():
         n_mix=1,
         pdftype=1,
         device="cpu",
-        seed=42,
+        seed=3,
         block_size=1024,
         do_newton=True,
         newt_start=5,
         share_comps=True,
         share_start=8,
         share_iter=10,
-        comp_thresh=0.9,
+        comp_thresh=0.99,
         kurt_start=3,
         num_kurt=5,
         kurt_int=1,
