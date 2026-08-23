@@ -5,7 +5,42 @@
 **Think:** Every pipeline failure is a production bug prevented.
 **Goal:** Fast feedback, high confidence, zero surprises.
 
-## Essential Workflows
+## pAMICA CI Topology (actual, issue #246)
+
+The generic template below stays as guidance for other projects; this project's
+real workflows live in `.github/workflows/` and diverge from it in ways worth
+recording:
+
+- **`ci.yml`** -- `pull_request` (any branch) plus `push` to `main` (release
+  branch) and `dev` (integration/default branch), so post-merge drift on `dev`
+  is caught, not just PR-time state (concurrency cancels a superseded run on
+  the same ref). Jobs: `lint` (ruff) -> `typecheck` (ty) -> `test` (Linux,
+  `-m "not slow"`, `--cov-fail-under=80`, builds the dependency-free native
+  AMICA binary for engine E2E tests) -> `test-macos` (Apple Silicon, `--extra
+  mlx --extra mne`, asserts a real MLX GPU device, builds the same native
+  binary via Accelerate, `-m "not slow"`, `--no-cov`) -> `test-mne` (Linux,
+  `--extra mne`) -> `build` (sdist/wheel import matrix, Python 3.12/3.13).
+  `typecheck`/`lint` gate every test job via `needs:`.
+- **`weekly-macos-slow.yml`** -- schedule-only (Sunday cron) plus manual
+  `workflow_dispatch`, never on `push`/`pull_request`, so it cannot block or
+  slow a PR. Runs the full suite with no `-m` filter on macOS (Apple Silicon):
+  `@pytest.mark.slow` tests, plus the Fortran-parity tests gated on
+  `PAMICA_NATIVE_BINARY` (native `native/build.sh` shim, arm64) and
+  `AMICA_RUN_FORTRAN=1`, plus `test_fortran_adapter.py`'s
+  `AMICA_FORTRAN_BIN`-gated tests (a *second*, separately built native
+  binary, `benchmarks/fortran/build_amica.sh`, real mpif90 as a single-rank
+  singleton). Neither native build needs Rosetta -- both compile
+  `amica15.f90`/`funmod2.f90` from source for the runner's own arch; only the
+  legacy bundled `pamica/sample_data/amica15mac` fixture is x86_64-only, and
+  nothing in CI runs it.
+- **`release-binaries.yml`**, **`publish.yml`**, **`auto-tag.yml`**,
+  **`auto-bump-dev.yml`**, **`sync-dev.yml`**, **`docs.yml`**, **`typos.yml`**,
+  **`draft-pdf.yml`** each own one concern (native-binary release assets, PyPI
+  publish, version tagging, dev version bump, post-release dev sync, MkDocs
+  deploy, spell-check, JOSS paper PDF) and trigger independently -- see each
+  file's header comment for its exact trigger and rationale.
+
+## Essential Workflows (generic template)
 
 ### 1. Testing (`test.yml`)
 **Triggers:** `on: [push, pull_request]` to main branches
