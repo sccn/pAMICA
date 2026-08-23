@@ -333,6 +333,40 @@ def test_multimodel_newton_mstep_matches_float64_twin(merged):
     assert model._ndtmpsum == pytest.approx(ng._ndtmpsum, rel=1e-4)
 
 
+def test_three_model_newton_curvature_matches_float64_twin():
+    """G1 extended to a third model (issue #272).
+
+    ``test_multimodel_newton_mstep_matches_float64_twin`` above pins the
+    2-model case, which cannot distinguish a correct per-model curvature index
+    from a transposition error that happens to still line up for exactly two
+    models. Cheap to add here: ``_warm_model``/``_torch_twin`` already
+    parametrize on ``n_models``, so this only changes that one argument.
+    """
+    model, x_t = _warm_model(5, n_models=3)
+    ng, x_ng = _torch_twin(model, x_t)
+
+    acc = model._accumulate_blocks(x_t)
+    acc_ng = ng._accumulate_blocks(x_ng)
+    for name, got, ref in zip(
+        ("sigma2", "lambda", "kappa"),
+        model._finalize_newton_stats(acc),
+        ng._finalize_newton_stats(acc_ng),
+    ):
+        a = np.array(got, dtype=np.float64)
+        b = ref.numpy().T
+        assert a.shape == (3, NW), f"{name} layout {a.shape}"
+        err = _relerr(a, b)
+        assert err < 1e-4, f"{name} differs from the float64 twin by {err:.2e}"
+
+    model._update_parameters(acc, x_t.shape[1])
+    ng._update_parameters(acc_ng, x_ng.shape[1])
+    mx.eval(model.A)
+
+    assert ng.A is not None
+    gap = np.abs(np.array(model.A, dtype=np.float64) - ng.A.numpy()).max()
+    assert gap < 1e-4, f"A diverged from the float64 Newton M-step by {gap:.2e}"
+
+
 @pytest.mark.slow
 def test_newton_fit_ll_matches_float64_torch():
     """G3: at a matched 100-iteration budget on the full recording, the MLX
