@@ -6,11 +6,11 @@ The reference Fortran binary (``amica15.f90``) and ``AMICA.from_params_file``
 different formats and, for a handful of settings, two different spellings of
 the same keyword. This module parses the literal Fortran text format --
 whitespace-separated ``key value`` lines, ``#`` full-line comments, ints/
-floats/strings, boolean flags as ``0``/``1`` -- into a dict shaped exactly
-like ``sample_data/sample_params.json`` (the format ``from_params_file``
-already understands), so a single ``input.param`` can drive both
-implementations for a parity run instead of maintaining a hand-translated
-JSON copy.
+floats/strings, boolean flags as ``0``/``1`` -- into a dict of pamica
+constructor/``fit()`` keyword arguments (see below), which
+``AMICA.from_params_file`` applies the same way it already applies a JSON
+parameter file, so a single ``input.param`` can drive both implementations
+for a parity run instead of maintaining a hand-translated JSON copy.
 
 This is a translator, not a second parameter-handling implementation: no
 constructor/backend logic lives here, only ``key value`` text -> dict, plus
@@ -20,18 +20,42 @@ the renames documented below. The mapping was built by reading every
 ``validate_implementations.py``'s ``_NG_PARAMS``/``_HANDLED_KEYS``, the
 authoritative pamica-side parameter names.
 
+The output dict's keys target the actual Python call surface --
+``AMICA.fit``'s named parameters (``max_iter``, ``lrate``, ``do_mean``,
+``do_sphere``, ``do_newton``) and ``AMICATorchNG`` constructor keywords --
+because ``AMICA.from_params_file`` forwards this dict into ``fit()`` as
+per-call defaults (see ``amica.py``). A key that does not spell one of those
+names exactly would silently fail to forward (or raise ``TypeError`` if
+forwarded blindly), so where the JSON schema (``sample_params.json``) itself
+spells a setting differently from the constructor, this module targets the
+*constructor's* spelling, not the JSON schema's.
+
 ``FORTRAN_TO_PAMICA_KEY`` lists every Fortran keyword this module can
 translate (53 keys covering 52 distinct pamica-side names -- Fortran accepts
 both ``num_mix_comps`` and ``num_mix`` for the same setting). Of those, three
-are renamed because the JSON schema spells them differently:
+are renamed because Fortran spells them differently from the pamica-side
+name:
 
-======================  ===================  ==========================
-Fortran keyword         pamica/JSON key       Note
-======================  ===================  ==========================
-``num_mix_comps``       ``num_mix``           also accepts bare ``num_mix``
-``share_iter``          ``share_int``         JSON schema's own spelling
-``numrej``              ``maxrej``            matches ``AMICATorchNG.maxrej``
-======================  ===================  ==========================
+======================  =========================  ================================
+Fortran keyword         pamica key                 Note
+======================  =========================  ================================
+``min_grad_norm``       ``min_nd``                 matches ``AMICATorchNG.min_nd``
+``max_decs``            ``maxdecs``                matches ``AMICATorchNG.maxdecs``
+``numrej``              ``maxrej``                 matches ``AMICATorchNG.maxrej``
+======================  =========================  ================================
+
+``num_mix_comps``/``num_mix`` both collapse to the pamica key ``num_mix``,
+which is not itself a constructor keyword (the constructor takes ``n_mix``);
+``AMICA.from_params_file`` reads ``num_mix``/``num_models`` directly to size
+the instance at construction time (unchanged pre-existing behavior), so
+those two keys are consumed *before* the rest of the dict ever reaches
+``fit()``'s per-call-default merge. ``share_iter`` is **not** renamed here --
+it already matches ``AMICATorchNG.share_iter`` exactly. This is a deliberate
+divergence from ``sample_params.json``, whose own schema spells the same
+setting ``share_int`` (and, along with its ``max_decs``/``min_grad_norm``
+keys, does not match the constructor either -- a pre-existing gap in that
+JSON file, out of scope here, that ``AMICA.fit``'s per-call-default merge
+now surfaces as a "not applied" warning when fitting from it).
 
 Every other translated key keeps its Fortran spelling.
 
@@ -137,7 +161,8 @@ _LIST_KEYS = frozenset({"files", "field_dim", "num_samples"})
 # `seed`) reads as a plain integer; see `_coerce_value`.
 
 # ---------------------------------------------------------------------------
-# Fortran keyword -> pamica/JSON key. Identity unless noted otherwise above.
+# Fortran keyword -> pamica constructor/fit() key. Identity unless noted
+# otherwise in the module docstring's rename table.
 # ---------------------------------------------------------------------------
 
 FORTRAN_TO_PAMICA_KEY: dict = {
@@ -166,16 +191,18 @@ FORTRAN_TO_PAMICA_KEY: dict = {
     "pcadb": "pcadb",
     "mineig": "mineig",
     # Learning rate / convergence stops (issue #207: use_min_dll/min_dll and
-    # use_grad_norm/min_grad_norm are the two independent per-iteration stops;
-    # max_decs is the lrate-decrease-count stop).
+    # use_grad_norm/min_nd are the two independent per-iteration stops;
+    # maxdecs is the lrate-decrease-count stop). min_grad_norm -> min_nd and
+    # max_decs -> maxdecs are renamed to match AMICATorchNG's constructor
+    # spelling (see the module docstring's rename table).
     "lrate": "lrate",
     "minlrate": "minlrate",
     "lratefact": "lratefact",
     "use_min_dll": "use_min_dll",
     "min_dll": "min_dll",
     "use_grad_norm": "use_grad_norm",
-    "min_grad_norm": "min_grad_norm",
-    "max_decs": "max_decs",
+    "min_grad_norm": "min_nd",
+    "max_decs": "maxdecs",
     "block_size": "block_size",
     # Newton preconditioner.
     "do_newton": "do_newton",
@@ -199,11 +226,13 @@ FORTRAN_TO_PAMICA_KEY: dict = {
     "kurt_start": "kurt_start",
     "num_kurt": "num_kurt",
     "kurt_int": "kurt_int",
-    # Component sharing (multi-model).
+    # Component sharing (multi-model). share_iter is identity: it already
+    # matches AMICATorchNG's constructor spelling (sample_params.json's own
+    # "share_int" spelling does not -- see the module docstring).
     "share_comps": "share_comps",
     "comp_thresh": "comp_thresh",
     "share_start": "share_start",
-    "share_iter": "share_int",
+    "share_iter": "share_iter",
     # Scaling / mixing-matrix bounds.
     "doscaling": "doscaling",
     "scalestep": "scalestep",
@@ -319,8 +348,10 @@ def _coerce_value(key: str, raw: str):
         # not an error, matching the reference reader.
         return flag == 1
     if key in _FLOAT_KEYS:
+        # Fortran double-precision literals may use 'd'/'D' as the exponent
+        # marker instead of 'e'/'E' (e.g. "1.5d-3"); normalize before parsing.
         try:
-            return float(raw)
+            return float(raw.replace("D", "e").replace("d", "e"))
         except ValueError as exc:
             raise ValueError(f"{key!r} expects a float, got {raw!r}") from exc
     if key in _STR_KEYS:
@@ -332,23 +363,36 @@ def _coerce_value(key: str, raw: str):
 
 
 def read_fortran_param_file(path: Union[str, Path]) -> dict:
-    """Parse a Fortran ``input.param`` file into pamica/JSON-schema kwargs.
+    """Parse a Fortran ``input.param`` file into pamica constructor/``fit()`` kwargs.
 
     Reads the literal Fortran text format -- whitespace-separated
     ``key value`` lines, ``#`` full-line comments (Fortran's own comment
     marker; see ``amica15.f90``'s ``get_cmd_args``), blank lines, ints/
-    floats/strings, boolean flags as ``0``/``1`` -- and returns a dict shaped
-    like ``sample_data/sample_params.json``: the same format
-    ``AMICA.from_params_file`` already consumes for the JSON path (see
-    ``AMICA.from_params_file`` in ``amica.py``, which auto-detects this
-    format and routes through this function).
+    floats/strings, boolean flags as ``0``/``1`` -- and returns a dict keyed
+    by pamica's own parameter names (see ``FORTRAN_TO_PAMICA_KEY``), which
+    ``AMICA.from_params_file`` (``amica.py``, which auto-detects this format
+    and routes through this function) applies the same way it already
+    applies a JSON parameter file.
 
     Unlike the Fortran parser itself, which silently ``cycle``s past a line
     with no value, a malformed line here raises ``ValueError`` -- silently
     dropping a configured setting would contradict this project's no-silent-
     failures policy. A recognized-but-unsupported keyword (see
     ``FORTRAN_UNSUPPORTED_KEYS``) or an unrecognized one is instead a
-    ``logger.warning`` naming the keyword, never a silent drop.
+    ``logger.warning`` naming the keyword, never a silent drop. If a
+    non-empty file has content lines but not one keyword is recognized as
+    valid Fortran syntax at all (e.g. a JSON file mistakenly handed to this
+    reader instead of ``json.load``), that is also a hard ``ValueError``
+    rather than a silent all-defaults return; a file of only known-but-
+    unsupported keywords is unaffected (it is a real, if useless, param
+    file, not a format mismatch).
+
+    Fortran's own comment marker is a line-*leading* ``#`` only; this reader
+    is deliberately more permissive (fail-safe direction) and also strips an
+    inline ``" #..."`` trailing comment from a value before type coercion.
+    Float values additionally accept Fortran's ``d``/``D`` double-precision
+    exponent marker (e.g. ``"1.5d-3"``), normalized to ``e`` before
+    ``float()``.
 
     Parameters
     ----------
@@ -368,6 +412,8 @@ def read_fortran_param_file(path: Union[str, Path]) -> dict:
     result: dict = {}
     unrecognized: set = set()
     unsupported: set = set()
+    content_lines = 0
+    recognized_lines = 0
 
     with path.open("r") as f:
         for lineno, raw_line in enumerate(f, start=1):
@@ -380,11 +426,23 @@ def read_fortran_param_file(path: Union[str, Path]) -> dict:
                     f"{path}:{lineno}: malformed line, expected '<key> <value>': "
                     f"{raw_line.rstrip()!r}"
                 )
+            content_lines += 1
             key, raw_value = parts[0], parts[1].strip()
+            # Strip a trailing inline comment before type coercion (deliberately
+            # more permissive than Fortran's own line-leading-only `#`).
+            hash_idx = raw_value.find(" #")
+            if hash_idx != -1:
+                raw_value = raw_value[:hash_idx].rstrip()
+            if not raw_value:
+                raise ValueError(
+                    f"{path}:{lineno}: malformed line, expected '<key> <value>': "
+                    f"{raw_line.rstrip()!r}"
+                )
 
             if accepted is not None and key not in accepted:
                 unrecognized.add(key)
                 continue
+            recognized_lines += 1
 
             json_key = FORTRAN_TO_PAMICA_KEY.get(key)
             if json_key is None:
@@ -395,6 +453,22 @@ def read_fortran_param_file(path: Union[str, Path]) -> dict:
                 result[json_key] = _coerce_value(key, raw_value)
             except ValueError as exc:
                 raise ValueError(f"{path}:{lineno}: {exc}") from exc
+
+    # Only meaningful when `accepted` is known: a file where not a single
+    # content line's keyword was recognized as valid Fortran syntax at all is
+    # very likely the wrong format entirely (e.g. JSON handed to this reader
+    # by mistake), so this is a hard error rather than a silent all-defaults
+    # result. A file of only known-but-unsupported keywords (recognized, just
+    # not translatable) is a legitimate, if useless, param file and does NOT
+    # hit this -- see FORTRAN_UNSUPPORTED_KEYS's warning below instead.
+    if accepted is not None and content_lines and recognized_lines == 0:
+        raise ValueError(
+            f"{path}: {content_lines} content line(s) but not one keyword was "
+            "recognized by the reference Fortran parser -- this usually means "
+            "the file is not actually the Fortran input.param text format "
+            "(e.g. JSON handed to read_fortran_param_file by mistake). "
+            "Refusing to silently return an all-defaults result."
+        )
 
     if unrecognized:
         logger.warning(
