@@ -5,6 +5,23 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Pinned `mir_history_` against the `keep_best` rollback and against
+  save/load** (issue #161, follow-up from #137/#160). Both claims already
+  held before this PR and were already tested: `test_mir_history_survives_keep_best_restore`
+  and `test_mir_history_empty_after_save_load` (`tests/torch_tests/test_ng_convergence.py`,
+  added in #245) already force a genuine `keep_best` restore on real EEG (the
+  established `n_models=2, do_newton=True, newt_start=1, lrate=0.5, seed=0`
+  recipe) and assert `mir_history_` is neither truncated nor rewritten, and
+  already round-trip a fit through `AMICA.save`/`load` and assert an empty
+  `mir_history_` (`AMICATorchNG.from_state_dict` reconstructs via `__init__`,
+  which sets `mir_history_ = []`, and `_load_params` never touches it). #245
+  also already documented the one-update offset between `mir_history_[i]`
+  (computed AFTER iteration `i`'s update) and `ll_history[i]` (the pre-update
+  likelihood) on `AMICA.mir_history_` and in `AMICATorchNG.__init__`. This PR
+  verified both tests and both docstrings against the code and added the one
+  place that was missing the offset note: `AMICATorchNG.fit`'s `mir_step`
+  docstring, the first place a reader would look. Documentation and test
+  verification only, no logic change.
 - **Documented that `final_ll_`/`self.ll[-1]` trails a `share_comps` merge
   landing on the final fit iteration** (issue #269). When a merge fires on the
   last iteration, the returned `A`/`W`/`comp_list` are already post-merge but
