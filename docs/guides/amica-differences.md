@@ -123,7 +123,7 @@ Separate from reference divergences: the optional MLX backend is a subset.
 
 | Feature | PyTorch | NumPy | MLX | Native Fortran |
 |---|---|---|---|---|
-| Newton | yes | yes | `NotImplementedError` | yes |
+| Newton | yes | yes | yes (float32) | yes |
 | PDF families | all five | all five | GG only | all five |
 | Component sharing | yes | yes | yes | yes |
 | Outlier rejection | yes | yes | no | yes |
@@ -135,7 +135,7 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | MIR diagnostic | yes | no | no | n/a |
 | Persistence | `state_dict` | EEGLAB `amicaout` | none | EEGLAB `amicaout` |
 
-Most MLX limitations fail loudly: `do_newton=True` and non-GG `pdftype` raise
+Most MLX limitations fail loudly: a non-GG `pdftype` raises
 `NotImplementedError`, and every unsupported parameter is simply absent from the
 constructor, so passing it raises `TypeError`.
 
@@ -163,6 +163,20 @@ state (`pamica/tests/test_mlx_sharing_cross_backend.py` pins that against
 Row 8 of the "At a glance" table at the top of this page (merged-away columns
 frozen at their last finite value, not left NaN behind the mask) holds in MLX as
 well.
+
+Newton was the last of the three, closed by issue #264: `AMICAMLXNG` takes
+`do_newton`/`newt_start`/`newtrate`/`newt_ramp` with the PyTorch backend's names,
+defaults and semantics, accumulates the same curvature statistics, applies the
+same per-source-pair 2x2 solve behind the same raw `prod > 1` guard, and counts
+rejections in `n_newton_fallbacks`. It runs entirely in float32 — Apple GPUs have
+no FP64 — which was pre-registered as a go/no-go rather than assumed: on the
+bundled sample the curvature matches a float64 PyTorch twin to 4e-7 relative, a
+matched 100-iteration fit lands on the float64 likelihood to five significant
+digits, and the positive-definiteness guard never comes within 1.9 of its
+boundary. Evidence and the gate script are in `.context/issue-264/`. `newtrate`
+is a float32 ceiling like `lrate_cap`, so a Newton fit on MLX should be treated
+as ~7-significant-digit, not float64-parity — use the PyTorch backend for
+Fortran-parity runs, as the Precision row above already implies.
 
 ## Component sharing on rank-reduced fits
 

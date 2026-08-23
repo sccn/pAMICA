@@ -67,8 +67,9 @@ real 70-ch EEG):** on Apple Silicon the **MLX backend is the GPU win: ~15-25 ms/
 channels, ~7x over torch-CPU and faster than an RTX 4090 (CUDA ~36 ms/it) at EEG scale**; **PyTorch-MPS
 never wins (162-255 ms/it, at or worse than CPU)**, so use MLX, not `device="mps"`, on Apple hardware.
 CUDA float64 stays the bit-safe NVIDIA path. All backends agree on the LL to ~3 digits on real data.
-Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses). Component sharing is ported
-(#263); the remaining MLX follow-ups are Newton (#264) and the non-GG pdf families (#265).
+Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses). Component sharing (#263) and
+Newton (#264, float32, validated against a float64 torch twin -- see `.context/issue-264/`) are
+ported; the remaining MLX follow-up is the non-GG pdf families (#265).
 
 ## Key Files
 - **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`)
