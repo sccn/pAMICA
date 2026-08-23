@@ -83,6 +83,7 @@ def test_pcakeep_applies_with_annotation_rejection(fitted_pcakeep, raw_annot, n_
     """Rank reduction and annotation rejection both took effect on one fit."""
     assert fitted_pcakeep.converged_ is True
     assert fitted_pcakeep.n_components_ == RANK
+    assert n_good < raw_annot.n_times  # the annotations genuinely removed data
     assert fitted_pcakeep._n_samples == n_good
     assert fitted_pcakeep.reject_by_annotation_ is True
     mask = fitted_pcakeep.good_sample_mask_
@@ -191,6 +192,9 @@ def test_auto_rank_scoring_is_timeline_aligned(fitted_auto_rank, raw_annot_low_r
     assert prob.shape == (1, raw_annot_low_rank.n_times)
     assert np.isnan(prob[:, ~mask]).all()
     assert np.isfinite(prob[:, mask]).all()
+    # Single model: the responsibility is exactly 1 wherever it is defined
+    # (symmetry with the pcakeep twin above).
+    np.testing.assert_allclose(prob[:, mask], 1.0)
 
 
 def test_auto_rank_pmi_scores_good_samples_only(
