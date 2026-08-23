@@ -5,6 +5,12 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **The MLX backend now has convergence stops** (issue #248). `AMICAMLXNG`
+  implemented neither, so an Apple-GPU fit always ran to `max_iter`; it now
+  carries `use_min_dll`/`min_dll`/`maxincs`, `use_grad_norm`/`min_nd` and the
+  likelihood-decrease branch's gradient-norm half, with the same names, defaults
+  and `stop_reason` strings as `AMICATorchNG`, and stops at the same iteration
+  as it on the same data.
 - **`share_comps` on the NumPy backend now runs the same algorithm as the
   PyTorch one** (issues #240, #242). A column shared by two models took one
   A-step per contributing model, the second against an already-stepped `A`,

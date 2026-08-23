@@ -404,17 +404,22 @@ them fire, and it is worth knowing which before concluding that one is broken.
 
 Two of the four defaults differ between the backends, so read the column that
 matches the entry point you use. `AMICA_NumPy` resolves its defaults from the
-bundled `pamica/numpy_impl/params.json`; `AMICA`/`AMICATorchNG` take theirs from
-the constructor signature; Fortran compiles in the values in `amica15_header.f90`
-and the bundled `pamica/sample_data/input.param` overrides several.
+bundled `pamica/numpy_impl/params.json`; `AMICA`/`AMICATorchNG` and `AMICAMLXNG`
+take theirs from the constructor signature (`max_iter` from `fit`); Fortran
+compiles in the values in `amica15_header.f90` and the bundled
+`pamica/sample_data/input.param` overrides several.
 
-| Stop | `AMICA` / `AMICATorchNG` | `AMICA_NumPy` | Fortran (compiled / `input.param`) |
-|---|---|---|---|
-| `max_iter` | **100** | 2000 | none / 2000 |
-| `min_dll` (`use_min_dll`) | on, `1e-9` | on, `1e-9` | on, `1e-9` |
-| `min_nd` (`use_grad_norm`) | on, `1e-7` | on, `1e-7` (named `min_grad_norm`) | on, `1e-7` |
-| `minlrate` (`lrate_floor`) | `1e-12` | `1e-12` | `1e-12` / `1e-8` |
-| `do_newton` | **off** | **on** | off / on |
+| Stop | `AMICA` / `AMICATorchNG` | `AMICA_NumPy` | `AMICAMLXNG` (MLX) | Fortran (compiled / `input.param`) |
+|---|---|---|---|---|
+| `max_iter` | **100** | 2000 | **100** | none / 2000 |
+| `min_dll` (`use_min_dll`) | on, `1e-9` | on, `1e-9` | on, `1e-9` | on, `1e-9` |
+| `min_nd` (`use_grad_norm`) | on, `1e-7` | on, `1e-7` (named `min_grad_norm`) | on, `1e-7` | on, `1e-7` |
+| `minlrate` (`lrate_floor`) | `1e-12` | `1e-12` | `1e-12` | `1e-12` / `1e-8` |
+| `do_newton` | **off** | **on** | n/a (`NotImplementedError`) | off / on |
+
+The MLX column dates from issue #248, which ported both stops to that backend;
+before it, an MLX fit had no convergence criterion at all and always ran to
+`max_iter`.
 
 Which of them actually ends a fit:
 
@@ -423,13 +428,13 @@ Which of them actually ends a fit:
   default `max_iter=100` the fit always ends on `max_iter` before `min_dll` can
   fire, so the default PyTorch run is iteration-limited, not converged. Raise
   `max_iter` if you want the likelihood stop to be the one that decides.
-- **`min_nd` never fires** on a recording this size, in any of the three
+- **`min_nd` never fires** on a recording this size, in any of the four
   implementations. This is the subject of the rest of this section.
 - **`minlrate` needs sustained likelihood decreases** to anneal the learning rate
   all the way to the floor. The bundled sample stops on `min_dll` (or `max_iter`)
   long before that, so it is not a stop you will meet here.
 
-**`min_nd` is not reachable on a recording this size, in any of the three
+**`min_nd` is not reachable on a recording this size, in any of the four
 implementations.** Running the reference binary to completion under a matched
 configuration, its own gradient norm oscillates rather than shrinking:
 
@@ -443,7 +448,7 @@ configuration, its own gradient norm oscillates rather than shrinking:
 
 It then plateaus at 1.0-1.65e-5 out to iteration 5073 without ever crossing the
 `1e-7` threshold, which sits about two orders of magnitude below the reference's
-own floor. Both Python backends plateau roughly two orders higher again — near
+own floor. The Python backends plateau roughly two orders higher again — near
 a fixed point `dAk` tends to zero, so the norm is measuring a near-total
 cancellation where floating-point and BLAS ordering differences dominate what is
 left.
