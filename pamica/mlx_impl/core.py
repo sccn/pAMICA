@@ -153,6 +153,13 @@ _CPU = mx.cpu
 # catching every conceivable near-singular matrix (no scalar cond threshold
 # can, given the above), but it reliably catches the realistic failure mode:
 # a collapsed or duplicated component, not a merely ill-conditioned one.
+#
+# A complete mechanism -- running mx.linalg.inv itself in a disposable
+# isolated subprocess, so a real LU abort kills only that subprocess -- was
+# considered and rejected: it would trade an occasional missed abort for a
+# per-iteration subprocess spawn on the hot path, which is a far larger and
+# less predictable cost than one host-side np.linalg.cond call, for a defect
+# this guard already makes rare in practice.
 _INV_COND_THRESHOLD = 1e12
 
 
@@ -779,31 +786,90 @@ class AMICAMLXNG:
         condition number above the threshold raises ``RuntimeError`` naming
         the model index, iteration, and value, in place of the uncatchable
         abort.
+
+        A matrix with non-finite entries needs its own handling, verified by
+        isolated-subprocess reproduction: a matrix that is ONLY non-finite
+        (no other defect) never aborts -- ``inv`` propagates NaN/inf into
+        ``W``, caught downstream by ``nan_params``. But a matrix that is
+        BOTH non-finite AND structurally singular elsewhere (an exact
+        duplicate column plus one unrelated NaN, confirmed to reach and
+        abort the process) is not covered by "only non-finite" reasoning --
+        skipping the check on any non-finite entry, as an earlier version of
+        this guard did, lets that combination through unguarded. The check
+        below therefore 0-fills non-finite entries (a no-op when already
+        finite) before computing the condition number, UNLESS every entry is
+        non-finite (the observed shape of a dead-model corruption -- a
+        zero-responsibility model dividing by ``dgm==0`` -- which carries no
+        structural signal to check and is left to flow to ``inv``/
+        ``nan_params`` exactly as before).
+
+        Caveat, carried from ``_INV_COND_THRESHOLD``: no scalar condition
+        number, on the sanitized matrix or otherwise, can guarantee catching
+        every conceivable abort-capable matrix -- the empirically observed
+        LU-abort onset (cond~9e8 to beyond cond~5e10, matrix-dependent) sits
+        below the 1e12 threshold, so a believed-rare residual window remains
+        between "passes this check" and "would actually abort".
         """
         assert self.A is not None and self.comp_list is not None
         ws, logdets = [], []
         for h in range(self.n_models):
             A_h = self.A[:, self.comp_list[:, h]]
             a_h_np = np.array(A_h, dtype=np.float32, copy=False)
-            # Skip the check when A_h is already non-finite (a prior NaN/inf,
-            # e.g. from a zero-responsibility dead model dividing by dgm==0):
-            # np.linalg.cond's SVD raises LinAlgError ("SVD did not converge")
-            # on NaN/inf input rather than returning a value, which is a
-            # DIFFERENT failure than the one this guard targets. Pre-guard,
-            # mx.linalg.inv on a non-finite A does not abort -- it propagates
-            # NaN/inf into W, which fit()'s existing nan_params guard already
-            # catches -- so skipping here preserves that exact behavior
-            # instead of a new, unrelated host-side crash.
-            if np.all(np.isfinite(a_h_np)):
-                cond = float(np.linalg.cond(a_h_np))
+            finite_mask = np.isfinite(a_h_np)
+            # A matrix with ZERO finite entries carries no signal to check --
+            # this is exactly the observed shape of a dead-model corruption
+            # (a zero-responsibility model dividing by dgm==0 propagates
+            # NaN/inf through the WHOLE per-model direction matrix, so all
+            # comp_list columns for that model go non-finite together, not
+            # just one entry -- confirmed on a real fitted 2-model dead-model
+            # state). Skipping here reproduces the pre-guard behavior exactly:
+            # mx.linalg.inv on a wholly non-finite A does not abort -- it
+            # propagates NaN/inf into W, which fit()'s existing nan_params
+            # guard already catches.
+            #
+            # Otherwise (fully finite, OR a MINORITY of entries non-finite),
+            # sanitize any non-finite entries to 0.0 before computing cond.
+            # This is a no-op when already fully finite. When partially
+            # non-finite, 0.0 is a neutral fill at the same natural scale as
+            # A's entries (near-unit-norm columns) -- unlike a huge/extreme
+            # sentinel, which was tried and rejected: it makes ANY non-finite
+            # entry look "infinitely far" from the rest of the matrix via pure
+            # scale mismatch, so a well-conditioned matrix with one stray NaN
+            # and a genuinely singular one both come back cond=inf, which
+            # cannot distinguish them. The neutral fill can (verified: a
+            # well-conditioned real matrix with one injected NaN reads
+            # cond~35 after 0-fill; the same matrix with an EXACT DUPLICATE
+            # column plus that same stray NaN -- the reviewer-reported killer
+            # combination, confirmed by isolated-subprocess reproduction to
+            # abort the process under the OLD skip-on-any-non-finite logic --
+            # reads cond~3.7e16, comfortably over the threshold). A raise here
+            # is unconditional on the underlying non-finite entries (the
+            # sanitized cond is a probe of the surrounding structure, not a
+            # claim about what the unknown entries "really" are), so it also
+            # still catches an exact-duplicate-column A with no non-finite
+            # entries at all, unchanged from before.
+            if np.any(finite_mask):
+                sentinel = np.where(finite_mask, a_h_np, np.float32(0.0)).astype(
+                    np.float32
+                )
+                cond = float(np.linalg.cond(sentinel))
                 if not math.isfinite(cond) or cond > _INV_COND_THRESHOLD:
+                    n_bad = int(a_h_np.size - finite_mask.sum())
+                    nonfinite_note = (
+                        f" ({n_bad} of {a_h_np.size} entries were already "
+                        "non-finite and were 0-filled for this check.)"
+                        if n_bad
+                        else ""
+                    )
                     raise RuntimeError(
                         f"Singular unmixing matrix for model {h} at iteration "
                         f"{self.iteration}: cond(A[:, comp_list[:, {h}]]) = "
                         f"{cond:.3e} exceeds the float32 threshold "
                         f"{_INV_COND_THRESHOLD:.1e} (MLX's CPU-stream inv "
                         "would otherwise abort the process instead of "
-                        "raising; #274)."
+                        "raising; #274). Likely a component collapse -- "
+                        "consider re-seeding or a lower lrate."
+                        f"{nonfinite_note}"
                     )
             wh = mx.linalg.inv(A_h, stream=_CPU)
             ws.append(wh)
