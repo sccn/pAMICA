@@ -1917,8 +1917,12 @@ class AMICATorchNG:
             ``mir_history_`` is a true trajectory like ``ll_history``: a
             ``keep_best`` (issue #51) restore does not rewrite it, so the
             fit-end MIR is ``self.mir(X)`` on the returned parameters, not
-            ``mir_history_[-1]``. Incompatible with PCA reduction
-            (``pcakeep``/``pcadb``), same as :meth:`mir` itself.
+            ``mir_history_[-1]``. Not index-aligned with ``ll_history``:
+            entry ``i`` is computed after iteration ``i``'s parameter update,
+            while ``ll_history[i]`` is the likelihood of the parameters
+            before it, so the two are one update apart (issue #161).
+            Incompatible with PCA reduction (``pcakeep``/``pcadb``), same as
+            :meth:`mir` itself.
 
         Returns
         -------
