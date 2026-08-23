@@ -121,14 +121,15 @@ def test_comp_used_survives_a_second_identify_call():
     """
     model = _shared_fit(max_iter=3, share_comps=False)
     model.A[:, int(model.comp_list[0, 1])] = model.A[:, int(model.comp_list[0, 0])]
+    atil = model._pinv_sphere() @ model.A
 
     comp_list_after, used_first = identify_shared_components(
-        model.A, model.W, model.comp_list.copy(), model.comp_thresh
+        atil, model.comp_list.copy(), model.comp_thresh
     )
     assert not used_first.all(), "setup failed: the forced collinear pair did not merge"
 
     _, used_second = identify_shared_components(
-        model.A, model.W, comp_list_after.copy(), model.comp_thresh
+        atil, comp_list_after.copy(), model.comp_thresh
     )
     assert used_second.sum() == used_first.sum(), (
         "comp_used was rebuilt from scratch and forgot the earlier merge"
@@ -514,3 +515,124 @@ def test_forced_merge_fit_is_finite_in_both_backends():
     for name in ("A", "mu", "beta", "gm", "alpha", "rho"):
         tensor = getattr(ng, name)
         assert tensor is not None and bool(torch.isfinite(tensor).all()), name
+
+
+# --- sensor-space sharing similarity (issue #258) ----------------------------
+def test_numpy_merge_decision_matches_torch_backend():
+    """Acceptance test: from one matched fitted state, the two backends reach
+    the identical merge decision now that both compare sensor-space
+    (de-sphered) mixing columns -- ``pinv(sphere) @ A`` -- mirroring
+    ``AMICATorchNG._identify_shared_comps`` exactly (torch_impl/core.py:1696-
+    1741) instead of numpy's former sphered-space comparison.
+    """
+    model = _shared_fit(max_iter=3, share_comps=False)
+    # Perturb one cross-model column into near- (not exact-) collinearity, so
+    # the merge decision itself is under test rather than a state whose
+    # comp_list is already pre-merged.
+    i0 = int(model.comp_list[0, 0])
+    i1 = int(model.comp_list[0, 1])
+    rng = np.random.RandomState(0)
+    model.A[:, i1] = model.A[:, i0] + 1e-3 * rng.standard_normal(model.A.shape[0])
+    model._update_unmixing_matrices()
+    thresh = 0.9
+
+    ng = AMICATorchNG(
+        n_channels=model.data_dim,
+        n_models=model.num_models,
+        n_mix=model.num_mix,
+        device="cpu",
+        block_size=_BLOCK,
+        seed=7,
+        pdftype=0,
+    )
+    ng._initialize_parameters()
+    for name in ("A", "mu", "alpha", "beta", "rho", "gm", "c", "sphere"):
+        setattr(ng, name, torch.from_numpy(np.asarray(getattr(model, name)).copy()))
+    ng.comp_list = torch.from_numpy(model.comp_list.copy())
+    ng._sphere_pinv = None
+    ng.comp_thresh = thresh
+
+    numpy_comp_list, _ = identify_shared_components(
+        model._pinv_sphere() @ model.A, model.comp_list.copy(), thresh
+    )
+    ng._identify_shared_comps()
+
+    assert not np.array_equal(numpy_comp_list, model.comp_list), (
+        "no merge fired; the cross-backend comparison would be vacuous"
+    )
+    np.testing.assert_array_equal(numpy_comp_list, ng.comp_list.numpy())
+
+
+def test_rank_reduced_numpy_sharing_completes():
+    """Twin of ``test_ng_sharing.py::test_rank_reduced_share_fit_completes``: a
+    rank-reduced sphere ``(16, 32)`` must not block ``share_comps`` -- the
+    sensor-space back-map is a pseudo-inverse, valid at any rank (issue #253's
+    fix, now shared by both backends via issue #258)."""
+    # do_newton stays off: Newton is unrelated to this change, and turning it
+    # on here crosses into a pre-existing, separately-scoped shape bug in the
+    # NumPy Newton path when a share pass collapses many components at once
+    # (encountered while writing this test; not touched by issue #258 -- see
+    # PR body).
+    model = AMICA(
+        num_models=2,
+        num_mix=3,
+        max_iter=25,
+        seed=3,
+        share_comps=True,
+        share_start=8,
+        share_int=10,
+        comp_thresh=0.99,
+        pcakeep=16,
+        use_tqdm=False,
+        do_opt_block=False,
+        block_size=_BLOCK,
+        do_newton=False,
+    )
+    model.fit(_real_data())
+    assert model.sphere is not None
+    assert model.sphere.shape == (16, 32)
+    assert model.data_dim == 16 and model.data_dim_in == 32
+    assert model.converged is True
+    for name in ("A", "mu", "beta", "gm", "alpha", "rho"):
+        assert np.all(np.isfinite(np.asarray(getattr(model, name)))), name
+    assert model.comp_used is not None
+    assert int(model.comp_used.sum()) < model.num_comps  # sharing really ran
+
+
+def test_zero_norm_column_is_not_merged_and_raises_no_warning():
+    """Pins the ``tiny`` denominator guard: a zero-norm column's cosine comes
+    out a clean 0.0, never NaN, so it neither merges nor trips a NumPy divide
+    warning (which an unguarded 0/0 would)."""
+    model = _shared_fit(max_iter=3, share_comps=False)
+    zero_idx = int(model.comp_list[0, 1])
+    other_idx = int(model.comp_list[0, 0])
+    model.A[:, zero_idx] = 0.0
+    atil = model._pinv_sphere() @ model.A
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        comp_list_after, _ = identify_shared_components(
+            atil, model.comp_list.copy(), model.comp_thresh
+        )
+
+    divides = [
+        w
+        for w in caught
+        if issubclass(w.category, RuntimeWarning)
+        and ("divide" in str(w.message) or "invalid value" in str(w.message))
+    ]
+    assert not divides, f"divide warnings fired: {[str(w.message) for w in divides]}"
+    assert int(comp_list_after[0, 1]) == zero_idx, "the zero-norm column merged"
+    assert other_idx != zero_idx
+
+
+def test_non_finite_sphere_fails_loudly():
+    """A degenerate (non-finite) sphere has no pseudo-inverse; the guard must
+    raise loudly rather than let the per-pair isfinite check downstream
+    silently decline every merge (twin of
+    ``test_ng_sharing.py::test_non_finite_sphere_still_fails_loudly``)."""
+    model = _shared_fit(max_iter=2, share_comps=False)
+    model.sphere = np.full_like(model.sphere, np.nan)
+    model._sphere_pinv = None
+    with pytest.raises(RuntimeError, match="non-finite"):
+        model.get_sensor_mixing_matrix()

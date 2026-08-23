@@ -5,6 +5,14 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **NumPy `share_comps` now measures similarity on de-sphered sensor-space
+  maps, matching the PyTorch backend and the Fortran reference** (issue #258).
+  `identify_shared_components` used to compare mixing columns directly in the
+  sphered space; it now takes `pinv(sphere) @ A`, the same `Spinv` back-map
+  `AMICATorchNG` and `amica15.f90` use (:1916, :568-578), so both backends
+  reach the identical merge decision from the same fitted state. Borderline
+  merge decisions near `comp_thresh` can change relative to a pre-#258 NumPy
+  fit, even on a full-rank sphere.
 - **The MLX backend now has convergence stops** (issue #248). `AMICAMLXNG`
   implemented neither, so an Apple-GPU fit always ran to `max_iter`; it now
   carries `use_min_dll`/`min_dll`/`maxincs`, `use_grad_norm`/`min_nd` and the
