@@ -118,7 +118,7 @@ def identify_shared_components(atil, comp_list, comp_thresh=0.99):
     agreement contract (.rules/backend_parity.md): ``AMICATorchNG._identify_shared_comps``
     (torch_impl/core.py) computes the identical ``pinv(sphere) @ A`` metric,
     so both backends make the same merge decision from the same fitted state
-    (see ``tests/test_numpy_share_comps.py::test_...matches_the_torch_backend``).
+    (see ``tests/test_numpy_share_comps.py::test_numpy_merge_decision_matches_torch_backend``).
     Before issue #258 this function compared raw columns of the *sphered* ``A``
     directly, which could disagree with the PyTorch backend under rank
     reduction or PCA whitening, where the sphere is not orthonormal.
