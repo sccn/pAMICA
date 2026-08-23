@@ -77,7 +77,7 @@ import logging
 import json
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 from tqdm import tqdm
 from ..rank import MINEIG, MINEIG_REL, numerical_rank
 from .utils import (
@@ -524,11 +524,7 @@ class AMICA:
             # check the fitted parameters themselves, mirroring the PyTorch
             # wrapper's degenerate-fit contract (issue #50): converged=False,
             # stop_reason names what went non-finite, and nothing is written.
-            degenerate = [
-                name
-                for name in ("A", "W", "c", "mu", "alpha", "beta", "rho", "gm")
-                if not np.all(np.isfinite(getattr(self, name)))
-            ]
+            degenerate = self._nonfinite_params()
             if degenerate:
                 self.converged = False
                 self.stop_reason = "Non-finite parameters at exit: " + ", ".join(
@@ -542,13 +538,77 @@ class AMICA:
         # Always persist the final converged result. _write_results is otherwise
         # only called on writestep boundaries during the loop, so a run whose
         # last iteration is not a writestep multiple (or that stops early) would
-        # never save the final state. Guard on a finite likelihood so a run that
-        # diverged to a non-finite LL (issue #39) does not overwrite the last
-        # good on-disk result with NaNs.
+        # never save the final state. Guarded by the same finiteness predicate as
+        # every checkpoint, so a run that diverged to a non-finite LL (issue #39)
+        # or ended holding non-finite parameters (issue #240) cannot overwrite
+        # the last good on-disk result with NaNs.
         if self.converged:
             self._write_results()
 
         return self
+
+    # Every parameter a caller can read back off disk or off the object. `A` and
+    # `W` are the decomposition; `c`/`mu`/`alpha`/`beta`/`rho`/`gm` are the model
+    # a downstream `loadmodout` reads. `sphere`/`mean` are preprocessing outputs
+    # and are checked too because write_amicaout persists them.
+    _FITTED_PARAMS = (
+        "A",
+        "W",
+        "c",
+        "mu",
+        "alpha",
+        "beta",
+        "rho",
+        "gm",
+        "sphere",
+        "mean",
+    )
+
+    def _nonfinite_params(self) -> List[str]:
+        """Names of fitted parameters currently holding a non-finite value.
+
+        The single definition of "this state is safe to persist or report as a
+        success", used by :meth:`fit`'s outcome and by every write site. An empty
+        list is the finiteness predicate; the names themselves go into
+        ``stop_reason`` and the skipped-write log, so a failure says *what* went
+        non-finite rather than only *that* something did.
+
+        Parameters not yet allocated (before ``_initialize_parameters``) are
+        skipped rather than treated as bad.
+        """
+        return [
+            name
+            for name in self._FITTED_PARAMS
+            if getattr(self, name, None) is not None
+            and not np.all(np.isfinite(np.asarray(getattr(self, name))))
+        ]
+
+    def _write_checkpoint(self, kind: str) -> bool:
+        """Write results/history for a mid-fit checkpoint, unless degenerate.
+
+        A checkpoint written from a non-finite state persists NaN parameters that
+        ``loadmodout`` reads back without complaint, so the run's only on-disk
+        artifact would be corrupt while the fit continued (issue #240). Skip the
+        write instead -- loudly, never silently, and without touching whatever
+        valid output an earlier checkpoint already left on disk.
+
+        Returns True if the write happened.
+        """
+        degenerate = self._nonfinite_params()
+        if degenerate:
+            self.logger.error(
+                "Skipping the %s checkpoint at iter %d: non-finite %s. The "
+                "previously written output on disk is left untouched.",
+                kind,
+                self.iter + 1,
+                ", ".join(degenerate),
+            )
+            return False
+        if kind == "history":
+            self._write_history()
+        else:
+            self._write_results()
+        return True
 
     def _preprocess_data(self, data: np.ndarray):
         """Preprocess the data by removing mean and sphering."""
@@ -1579,6 +1639,12 @@ class AMICA:
             for iter in iterator:
                 self.iter = iter
                 final_iter = iter
+                # Fortran-style 1-indexed iteration. Every schedule the reference
+                # expresses as `mod(iter, step)` (share_comps, writestep,
+                # histstep) is anchored on this, not on the 0-indexed loop
+                # counter, so an identical setting fires on the same iterations
+                # here, in AMICATorchNG, and in the binary.
+                itf = iter + 1
 
                 # Get updates and likelihood
                 updates = self._get_updates_and_likelihood()
@@ -1682,10 +1748,9 @@ class AMICA:
                 # get_unmixing_matrices, amica15.f90:1840,1845) -- otherwise the
                 # next E-step would read a stale W while indexing the densities
                 # by the merged comp_list. itf is the Fortran-style 1-indexed
-                # iteration, the same anchor AMICATorchNG uses, so an identical
-                # (share_start, share_int) fires on the same iterations in both
-                # backends and lines up with the _a_frozen window.
-                itf = iter + 1
+                # iteration (itf, above), the same anchor AMICATorchNG uses, so
+                # an identical (share_start, share_int) fires on the same
+                # iterations in both backends and lines up with _a_frozen.
                 if (
                     self.share_comps
                     and itf >= self.share_start
@@ -1696,13 +1761,21 @@ class AMICA:
                     )
                     self._update_unmixing_matrices()
 
-                # Write intermediate results if requested
-                if self.writestep > 0 and iter % self.writestep == 0:
-                    self._write_results()
+                # Write intermediate results/history if requested, on Fortran's
+                # cadence: `mod(iter, writestep) == 0` over its 1-indexed
+                # iteration counter (amica15.f90:1124/1130), so the first
+                # checkpoint lands at iteration `writestep`, not before it. This
+                # loop's `iter` is 0-indexed, and the literal transcription fired
+                # at iter 0 -- so EVERY fit wrote a checkpoint after its first
+                # iteration whatever writestep said, including fits far shorter
+                # than one interval. Both are skipped (loudly) from a non-finite
+                # state so a checkpoint cannot persist NaN parameters that
+                # loadmodout reads back without complaint (issue #240).
+                if self.writestep > 0 and itf % self.writestep == 0:
+                    self._write_checkpoint("results")
 
-                # Write history if requested
-                if self.do_history and iter % self.histstep == 0:
-                    self._write_history()
+                if self.do_history and itf % self.histstep == 0:
+                    self._write_checkpoint("history")
         finally:
             # Close the progress bar if using tqdm
             if use_tqdm_progress:
