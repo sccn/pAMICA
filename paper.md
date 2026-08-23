@@ -122,8 +122,9 @@ and double-precision CUDA is the reproducible NVIDIA path.
 
 On real 70-channel EEG at `block_size=512`, per-iteration cost is 25 ms for MLX on an Apple GPU, 39 ms for double-precision CUDA on an RTX 4090,
 and 30 ms for native Fortran on a 24-core i9-13900K, against 193 ms for PyTorch on an Apple-Silicon CPU and 255 ms for PyTorch-Metal.
-That comparison is block-size-confounded: PyTorch-Metal is far more block-size-sensitive than the CPU it runs beside, falling from 431 to 30 ms/iteration on the bundled 32-channel sample
-between `block_size=512` and `pamica`'s current 8192 default, and to 13.5 ms/iteration at a further-tuned block size, below the CPU's 15.8 ms there.
+That comparison is block-size-confounded: PyTorch-Metal is far more block-size-sensitive than the CPU it runs beside, falling from 431 to 30.5 ms/iteration on the bundled 32-channel sample
+between `block_size=512` and `pamica`'s current 8192 default, still behind the CPU's 21.7 ms/iteration there, and to 13.5 ms/iteration, below the CPU's 15.8 ms,
+at a further-tuned single-block setting that is memory-limited rather than a free win, since peak block memory scales with `block_size`, which is why 8192 stays the shipped default.
 MLX stays the fastest Apple backend throughout the sweep.
 Full tables, the data-size sweep, and reproduction commands are in the [documentation](https://eeglab.org/pAMICA/guides/validation/); the correctness harness never uses synthetic data.
 The harness and sample data ship with the package, and every row of Table 1 but the two on002718 entries re-runs from the bundled sample alone.
