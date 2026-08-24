@@ -60,6 +60,35 @@ def _model(**kwargs: Any):
     return AMICAMLXNG(**params)
 
 
+RANK = 20
+
+
+@pytest.fixture(scope="module")
+def rank_deficient(real_data: np.ndarray) -> np.ndarray:
+    """Real EEG projected onto its top-``RANK`` subspace (what SSS does to MEG),
+    the established rank-reduction route in ``torch_tests/test_ng_rank_deficient.py``."""
+    centered = real_data - real_data.mean(axis=1, keepdims=True)
+    U = np.linalg.svd(centered, full_matrices=False)[0][:, :RANK]
+    return U @ (U.T @ centered)
+
+
+def _recorded_search(monkeypatch) -> dict:
+    """Capture the arguments the backend hands ``blocktune.search``: after
+    preprocessing they are the model's REDUCED dimensions, which is how the
+    ordering of the search relative to preprocessing becomes observable."""
+    from pamica.mlx_impl import core as mlx_core
+
+    recorded: dict = {}
+    real_search = blocktune.search
+
+    def recording_search(**kwargs):
+        recorded.update(kwargs)
+        return real_search(**kwargs)
+
+    monkeypatch.setattr(mlx_core.blocktune, "search", recording_search)
+    return recorded
+
+
 # ---------------------------------------------------------------------------
 # Defaults and inertness
 # ---------------------------------------------------------------------------
@@ -123,14 +152,56 @@ def test_candidates_never_exceed_the_sample_count(real_data):
     assert model.block_size <= subset.shape[1]
 
 
-def test_memory_cap_uses_the_recommended_working_set():
-    """MLX will allocate past the recommended working set and start paging,
-    which shows up as a mysteriously slow candidate rather than a failure, so
-    the cap is taken against the size the driver recommends."""
+def test_memory_cap_uses_the_recommended_working_set(monkeypatch):
+    """Which of the two reported sizes is used is the whole point of this
+    helper: MLX allocates past the recommended working set and starts paging,
+    which surfaces as a mysteriously slow candidate rather than a failure, so
+    the cap must come from the recommended set and not the larger raw memory
+    size. Both keys are reported with different values here, so preferring the
+    wrong one is visible rather than indistinguishable."""
     from pamica.mlx_impl.core import AMICAMLXNG
 
-    available = AMICAMLXNG._available_memory_bytes()
-    assert available is None or available > 0
+    recommended, total = 8 * 1024**3, 64 * 1024**3
+    monkeypatch.setattr(
+        mx,
+        "device_info",
+        lambda: {
+            "max_recommended_working_set_size": recommended,
+            "memory_size": total,
+        },
+    )
+    assert AMICAMLXNG._available_memory_bytes() == recommended
+
+
+def test_memory_cap_falls_back_to_memory_size(monkeypatch):
+    """Older MLX builds report only the raw size; that is a usable cap, and
+    better than no cap at all."""
+    from pamica.mlx_impl.core import AMICAMLXNG
+
+    monkeypatch.setattr(mx, "device_info", lambda: {"memory_size": 64 * 1024**3})
+    assert AMICAMLXNG._available_memory_bytes() == 64 * 1024**3
+
+
+def test_memory_cap_is_none_when_mlx_reports_nothing(monkeypatch):
+    """No reported size means no cap -- the search then relies entirely on
+    catching the real allocation failure, which is the actual safety net."""
+    from pamica.mlx_impl.core import AMICAMLXNG
+
+    monkeypatch.setattr(mx, "device_info", lambda: {})
+    assert AMICAMLXNG._available_memory_bytes() is None
+
+
+def test_tuner_runs_on_the_reduced_channel_count(rank_deficient, monkeypatch):
+    """Ordering pin: the search runs after preprocessing, so on rank-reduced
+    input it sees the kept rank rather than the input channel count -- which is
+    what the memory cap has to be sized against."""
+    recorded = _recorded_search(monkeypatch)
+    model = _model(do_opt_block=True, blk_min=2048, blk_max=8192, blk_step=2048)
+    model.fit(rank_deficient, max_iter=2, verbose=False)
+
+    assert model.n_channels == RANK < NW  # reduction really happened
+    assert recorded["n_channels"] == RANK
+    assert model.block_size in (2048, 4096, 6144, 8192)
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +295,9 @@ def test_metal_allocation_failure_is_a_catchable_exception():
     assert blocktune.is_allocation_failure(excinfo.value)
 
 
-def test_allocation_failure_falls_back_to_the_last_working_size(real_data, caplog):
+def test_allocation_failure_falls_back_to_the_last_working_size(
+    real_data, caplog, monkeypatch
+):
     """The core deliverable of issue #232, on MLX. The per-candidate probe is
     replaced with one that raises the verbatim ``[metal::malloc]`` RuntimeError
     captured from the live probe above. This is approved error-path injection,
@@ -244,7 +317,7 @@ def test_allocation_failure_falls_back_to_the_last_working_size(real_data, caplo
             )
         return real_accumulate(X)
 
-    model._accumulate_blocks = failing_accumulate
+    monkeypatch.setattr(model, "_accumulate_blocks", failing_accumulate)
     with caplog.at_level(logging.DEBUG, logger="pamica.mlx_impl.core"):
         model.fit(real_data, max_iter=2, verbose=False)
 
@@ -254,7 +327,7 @@ def test_allocation_failure_falls_back_to_the_last_working_size(real_data, caplo
     assert "12288" in text and "stopped early" in text
 
 
-def test_a_real_error_in_the_probe_is_not_swallowed(real_data):
+def test_a_real_error_in_the_probe_is_not_swallowed(real_data, monkeypatch):
     """A genuine MLX failure must surface rather than be absorbed as memory
     pressure -- the distinction matters most here, where both arrive as a bare
     RuntimeError."""
@@ -263,6 +336,6 @@ def test_a_real_error_in_the_probe_is_not_swallowed(real_data):
     def broken_accumulate(X):
         raise RuntimeError("[linalg::lu] Input matrix is singular")
 
-    model._accumulate_blocks = broken_accumulate
+    monkeypatch.setattr(model, "_accumulate_blocks", broken_accumulate)
     with pytest.raises(RuntimeError, match="singular"):
         model.fit(real_data[:, :8192], max_iter=1, verbose=False)

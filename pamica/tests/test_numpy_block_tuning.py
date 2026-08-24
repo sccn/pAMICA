@@ -72,6 +72,35 @@ def _model(**kwargs: Any) -> AMICA:
     return AMICA(**params)
 
 
+RANK = 20
+
+
+def _rank_deficient(n_samples: int) -> np.ndarray:
+    """Real EEG projected onto its top-``RANK`` subspace (what SSS does to MEG),
+    the established rank-reduction route in ``torch_tests/test_ng_rank_deficient.py``."""
+    data = _real_data(n_samples)
+    centered = data - data.mean(axis=1, keepdims=True)
+    U = np.linalg.svd(centered, full_matrices=False)[0][:, :RANK]
+    return U @ (U.T @ centered)
+
+
+def _recorded_search(monkeypatch) -> dict:
+    """Capture the arguments the backend hands ``blocktune.search``: after
+    preprocessing they are the model's REDUCED dimensions, which is how the
+    ordering of the search relative to preprocessing becomes observable."""
+    from pamica.numpy_impl import core as np_core
+
+    recorded: dict = {}
+    real_search = blocktune.search
+
+    def recording_search(**kwargs):
+        recorded.update(kwargs)
+        return real_search(**kwargs)
+
+    monkeypatch.setattr(np_core.blocktune, "search", recording_search)
+    return recorded
+
+
 # ---------------------------------------------------------------------------
 # Defaults and inertness
 # ---------------------------------------------------------------------------
@@ -85,6 +114,34 @@ def test_search_is_now_off_by_default():
     model = _model()
     assert model.do_opt_block is False
     assert model.block_size == 8192
+
+
+def test_bare_default_fit_runs_at_the_shipped_block_size():
+    """Direct pin on the shipped default, on the object a user actually gets.
+    ``params.json`` had pinned block_size to 128, which went unnoticed only
+    because the always-on tuner overrode it every time; with the tuner off that
+    would have shipped as a silent ~9x slowdown. Nothing here passes
+    ``block_size`` or ``do_opt_block`` -- ``max_iter`` only keeps the test
+    short, since the bare default is 2000 iterations."""
+    model = AMICA(use_tqdm=False, max_iter=2)
+    assert model.block_size == 8192
+    assert model.do_opt_block is False
+
+    model.fit(_real_data(4000))
+    assert model.block_size == 8192
+
+
+def test_tuner_runs_on_the_reduced_channel_count(monkeypatch):
+    """Ordering pin: the search runs after preprocessing, so on rank-reduced
+    input it sees the kept rank rather than the input channel count -- which is
+    what the memory cap has to be sized against."""
+    recorded = _recorded_search(monkeypatch)
+    model = _model(do_opt_block=True, blk_min=2048, blk_max=8192, blk_step=2048)
+    model.fit(_rank_deficient(9000))
+
+    assert model.data_dim == RANK < 32  # reduction really happened
+    assert recorded["n_channels"] == RANK
+    assert model.block_size in (2048, 4096, 6144, 8192)
 
 
 def test_default_sweep_bounds_match_the_other_backends():

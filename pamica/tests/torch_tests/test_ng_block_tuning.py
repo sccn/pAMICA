@@ -46,6 +46,38 @@ def real_data() -> np.ndarray:
     return _load_real_data()
 
 
+RANK = 20
+
+
+@pytest.fixture(scope="module")
+def rank_deficient(real_data: np.ndarray) -> np.ndarray:
+    """Real EEG projected onto its top-``RANK`` subspace (what SSS does to MEG),
+    the established rank-reduction route in ``test_ng_rank_deficient.py``."""
+    centered = real_data - real_data.mean(axis=1, keepdims=True)
+    U = np.linalg.svd(centered, full_matrices=False)[0][:, :RANK]
+    return U @ (U.T @ centered)
+
+
+def _recorded_search(monkeypatch) -> dict:
+    """Capture the arguments the backend hands ``blocktune.search``.
+
+    The dimensions the tuner is given are the observable consequence of running
+    it in the right place: after preprocessing, they are the model's REDUCED
+    dimensions, not the caller's input shape.
+    """
+    from pamica.torch_impl import core as ng_core
+
+    recorded: dict = {}
+    real_search = blocktune.search
+
+    def recording_search(**kwargs):
+        recorded.update(kwargs)
+        return real_search(**kwargs)
+
+    monkeypatch.setattr(ng_core.blocktune, "search", recording_search)
+    return recorded
+
+
 def _model(**kwargs: Any) -> AMICATorchNG:
     params: dict[str, Any] = dict(
         n_channels=NW,
@@ -139,6 +171,60 @@ def test_candidates_never_exceed_the_sample_count(real_data):
     model = _model(do_opt_block=True, blk_min=4096, blk_max=32768, blk_step=4096)
     model.fit(subset, max_iter=1, verbose=False)
     assert model.block_size <= subset.shape[1]
+
+
+def test_tuner_runs_on_the_reduced_channel_count(rank_deficient, monkeypatch):
+    """Ordering pin: the search runs AFTER preprocessing, so on rank-reduced
+    input it must see the kept rank, not the input channel count. Getting this
+    backwards would size the memory cap against dimensions the fit never uses
+    -- wrong by 60% here -- and would mean the tuner had been wired in ahead of
+    the reduction that defines the model."""
+    recorded = _recorded_search(monkeypatch)
+    model = _model(do_opt_block=True, blk_min=2048, blk_max=8192, blk_step=2048)
+    model.fit(rank_deficient, max_iter=2, verbose=False)
+
+    assert model.n_channels == RANK < NW  # reduction really happened
+    assert recorded["n_channels"] == RANK
+    assert model.block_size in (2048, 4096, 6144, 8192)
+
+
+def test_tuner_runs_for_multiple_models(real_data):
+    """Multi-model changes both the per-block memory (three tensors per model)
+    and the work each probe times, so it must be exercised, not assumed from
+    the single-model path."""
+    model = _model(
+        n_models=2, do_opt_block=True, blk_min=2048, blk_max=8192, blk_step=2048
+    )
+    model.fit(real_data[:, :12000], max_iter=2, verbose=False)
+
+    assert model.block_size in blocktune.block_size_candidates(
+        2048, 8192, 2048, n_samples=12000
+    )
+    assert model.final_ll_ is not None and math.isfinite(model.final_ll_)
+
+
+def test_small_data_degrades_to_a_single_clamped_candidate(real_data):
+    """End-to-end wiring of the clamp: with fewer samples than blk_min every
+    candidate collapses onto n_samples, so the fit runs as one block rather
+    than at a size larger than the data (which Fortran turns into silent NaNs,
+    issue #292)."""
+    subset = real_data[:, :2000]
+    assert subset.shape[1] < blocktune.DEFAULT_BLK_MIN
+    model = _model(do_opt_block=True)  # default 4096-32768 sweep
+    model.fit(subset, max_iter=2, verbose=False)
+
+    assert model.block_size == subset.shape[1]
+    assert model.final_ll_ is not None and math.isfinite(model.final_ll_)
+
+
+def test_available_memory_falls_back_to_host_ram_on_cpu():
+    """The branch every CPU fit takes. The CUDA and MPS branches are not
+    covered: neither device is available in CI, and both degrade to None (no
+    cap) if the query fails, so an untested regression there costs a missing
+    first filter, not a wrong one -- the allocation catch still backs it."""
+    model = _model()
+    assert model.device.type == "cpu"
+    assert model._available_memory_bytes() == blocktune.host_memory_bytes()
 
 
 def test_search_runs_under_do_reject(real_data):
