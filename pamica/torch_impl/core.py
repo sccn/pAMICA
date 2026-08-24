@@ -47,13 +47,14 @@ from __future__ import annotations
 import logging
 import math
 import time
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from .. import blocktune
+from .. import restarts
 from ..metrics import mir as mir_metric
 from ..metrics import pairwise_mi
 from ..rank import MINEIG, MINEIG_REL, numerical_rank
@@ -539,6 +540,18 @@ class AMICATorchNG:
         internally (not ``torch``'s RNG) with the exact same draw order as
         ``pamica.AMICA._initialize_parameters``, so the same seed produces
         bit-identical starting parameters to the NumPy reference.
+    n_restarts : int, default=1
+        Number of independent fits to run from different seeds, keeping the one
+        with the highest ``final_ll_`` (issue #198). ``1`` (the default) is the
+        parity-preserving setting: the restart machinery is bypassed entirely
+        and the fit is bit-identical to a pre-#198 run. With ``n_restarts > 1``
+        a base ``seed`` (or explicit ``restart_seeds``) is required, so the
+        winning fit can be reproduced. Restarts run serially, so a fit costs
+        ``n_restarts`` times as long. Fortran has no equivalent; see
+        ``docs/guides/amica-differences.md`` and :mod:`pamica.restarts`.
+    restart_seeds : sequence of int, optional
+        Explicit per-restart seeds; must have exactly ``n_restarts`` entries.
+        When omitted the seeds are ``seed, seed + 1, ..., seed + n_restarts - 1``.
     device : str or torch.device, optional
         Compute device for the block loop. Preprocessing (mean/cov/eigh) is
         always done in float64 on CPU regardless of device, since eigh is
@@ -608,6 +621,8 @@ class AMICATorchNG:
         mineig: float = MINEIG,
         mineig_rel: Optional[float] = MINEIG_REL,
         seed: Optional[int] = None,
+        n_restarts: int = restarts.DEFAULT_N_RESTARTS,
+        restart_seeds: Optional[Sequence[int]] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float64,
     ):
@@ -760,6 +775,22 @@ class AMICATorchNG:
         self.pcadb = pcadb
 
         self.seed = seed
+
+        # Best-of-N restarts (issue #198), a pamica extension: Fortran has no
+        # search over seeds. Resolved here so a bad configuration fails before
+        # any data is touched, and derived from the CONSTRUCTOR seed so that a
+        # second fit() on the same instance repeats the same seeds even though
+        # fit() leaves self.seed on the winning restart.
+        self._restart_seeds = restarts.resolve_seeds(n_restarts, restart_seeds, seed)
+        self.n_restarts = int(n_restarts)
+        self.restart_seeds = None if restart_seeds is None else list(restart_seeds)
+        # Per-restart records, set by fit(): index-aligned lists of the seed each
+        # restart ran from, the log-likelihood it returned (NaN for a degenerate
+        # restart) and why it stopped. A degenerate restart is excluded from
+        # selection but kept here -- it is a fact about that seed.
+        self.restart_seeds_: List[Optional[int]] = []
+        self.restart_lls_: List[float] = []
+        self.restart_stop_reasons_: List[Optional[str]] = []
 
         if device is None:
             device = setup_device()
@@ -2019,6 +2050,37 @@ class AMICATorchNG:
             setattr(self, name, value)
 
     # ------------------------------------------------------------------
+    # Best-of-N restarts (issue #198)
+    # ------------------------------------------------------------------
+    # Everything a fit writes, and therefore everything a restart snapshot must
+    # copy for the winning restart to be indistinguishable from a single fit
+    # from that seed. Split from the invariants below purely to document *why*
+    # an attribute is or is not copied; together the two must account for every
+    # ``self.x =`` in the fit path, which ``test_restart_policy.py`` enforces by
+    # parsing this module -- so a field added to a fit-path method fails the
+    # suite until it is classified here.
+    _RESTART_STATE_ATTRS = (
+        # Fitted parameters (the state_dict params) ...
+        "A", "W", "c", "mu", "alpha", "beta", "rho", "gm", "comp_list", "pdtype",
+        # ... the schedule/counters a fit mutates (the state_dict extras) ...
+        "iteration", "ll_history", "final_ll_", "stop_reason", "mir_history_",
+        "n_newton_fallbacks", "n_kurt_done", "numrej", "good_idx", "_ndtmpsum",
+        "lrate", "lrate_cap", "newtrate", "rholrate",
+        # ... the LLt stash and its materialized arrays (issue #157) ...
+        "_llt_logv", "_llt_ll", "_llt_lht", "_llt_lt",
+        # ... the tuned block size (do_opt_block re-times per restart) and the
+        # seed the winning restart ran from.
+        "block_size", "seed",
+    )  # fmt: skip
+    # Written by the fit path but identical across the restarts of one fit()
+    # call, because they are functions of the data alone: preprocessing outputs
+    # and the model sizing derived from the numerical rank. Copying them would
+    # be harmless but pointless, and would suggest they could differ.
+    _RESTART_INVARIANT_ATTRS = (
+        "mean", "sphere", "sldet", "_sphere_pinv", "n_channels", "n_comps",
+    )  # fmt: skip
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def fit(
@@ -2028,7 +2090,143 @@ class AMICATorchNG:
         verbose: bool = True,
         mir_step: int = 0,
     ) -> "AMICATorchNG":
-        """Fit the model to data.
+        """Fit the model to data, running ``n_restarts`` fits and keeping the best.
+
+        With the default ``n_restarts=1`` this is exactly :meth:`_fit_once` --
+        the restart machinery draws nothing, copies nothing and changes nothing,
+        so the trajectory is bit-identical to a pre-issue-#198 fit. With
+        ``n_restarts > 1`` the model is fit once per seed in ``restart_seeds``
+        (serially), and the highest-``final_ll_`` non-degenerate restart's
+        complete state is what the returned model holds.
+
+        See :meth:`_fit_once` for the semantics of a single fit (parameters,
+        ``keep_best``, LLt, ``share_comps`` ordering); every one of them applies
+        unchanged to each restart.
+
+        Parameters
+        ----------
+        X, max_iter, verbose, mir_step
+            As :meth:`_fit_once`.
+
+        Returns
+        -------
+        self : AMICATorchNG
+            Holding the winning restart's parameters, ``ll_history``,
+            ``final_ll_``, ``stop_reason``, ``mir_history_``, LLt arrays and
+            rejection state -- the state a single fit from that seed would have
+            left, bit for bit.
+
+        Notes
+        -----
+        Records (index-aligned, one entry per restart, always populated --
+        including the single-restart path): ``restart_seeds_``,
+        ``restart_lls_`` (NaN where a restart ended degenerate) and
+        ``restart_stop_reasons_``. The winner is named in one INFO log line.
+
+        A restart that ends degenerate (``nan_ll``/``singular_ll``) is excluded
+        from selection but recorded. If *every* restart is degenerate the model
+        is left holding the last one, so issue #50's degenerate-fit contract
+        applies exactly as it does to a single degenerate fit.
+        """
+        seeds = self._restart_seeds
+        if len(seeds) == 1:
+            # Single-restart path: no snapshot, no reseeding of anything that is
+            # not already the constructor's seed (seeds[0] IS self.seed unless
+            # the caller passed an explicit one-element restart_seeds), so this
+            # is byte-for-byte the pre-#198 fit.
+            self.seed = seeds[0]
+            self._fit_once(X, max_iter=max_iter, verbose=verbose, mir_step=mir_step)
+            self.restart_seeds_ = list(seeds)
+            self.restart_lls_ = [
+                float("nan") if self.final_ll_ is None else float(self.final_ll_)
+            ]
+            self.restart_stop_reasons_ = [self.stop_reason]
+            return self
+        return self._fit_restarts(X, max_iter, verbose, mir_step)
+
+    def _fit_restarts(
+        self, X: np.ndarray, max_iter: int, verbose: bool, mir_step: int
+    ) -> "AMICATorchNG":
+        """Run one full fit per restart seed and keep the winner (issue #198).
+
+        Each restart is a complete :meth:`_fit_once`, which re-runs
+        ``_initialize_parameters`` and resets every per-fit counter, so no state
+        leaks from one restart into the next. The winning restart's state is
+        captured with :meth:`_capture_restart_state` (a copy of every attribute
+        the fit path writes) and reapplied at the end unless the winner happens
+        to be the last restart, whose state is already live.
+        """
+        seeds = self._restart_seeds
+        lls: List[float] = []
+        degenerate: List[bool] = []
+        stop_reasons: List[Optional[str]] = []
+        states: Dict[int, Dict[str, object]] = {}
+
+        for index, seed in enumerate(seeds):
+            self.seed = seed
+            self._fit_once(X, max_iter=max_iter, verbose=verbose, mir_step=mir_step)
+            ll = float("nan") if self.final_ll_ is None else float(self.final_ll_)
+            is_degenerate = self.stop_reason in self._DEGENERATE_STOP_REASONS
+            lls.append(ll)
+            degenerate.append(is_degenerate)
+            stop_reasons.append(self.stop_reason)
+            logger.info(
+                "%s",
+                restarts.progress_message(
+                    index, len(seeds), seed, ll, self.stop_reason, is_degenerate
+                ),
+            )
+            # Keep only the best state seen so far: one copy at a time, never
+            # n_restarts of them.
+            best_so_far = restarts.select_best(lls, degenerate)
+            if best_so_far == index:
+                states = {index: self._capture_restart_state()}
+
+        winner = restarts.select_best(lls, degenerate)
+        if winner is None:
+            logger.warning(
+                "%s", restarts.all_degenerate_message(len(seeds), stop_reasons)
+            )
+        else:
+            logger.info(
+                "%s",
+                restarts.winner_message(winner, len(seeds), seeds[winner], lls[winner]),
+            )
+            if winner != len(seeds) - 1:
+                self._apply_restart_state(states[winner])
+
+        self.restart_seeds_ = list(seeds)
+        self.restart_lls_ = lls
+        self.restart_stop_reasons_ = stop_reasons
+        return self
+
+    def _capture_restart_state(self) -> Dict[str, object]:
+        """Independent copy of every attribute the fit path writes.
+
+        The list is :data:`_RESTART_STATE_ATTRS`; ``test_restart_policy.py``
+        cross-checks it against the attributes the fit-path methods actually
+        assign, so a field added later cannot be silently dropped from a restart
+        snapshot.
+        """
+        return {
+            name: restarts.copy_state_value(getattr(self, name))
+            for name in self._RESTART_STATE_ATTRS
+        }
+
+    def _apply_restart_state(self, state: Dict[str, object]) -> None:
+        """Restore the state captured by :meth:`_capture_restart_state`."""
+        for name, value in state.items():
+            setattr(self, name, value)
+
+    def _fit_once(
+        self,
+        X: np.ndarray,
+        max_iter: int = 100,
+        verbose: bool = True,
+        mir_step: int = 0,
+    ) -> "AMICATorchNG":
+        """Run one fit (one initialization, one EM loop) -- what :meth:`fit`
+        calls once per restart.
 
         Parameters
         ----------
@@ -3229,6 +3427,14 @@ class AMICATorchNG:
             "mineig": self.mineig,
             "mineig_rel": self.mineig_rel,
             "seed": self.seed,
+            # Best-of-N restarts (issue #198). Like keep_best, this only affects
+            # a re-fit, but it is persisted so a reloaded model reconstructs its
+            # exact configuration; the restart the fit actually kept is in
+            # ``extra`` below. self.seed is the winner's seed, and
+            # restart_seeds is the constructor's list, so a reload re-runs the
+            # same search rather than re-deriving seeds from the winner.
+            "n_restarts": self.n_restarts,
+            "restart_seeds": self.restart_seeds,
             # Store dtype by name (e.g. "float64") to keep the payload
             # weights_only-safe; rebuilt via getattr(torch, ...) on load.
             "dtype": str(self.dtype).split(".")[-1],
@@ -3257,6 +3463,13 @@ class AMICATorchNG:
             "lrate_cap": float(self.lrate_cap),
             "newtrate": float(self.newtrate),
             "rholrate": float(self.rholrate),
+            # Per-restart records (issue #198): which seeds ran, what each
+            # returned, and why each stopped. Persisted so a reloaded best-of-N
+            # model can still say how its parameters were chosen instead of
+            # reporting an empty search.
+            "restart_seeds_": list(self.restart_seeds_),
+            "restart_lls_": [float(v) for v in self.restart_lls_],
+            "restart_stop_reasons_": list(self.restart_stop_reasons_),
         }
         return {
             "format_version": 3,
@@ -3351,3 +3564,9 @@ class AMICATorchNG:
         self.lrate_cap = extra["lrate_cap"]
         self.newtrate = extra["newtrate"]
         self.rholrate = extra["rholrate"]
+        # Additive-only, like the issue #207 config keys: a payload written
+        # before issue #198 simply has no restart records, and an empty search
+        # is the honest description of a single-fit model saved back then.
+        self.restart_seeds_ = list(extra.get("restart_seeds_", []))
+        self.restart_lls_ = list(extra.get("restart_lls_", []))
+        self.restart_stop_reasons_ = list(extra.get("restart_stop_reasons_", []))
