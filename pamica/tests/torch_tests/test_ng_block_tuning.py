@@ -313,14 +313,14 @@ def test_allocation_failure_falls_back_to_the_last_working_size(
     model = _model(do_opt_block=True, blk_min=4096, blk_max=16384, blk_step=4096)
     real_accumulate = model._accumulate_blocks
 
-    def failing_accumulate(X):
+    def failing_accumulate(X, stash_llt=False):
         if model.block_size > 8192:
             raise RuntimeError(
                 "[enforce fail at alloc_cpu.cpp:117] . DefaultCPUAllocator: "
                 "not enough memory: you tried to allocate 68719476736 bytes. "
                 "Ran out of memory"
             )
-        return real_accumulate(X)
+        return real_accumulate(X, stash_llt=stash_llt)
 
     monkeypatch.setattr(model, "_accumulate_blocks", failing_accumulate)
     with caplog.at_level(logging.DEBUG, logger="pamica.torch_impl.core"):

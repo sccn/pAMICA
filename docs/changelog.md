@@ -5,6 +5,33 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **`LLt` is written from the E-step's stashed per-sample log-likelihood**
+  (issue #157), on both the PyTorch and NumPy backends, instead of being
+  recomputed by a fresh full-dataset forward pass at write time. This is the
+  reference's own design -- `modloglik`/`loglik` are allocated once
+  (amica15.f90:2619-2620), filled by every E-step and dumped verbatim by
+  `write_output` -- and it removes the last full pass the write path paid for:
+  a NumPy `writestep` checkpoint drops from 78 ms to 0.8 ms on the bundled
+  32-channel sample, and a PyTorch fit no longer spends an extra E-step (12.8
+  ms, about half an EM iteration) computing `LLt` even when nothing is written.
+  **Behaviour change:** pamica now inherits Fortran's one-M-step staleness. The
+  written `LLt` is the E-step of the parameters as they stood *before* the
+  M-step whose `W`/`A` sit beside it, so it satisfies the reference's own
+  invariant `Lt.sum()/(n_good*nw) == LL[-1]` -- which the committed reference
+  output satisfies exactly, and which the previous self-consistent recompute
+  did not. That comparability was the point: see
+  `docs/guides/amica-differences.md` for the decision (2026-08-23) and its
+  Fortran citations. Under the PyTorch `keep_best` safeguard, which the
+  reference has no counterpart for, the stash is rolled back with the
+  parameters, so the exported `LLt` is the E-step that produced the exported
+  `final_ll_`. `model_loglik(X)` still gives the log-likelihood of the written
+  parameters if that is what you need. The `do_reject` zero sentinel is
+  unchanged (a rejected sample's entries are zeroed exactly as
+  amica15.f90:2232-2234 does), and one reference-faithful exception to the
+  invariant is now pinned as behavior: a `do_reject` fit that rejects on the
+  same iteration as the write leaves a small residual, because Fortran
+  normalizes `LL(iter)` (amica15.f90:1770) before `reject_data` shrinks the
+  good count (amica15.f90:1138, :2252) -- the binary shows it too.
 - **Block-size auto-tuner with an OOM-safe fallback** (issue #232, split out of
   #216/#230), on all three backends behind Fortran's own four parameter names
   (`do_opt_block`, `blk_min`, `blk_max`, `blk_step`). With `do_opt_block=True`,

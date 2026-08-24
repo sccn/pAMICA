@@ -332,6 +332,62 @@ undo the merge. So under sharing, every backend returns the last iterate, and
 `final_ll_`/`self.ll[-1]` trailing a final-iteration merge is not a
 `keep_best` artifact; it happens the same way with `keep_best=False`.
 
+## The written `LLt` is one M-step older than the `W` beside it (issue #157)
+
+`LLt` is the per-timepoint, per-model log-likelihood written alongside the
+model, the array EEGLAB's `loadmodout15.m` returns as `mod.Lht`/`mod.Lt`.
+pamica writes the values its last E-step computed, which is what the reference
+does: `modloglik`/`loglik` are allocated once (amica15.f90:2619-2620), filled
+by each E-step (amica15.f90:1406-1411) and dumped verbatim by `write_output`
+(amica15.f90:2338-2343).
+
+Fortran's iteration runs `get_updates_and_likelihood` (amica15.f90:996), then
+`update_params` (amica15.f90:1122), then `write_output` (amica15.f90:1126 for a
+`writestep` checkpoint, 1146 at the end). So the `LLt` on disk belongs to the
+parameters as they stood *before* the M-step whose `W`/`A` sit next to it. It
+is not the likelihood of the written decomposition; it is the likelihood of its
+immediate predecessor, and it is the E-step that produced the last entry of the
+written `LL` trajectory. The relation that holds on both sides — on the
+committed reference output as much as on pamica's — is
+
+```
+LLt[num_models, :].sum() / (n_good_samples * nw) == LL[-1]
+```
+
+It holds bit for bit with one reference-faithful exception: a `do_reject` fit
+whose rejection fires on the same iteration as the write. `LL(iter)` is
+normalized over the good set as it stood *before* that rejection
+(amica15.f90:1770), and `reject_data` then shrinks `numgoodsum`
+(amica15.f90:2252) and zeroes the rejected samples' `modloglik`/`loglik`
+(amica15.f90:2232-2234), so the two sides stop counting the same samples and a
+small residual remains — 0.011 on the bundled sample for a pass that drops 68
+of 4096 samples, identical on both pamica backends, and of the same order in
+the binary itself. It scales with how much that one pass drops. Any later
+iteration re-normalizes over the shrunk set and the equality returns exactly.
+pamica reproduces this rather than papering over it, and pins both halves as
+behavior (`test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration`
+and `test_llt_invariant_returns_one_iteration_after_a_rejection`).
+
+pamica adopted this deliberately (2026-08-23, issue #157). Between issues #155
+and #157 it instead recomputed `LLt` from the post-update parameters, which
+made the file self-consistent with the `W` beside it but *not* comparable with
+the binary's — and cost a full extra pass over the data at every write. Being
+byte-comparable with the reference is this project's definition of correct, so
+the reference's ordering won. The recompute is gone from both backends, which
+also removes ~77 ms per NumPy `writestep` checkpoint and one full E-step per
+PyTorch fit on the bundled 32-channel sample.
+
+The one place pamica has no reference to follow is its `keep_best` safeguard
+(row 3 above), which Fortran does not have. There the stashed `LLt` is rolled
+back with the parameters, and because the snapshot is taken *before* that
+iteration's M-step, the restored parameters and the restored `LLt` come from
+the same point in the loop: under a restore there is no staleness at all.
+Either way the rule is one sentence — **the exported `LLt` is the E-step that
+produced the exported `final_ll_`**.
+
+If you want the log-likelihood of the parameters actually written, compute it:
+`model.model_loglik(X)` on the PyTorch backend returns exactly that.
+
 ## The block-size search picks a machine-dependent value (issue #232)
 
 `do_opt_block` times a few candidate `block_size` values on your data and

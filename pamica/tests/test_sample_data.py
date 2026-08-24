@@ -522,9 +522,10 @@ def test_numpy_llt_multimodel_roundtrip(tmp_path):
     """A small real 2-model NumPy fit's ``LLt`` satisfies its definitional
     relationship: the total per-sample log-likelihood is the log-sum-exp of
     the per-model log-likelihoods (issue #155). Only the torch backend had a
-    multi-model LLt round-trip test; the two ``_compute_full_posterior_ll``
-    are separate implementations, so this exercises the numpy one too. Few
-    iterations -- this is a code-path smoke test, not a convergence check.
+    multi-model LLt round-trip test; each backend stashes and lays out its own
+    ``LLt`` (``_llt_arrays`` here, ``_llt_lht``/``_llt_lt`` there, issue #157),
+    so this exercises the numpy one too. Few iterations -- this is a code-path
+    smoke test, not a convergence check.
     """
     from scipy.special import logsumexp
 
