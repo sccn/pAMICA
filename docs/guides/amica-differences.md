@@ -354,6 +354,20 @@ committed reference output as much as on pamica's — is
 LLt[num_models, :].sum() / (n_good_samples * nw) == LL[-1]
 ```
 
+It holds bit for bit with one reference-faithful exception: a `do_reject` fit
+whose rejection fires on the same iteration as the write. `LL(iter)` is
+normalized over the good set as it stood *before* that rejection
+(amica15.f90:1770), and `reject_data` then shrinks `numgoodsum`
+(amica15.f90:2252) and zeroes the rejected samples' `modloglik`/`loglik`
+(amica15.f90:2232-2234), so the two sides stop counting the same samples and a
+small residual remains — 0.011 on the bundled sample for a pass that drops 68
+of 4096 samples, identical on both pamica backends, and of the same order in
+the binary itself. It scales with how much that one pass drops. Any later
+iteration re-normalizes over the shrunk set and the equality returns exactly.
+pamica reproduces this rather than papering over it, and pins both halves as
+behavior (`test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration`
+and `test_llt_invariant_returns_one_iteration_after_a_rejection`).
+
 pamica adopted this deliberately (2026-08-23, issue #157). Between issues #155
 and #157 it instead recomputed `LLt` from the post-update parameters, which
 made the file self-consistent with the `W` beside it but *not* comparable with

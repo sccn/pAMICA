@@ -23,11 +23,15 @@ Release notes are also published on the
   `docs/guides/amica-differences.md` for the decision (2026-08-23) and its
   Fortran citations. Under the PyTorch `keep_best` safeguard, which the
   reference has no counterpart for, the stash is rolled back with the
-  parameters, so the exported `LLt` is always the E-step that produced the
-  exported `final_ll_`. `model_loglik(X)` still gives the log-likelihood of the
-  written parameters if that is what you need. The `do_reject` zero sentinel is
+  parameters, so the exported `LLt` is the E-step that produced the exported
+  `final_ll_`. `model_loglik(X)` still gives the log-likelihood of the written
+  parameters if that is what you need. The `do_reject` zero sentinel is
   unchanged (a rejected sample's entries are zeroed exactly as
-  amica15.f90:2232-2234 does).
+  amica15.f90:2232-2234 does), and one reference-faithful exception to the
+  invariant is now pinned as behavior: a `do_reject` fit that rejects on the
+  same iteration as the write leaves a small residual, because Fortran
+  normalizes `LL(iter)` (amica15.f90:1770) before `reject_data` shrinks the
+  good count (amica15.f90:1138, :2252) -- the binary shows it too.
 - **Block-size auto-tuner with an OOM-safe fallback** (issue #232, split out of
   #216/#230), on all three backends behind Fortran's own four parameter names
   (`do_opt_block`, `blk_min`, `blk_max`, `blk_step`). With `do_opt_block=True`,

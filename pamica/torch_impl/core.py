@@ -2069,9 +2069,15 @@ class AMICATorchNG:
         LLt semantics (issue #157). The exported ``LLt``
         (``_llt_lht``/``_llt_lt``, written by :meth:`write_amica_output`) is
         the per-sample log-likelihood **stashed by the E-step that produced**
-        ``final_ll_``, never a separate post-fit forward pass. Equivalently, it
-        always satisfies ``Lt.sum() / (n_samples * n_channels) == final_ll_``
-        bit for bit. Two consequences worth stating plainly:
+        ``final_ll_``, never a separate post-fit forward pass. Equivalently it
+        satisfies, bit for bit,
+
+            ``Lt.sum() / (n_good_samples * n_channels) == final_ll_``
+
+        where ``n_good_samples`` is the sample count that E-step ran over
+        (``good_idx.numel()`` under ``do_reject``, ``n_samples`` otherwise) --
+        the same normalization ``ll_history`` uses. Three consequences worth
+        stating plainly:
 
         * Without a keep-best restore, ``final_ll_`` is ``ll_history[-1]``, the
           LL of the parameters as they stood *before* the last M-step -- so the
@@ -2090,6 +2096,20 @@ class AMICATorchNG:
           iteration's M-step, the restored parameters and the restored ``LLt``
           come from the same point in the loop, so there is no staleness at all
           in this case.
+        * The one case where the equality above does NOT hold is a
+          ``do_reject`` fit whose rejection fires on its own last executed
+          iteration: ``ll`` was normalized over the good set as it stood
+          *before* that rejection, and ``_reject_outliers`` then zeroed the
+          dropped samples' stash entries, so numerator and denominator no
+          longer refer to the same set and a small residual remains (0.011 on
+          the bundled sample with one 68-sample pass; it scales with how much
+          that pass drops). This too is reference-faithful, not a defect:
+          Fortran computes ``LL(iter) = LLtmp2/dble(numgoodsum*nw)``
+          (amica15.f90:1770) before ``reject_data`` (amica15.f90:1138) shrinks
+          ``numgoodsum`` (amica15.f90:2252) and zeroes the rejected
+          ``modloglik``/``loglik`` (amica15.f90:2232-2234), and the binary shows
+          the same residual on the same schedule. Any later iteration
+          re-normalizes over the shrunk good set and the equality returns.
         """
         if X.ndim != 2:
             raise ValueError(
@@ -2481,9 +2501,13 @@ class AMICATorchNG:
         # above, which rolls the stash back alongside the parameters, so these
         # arrays are always the E-step of the iterate fit() returns -- i.e. the
         # very E-step whose total is ``final_ll_``:
-        #     Lt.sum() / (n_samples * n_channels) == final_ll_   (bit-exact)
-        # This is Fortran's own convention (see the class docstring on
-        # staleness) and holds for the reference binary's own output too.
+        #     Lt.sum() / (n_good_samples * n_channels) == final_ll_  (bit-exact)
+        # where n_good_samples is the count that E-step ran over. This is
+        # Fortran's own convention (see fit()'s docstring on staleness) and
+        # holds for the reference binary's own output too. The single exception,
+        # also reference-faithful, is a do_reject fit that rejects on its own
+        # last iteration: ll was normalized before that rejection and the stash
+        # zeroed after it (Fortran: amica15.f90:1770 precedes :1138/:2252).
         # Converted to compact numpy here so the device buffers can be freed;
         # a refit reallocates them.
         if self._llt_logv is not None and self._llt_ll is not None and self.ll_history:

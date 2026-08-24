@@ -1369,6 +1369,16 @@ class AMICA:
         with the binary's. The invariant this pins down, on both sides, is
         ``Lt.sum() / (num_good_samples * data_dim) == self.ll[-1]``.
 
+        That equality holds bit for bit except on a write whose iteration also
+        fired a rejection: ``self.ll[-1]`` was normalized over the good set as
+        it stood *before* ``_reject_outliers`` ran, and the dropped samples'
+        stash entries have since been zeroed, so the two sides no longer count
+        the same samples and a small residual remains. Reference-faithful
+        rather than a defect -- Fortran computes ``LL(iter) =
+        LLtmp2/dble(numgoodsum*nw)`` (amica15.f90:1770) before ``reject_data``
+        (amica15.f90:1138) shrinks ``numgoodsum`` (amica15.f90:2252) -- and any
+        later iteration re-normalizes over the shrunk set and restores it.
+
         Under ``do_reject`` a rejected sample's entries are zero -- they are
         never scored again after ``_reject_outliers`` zeroes them (mirroring
         amica15.f90:2232-2234), and ``load_rej`` reads exactly that zero as the
