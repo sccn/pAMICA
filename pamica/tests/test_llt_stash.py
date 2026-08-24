@@ -20,6 +20,12 @@ that the committed reference output satisfies bit for bit, is
 
     Lt.sum() / (n_good_samples * nw) == LL[-1]
 
+with exactly one exception, itself reference-faithful and pinned here as
+behavior: a ``do_reject`` fit that rejects on the same iteration as the write
+normalizes ``LL(iter)`` before ``reject_data`` shrinks the good count
+(amica15.f90:1770 precedes :1138/:2252), so a small residual remains until the
+next E-step re-normalizes.
+
 Real sample EEG only, and the Fortran side of the headline test is the
 committed ``sample_data/amicaout`` -- output of the reference binary itself, so
 the comparison needs no binary at run time (an opt-in fresh-binary variant is
@@ -276,6 +282,97 @@ def test_torch_and_numpy_stash_the_same_llt_on_matched_state(real_data, tmp_path
     np.testing.assert_allclose(ng._llt_ll.numpy(), npm._llt_ll, rtol=0, atol=1e-10)
     # Not vacuous: these are real log-likelihoods, not a pair of zero buffers.
     assert np.abs(npm._llt_ll).min() > 0.0
+
+
+# --- do_reject: the one reference-faithful break in the invariant -----------
+def _reject_kwargs(rejstart):
+    """Fire exactly one rejection, on iteration ``rejstart`` (0-indexed).
+
+    ``rejint=3`` keeps the modulo arm of the schedule from firing earlier (both
+    backends clamp ``max(1, iter - rejstart)``, so a ``rejint`` of 1 would
+    reject on every iteration from the start), and ``maxrej=1`` caps it at one
+    pass so the iteration under test is unambiguous.
+    """
+    return dict(do_reject=True, rejstart=rejstart, rejint=3, maxrej=1, rejsig=3.0)
+
+
+def test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration(
+    real_data, tmp_path
+):
+    """A rejection on the fit's own last iteration leaves a bounded residual.
+
+    ``ll`` is normalized over the good set as it stood BEFORE that iteration's
+    rejection, and ``_reject_outliers`` then zeroes the dropped samples' stash
+    entries, so the two sides of the invariant stop counting the same samples.
+    This is Fortran's ordering, not a pamica defect: the reference computes
+    ``LL(iter) = LLtmp2/dble(numgoodsum*nw)`` (amica15.f90:1770) before
+    ``reject_data`` (amica15.f90:1138) shrinks ``numgoodsum``
+    (amica15.f90:2252) and zeroes the rejected ``modloglik``/``loglik``
+    (amica15.f90:2232-2234), and the binary shows the same residual on the same
+    schedule.
+
+    Pinned as behavior rather than silenced, on both backends, and paired with
+    the control below: one more iteration after the rejection re-normalizes
+    over the shrunk good set and the equality returns exactly. The residual's
+    size depends on how many samples that one pass drops, so it is bounded
+    rather than pinned to a value -- what is asserted is that it is far above
+    the summation tolerance and far below anything resembling a blow-up.
+    """
+    tm = _torch_fit(real_data, n_models=1, max_iter=6, **_reject_kwargs(5))
+    assert len(tm.ll_history) == 6 and tm.numrej == 1
+    assert tm.good_idx is not None and int(tm.good_idx.numel()) < real_data.shape[1]
+    assert tm._llt_lt is not None
+    n_good = int(tm.good_idx.numel())
+    # Rejected samples carry Fortran's zero sentinel, which is what makes the
+    # two sides count different sets.
+    assert int((tm._llt_lt == 0.0).sum()) == real_data.shape[1] - n_good
+    residual = abs(_llt_invariant(tm._llt_lt, n_good, NW) - tm.final_ll_)
+    assert 1e4 * _LL_TOL < residual < 1.0
+
+    nm = _numpy_fit(
+        real_data,
+        n_models=1,
+        max_iter=6,
+        outdir=str(tmp_path / "rej"),
+        **_reject_kwargs(5),
+    )
+    assert len(nm.ll) == 6 and nm.numrej == 1
+    _, n_lt = nm._llt_arrays()
+    assert n_lt is not None and nm.num_good_samples < real_data.shape[1]
+    n_residual = abs(_llt_invariant(n_lt, nm.num_good_samples, nm.data_dim) - nm.ll[-1])
+    assert 1e4 * _LL_TOL < n_residual < 1.0
+
+
+def test_llt_invariant_returns_one_iteration_after_a_rejection(real_data, tmp_path):
+    """The control: the same rejection, one iteration earlier, and it holds.
+
+    Confines the exception above to exactly the case named -- a rejection on
+    the fit's own last iteration -- rather than to ``do_reject`` in general.
+    The E-step after a rejection re-normalizes over the shrunk good set, and
+    the rejected samples contribute 0 to both sides, so the equality is exact
+    again.
+    """
+    tm = _torch_fit(real_data, n_models=1, max_iter=7, **_reject_kwargs(5))
+    assert len(tm.ll_history) == 7 and tm.numrej == 1
+    assert tm.good_idx is not None and tm._llt_lt is not None
+    n_good = int(tm.good_idx.numel())
+    assert n_good < real_data.shape[1]  # a rejection really did fire
+    assert abs(_llt_invariant(tm._llt_lt, n_good, NW) - tm.final_ll_) <= _LL_TOL
+
+    nm = _numpy_fit(
+        real_data,
+        n_models=1,
+        max_iter=7,
+        outdir=str(tmp_path / "rej2"),
+        **_reject_kwargs(5),
+    )
+    assert len(nm.ll) == 7 and nm.numrej == 1
+    _, n_lt = nm._llt_arrays()
+    assert n_lt is not None and nm.num_good_samples < real_data.shape[1]
+    assert (
+        abs(_llt_invariant(n_lt, nm.num_good_samples, nm.data_dim) - nm.ll[-1])
+        <= _LL_TOL
+    )
 
 
 # --- keep_best (issue #51) --------------------------------------------------
