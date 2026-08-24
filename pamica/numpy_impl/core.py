@@ -346,6 +346,19 @@ class AMICA:
         self.numrej = 0
         self._last_ll_samples: Optional[np.ndarray] = None
 
+        # LLt stash (issue #157): the per-sample/per-model log-likelihood the
+        # E-step already computes, kept for the write path instead of being
+        # recomputed there by a second full-dataset forward pass. This is
+        # Fortran's design -- ``modloglik(num_models,N)``/``loglik(N)`` are
+        # allocated once (amica15.f90:2619-2620), filled by every E-step
+        # (amica15.f90:1406-1411) and simply dumped by ``write_output``
+        # (amica15.f90:2338-2343). Zero-filled so a ``do_reject`` sample keeps
+        # the zero that ``load_rej`` reads as the rejection sentinel. Memory is
+        # ``(num_models + 1) * n_samples * 8`` bytes, which grows with the data
+        # but stays far below ``self.data`` itself (``data_dim x n_samples``).
+        self._llt_logv: Optional[np.ndarray] = None
+        self._llt_ll: Optional[np.ndarray] = None
+
         # Initialize optimization state
         self.iter = 0
         self.ll = []  # Log likelihood history
@@ -817,6 +830,14 @@ class AMICA:
             self.good_idx = np.arange(self.num_samples)
         self.num_good_samples = self.num_samples
 
+        # LLt stash (issue #157), Fortran's modloglik/loglik. Allocated here so
+        # a restart (_reinitialize_for_restart calls back into this method)
+        # cannot leave the pre-restart basin's per-sample values behind; the
+        # next E-step refills every good column, and rejected columns stay at
+        # the zero sentinel either way.
+        self._llt_logv = np.zeros((self.num_samples, self.num_models))
+        self._llt_ll = np.zeros(self.num_samples)
+
         # Initialize mixture parameters
         if self.mu is None:
             self.mu = np.zeros((self.num_mix, self.num_comps))
@@ -1025,12 +1046,11 @@ class AMICA:
         # Restrict the E-step to the currently-good samples under do_reject
         # (mirrors AMICATorchNG's ``X_use = X_t[:, good_idx]``); the default path
         # uses the full array with no copy, so it stays bit-identical.
-        data_use = self.data[:, self.good_idx] if self.do_reject else self.data
+        good_idx = self.good_idx if self.do_reject else None
+        assert not self.do_reject or good_idx is not None
+        data_use = self.data[:, good_idx] if good_idx is not None else self.data
 
-        # Per-sample log-likelihood of the good set, collected in good_idx order
-        # so _reject_outliers' keep-mask maps back onto good_idx. Only gathered
-        # under do_reject, so the default path carries no extra work.
-        ll_parts = []
+        assert self._llt_logv is not None and self._llt_ll is not None
 
         # Process data in blocks
         for start in range(0, data_use.shape[1], self.block_size):
@@ -1040,16 +1060,26 @@ class AMICA:
             # Get block updates
             block_updates = self._get_block_updates(X)
 
-            # Accumulate updates (block_updates may carry an extra "ll_samples"
-            # under do_reject, which is gathered below rather than summed here).
+            # Accumulate updates. block_updates also carries the per-sample
+            # "logV"/"ll_samples", which are stashed below rather than summed
+            # here -- this loop only walks the accumulator keys, so they are
+            # skipped.
             for key in updates:
                 updates[key] += block_updates[key]
 
-            if self.do_reject:
-                ll_parts.append(block_updates["ll_samples"])
+            # LLt stash (issue #157), Fortran's per-block modloglik/loglik write
+            # (amica15.f90:1406-1411). Under do_reject the block came from
+            # data[:, good_idx], so block row r is dataset sample good_idx[r].
+            rows = good_idx[start:end] if good_idx is not None else slice(start, end)
+            self._llt_logv[rows] = block_updates["logV"]
+            self._llt_ll[rows] = block_updates["ll_samples"]
 
-        if self.do_reject:
-            self._last_ll_samples = np.concatenate(ll_parts)
+        # Per-sample log-likelihood of the good set, in good_idx order, so
+        # _reject_outliers' keep-mask maps back onto good_idx. Read straight out
+        # of the stash just written (the same values the blocks produced) rather
+        # than concatenated a second time.
+        if good_idx is not None:
+            self._last_ll_samples = self._llt_ll[good_idx]
 
         # Normalize the accumulated total LL by (good-sample count x working
         # dimensionality), matching Fortran's LL(iter) = LLtmp2 / dble(numgoodsum*nw)
@@ -1075,13 +1105,13 @@ class AMICA:
         Jacobian), and the per-sample total log-likelihood (``Vmax``/
         ``ll_samples``, log-sum-exp over models).
 
-        Shared by ``_get_block_updates`` (the training-path M-step, which
-        normalizes ``z``/``logV`` into responsibilities) and
-        ``_compute_full_posterior_ll`` (the LLt write path, which only needs
-        ``logV``/``ll_samples``) so a single copy carries any future fix to
-        this forward pass -- this codebase has had one-sided forward-pass bugs
-        before (issue #24's fp-vs-dpdf sign bug), and a duplicated copy could
-        silently drift (issue #155).
+        Called only from ``_get_block_updates``, whose per-block ``logV``/
+        ``ll_samples`` serve both the M-step (after normalization into
+        responsibilities) and the ``LLt`` stash (:meth:`_llt_arrays`). Since
+        issue #157 there is no second caller: the write path reads the stash
+        instead of re-running this pass, so it cannot silently drift from the
+        training E-step -- this codebase has had one-sided forward-pass bugs
+        before (issue #24's fp-vs-dpdf sign bug).
 
         Returns
         -------
@@ -1225,10 +1255,12 @@ class AMICA:
         b, z, z0max, logV, Vmax, ll_samples = self._forward_block(X)
 
         updates["ll"] = np.sum(ll_samples)
-        # Expose the per-sample vector for outlier rejection (issue #123); only
-        # under do_reject, so the default path is unchanged.
-        if self.do_reject:
-            updates["ll_samples"] = ll_samples
+        # Per-sample E-step outputs, for outlier rejection (issue #123) and the
+        # LLt stash (issue #157). Not accumulators: _get_updates_and_likelihood
+        # scatters them into the full-dataset buffers instead of summing them
+        # (its accumulate loop walks only the keys initialized above).
+        updates["logV"] = logV
+        updates["ll_samples"] = ll_samples
 
         # Model responsibilities v = softmax(logV); mixture responsibilities z.
         v = np.exp(logV - Vmax)
@@ -1316,89 +1348,47 @@ class AMICA:
 
         return updates
 
-    def _compute_full_posterior_ll(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Recompute the per-model/per-sample log-likelihood over every sample
-        of ``self.data``, for the Fortran ``LLt`` output (issue #155).
+    def _llt_arrays(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """The stashed per-model/per-sample log-likelihood, in ``LLt`` layout.
 
-        Shares the ``_forward_block`` forward pass with ``_get_block_updates``
-        (only ``logV``/``ll_samples`` are needed here), so this read-only
-        computation cannot silently drift from the training path's E-step.
-        Computed fresh from ``self``'s current parameters, not stashed
-        mid-training-loop values, so it is correct even after a keep-best
-        rollback (issue #51).
+        Returns what the last E-step computed (issue #157), reshaped for
+        :func:`pamica.numpy_impl.load.write_amicaout`; it performs no forward
+        pass of its own, so a ``writestep`` checkpoint costs no more than it did
+        before ``LLt`` output existed. This is Fortran's design: ``modloglik``/
+        ``loglik`` are allocated once (amica15.f90:2619-2620), filled by every
+        E-step (amica15.f90:1406-1411) and dumped verbatim by ``write_output``
+        (amica15.f90:2338-2343).
 
-        Deliberate divergence from Fortran: Fortran's ``modloglik`` is filled
-        during iteration i's E-step, the M-step then updates the parameters,
-        and ``write_output`` writes both -- so Fortran's on-disk LLt is stale
-        by one M-step relative to the parameters written alongside it. This
-        method recomputes from the POST-update parameters, so pamica's LLt is
-        self-consistent with the written W/A (better-behaved, not "fixed
-        toward Fortran" -- do not change this to match Fortran's staleness).
+        Ordering, adopted from the reference on purpose. Fortran's main loop is
+        ``get_updates_and_likelihood`` -> ``update_params`` -> ``write_output``
+        (amica15.f90:996, 1122, 1124-1127), so the ``LLt`` written at any
+        checkpoint is the E-step of the parameters as they stood BEFORE that
+        iteration's M-step: one M-step older than the ``W``/``A`` written beside
+        it. pamica's loop has the same three steps in the same order, so
+        stashing reproduces that exactly, and the on-disk ``LLt`` is comparable
+        with the binary's. The invariant this pins down, on both sides, is
+        ``Lt.sum() / (num_good_samples * data_dim) == self.ll[-1]``.
 
-        Cost note: called at every ``writestep`` checkpoint during training
-        (see ``_write_results``), not just once at the end, so each
-        checkpoint now pays a full O(n_samples) forward pass it did not pay
-        before this method existed. Bounded and small at the default
-        ``writestep`` (100; the bundled sample config uses 20); accepted for
-        now since this is the legacy backend. A cheaper design (stash the
-        per-sample ``logV`` computed during the training E-step instead of
-        recomputing, as Fortran does by keeping ``modloglik`` permanently
-        allocated) is tracked as a follow-up rather than done here.
-
-        Under ``do_reject``, only the good set (``self.good_idx``) is scored
-        -- Fortran zeroes a rejected sample's ``modloglik``/``loglik`` on write
-        (amica15.f90:2231-2234) and ``load_rej`` uses that exact zero as the
-        rejection sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:
-        907), so rejected columns of ``Lht``/``Lt`` are left at their
-        zero-initialized value rather than computed and discarded -- this also
-        avoids running rejected outliers through the model for the first time
-        at write time.
+        Under ``do_reject`` a rejected sample's entries are zero -- they are
+        never scored again after ``_reject_outliers`` zeroes them (mirroring
+        amica15.f90:2232-2234), and ``load_rej`` reads exactly that zero as the
+        rejection sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:907).
 
         Returns
         -------
-        Lht : ndarray of shape (num_models, n_samples)
+        Lht : ndarray of shape (num_models, n_samples), or None
             Per-model log-likelihood, Fortran's ``modloglik``. Zero for
-            rejected samples under ``do_reject``.
-        Lt : ndarray of shape (n_samples,)
-            Total log-likelihood, Fortran's ``loglik``. Zero for rejected
-            samples under ``do_reject``.
+            rejected samples under ``do_reject``. ``None`` before any E-step
+            has run, so the caller omits the file rather than writing an
+            all-zero array that ``load_rej`` would read as "everything
+            rejected".
+        Lt : ndarray of shape (n_samples,), or None
+            Total log-likelihood, Fortran's ``loglik``; ``None`` on the same
+            condition as ``Lht``.
         """
-        assert (
-            self.data_dim is not None
-            and self.data is not None
-            and self.W is not None
-            and self.c is not None
-            and self.comp_list is not None
-            and self.beta is not None
-            and self.mu is not None
-            and self.rho is not None
-            and self.alpha is not None
-            and self.gm is not None
-        )
-        data = self.data
-        n_samples = data.shape[1]
-        Lht = np.zeros((self.num_models, n_samples))
-        Lt = np.zeros(n_samples)
-
-        if self.do_reject:
-            assert self.good_idx is not None
-            idx = self.good_idx
-            data_use = data[:, idx]
-        else:
-            idx = np.arange(n_samples)
-            data_use = data
-        n_use = data_use.shape[1]
-
-        for start in range(0, n_use, self.block_size):
-            end = min(start + self.block_size, n_use)
-            X = data_use[:, start:end]
-            _, _, _, logV, _, ll_samples = self._forward_block(X)
-
-            cols = idx[start:end]
-            Lht[:, cols] = logV.T
-            Lt[cols] = ll_samples
-
-        return Lht, Lt
+        if self._llt_logv is None or self._llt_ll is None or not self.ll:
+            return None, None
+        return self._llt_logv.T, self._llt_ll
 
     def _update_parameters(self, updates: Dict):
         """
@@ -2131,6 +2121,16 @@ class AMICA:
                 f"(rejsig={self.rejsig} too aggressive for this data)."
             )
 
+        # Zero the LLt stash for the samples being dropped, as Fortran's
+        # reject_data does (amica15.f90:2232-2234): they are never scored again,
+        # so otherwise they would keep the log-likelihood from the last
+        # iteration that still counted them good, and load_rej's
+        # ``sum(modloglik(:,i)) == 0`` sentinel would not see them as rejected.
+        if self._llt_logv is not None and self._llt_ll is not None:
+            dropped = self.good_idx[~keep]
+            self._llt_logv[dropped] = 0.0
+            self._llt_ll[dropped] = 0.0
+
         n_before = self.good_idx.size
         self.good_idx = self.good_idx[keep]
         self.num_good_samples = int(self.good_idx.size)
@@ -2155,13 +2155,12 @@ class AMICA:
         slowest, column-major within a model), so EEGLAB's ``loadmodout15.m``
         reads both correctly. See :func:`pamica.numpy_impl.load.write_amicaout`.
 
-        Also writes ``LLt`` (issue #155) via ``_compute_full_posterior_ll``,
-        which is called on every ``_write_results`` call -- including every
-        mid-training ``writestep`` checkpoint, not just the final write -- so
-        each checkpoint now pays a full O(n_samples) forward pass over the
-        whole dataset. See ``_compute_full_posterior_ll``'s docstring for the
-        cost/tradeoff note and the cheaper stash-during-E-step design tracked
-        as a follow-up.
+        Also writes ``LLt`` (issue #155) from the stash the E-step already
+        filled (:meth:`_llt_arrays`, issue #157). A ``writestep`` checkpoint
+        therefore pays no forward pass of its own -- and, exactly as in the
+        reference, writes the E-step of the parameters as they stood before
+        this iteration's M-step. See :meth:`_llt_arrays` for that ordering and
+        its Fortran citation.
         """
         # A is written (Fortran output omits it; loadmodout derives A from W and
         # S) only so load_results can restore it directly for the viz helpers.
@@ -2170,7 +2169,7 @@ class AMICA:
         # (loadmodout treats 'nd' as optional).
         from .load import write_amicaout
 
-        Lht, Lt = self._compute_full_posterior_ll()
+        Lht, Lt = self._llt_arrays()
 
         write_amicaout(
             self.outdir,
