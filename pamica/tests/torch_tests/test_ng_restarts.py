@@ -22,6 +22,7 @@ import torch
 
 from pamica import AMICA, restarts
 from pamica.torch_impl import AMICATorchNG
+from pamica.torch_impl import core
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
 DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
@@ -29,9 +30,18 @@ NW = 32
 FIELD = 30504
 NMIX = 3
 MAX_ITER = 5
-# Deliberately NOT ascending: with these seeds the winner is not the last
-# restart, so the snapshot/restore path is what the acceptance test exercises.
-SEEDS = [44, 43, 42]
+# Ordered best-to-worst, so the winner is the FIRST restart: the snapshot/restore
+# path is then what the acceptance test exercises, rather than the live state
+# being right by accident. The seeds are chosen for separation, not convenience:
+# measured on this fixture at MAX_ITER, the final LLs are
+# -3.264177210 / -3.264757966 / -3.264984217, i.e. the winner leads the
+# runner-up by 5.8e-4 and the last restart by 8.1e-4. That is ~8 orders of
+# magnitude above float64 BLAS summation noise (~1e-12 relative on an LL of
+# ~3.26), so re-ordering the reductions -- OpenBLAS vs Accelerate, one thread vs
+# many -- cannot change which restart wins (the issue #241 flake class). The
+# NumPy and MLX suites use the same seeds: NumPy agrees to 1e-9 and MLX
+# (float32) to 6e-7, both far inside the same margin.
+SEEDS = [54, 50, 42]
 
 pytestmark = pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
 
@@ -132,9 +142,12 @@ def test_best_of_n_returns_the_argmax_of_the_independent_fits(
         best_of_n.fit(real_data, max_iter=MAX_ITER, verbose=False)
 
     expected = max(range(len(SEEDS)), key=lambda i: independent_fits[i].final_ll_)
-    # The seeds are chosen so the winner is not simply the last restart, which
-    # is the case where the live state would be right by accident.
-    assert expected != len(SEEDS) - 1
+    assert expected != len(SEEDS) - 1, (
+        "precondition: the winning seed must not be the last restart, or the "
+        "restore path goes untested. The margin is 5.8e-4 (see SEEDS), far above "
+        "float64 summation noise, so a failure here is a platform-BLAS ordering "
+        "finding worth reporting -- not a correctness bug in the restart loop."
+    )
     _assert_same_state(best_of_n, independent_fits[expected])
     assert best_of_n.ll_history == independent_fits[expected].ll_history
     assert best_of_n.final_ll_ == independent_fits[expected].final_ll_
@@ -222,6 +235,92 @@ def test_a_degenerate_restart_is_recorded_but_never_selected(
     assert _same(model.A, independent_fits[expected].A)
 
 
+class _RaiseForSeeds(AMICATorchNG):
+    """Raises ``torch.linalg.LinAlgError`` for the listed seeds only.
+
+    The failure mode a non-finite likelihood does NOT cover: a truly singular
+    ``A`` makes ``torch.linalg.inv`` raise rather than return infinities, so the
+    fit never reaches the in-loop guard. Injected at the same hook the real
+    failure comes from (``_update_unmixing_matrices`` -> ``torch.linalg.inv``)
+    and with the same exception type torch itself raises, so what is under test
+    is the restart loop's isolation, not the injection.
+    """
+
+    raise_seeds: tuple = ()
+
+    def _update_unmixing_matrices(self):
+        if self.seed in self.raise_seeds:
+            raise torch.linalg.LinAlgError(
+                "linalg.inv: The diagonal element 3 is zero, the inversion "
+                "could not be completed because the input matrix is singular."
+            )
+        return super()._update_unmixing_matrices()
+
+
+def test_a_crashing_restart_does_not_kill_the_search(
+    real_data, independent_fits, caplog
+):
+    """Isolation (issue #198 review). A restart that RAISES must not discard the
+    restarts that already succeeded -- that would be the exact opposite of what
+    best-of-N is for. It is recorded as a degenerate ``restart_error`` and the
+    search continues to the next seed."""
+    model = _RaiseForSeeds(
+        n_channels=NW, n_mix=NMIX, device="cpu", seed=0,
+        n_restarts=len(SEEDS), restart_seeds=SEEDS,
+    )  # fmt: skip
+    # The BEST seed crashes, so the winner has to come from the survivors: a
+    # loop that silently kept the crashed restart's state would fail here.
+    model.raise_seeds = (SEEDS[0],)
+    with caplog.at_level(logging.WARNING, logger="pamica.torch_impl.core"):
+        model.fit(real_data, max_iter=MAX_ITER, verbose=False)
+
+    assert model.restart_stop_reasons_[0] == restarts.ERROR_STOP_REASON
+    assert math.isnan(model.restart_lls_[0])
+    assert restarts.ERROR_STOP_REASON in AMICATorchNG._DEGENERATE_STOP_REASONS
+    healthy = {1: independent_fits[1].final_ll_, 2: independent_fits[2].final_ll_}
+    expected = max(healthy, key=lambda index: healthy[index])
+    assert model.final_ll_ == healthy[expected]
+    assert model.seed == SEEDS[expected]
+    _assert_same_state(model, independent_fits[expected])
+    assert any("LinAlgError" in r.getMessage() for r in caplog.records), (
+        "the caught exception must stay diagnosable in the log"
+    )
+
+
+def test_a_single_restart_still_raises(real_data):
+    """The other half of the isolation contract: bit-identity with a pre-#198
+    fit includes ERROR behavior, so the single-restart path must NOT catch."""
+    model = _RaiseForSeeds(n_channels=NW, n_mix=NMIX, device="cpu", seed=SEEDS[0])
+    model.raise_seeds = (SEEDS[0],)
+    with pytest.raises(torch.linalg.LinAlgError):
+        model.fit(real_data, max_iter=MAX_ITER, verbose=False)
+
+
+def test_all_restarts_crashing_keeps_the_degenerate_contract(real_data, caplog):
+    """Every restart raises: the model is unusable and says so, rather than the
+    exception escaping (which would lose the records) or the fit reporting
+    success on whatever partial state the crash left."""
+    model = _RaiseForSeeds(
+        n_channels=NW, n_mix=NMIX, device="cpu", seed=0,
+        n_restarts=len(SEEDS), restart_seeds=SEEDS,
+    )  # fmt: skip
+    model.raise_seeds = tuple(SEEDS)
+    with caplog.at_level(logging.WARNING, logger="pamica.torch_impl.core"):
+        model.fit(real_data, max_iter=MAX_ITER, verbose=False)
+
+    assert model.stop_reason == restarts.ERROR_STOP_REASON
+    assert model.restart_seeds_ == SEEDS
+    assert all(math.isnan(ll) for ll in model.restart_lls_)
+    assert model.restart_stop_reasons_ == [restarts.ERROR_STOP_REASON] * len(SEEDS)
+    assert any(
+        "All 3 restarts ended degenerate" in r.getMessage() for r in caplog.records
+    )
+    with pytest.raises(RuntimeError, match="degenerate"):
+        model.state_dict()
+    # No per-sample likelihoods survive from a fit that never completed.
+    assert model._llt_lht is None and model._llt_lt is None
+
+
 def test_all_degenerate_restarts_keep_the_degenerate_contract(real_data, caplog):
     """A single NaN in the real EEG forces every restart to diverge (an
     error-path robustness test, not a correctness oracle -- the same route
@@ -243,6 +342,37 @@ def test_all_degenerate_restarts_keep_the_degenerate_contract(real_data, caplog)
     )
     with pytest.raises(RuntimeError, match="degenerate"):
         model.state_dict()
+
+
+# ---------------------------------------------------------------------------
+# Interaction with the block-size search (issue #232)
+# ---------------------------------------------------------------------------
+
+
+def test_the_winners_tuned_block_size_is_restored(real_data, monkeypatch):
+    """``do_opt_block`` re-times the block size inside every restart, so the
+    tuned value is per-restart state and the winner's must survive the restore.
+
+    The search's RETURN VALUE is stubbed rather than its timings: which size
+    wins a real sweep is documented as machine-dependent (``blocktune``), so
+    pinning it deterministically is the only way to assert this at all. The
+    stub hands restart 1 a different size from restart 2, and restart 1 is the
+    winner, so a loop that forgot ``block_size`` would end on 8192.
+    """
+    sizes = iter([4096, 8192, 16384])
+
+    def fixed_search(**kwargs):
+        return next(sizes)
+
+    monkeypatch.setattr(core.blocktune, "search", fixed_search)
+    model = _model(
+        seed=0, n_restarts=len(SEEDS), restart_seeds=SEEDS, do_opt_block=True
+    )
+    model.fit(real_data, max_iter=MAX_ITER, verbose=False)
+
+    expected = max(range(len(SEEDS)), key=lambda i: model.restart_lls_[i])
+    assert expected == 0, "SEEDS puts the winner first; see the SEEDS comment"
+    assert model.block_size == 4096
 
 
 # ---------------------------------------------------------------------------
@@ -315,3 +445,31 @@ def test_wrapper_records_the_single_restart_of_a_default_fit(real_data):
     wrapper.fit(real_data, max_iter=MAX_ITER, lrate=0.1, seed=42)
     assert wrapper.restart_seeds_ == [42]
     assert wrapper.restart_lls_ == [wrapper.final_ll_]
+
+
+def test_wrapper_refuses_a_best_of_n_fit_whose_restarts_all_degenerate(
+    real_data, tmp_path, caplog
+):
+    """Best-of-N must not weaken issue #50: when no restart produced a usable
+    model, the wrapper marks the fit unusable and every output method refuses
+    it, exactly as it does for a single degenerate fit -- with the per-restart
+    records still readable for diagnosis."""
+    bad = real_data[:, :4096].copy()
+    bad[0, 0] = np.nan  # degenerates every seed alike (see the backend test)
+    wrapper = AMICA(n_models=1, n_mix=NMIX, device="cpu", verbose=False)
+    with caplog.at_level(logging.WARNING, logger="pamica.amica"):
+        wrapper.fit(bad, max_iter=3, lrate=0.1, block_size=1024, seed=0, n_restarts=2)
+
+    assert wrapper.converged_ is False
+    assert wrapper.is_fitted_ is False
+    assert wrapper.stop_reason_ == "nan_ll"
+    assert wrapper.restart_seeds_ == [0, 1]
+    assert all(math.isnan(ll) for ll in wrapper.restart_lls_)
+    assert any("degenerate" in r.getMessage() for r in caplog.records)
+    for action in (
+        lambda: wrapper.transform(real_data[:, :512]),
+        lambda: wrapper.get_mixing_matrix(),
+        lambda: wrapper.save(str(tmp_path / "degenerate.pt")),
+    ):
+        with pytest.raises(RuntimeError, match="degenerate"):
+            action()

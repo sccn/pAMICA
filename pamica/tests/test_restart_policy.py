@@ -209,10 +209,43 @@ def test_every_backend_validates_the_configuration_at_construction(backend: str)
         cls(n_restarts=2, **kwargs)
 
 
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_crashed_restart_is_degenerate_on_every_backend(backend: str):
+    """Isolation policy (issue #198 review): the reason a restart that RAISED is
+    recorded under is the same string everywhere, and every backend treats it as
+    degenerate -- so a crashed restart is excluded from selection, and an
+    all-crashed search leaves a model the issue #50 contract refuses. The NumPy
+    backend expresses degeneracy as ``converged=False`` and has no such tuple,
+    so it is checked in its own suite."""
+    cls = _backend_class(backend)
+    if backend == "numpy":
+        pytest.skip("NumPy signals degeneracy via converged, not a stop-reason tuple")
+    assert restarts.ERROR_STOP_REASON in cls._DEGENERATE_STOP_REASONS
+
+
+def test_the_error_stop_reason_is_distinct_from_the_likelihood_ones():
+    """``restart_error`` means "this fit could not run to completion", which is
+    a different fact from ``singular_ll`` ("it ran and reported -inf"). Keeping
+    them distinct is what makes ``restart_stop_reasons_`` diagnosable."""
+    assert restarts.ERROR_STOP_REASON not in ("nan_ll", "singular_ll", "nan_params")
+
+
 # Methods excluded from the fit-path scan below, with the reason each is not
 # part of a fit: the constructor assigns the configuration (which a restart must
 # NOT reset), the logging setup assigns file handles, and the PyTorch backend's
 # _load_params is the deserialization path, not a fit.
+#
+# KNOWN BLIND SPOT of this scan: it only sees ``self.<attr> = ...`` written
+# INSIDE the backend class in that class's own module. State written any other
+# way is invisible -- a module-level helper handed ``self``, a mixin in another
+# file, or ``setattr(self, name, value)`` (which the snapshot restore itself
+# uses; counting that one would make the guard circular). No such fit-path
+# mutator exists today: every backend's fit state is written by its own methods,
+# and the shared helpers (``blocktune``, ``rank``, ``restarts``) all return
+# values rather than mutating a model. A refactor that moves fit-path logic out
+# of ``core.py`` -- or into a helper that takes ``self`` -- must extend this scan
+# to follow it, or the completeness guarantee quietly narrows to whatever is
+# left behind.
 _EXCLUDED_METHODS = {"__init__", "_setup_logging", "_load_params"}
 
 
