@@ -980,6 +980,13 @@ class AMICAMLXNG:
         which shows up as a mysteriously slow candidate rather than a failure,
         so the cap is applied against the number the driver actually
         recommends. ``None`` (no cap) if MLX cannot report it.
+
+        Both keys report CAPACITY, not currently-free memory (unlike CUDA's
+        ``mem_get_info``): neither subtracts what is already allocated, here or
+        by anything else sharing the unified memory. The cap is therefore an
+        upper bound on what the GPU could ever give, which is why it is only a
+        first filter -- catching the real ``[metal::malloc]`` failure is what
+        makes the search safe.
         """
         try:
             info = mx.device_info()

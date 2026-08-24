@@ -1363,6 +1363,16 @@ class AMICATorchNG:
 
         ``None`` (no cap) when the device cannot report it; the search then
         relies solely on catching the allocation failure.
+
+        The three branches do not report the same quantity. CUDA's
+        ``mem_get_info`` gives currently-FREE memory, while MPS's
+        ``recommended_max_memory`` and the host branch give total CAPACITY --
+        neither accounts for what is already allocated. The cap is therefore an
+        upper bound on what the device could ever give, not on what is free
+        right now, which is why it is only ever a first filter:
+        :data:`~pamica.blocktune.MEMORY_BUDGET_FRACTION` keeps it conservative
+        and catching the real allocation failure is what actually makes the
+        search safe.
         """
         dev = self.device.type
         if dev == "cuda":
@@ -1372,9 +1382,11 @@ class AMICATorchNG:
                 return None
         if dev == "mps":
             try:
+                # Capacity, not free memory (see the docstring).
                 return int(torch.mps.recommended_max_memory())
             except (RuntimeError, AttributeError):
                 return None
+        # Total host RAM, likewise capacity rather than free.
         return blocktune.host_memory_bytes()
 
     def _tune_block_size(self, X: torch.Tensor) -> None:
