@@ -2273,8 +2273,13 @@ class AMICATorchNG:
             entry ``i`` is computed after iteration ``i``'s parameter update,
             while ``ll_history[i]`` is the likelihood of the parameters
             before it, so the two are one update apart (issue #161).
-            Incompatible with PCA reduction (``pcakeep``/``pcadb``), same as
-            :meth:`mir` itself.
+            Incompatible with PCA reduction, same as :meth:`mir` itself. This
+            upfront gate only sees explicit ``pcakeep``/``pcadb`` (the sphere
+            for THIS fit does not exist yet, so automatic ``mineig``/
+            ``mineig_rel`` rank reduction cannot be checked here); that case is
+            instead caught once the sphere exists, inside the per-waypoint
+            :meth:`mir` call below, whose ``ValueError`` is already caught and
+            logged rather than propagated (issue #283).
 
         Returns
         -------
@@ -2344,7 +2349,7 @@ class AMICATorchNG:
             )
         if mir_step < 0:
             raise ValueError(f"mir_step must be >= 0, got {mir_step}")
-        if mir_step > 0 and self._pca_reduced():
+        if mir_step > 0 and self._pca_reduction_requested():
             raise ValueError(
                 "mir_step > 0 is incompatible with PCA reduction "
                 "(pcakeep/pcadb): the sphere is rank-deficient, so MIR's "
@@ -2909,10 +2914,34 @@ class AMICATorchNG:
         self._check_model_idx(model_idx)
         return self.W[:, :, model_idx].T.cpu().numpy()
 
-    def _pca_reduced(self) -> bool:
-        """Whether PCA reduction is active (``pcakeep``/``pcadb``), which leaves
-        the sphere rank-deficient."""
+    def _pca_reduction_requested(self) -> bool:
+        """Whether an explicit PCA-reduction parameter (``pcakeep``/``pcadb``)
+        was passed to the constructor.
+
+        Config-only, not geometry: used solely by :meth:`_fit_once`'s upfront
+        ``mir_step`` gate, which runs BEFORE :meth:`_preprocess` builds this
+        fit's sphere, so the sphere's actual shape (and therefore any
+        AUTOMATIC ``mineig``/``mineig_rel`` rank reduction) is not yet
+        knowable. Use :meth:`_pca_reduced` instead wherever a fitted sphere
+        already exists (issue #283).
+        """
         return self.pcakeep is not None or self.pcadb is not None
+
+    def _pca_reduced(self) -> bool:
+        """Whether the fitted sphere is rank-reduced (non-square).
+
+        Derived from the fitted geometry -- ``sphere.shape[0] !=
+        sphere.shape[1]`` -- rather than from which parameter caused the
+        reduction, so this also catches rank reduction from AUTOMATIC
+        numerical-rank detection (``mineig``/``mineig_rel``), not just
+        explicit ``pcakeep``/``pcadb`` (issue #283: the old parameter-only
+        check let an auto-detected reduction slip past :meth:`mir`'s guard,
+        which then failed with an opaque ``LinAlgError`` instead of the
+        documented ``ValueError``). ``False`` before :meth:`fit` (``sphere``
+        is ``None``) and for a full-rank fit, matching the pre-#283 behavior
+        in both of those cases.
+        """
+        return self.sphere is not None and self.sphere.shape[0] != self.sphere.shape[1]
 
     def mir(
         self, X: np.ndarray, *, model_idx: int = 0, nbins: Optional[int] = None
@@ -2943,8 +2972,11 @@ class AMICATorchNG:
         RuntimeError
             If the model is unfitted.
         ValueError
-            If PCA reduction (``pcakeep``/``pcadb``) is active: it leaves the
-            sphere rank-deficient, so MIR's log-Jacobian term is undefined.
+            If the fitted sphere is rank-reduced (non-square): whether from
+            explicit ``pcakeep``/``pcadb`` or from automatic ``mineig``/
+            ``mineig_rel`` numerical-rank detection, the sphere is
+            rank-deficient, so MIR's log-Jacobian term is undefined
+            (issue #283).
         """
         if self.A is None or self.W is None or self.sphere is None:
             raise RuntimeError(
@@ -2953,10 +2985,12 @@ class AMICATorchNG:
         self._check_model_idx(model_idx)
         if self._pca_reduced():
             raise ValueError(
-                "mir() is incompatible with PCA reduction (pcakeep/pcadb): "
-                "the sphere is rank-deficient, so MIR's log-Jacobian term is "
-                "undefined for the resulting non-square/non-invertible "
-                "unmixing."
+                "mir() is incompatible with PCA reduction: the fitted "
+                f"sphere is rank-deficient ({self.n_channels} of "
+                f"{self.n_channels_in} channels kept), whether from explicit "
+                "pcakeep/pcadb or automatic mineig/mineig_rel numerical-rank "
+                "detection, so MIR's log-Jacobian term is undefined for the "
+                "resulting non-square/non-invertible unmixing."
             )
         unmixing = (self.W[:, :, model_idx].T @ self.sphere).cpu().numpy()
         return mir_metric(unmixing, X, nbins)

@@ -493,8 +493,9 @@ class AMICA:
         Raises
         ------
         ValueError
-            If the model is unfitted; or if PCA reduction (``pcakeep``/
-            ``pcadb``) is active, which leaves the sphere rank-deficient so
+            If the model is unfitted; or if the fitted sphere is rank-reduced
+            (explicit ``pcakeep``/``pcadb`` or automatic ``mineig``/
+            ``mineig_rel`` detection), which leaves it rank-deficient so
             MIR's log-Jacobian term is undefined; or if ``X`` is non-finite or
             has a constant channel. See :meth:`AMICATorchNG.mir` and
             :func:`pamica.metrics.mir`.
