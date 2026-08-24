@@ -106,15 +106,28 @@ _BLOCK_TENSOR_SLOTS = 8
 # confirmed by probe on an M4 Pro under mlx 0.32 -- it is a catchable Python
 # exception, not the process abort that MLX's LU decomposition takes (issue
 # #274).
+# Every verified message above matches one of the first four alternatives. The
+# fifth exists only for wordings not seen here, and requires a size/memory token
+# next to the verb: a bare "could not allocate" also describes failing to
+# allocate a device id, a file handle or a port, none of which a smaller block
+# would fix.
+#
+# Residual risk, accepted deliberately: a message match is a heuristic, so a
+# RuntimeError that mentions memory for some non-allocation reason would be
+# classified as memory pressure. The consequence is bounded and visible -- the
+# search stops walking upward, logs a WARNING naming the size that failed, and
+# the fit continues at a smaller block. The alternative (treat every
+# RuntimeError as fatal) would make the fallback useless on exactly the two
+# backends that need it, since torch and MLX both report OOM as a bare
+# RuntimeError. Errors that do NOT match still propagate untouched, which is the
+# half of this that protects against mistaking a real bug for memory pressure.
 _OOM_TEXT = re.compile(
     r"out of memory"
-    r"|cannot allocate"
-    r"|can't allocate"
-    r"|unable to allocate"
-    r"|failed to allocate"
+    r"|bad_alloc"
     r"|metal::malloc"
     r"|maximum allowed buffer size"
-    r"|bad_alloc",
+    r"|(?:cannot|can't|could not|unable to|failed to)\s+allocate\b"
+    r"[^\n]{0,80}?\b(?:bytes?|memory|[KMGT]i?B)\b",
     re.IGNORECASE,
 )
 
@@ -283,6 +296,22 @@ def tune_block_size(
         if elapsed < best_time:
             best_time, best_size = elapsed, size
 
+    if not timings:
+        # Only reachable when the FIRST candidate failed: the loop exits early
+        # only on an allocation failure, and `candidates` is non-empty. Reported
+        # separately from the truncation warning below because `best_size` is
+        # still the untouched `fallback` here -- describing it as "the fastest
+        # size that ran" would be a plain falsehood, since nothing ran.
+        assert exhausted_at is not None
+        log.warning(
+            "Block-size search: the first candidate (%d) could not be "
+            "allocated and no smaller size had been timed, so nothing was "
+            "measured; keeping the configured block_size=%d untested.",
+            exhausted_at,
+            fallback,
+        )
+        return fallback
+
     if exhausted_at is not None:
         log.warning(
             "Block-size search stopped early: block_size=%d could not be "
@@ -292,13 +321,6 @@ def tune_block_size(
             exhausted_at,
             best_size,
         )
-
-    if not timings:
-        log.warning(
-            "Block-size search timed no candidate; keeping block_size=%d.",
-            fallback,
-        )
-        return fallback
 
     log.info(
         "Block-size search: chose block_size=%d (%.1f ms/pass) from %s",

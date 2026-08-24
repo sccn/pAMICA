@@ -165,6 +165,9 @@ def test_host_memory_is_positive_or_unavailable():
         RuntimeError("MPS backend out of memory (MPS allocated: 9.00 GB)"),
         RuntimeError("[enforce fail at alloc_cpu.cpp:117] . Ran out of memory"),
         RuntimeError("std::bad_alloc"),
+        # Not a verified wording; the narrow "allocate <n> <unit>" arm exists
+        # for messages this project has not seen.
+        RuntimeError("failed to allocate 68719476736 bytes"),
     ],
 )
 def test_recognizes_every_backend_allocation_failure(exc):
@@ -182,6 +185,12 @@ def test_recognizes_every_backend_allocation_failure(exc):
         RuntimeError("linalg.inv: The diagonal element 3 is zero"),
         ValueError("block_size must be positive"),
         ZeroDivisionError("division by zero"),
+        # "Allocate" alone does not mean memory: a smaller block size fixes
+        # none of these, so treating them as memory pressure would silently
+        # degrade the fit instead of surfacing the real failure.
+        RuntimeError("failed to allocate device id 3"),
+        RuntimeError("cannot allocate a file handle for the output stream"),
+        RuntimeError("unable to allocate port 8080"),
     ],
 )
 def test_does_not_mistake_a_real_bug_for_memory_pressure(exc):
@@ -305,13 +314,35 @@ def test_keeps_the_static_default_when_nothing_can_be_timed(caplog):
     the configured block_size, which is the size the caller already asked for."""
 
     def probe(size: int) -> float:
-        raise MemoryError("Unable to allocate")
+        raise MemoryError("Unable to allocate 4.00 GiB for an array")
 
     with caplog.at_level(logging.WARNING, logger="pamica.blocktune"):
         assert blocktune.tune_block_size(probe, [4096, 8192], fallback=8192) == 8192
-    assert "keeping block_size=8192" in "\n".join(
+    assert "keeping the configured block_size=8192 untested" in "\n".join(
         r.getMessage() for r in caplog.records
     )
+
+
+def test_first_candidate_failure_does_not_claim_a_size_ran(caplog):
+    """Every other failure test fails at a LATER candidate, where a working
+    size really is in hand. When the first (or only) candidate fails there is
+    none: `best_size` is still the untouched fallback, so the truncation
+    wording ("continuing at N, the fastest size that ran") would assert that a
+    size ran when nothing did, and would fire a second, contradictory warning
+    alongside it. One warning, and it must not claim a measurement."""
+
+    def probe(size: int) -> float:
+        raise MemoryError("Unable to allocate 4.00 GiB for an array")
+
+    with caplog.at_level(logging.DEBUG, logger="pamica.blocktune"):
+        assert blocktune.tune_block_size(probe, [4096], fallback=8192) == 8192
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "the first candidate (4096) could not be allocated" in message
+    assert "keeping the configured block_size=8192 untested" in message
+    assert "the fastest size that ran" not in message
 
 
 def test_a_non_allocation_error_propagates():
