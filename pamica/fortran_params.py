@@ -31,7 +31,7 @@ spells a setting differently from the constructor, this module targets the
 *constructor's* spelling, not the JSON schema's.
 
 ``FORTRAN_TO_PAMICA_KEY`` lists every Fortran keyword this module can
-translate (53 keys covering 52 distinct pamica-side names -- Fortran accepts
+translate (57 keys covering 56 distinct pamica-side names -- Fortran accepts
 both ``num_mix_comps`` and ``num_mix`` for the same setting). Of those, three
 are renamed because Fortran spells them differently from the pamica-side
 name:
@@ -59,10 +59,10 @@ now surfaces as a "not applied" warning when fitting from it).
 
 Every other translated key keeps its Fortran spelling.
 
-``FORTRAN_UNSUPPORTED_KEYS`` lists every other keyword the Fortran parser
-accepts (checkpoint warm-start, per-family EM freeze toggles, the
-``do_opt_block`` block-size search, FIR/DFT pre-filtering, console/file
-reporting cadence, ...) that has no pamica equivalent; these are
+``FORTRAN_UNSUPPORTED_KEYS`` lists the remaining 32 keywords the Fortran
+parser accepts (checkpoint warm-start, per-family EM freeze toggles, FIR/DFT
+pre-filtering, console/file reporting cadence, ...) that have no pamica
+equivalent; these are
 *deliberately* unmapped, not missed, and ``read_fortran_param_file`` warns
 about them by name rather than dropping them in silence. A keyword absent
 from *both* dicts is not a Fortran keyword this module knows about at all
@@ -204,6 +204,16 @@ FORTRAN_TO_PAMICA_KEY: dict = {
     "min_grad_norm": "min_nd",
     "max_decs": "maxdecs",
     "block_size": "block_size",
+    # Block-size search (issue #232). Identity mappings: pamica implements
+    # Fortran's do_opt_block sweep under Fortran's own four names, with the same
+    # arithmetic blk_min/blk_max/blk_step stepping, so a param file means the
+    # same thing on both sides. pamica's *defaults* for the three bounds differ
+    # (Fortran's 128-1024 sits far below where any pamica backend peaks), but a
+    # file that sets them explicitly is honored as written.
+    "do_opt_block": "do_opt_block",
+    "blk_min": "blk_min",
+    "blk_max": "blk_max",
+    "blk_step": "blk_step",
     # Newton preconditioner.
     "do_newton": "do_newton",
     "newt_start": "newt_start",
@@ -258,12 +268,6 @@ FORTRAN_UNSUPPORTED_KEYS: dict = {
     "dft_length": "DFT pre-filtering pipeline, not ported",
     # Threading: PyTorch manages its own thread pool.
     "max_threads": "Fortran thread-pool size; PyTorch manages its own threading",
-    # Optimal block-size search (do_opt_block sweep): pamica uses a single
-    # fixed block_size (see AGENTS.md's block_size performance note).
-    "blk_min": "do_opt_block block-size search, not ported",
-    "blk_max": "do_opt_block block-size search, not ported",
-    "blk_step": "do_opt_block block-size search, not ported",
-    "do_opt_block": "block-size search toggle, not ported",
     # Checkpoint warm-start: Fortran can resume a run from a prior run's saved
     # parameter files. pamica has no equivalent load path from a param file
     # (AMICA.load restores its own saved state instead).

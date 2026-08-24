@@ -46,12 +46,14 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
+from .. import blocktune
 from ..metrics import mir as mir_metric
 from ..metrics import pairwise_mi
 from ..rank import MINEIG, MINEIG_REL, numerical_rank
@@ -301,6 +303,31 @@ class AMICATorchNG:
         multi-iteration trajectory shifts ~1e-6, inside parity tolerance but
         enough that a bit-for-bit Fortran comparison must match ``block_size`` on
         both sides (the bundled ``input.param`` uses 512).
+    do_opt_block : bool, default=False
+        Time a few candidate block sizes on the real data and device at the
+        start of ``fit`` and keep the fastest, instead of using ``block_size``
+        as given (issue #232; Fortran ``do_opt_block``). The measured optimum
+        moves with host, device and data, so a fixed default necessarily leaves
+        16-60% on the table depending on backend -- but the choice is
+        **timing-based and therefore machine-dependent**, so two hosts can pick
+        different sizes and their trajectories then differ at the same ~1e-6
+        level any ``block_size`` change produces. Off by default for that
+        reason: a run compared bit-for-bit against the reference binary must
+        leave this off and pin ``block_size``. When on, ``block_size`` is the
+        fallback the search keeps if no candidate can be timed.
+
+        Unlike Fortran, whose ``determine_block_size`` aborts the run when a
+        candidate cannot be allocated, a failing candidate here is skipped, the
+        upward search stops there, and the fit continues at the largest size
+        that ran. See :mod:`pamica.blocktune`.
+    blk_min, blk_max, blk_step : int, defaults 4096, 32768, 4096
+        Candidate sweep for ``do_opt_block``: ``blk_min``, ``blk_min +
+        blk_step``, ..., ``<= blk_max``, Fortran's arithmetic stepping, each
+        clamped to ``n_samples`` and to a conservative memory estimate.
+        Validated (and only used) when ``do_opt_block`` is on. The defaults are
+        re-derived rather than copied from Fortran's 128-1024, which sits far
+        below where any pamica backend peaks; they bracket the measured CPU
+        optimum and include the 8192 default.
     lrate : float, default=0.1
         Initial/maximum natural-gradient learning rate (``lrate0`` in NumPy).
     minlrate : float, default=1e-12
@@ -533,6 +560,10 @@ class AMICATorchNG:
         n_models: int = 1,
         n_mix: int = 3,
         block_size: int = 8192,
+        do_opt_block: bool = False,
+        blk_min: int = blocktune.DEFAULT_BLK_MIN,
+        blk_max: int = blocktune.DEFAULT_BLK_MAX,
+        blk_step: int = blocktune.DEFAULT_BLK_STEP,
         lrate: float = 0.1,
         minlrate: float = 1e-12,
         lratefact: float = 0.5,
@@ -587,6 +618,16 @@ class AMICATorchNG:
         self.mineig = mineig
         self.mineig_rel = mineig_rel
         self.block_size = block_size
+        self.do_opt_block = do_opt_block
+        self.blk_min = blk_min
+        self.blk_max = blk_max
+        self.blk_step = blk_step
+        if do_opt_block:
+            # Only validated when the search is on, matching how share_comps /
+            # do_reject validate their own schedules: these three are inert
+            # otherwise, and a literal Fortran input.param carrying them
+            # alongside do_opt_block=0 must stay loadable (issue #232).
+            blocktune.validate_block_tune_params(blk_min, blk_max, blk_step)
 
         self.lrate0 = lrate
         self.lrate = lrate
@@ -1317,6 +1358,79 @@ class AMICATorchNG:
         assert acc is not None
         return acc
 
+    def _available_memory_bytes(self) -> Optional[int]:
+        """Memory the current device reports as usable, for the search's cap.
+
+        ``None`` (no cap) when the device cannot report it; the search then
+        relies solely on catching the allocation failure.
+
+        The three branches do not report the same quantity. CUDA's
+        ``mem_get_info`` gives currently-FREE memory, while MPS's
+        ``recommended_max_memory`` and the host branch give total CAPACITY --
+        neither accounts for what is already allocated. The cap is therefore an
+        upper bound on what the device could ever give, not on what is free
+        right now, which is why it is only ever a first filter:
+        :data:`~pamica.blocktune.MEMORY_BUDGET_FRACTION` keeps it conservative
+        and catching the real allocation failure is what actually makes the
+        search safe.
+        """
+        dev = self.device.type
+        if dev == "cuda":
+            try:
+                return int(torch.cuda.mem_get_info(self.device)[0])
+            except (RuntimeError, AttributeError):
+                return None
+        if dev == "mps":
+            try:
+                # Capacity, not free memory (see the docstring).
+                return int(torch.mps.recommended_max_memory())
+            except (RuntimeError, AttributeError):
+                return None
+        # Total host RAM, likewise capacity rather than free.
+        return blocktune.host_memory_bytes()
+
+    def _tune_block_size(self, X: torch.Tensor) -> None:
+        """Set ``self.block_size`` to the fastest timed candidate (issue #232).
+
+        The probe is one ``_accumulate_blocks`` pass -- the same E-step-plus-
+        sufficient-statistics work every EM iteration does, so it times what the
+        fit will actually spend its time on. ``_accumulate_blocks`` only reads
+        model state and consumes no RNG, and ``block_size`` is restored around
+        every probe, so the fit that follows is bit-identical to one started
+        directly at the chosen size (``test_post_tune_fit_is_bit_identical``).
+        """
+        saved = self.block_size
+
+        def probe(size: int) -> float:
+            self.block_size = size
+            try:
+                start = time.perf_counter()
+                acc = self._accumulate_blocks(X)
+                # Force completion before stopping the clock: CUDA/MPS queue
+                # work asynchronously, so reading a result is what makes the
+                # elapsed time mean anything. Cheap and correct on CPU too.
+                float(acc["ll"])
+                return time.perf_counter() - start
+            finally:
+                # Never leave the model holding a candidate -- least of all one
+                # that just failed to allocate (issue #232).
+                self.block_size = saved
+
+        self.block_size = blocktune.search(
+            probe=probe,
+            fallback=saved,
+            blk_min=self.blk_min,
+            blk_max=self.blk_max,
+            blk_step=self.blk_step,
+            n_samples=int(X.shape[1]),
+            n_channels=self.n_channels,
+            n_mix=self.n_mix,
+            n_models=self.n_models,
+            itemsize=torch.finfo(self.dtype).bits // 8,
+            available_bytes=self._available_memory_bytes(),
+            log=logger,
+        )
+
     # ------------------------------------------------------------------
     # M-step parameter update
     # ------------------------------------------------------------------
@@ -1967,6 +2081,15 @@ class AMICATorchNG:
         self.good_idx = (
             torch.arange(n_total, device=self.device) if self.do_reject else None
         )
+
+        # Block-size search (issue #232): after preprocessing and parameter
+        # initialization, before the first EM iteration, so it times the real
+        # data on the real device with the parameters the fit will start from.
+        # A no-op when off, and its probes leave no state behind, so a fit with
+        # the search off is byte-for-byte what it was before this existed.
+        if self.do_opt_block:
+            self._tune_block_size(X_t[:, self.good_idx] if self.do_reject else X_t)
+
         numdecs = 0
         # Consecutive-small-likelihood-gain counter for the min_dll stop (Fortran
         # numincs, amica15.f90:1079-1089; issue #207). Reset here so a refit on
@@ -2934,7 +3057,16 @@ class AMICATorchNG:
             "n_channels": self.n_channels,
             "n_models": self.n_models,
             "n_mix": self.n_mix,
+            # block_size is the value the fit actually ran at -- which, under
+            # do_opt_block, is the size the search chose rather than the one the
+            # constructor was given (issue #232). Persisting the tuned value is
+            # what makes a reloaded model reproduce the run it came from; the
+            # sweep bounds ride along so a re-fit can search again if asked.
             "block_size": self.block_size,
+            "do_opt_block": self.do_opt_block,
+            "blk_min": self.blk_min,
+            "blk_max": self.blk_max,
+            "blk_step": self.blk_step,
             # lrate/newtrate/rholrate are annealed during fit; persist the
             # original constructor values (lrate0/newtrate0/rholrate0) and
             # restore the mutated ones from ``extra`` below.

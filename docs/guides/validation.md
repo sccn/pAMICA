@@ -353,6 +353,14 @@ Apple hardware regardless of how `block_size` is tuned. The `30504` row is a mem
 (the whole sample as one block), not a free win: peak block memory scales with `block_size`, which is
 why 8192, not 30504, stays the shipped default.
 
+Since the optimum moves with host, device and data, `do_opt_block` (issue #232, off by default) can
+search for it instead: it times candidate sizes on your actual data at the start of `fit` and keeps
+the fastest, on all three backends, under Fortran's `blk_min`/`blk_max`/`blk_step` names. The choice
+is timing-based and therefore machine-dependent, so a parity run must leave it off and pin
+`block_size`; see [the block-size search](amica-differences.md#the-block-size-search-picks-a-machine-dependent-value-issue-232)
+for the full caveat and for how a candidate that cannot be allocated is handled (skipped, not fatal --
+the one place the reference implementation exits where it should degrade).
+
 ### CPU core-scaling and native Fortran
 
 The table above uses each platform's default thread count and has no Fortran row.
@@ -571,9 +579,9 @@ rather than trusting the file extension) stashes the translated dict on the retu
 over the file's value, whether that argument is one of the five named parameters above or an
 `AMICATorchNG` keyword passed through `**kwargs` (e.g. `block_size`, `rho0`, `newt_start`).
 
-89 Fortran keywords are recognized; 53 (52 distinct pamica-side names) are translated and 36 are
-deliberately unsupported (checkpoint warm-start, per-family EM freeze toggles, the
-`do_opt_block` block-size search, FIR/DFT pre-filtering, console/output-file reporting, ...) --
+89 Fortran keywords are recognized; 57 (56 distinct pamica-side names) are translated and 32 are
+deliberately unsupported (checkpoint warm-start, per-family EM freeze toggles, FIR/DFT
+pre-filtering, console/output-file reporting, ...) --
 a keyword this reader drops always fires a `logger.warning` naming it, whether that is because
 it is a real Fortran keyword pamica has no equivalent for, or because it is not a Fortran keyword
 this reader recognizes at all (the bundled `sample_data/input.param` template itself carries three
@@ -601,6 +609,12 @@ reaches `fit()`. `share_iter` is **not** renamed -- it already matches `AMICATor
 exactly, unlike `sample_params.json`'s own schema, which spells the same setting `share_int` (a
 pre-existing mismatch in that JSON file, out of scope here, that `fit()`'s per-call-default merge
 now surfaces as a "not applied" warning when fitting from it rather than silently ignoring it).
+
+`do_opt_block`, `blk_min`, `blk_max` and `blk_step` moved from the unsupported table to identity
+mappings with issue #232: pamica now implements the block-size search under Fortran's own four
+names and Fortran's arithmetic stepping, so a file carrying them is applied rather than warned
+about and dropped. pamica's *defaults* for the three bounds differ (Fortran's 128-1024 is far
+below where any pamica backend peaks), but a file that sets them is honored as written.
 
 Every other translated keyword keeps its Fortran spelling; see `FORTRAN_TO_PAMICA_KEY` and
 `FORTRAN_UNSUPPORTED_KEYS` in `pamica/fortran_params.py` for the full tables.

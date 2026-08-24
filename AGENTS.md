@@ -51,6 +51,10 @@ largest throughput knob: ~6x on CPU float64 for the bundled sample (217 -> 36 ms
 than larger because peak block memory scales with it and 8192 stays safe at high channel counts.
 Runs compared bit-for-bit against the Fortran binary must set `block_size` on both sides (the
 bundled `input.param` uses 512); the trajectory shifts ~1e-6 with it, inside parity tolerance.
+`do_opt_block` (#232, `pamica/blocktune.py`, all three backends, OFF by default) searches for the
+per-host optimum instead of using the static default; its choice is timing-based and so
+machine-dependent, which is why parity runs must leave it off and pin `block_size`. Unlike Fortran,
+a candidate that cannot be allocated is skipped rather than aborting the run.
 CUDA float64 is ~4.5x over a 16-thread CPU (RTX 4090, warmed) and agrees with the CPU LL
 to 5 sig digits (auto-selected by the wrapper). float32 now converges reliably on
 full-size data across seeds (#75 guarded the one float32-only divide-by-zero: a sample rounding an

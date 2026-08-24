@@ -20,9 +20,11 @@ that is not listed, that is a bug worth
 | 6 | Precision | float64 | float64 (float32 on Apple GPUs) | Apple GPUs have no float64; float32 agrees to ~7 significant digits, not bit-parity | `dtype=torch.float64` |
 | 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
 | 8 | Columns merged away by `share_comps` | updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided) | a fit must not end holding NaN parameters, mask or no mask; the columns are dead either way | — (see issues #60, #240) |
+| 9 | Block-size search | on (`do_opt_block=1`), sweeps 128–1024, **aborts** if a candidate cannot allocate | off; sweeps 4096–32768; a candidate that cannot allocate is skipped and the fit continues | the choice is timing-based and therefore machine-dependent, which a parity run cannot have; Fortran's range sits far below where any pamica backend peaks; and running out of memory is a reason to use a smaller block, not to stop | `do_opt_block=True` (but pin `block_size` for a bit-for-bit comparison) |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
-row 3 with ADR 0003; row 5 with issue #50; row 8 with issues #60 and #240.
+row 3 with ADR 0003; row 5 with issue #50; row 8 with issues #60 and #240;
+row 9 with issue #232.
 
 Two `share_comps` details are pamica's own because the reference cannot decide
 them: the A-freeze window after a merge is anchored on `share_start` (the literal
@@ -329,3 +331,69 @@ the parameter count mid-fit -- restoring an earlier snapshot would silently
 undo the merge. So under sharing, every backend returns the last iterate, and
 `final_ll_`/`self.ll[-1]` trailing a final-iteration merge is not a
 `keep_best` artifact; it happens the same way with `keep_best=False`.
+
+## The block-size search picks a machine-dependent value (issue #232)
+
+`do_opt_block` times a few candidate `block_size` values on your data and
+device at the start of `fit` and keeps the fastest, under Fortran's own four
+parameter names (`do_opt_block`, `blk_min`, `blk_max`, `blk_step`) and
+Fortran's arithmetic stepping. It is available on all three backends.
+
+Because the winner is decided by measured time, **two machines can pick
+different block sizes for the same data**, and their trajectories then differ
+at the same ~1e-6 level any `block_size` change produces (see
+[Block-size sensitivity](validation.md#block-size-sensitivity)). That is why
+the search is **off by default** in every backend, unlike Fortran, whose header
+default turns it on. A run being compared bit-for-bit against the reference
+binary must leave `do_opt_block` off and pin `block_size` on both sides.
+
+The pamica sweep bounds are re-derived rather than copied. Fortran sweeps
+128–1024, which is entirely below where any pamica backend peaks; the pamica
+defaults (4096–32768 in steps of 4096) bracket the measured CPU optimum and
+include the shipped `block_size=8192`. A file that sets `blk_min`/`blk_max`/
+`blk_step` explicitly is honored as written, so a literal Fortran
+`input.param` means the same thing on both sides.
+
+The search is not free: it costs two accumulate passes per candidate, about 16
+EM iterations' worth under the defaults (0.54 s on torch-CPU, 2.8 s on NumPy for
+the bundled 32-channel sample). Two passes rather than one because the first
+pass at a given block size pays one-off costs that belong to no candidate — most
+sharply on Metal, where a new block shape triggers shader compilation and
+inflated single measurements about fourfold on an M4 Pro. The cost pays for
+itself across a normal multi-hundred-iteration fit and does not across a very
+short one, which is the other half of why this is opt-in. On the bundled
+32-channel sample the block-size curve is flat enough that the win is modest
+(torch-CPU picks 16384 for ~1.13x over the 8192 default; NumPy picks 16384 for
+~1.03x); the 16–60% gaps in the table above are on the configurations where the
+optimum sits far from 8192.
+
+The behavioral difference that motivated the port is what happens when a
+candidate does not fit in memory. The search walks *upward* into larger blocks,
+which is exactly where memory runs out, and Fortran's `determine_block_size`
+calls `allocate_blocks` with no `stat=`, so the run aborts. In pamica the
+failing candidate is skipped, the upward walk stops (every larger candidate
+would fail too), and the fit continues at the largest size that actually ran --
+or at the `block_size` you configured, if nothing could be timed. Candidates
+are additionally capped by `n_samples` and by a conservative estimate of one
+block's peak, so the search usually finds its ceiling without having to walk
+into a failure at all.
+
+One consequence worth stating plainly: on the NumPy backend this flag used to
+default to **on** (following Fortran's header) while its sweep ran over
+128–1024, so every NumPy fit quietly re-tuned itself to a small block and
+ignored the `block_size` it was given. It is now off by default there too, and
+that backend's default `block_size` is the shipped 8192.
+
+That old search was worse than merely mistuned: because it timed `X.T @ X`,
+whose cost grows linearly with block size, it was structurally guaranteed to
+pick `blk_min`. Every NumPy fit therefore ran at 128 regardless of what the
+sweep bounds said. The place this mattered most is
+`test_sample_data_numpy_vs_fortran`, the issue #24 NumPy-vs-Fortran gating
+test: it requests `block_size=512` to match the reference `input.param`, but
+its historical *effective* block size was 128, so the parity it demonstrated
+was never at the size it asked for. That test has been re-verified on the
+literal 512 it now actually gets, under the new default, and still passes:
+Hungarian-matched component correlation 0.981 (gate > 0.9) and final
+log-likelihood −3.4039 after 150 iterations. Parity is unaffected — consistent
+with the block-size invariance measured in issue #216 — but the value it runs
+at is now the value it specifies.
