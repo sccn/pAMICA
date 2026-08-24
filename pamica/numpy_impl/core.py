@@ -80,6 +80,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from tqdm import tqdm
 from .. import blocktune
+from .. import restarts
 from ..rank import MINEIG, MINEIG_REL, numerical_rank
 from .utils import (
     gammaln,
@@ -157,6 +158,18 @@ class AMICA:
             ``block_size``. Unlike Fortran, a candidate that cannot be
             allocated is skipped rather than aborting the run. See
             :mod:`pamica.blocktune`.
+
+            ``n_restarts`` (1) and ``restart_seeds`` (None) carry
+            AMICATorchNG's names, defaults and semantics (issue #198): run the
+            fit from ``n_restarts`` different seeds and keep the one with the
+            highest ``ll[-1]``. ``1`` is the parity-preserving default and
+            bypasses the restart machinery entirely. ``n_restarts > 1`` requires
+            a base ``seed`` (or an explicit ``restart_seeds`` list of exactly
+            that length) so the winner is reproducible, and costs
+            ``n_restarts`` times as long -- restarts run serially. This is a
+            pamica extension: Fortran has no search over seeds, and it is
+            unrelated to ``maxrestarts``/``restartiter``, its recovery path
+            after an early non-finite likelihood. See :mod:`pamica.restarts`.
         """
         # Store progress bar settings
         self.use_tqdm = use_tqdm
@@ -308,7 +321,44 @@ class AMICA:
             self._config_field_dim = raw_params.get("field_dim")
 
         # Initialize random state
-        self.rng = np.random.RandomState(params.get("seed"))
+        self.seed = params.get("seed")
+        self.rng = np.random.RandomState(self.seed)
+
+        # Best-of-N restarts (issue #198), a pamica extension: run the fit from
+        # several seeds and keep the highest-likelihood one. Distinct from
+        # ``maxrestarts``/``numrestarts`` above, which is Fortran's *recovery*
+        # path (redraw A after an early non-finite LL, amica17.f90:1027-1060)
+        # and never compares two completed fits. Resolved here so a bad
+        # configuration fails before any data is touched, and derived from the
+        # constructor seed so a second fit() repeats the same seeds even though
+        # fit() leaves self.seed on the winning restart.
+        n_restarts = params.get("n_restarts", restarts.DEFAULT_N_RESTARTS)
+        restart_seeds = params.get("restart_seeds")
+        self._restart_seeds = restarts.resolve_seeds(
+            n_restarts, restart_seeds, self.seed
+        )
+        self.n_restarts = int(n_restarts)
+        self.restart_seeds = None if restart_seeds is None else list(restart_seeds)
+        # Per-restart records, set by fit(): index-aligned lists of the seed each
+        # restart ran from, the log-likelihood it returned (NaN for a degenerate
+        # restart) and why it stopped. A degenerate restart is excluded from
+        # selection but kept here -- it is a fact about that seed.
+        self.restart_seeds_: List[Optional[int]] = []
+        self.restart_lls_: List[float] = []
+        self.restart_stop_reasons_: List[Optional[str]] = []
+        # Pristine learning-rate ceilings and block size, captured before any
+        # fit can ratchet them. Unlike the other two backends, this one does not
+        # reset the rates at fit start (``lrate0`` and ``newtrate`` are ratcheted
+        # in place by _check_convergence and never restored), so a restart has to
+        # put them back itself or restart k+1 would inherit restart k's annealed
+        # schedule. See _reset_for_restart.
+        self._pristine_state = {
+            "lrate": self.lrate,
+            "lrate0": self.lrate0,
+            "newtrate": self.newtrate,
+            "rholrate": self.rholrate,
+            "block_size": self.block_size,
+        }
 
         # Initialize model parameters
         self.A: Optional[np.ndarray] = None  # Mixing matrix
@@ -532,6 +582,20 @@ class AMICA:
         the LL only shows up in the next E-step, which never runs. This
         matches the reference ordering (issue #269); see the ``self.ll``
         attribute's comment for detail.
+
+        With ``n_restarts > 1`` (issue #198) the fit runs once per seed in
+        ``restart_seeds`` (serially) and the model is left holding the
+        highest-``ll[-1]`` non-degenerate restart -- the state a single fit from
+        that seed would have left. ``restart_seeds_``/``restart_lls_``/
+        ``restart_stop_reasons_`` record every restart (NaN likelihood for a
+        degenerate one) and one INFO line names the winner. The default
+        ``n_restarts=1`` bypasses the restart machinery entirely: no reseeding,
+        no state copy, bit-identical to a pre-#198 fit.
+
+        Only the winner is written to ``outdir`` at the end of the fit, but the
+        periodic ``writestep`` checkpoints of *every* restart pass through the
+        same files while it runs, so a losing restart's intermediate output can
+        appear on disk mid-fit; the final write replaces it.
         """
         if data is None:
             if not self._config_files:
@@ -579,6 +643,156 @@ class AMICA:
         # Preprocess data
         self._preprocess_data(data)
 
+        seeds = self._restart_seeds
+        if len(seeds) == 1:
+            # Single-restart path: nothing is reseeded or reset unless the
+            # caller passed an explicit one-element restart_seeds, so this is
+            # byte-for-byte the pre-#198 fit.
+            if self.restart_seeds is not None:
+                self._reset_for_restart(seeds[0])
+            self._fit_once()
+            self.restart_seeds_ = list(seeds)
+            self.restart_lls_ = [self._returned_ll()]
+            self.restart_stop_reasons_ = [self.stop_reason]
+        else:
+            self._fit_restarts(seeds)
+
+        # Always persist the final converged result. _write_results is otherwise
+        # only called on writestep boundaries during the loop, so a run whose
+        # last iteration is not a writestep multiple (or that stops early) would
+        # never save the final state. Guarded by the same finiteness predicate as
+        # every checkpoint, so a run that diverged to a non-finite LL (issue #39)
+        # or ended holding non-finite parameters (issue #240) cannot overwrite
+        # the last good on-disk result with NaNs. Under best-of-N restarts this
+        # writes the WINNER, whose state is live by the time it runs.
+        if self.converged:
+            self._write_results()
+
+        return self
+
+    def _returned_ll(self) -> float:
+        """Log-likelihood of the model this fit returns -- ``AMICATorchNG``'s
+        ``final_ll_`` on this backend (see the ``self.ll`` comment in
+        ``__init__``). NaN when no iteration recorded one."""
+        return float(self.ll[-1]) if len(self.ll) > 0 else float("nan")
+
+    def _fit_restarts(self, seeds: List[Optional[int]]) -> None:
+        """Run one full fit per restart seed and keep the winner (issue #198).
+
+        Each restart is a complete :meth:`_fit_once` preceded by
+        :meth:`_reset_for_restart`, so nothing leaks from one restart into the
+        next; the winner's state is copied with :meth:`_capture_restart_state`
+        and reapplied at the end unless it is already live (the last restart).
+        """
+        lls: List[float] = []
+        degenerate: List[bool] = []
+        stop_reasons: List[Optional[str]] = []
+        states: Dict[int, Dict[str, object]] = {}
+
+        for index, seed in enumerate(seeds):
+            self._reset_for_restart(seed)
+            self._fit_once()
+            ll = self._returned_ll()
+            # converged is this backend's degeneracy verdict: False means a
+            # non-finite likelihood or non-finite fitted parameters (issue #240).
+            is_degenerate = not self.converged
+            lls.append(ll)
+            degenerate.append(is_degenerate)
+            stop_reasons.append(self.stop_reason)
+            self.logger.info(
+                restarts.progress_message(
+                    index, len(seeds), seed, ll, self.stop_reason, is_degenerate
+                )
+            )
+            # Keep only the best state seen so far: one copy at a time.
+            if restarts.select_best(lls, degenerate) == index:
+                states = {index: self._capture_restart_state()}
+
+        winner = restarts.select_best(lls, degenerate)
+        if winner is None:
+            self.logger.error(restarts.all_degenerate_message(len(seeds), stop_reasons))
+        else:
+            self.logger.info(
+                restarts.winner_message(winner, len(seeds), seeds[winner], lls[winner])
+            )
+            if winner != len(seeds) - 1:
+                self._apply_restart_state(states[winner])
+
+        self.restart_seeds_ = list(seeds)
+        self.restart_lls_ = lls
+        self.restart_stop_reasons_ = stop_reasons
+
+    def _capture_restart_state(self) -> Dict[str, object]:
+        """Independent copy of every attribute the fit path writes.
+
+        The list is :data:`_RESTART_STATE_ATTRS`; ``test_restart_policy.py``
+        cross-checks it against the attributes the fit-path methods actually
+        assign, so a field added later cannot be silently dropped.
+        """
+        return {
+            name: restarts.copy_state_value(getattr(self, name))
+            for name in self._RESTART_STATE_ATTRS
+        }
+
+    def _apply_restart_state(self, state: Dict[str, object]) -> None:
+        """Restore the state captured by :meth:`_capture_restart_state`."""
+        for name, value in state.items():
+            setattr(self, name, value)
+
+    def _reset_for_restart(self, seed: Optional[int]) -> None:
+        """Return the per-fit state to what a freshly constructed model holds,
+        and reseed the RNG (issue #198).
+
+        The other two backends need no such method: their
+        ``_initialize_parameters`` redraws unconditionally and their ``fit``
+        resets every counter. This one initializes a parameter only ``if <param>
+        is None`` (so it can honor externally supplied starting values) and its
+        learning-rate ceilings are ratcheted in place by ``_check_convergence``
+        and never restored, so a second fit on the same instance would otherwise
+        continue from the first fit's parameters and annealed schedule. Nulling
+        the parameters is what makes restart *k* equal to a fresh model fit from
+        ``seed`` -- which is the property the acceptance test pins.
+        """
+        self.seed = seed
+        self.rng = np.random.RandomState(seed)
+
+        # Redrawn by _initialize_parameters once they are None.
+        self.A = None
+        self.W = None
+        self.mu = None
+        self.alpha = None
+        self.beta = None
+        self.rho = None
+        self.gm = None
+        self.c = None
+        self.comp_list = None
+        self.comp_used = None
+        self.sigma2 = None
+        self.lambda_ = None
+        self.kappa = None
+        self._llt_logv = None
+        self._llt_ll = None
+
+        # Per-fit bookkeeping.
+        self.good_idx = None
+        self.num_good_samples = None
+        self.numrej = 0
+        self.numrestarts = 0
+        self._last_ll_samples = None
+        self.iter = 0
+        self.ll = []
+        self.nd = []
+        self.converged = False
+        self.stop_reason = None
+
+        # Learning-rate ceilings and block size, back to their pristine values.
+        for name, value in self._pristine_state.items():
+            setattr(self, name, value)
+
+    def _fit_once(self) -> None:
+        """One fit: initialize, optionally tune the block size, run the EM loop,
+        and record the outcome in ``converged``/``stop_reason``. Called once per
+        restart by :meth:`fit`, on data that is already preprocessed."""
         # Initialize parameters
         self._initialize_parameters()
 
@@ -623,17 +837,32 @@ class AMICA:
                     self.stop_reason,
                 )
 
-        # Always persist the final converged result. _write_results is otherwise
-        # only called on writestep boundaries during the loop, so a run whose
-        # last iteration is not a writestep multiple (or that stops early) would
-        # never save the final state. Guarded by the same finiteness predicate as
-        # every checkpoint, so a run that diverged to a non-finite LL (issue #39)
-        # or ended holding non-finite parameters (issue #240) cannot overwrite
-        # the last good on-disk result with NaNs.
-        if self.converged:
-            self._write_results()
-
-        return self
+    # Everything a fit writes, and therefore everything a restart snapshot must
+    # copy for the winning restart to be indistinguishable from a single fit
+    # from that seed (issue #198). Together with the invariants below this must
+    # account for every ``self.x =`` in the fit path, which
+    # ``test_restart_policy.py`` enforces by parsing this module -- so a field
+    # added to a fit-path method fails the suite until it is classified here.
+    _RESTART_STATE_ATTRS = (
+        # Fitted parameters and the Newton buffers ...
+        "A", "W", "c", "mu", "alpha", "beta", "rho", "gm", "comp_list",
+        "comp_used", "sigma2", "lambda_", "kappa",
+        # ... the per-fit trajectory, counters and outcome ...
+        "iter", "ll", "nd", "converged", "stop_reason", "numrej", "numrestarts",
+        "good_idx", "num_good_samples", "_last_ll_samples", "_llt_logv", "_llt_ll",
+        # ... the ratcheted learning-rate ceilings (this backend anneals lrate0
+        # and newtrate in place), the tuned block size, and the seed/RNG the
+        # winning restart ran from.
+        "lrate", "lrate0", "newtrate", "rholrate",
+        "block_size", "seed", "rng",
+    )  # fmt: skip
+    # Written by the fit path but identical across the restarts of one fit()
+    # call, because they are functions of the data alone: the preprocessed data
+    # itself, the preprocessing outputs, and the model sizing derived from them.
+    _RESTART_INVARIANT_ATTRS = (
+        "data", "data_dim", "num_samples", "num_comps",
+        "mean", "sphere", "sldet", "_sphere_pinv",
+    )  # fmt: skip
 
     # Every parameter a caller can read back off disk or off the object. `A` and
     # `W` are the decomposition; `c`/`mu`/`alpha`/`beta`/`rho`/`gm` are the model
