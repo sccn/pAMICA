@@ -847,14 +847,26 @@ class AMICATorchNG:
         self.sldet = 0.0
 
         # Full-dataset per-sample/per-model log-likelihood (Fortran's LLt,
-        # issue #155), computed ONCE at the end of fit() -- after any
-        # keep-best restore (issue #51), so it reflects the parameters
-        # actually exported, never a mid-training-loop value -- and stored as
-        # compact numpy arrays (not the full sphered dataset, which would pin
-        # n_channels x N x 8 bytes on the model, on GPU too). Not a fitted
-        # parameter (absent from state_dict()/_PARAM_TENSORS): a model
-        # restored via from_state_dict() has neither, so write_amica_output
+        # issue #155), STASHED as the training E-step computes it rather than
+        # recomputed by a separate forward pass at write time (issue #157) --
+        # which is what Fortran does, keeping ``modloglik(num_models,N)`` and
+        # ``loglik(N)`` permanently allocated (amica15.f90:2619-2620) so that
+        # ``write_output`` just dumps them (amica15.f90:2338-2343).
+        #
+        # ``_llt_logv``/``_llt_ll`` are the live per-fit buffers (device
+        # tensors; Fortran's ``modloglik``/``loglik``), zero-filled so a
+        # ``do_reject`` sample keeps Fortran's zero sentinel. ``fit`` converts
+        # them into the compact numpy ``_llt_lht``/``_llt_lt`` that
+        # ``write_amica_output`` consumes, then drops the device buffers.
+        # Memory is ``(n_models + 1) * n_samples * itemsize`` and so grows with
+        # the data, but stays far below the sphered dataset already resident
+        # (``n_channels x n_samples``) since ``n_channels >> n_models + 1`` in
+        # any real fit: ~0.7 MB for the bundled 30504-sample two-model case.
+        # Not fitted parameters (absent from state_dict()/_PARAM_TENSORS): a
+        # model restored via from_state_dict() has none, so write_amica_output
         # writes no LLt for it.
+        self._llt_logv: Optional[torch.Tensor] = None
+        self._llt_ll: Optional[torch.Tensor] = None
         self._llt_lht: Optional[np.ndarray] = None
         self._llt_lt: Optional[np.ndarray] = None
 
@@ -1133,68 +1145,6 @@ class AMICATorchNG:
         logV, *_ = self._forward(X)
         return torch.logsumexp(logV, dim=1)  # (batch,)
 
-    def _compute_full_posterior_ll(
-        self, X_t: torch.Tensor
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Recompute the per-model/per-sample log-likelihood over every sample
-        of ``X_t`` (the sphered training data), for the Fortran ``LLt`` output
-        (issue #155). Called once from ``fit()`` (after any keep-best restore)
-        with the full dataset; not retained on ``self`` afterward.
-
-        Reuses ``_forward``'s ``logV`` (Fortran's ``modloglik``: already
-        includes the ``log|det W|`` + ``sldet`` Jacobian terms) rather than any
-        value accumulated during training, so this reflects ``self``'s current
-        parameters -- correct even after a keep-best rollback (issue #51) to an
-        earlier iterate than the training loop's last.
-
-        Deliberate divergence from Fortran: Fortran's ``modloglik`` is filled
-        during iteration i's E-step, the M-step then updates the parameters,
-        and ``write_output`` writes both -- so Fortran's on-disk LLt is stale
-        by one M-step relative to the parameters written alongside it. This
-        method recomputes from the POST-update (and, here, post-keep-best-
-        restore) parameters, so pamica's LLt is self-consistent with the
-        written W/A (better-behaved, not "fixed toward Fortran" -- do not
-        change this to match Fortran's staleness).
-
-        Under ``do_reject``, only the good set (``self.good_idx``) is scored --
-        Fortran zeroes a rejected sample's ``modloglik``/``loglik`` on write
-        (amica15.f90:2231-2234) and ``load_rej`` uses that exact zero as the
-        rejection sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:
-        907), so rejected columns of the returned arrays are left at their
-        zero-initialized value rather than computed and discarded -- this also
-        avoids running rejected outliers through the model for the first time
-        at write time.
-
-        Returns
-        -------
-        Lht : ndarray of shape (n_models, n_samples). Zero for rejected
-            samples under ``do_reject``.
-        Lt : ndarray of shape (n_samples,). Zero for rejected samples under
-            ``do_reject``.
-        """
-        n_samples = X_t.shape[1]
-        Lht = np.zeros((self.n_models, n_samples))
-        Lt = np.zeros(n_samples)
-
-        if self.do_reject:
-            assert self.good_idx is not None
-            idx = self.good_idx.detach().cpu().numpy()
-            X_use = X_t[:, self.good_idx]
-        else:
-            idx = np.arange(n_samples)
-            X_use = X_t
-        n_use = X_use.shape[1]
-
-        for start in range(0, n_use, self.block_size):
-            end = min(start + self.block_size, n_use)
-            logV, *_ = self._forward(X_use[:, start:end])
-            lt_block = torch.logsumexp(logV, dim=1)
-            cols = idx[start:end]
-            Lht[:, cols] = logV.T.detach().cpu().numpy()
-            Lt[cols] = lt_block.detach().cpu().numpy()
-
-        return Lht, Lt
-
     def _get_block_updates(self, X: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Compute sufficient-statistic accumulators for one data block.
 
@@ -1223,6 +1173,11 @@ class AMICATorchNG:
             n_models; the data-space bias numerator ``sum_t v_h*x``, issue #27),
             ``ll`` (scalar), and -- when ``do_newton`` -- ``dsigma2_numer``,
             ``dkappa_numer``, ``dlambda_numer`` (see ``_finalize_newton_stats``).
+
+            Plus two per-sample (non-summable) entries consumed and removed by
+            ``_accumulate_blocks``: ``logV`` (batch, n_models) and
+            ``ll_samples`` (batch,) -- Fortran's ``modloglik``/``loglik``
+            columns for this block, stashed for the LLt output (issue #157).
         """
         assert (
             self.comp_list is not None
@@ -1233,7 +1188,12 @@ class AMICATorchNG:
         dev, dt = self.device, self.dtype
 
         logV, b_list, z_list, y_list, azrho_list = self._forward(X)
-        block_ll = torch.logsumexp(logV, dim=1).sum()
+        # Per-sample total log-likelihood (Fortran ``P``/``loglik``,
+        # amica15.f90:1402). Kept as a vector rather than folded straight into
+        # the scalar sum so the LLt stash can reuse it (issue #157); ``block_ll``
+        # is the same summation as before, bit for bit.
+        block_ll_samples = torch.logsumexp(logV, dim=1)
+        block_ll = block_ll_samples.sum()
         v = torch.softmax(logV, dim=1)  # (batch, num_models)
 
         def zeros(*shape):
@@ -1332,6 +1292,12 @@ class AMICATorchNG:
             "dWtmp": dWtmp,
             "dc_numer": dc_numer,
             "ll": block_ll,
+            # Per-sample E-step outputs for the LLt stash (issue #157). These
+            # are NOT summable accumulators -- _accumulate_blocks pops them
+            # before folding the rest -- and cost nothing extra: both are
+            # already computed above for ``ll``/``v``.
+            "logV": logV,
+            "ll_samples": block_ll_samples,
         }
         if do_newton:
             updates["dsigma2_numer"] = dsigma2_numer
@@ -1339,17 +1305,49 @@ class AMICATorchNG:
             updates["dlambda_numer"] = dlambda_numer
         return updates
 
-    def _accumulate_blocks(self, X: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def _accumulate_blocks(
+        self, X: torch.Tensor, stash_llt: bool = False
+    ) -> Dict[str, torch.Tensor]:
         """Sum sufficient statistics over all blocks of ``X``.
 
         Peak memory scales with ``block_size`` (each block's intermediates
         are freed once accumulated), not with ``X.shape[1]``.
+
+        Parameters
+        ----------
+        X : torch.Tensor
+            The (sphered) data to accumulate over, already restricted to the
+            good set under ``do_reject``.
+        stash_llt : bool, default=False
+            Scatter each block's per-sample ``logV``/``ll_samples`` into the
+            ``_llt_logv``/``_llt_ll`` buffers as it goes, so the LLt output
+            never needs a second pass over the data (issue #157). Only the
+            training loop sets this; the ``_tune_block_size`` probes leave the
+            buffers untouched, so the tuner still leaves no state behind. The
+            per-sample values are dropped from the returned dict either way --
+            they are per-block quantities, not accumulators, and summing them
+            would be meaningless.
         """
         n_samples = X.shape[1]
         acc: Optional[Dict[str, torch.Tensor]] = None
         for start in range(0, n_samples, self.block_size):
             end = min(start + self.block_size, n_samples)
             block_acc = self._get_block_updates(X[:, start:end])
+            logv = block_acc.pop("logV")
+            ll_samples = block_acc.pop("ll_samples")
+            if stash_llt:
+                assert self._llt_logv is not None and self._llt_ll is not None
+                # Map this block's rows back onto the full-dataset index. Under
+                # do_reject the caller passed X_t[:, good_idx], so block
+                # [start:end] of X is good_idx[start:end] of the dataset;
+                # otherwise the block index is the sample index.
+                rows = (
+                    self.good_idx[start:end]
+                    if self.good_idx is not None
+                    else slice(start, end)
+                )
+                self._llt_logv[rows] = logv
+                self._llt_ll[rows] = ll_samples
             if acc is None:
                 acc = block_acc
             else:
@@ -1991,11 +1989,28 @@ class AMICATorchNG:
         switch counter that gates ``pdtype``) so a restored model's switch count
         stays consistent with its rolled-back ``pdtype`` -- otherwise a switch
         applied after the peak iterate would leave the two out of sync in a saved
-        model (silent-failure review)."""
+        model (silent-failure review).
+
+        Also captures the LLt stash (issue #157). ``fit`` snapshots immediately
+        after the E-step that produced both the candidate ``best_ll`` and this
+        iteration's ``_llt_logv``/``_llt_ll``, so a restore rolls the on-disk
+        LLt back to the E-step of the restored iterate rather than leaving the
+        last (discarded) iterate's per-sample values behind. Fortran has no
+        best-iterate safeguard to reconcile here; this is what keeps the
+        exported LLt the one belonging to the exported parameters. Costs one
+        ``(n_models + 1) * n_samples`` clone per improving iteration, which is
+        negligible against the E-step's ``O(n_samples * n_channels^2 * n_mix)``.
+        """
         snap: Dict[str, object] = {
             name: getattr(self, name).clone() for name in self._PARAM_TENSORS
         }
         snap["n_kurt_done"] = self.n_kurt_done
+        # Present for every in-fit call (fit allocates the buffers before the
+        # loop and frees them only after the restore); absent only for a direct
+        # call on an already-returned model, where there is nothing to roll back.
+        if self._llt_logv is not None and self._llt_ll is not None:
+            snap["_llt_logv"] = self._llt_logv.clone()
+            snap["_llt_ll"] = self._llt_ll.clone()
         return snap
 
     def _restore_params(self, snapshot: Dict[str, object]) -> None:
@@ -2050,6 +2065,31 @@ class AMICATorchNG:
         effect on the LL only shows up in the next E-step, which never runs.
         This matches the reference ordering (issue #269); see ``final_ll_``'s
         comment for detail.
+
+        LLt semantics (issue #157). The exported ``LLt``
+        (``_llt_lht``/``_llt_lt``, written by :meth:`write_amica_output`) is
+        the per-sample log-likelihood **stashed by the E-step that produced**
+        ``final_ll_``, never a separate post-fit forward pass. Equivalently, it
+        always satisfies ``Lt.sum() / (n_samples * n_channels) == final_ll_``
+        bit for bit. Two consequences worth stating plainly:
+
+        * Without a keep-best restore, ``final_ll_`` is ``ll_history[-1]``, the
+          LL of the parameters as they stood *before* the last M-step -- so the
+          exported ``LLt`` is one M-step older than the exported ``W``/``A``.
+          That is the reference's own behaviour (Fortran fills ``modloglik``
+          during iteration i's E-step, ``update_params`` then moves the
+          parameters, and ``write_output`` writes both -- amica15.f90:996,
+          1122, 1124-1127), adopted deliberately so pamica's on-disk ``LLt`` is
+          comparable with the binary's. It is verifiable on the committed
+          reference output: ``sum(Lt)/(N*nw)`` there equals its ``LL[-1]``
+          exactly, not the LL of the ``W`` written next to it.
+        * With a keep-best restore (issue #51), the restore rolls the stash
+          back with the parameters, so ``LLt`` is the restored iterate's own
+          E-step -- the one that measured ``best_ll`` -- and not the discarded
+          last iterate's. Because ``_snapshot_params`` is taken *before* that
+          iteration's M-step, the restored parameters and the restored ``LLt``
+          come from the same point in the loop, so there is no staleness at all
+          in this case.
         """
         if X.ndim != 2:
             raise ValueError(
@@ -2090,6 +2130,18 @@ class AMICATorchNG:
         if self.do_opt_block:
             self._tune_block_size(X_t[:, self.good_idx] if self.do_reject else X_t)
 
+        # LLt buffers (issue #157), Fortran's permanently-allocated
+        # modloglik/loglik (amica15.f90:2619-2620). Zero-filled: a do_reject
+        # sample that is never scored again keeps the zero that Fortran's
+        # load_rej reads as the rejection sentinel. Re-allocated per fit so a
+        # refit on a different dataset cannot serve a stale array.
+        self._llt_logv = torch.zeros(
+            (n_total, self.n_models), dtype=self.dtype, device=self.device
+        )
+        self._llt_ll = torch.zeros(n_total, dtype=self.dtype, device=self.device)
+        self._llt_lht = None
+        self._llt_lt = None
+
         numdecs = 0
         # Consecutive-small-likelihood-gain counter for the min_dll stop (Fortran
         # numincs, amica15.f90:1079-1089; issue #207). Reset here so a refit on
@@ -2127,7 +2179,7 @@ class AMICATorchNG:
 
             X_use = X_t[:, self.good_idx] if self.do_reject else X_t
             n_use = X_use.shape[1]
-            acc = self._accumulate_blocks(X_use)
+            acc = self._accumulate_blocks(X_use, stash_llt=True)
 
             # Log-likelihood of the CURRENT (pre-update) parameters: acc["ll"] is
             # this iteration's E-step total, computed before _update_parameters
@@ -2424,11 +2476,27 @@ class AMICATorchNG:
             self.final_ll_ = best_ll
 
         # LLt (Fortran's per-sample/per-model log-likelihood, issue #155):
-        # computed ONCE here, strictly after the keep-best restore above, so
-        # the stored arrays reflect the parameters actually being returned/
-        # exported by fit() -- never a mid-training-loop value. Stored as
-        # compact numpy arrays rather than retaining the full sphered dataset.
-        self._llt_lht, self._llt_lt = self._compute_full_posterior_ll(X_t)
+        # materialized from the stash the training E-step filled, with NO extra
+        # forward pass (issue #157). Runs strictly after the keep-best restore
+        # above, which rolls the stash back alongside the parameters, so these
+        # arrays are always the E-step of the iterate fit() returns -- i.e. the
+        # very E-step whose total is ``final_ll_``:
+        #     Lt.sum() / (n_samples * n_channels) == final_ll_   (bit-exact)
+        # This is Fortran's own convention (see the class docstring on
+        # staleness) and holds for the reference binary's own output too.
+        # Converted to compact numpy here so the device buffers can be freed;
+        # a refit reallocates them.
+        if self._llt_logv is not None and self._llt_ll is not None and self.ll_history:
+            self._llt_lht = self._llt_logv.T.detach().cpu().numpy()
+            self._llt_lt = self._llt_ll.detach().cpu().numpy()
+        # Else: no iteration ever completed an E-step whose LL was recorded
+        # (max_iter=0, or a degenerate first iteration that broke before
+        # ll_history.append). The buffers hold nothing but zeros, which
+        # load_rej would misread as "every sample rejected", so leave
+        # _llt_lht/_llt_lt None and let write_amica_output omit the file with
+        # its existing warning rather than write a misleading one.
+        self._llt_logv = None
+        self._llt_ll = None
 
         return self
 
@@ -2480,6 +2548,16 @@ class AMICATorchNG:
                 f"Outlier rejection removed all {good.numel()} samples "
                 f"(rejsig={self.rejsig} too aggressive for this data)."
             )
+
+        # Zero the LLt stash for the samples being dropped, exactly as Fortran's
+        # reject_data does (amica15.f90:2232-2234): they are never scored again,
+        # so without this they would keep the log-likelihood from the last
+        # iteration that still considered them good, and load_rej's
+        # ``sum(modloglik(:,i)) == 0`` sentinel would not see them as rejected.
+        if self._llt_logv is not None and self._llt_ll is not None:
+            dropped = good[~keep]
+            self._llt_logv[dropped] = 0.0
+            self._llt_ll[dropped] = 0.0
 
         self.good_idx = good[keep]
         self.numrej += 1
@@ -2924,10 +3002,13 @@ class AMICATorchNG:
         byte-compatible with the Fortran reference.
 
         Also writes ``LLt`` (the per-sample/per-model log-likelihood, issue
-        #155) for a model that was just ``fit()`` in this process. A model
-        restored via :meth:`from_state_dict` has no training data to recompute
-        it from, so ``LLt`` is omitted for it (a warning is logged) -- the
-        rest of the output is unaffected.
+        #155) for a model that was just ``fit()`` in this process, from the
+        stash the training E-step filled (issue #157) -- so, exactly as in the
+        reference, ``LLt`` is the E-step of the returned iterate and is one
+        M-step older than the ``W``/``A`` written beside it (see ``fit``'s
+        Notes). A model restored via :meth:`from_state_dict` carries no stash,
+        so ``LLt`` is omitted for it (a warning is logged) -- the rest of the
+        output is unaffected.
 
         Parameters
         ----------
