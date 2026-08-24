@@ -500,7 +500,18 @@ Practical notes:
   recorded**, with a NaN likelihood. If every restart is degenerate, the model
   is left holding the last one, so the degenerate-fit contract (issue #50)
   applies exactly as it does to a single degenerate fit.
+- A restart that **raises** is isolated the same way. A truly singular mixing
+  matrix makes the unmixing inversion raise rather than produce a non-finite
+  likelihood, and inside a search that must not discard the seeds that already
+  worked: the failure is recorded as `stop_reason="restart_error"` (degenerate,
+  so excluded from selection, and refused by the same contract if every restart
+  hits it), logged with the exception type and message, and the next seed runs.
+  Only the multi-restart path catches — `n_restarts=1` still raises exactly as
+  it did before this feature existed, because bit-identity includes error
+  behavior.
 - On the NumPy backend only the winner is written to `outdir` at the end of the
   fit, but the periodic `writestep` checkpoints of every restart pass through
   the same files while the fit runs, so a losing restart's intermediate output
-  can appear on disk mid-fit. The final write replaces it.
+  can appear on disk mid-fit. The final write replaces it — what is on disk when
+  `fit` returns is the winner's state, which is a tested claim, not just a
+  documented intention.
