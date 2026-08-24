@@ -79,7 +79,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from typing import Optional
+from typing import List, Optional, Sequence
 
 # mlx ships as a compiled extension with no type stubs, so ty cannot resolve
 # it statically even when installed; scope the suppression to this one import.
@@ -88,6 +88,7 @@ import numpy as np
 from scipy.special import digamma, gammaln
 
 from .. import blocktune
+from .. import restarts
 from ..numpy_impl.utils import identify_shared_components
 from ..rank import MINEIG, MINEIG_REL, numerical_rank
 
@@ -399,6 +400,22 @@ class AMICAMLXNG:
         catchable ``RuntimeError`` (``[metal::malloc] ...`` -- not the process
         abort MLX's LU takes on singular input, issue #274), so it is skipped
         and the fit continues at the largest size that ran.
+
+    The best-of-N restart parameters (issue #198) likewise carry
+    AMICATorchNG's names, defaults and semantics:
+
+    ``n_restarts`` (1)
+        Number of independent fits to run from different seeds, keeping the one
+        with the highest ``final_ll_``. ``1`` (the default) bypasses the restart
+        machinery entirely, so a default fit is bit-for-bit what it was before
+        #198. ``n_restarts > 1`` requires a base ``seed`` (or explicit
+        ``restart_seeds``) so the winner can be reproduced, and costs
+        ``n_restarts`` times as long (restarts run serially). This is a pamica
+        extension: Fortran has no search over seeds. See
+        :mod:`pamica.restarts` and ``docs/guides/amica-differences.md``.
+    ``restart_seeds`` (None)
+        Explicit per-restart seeds, exactly ``n_restarts`` of them; otherwise
+        ``seed, seed + 1, ...``.
     """
 
     def __init__(
@@ -447,6 +464,8 @@ class AMICAMLXNG:
         mineig: float = MINEIG,
         mineig_rel: Optional[float] = MINEIG_REL,
         seed: Optional[int] = None,
+        n_restarts: int = restarts.DEFAULT_N_RESTARTS,
+        restart_seeds: Optional[Sequence[int]] = None,
     ):
         self.n_channels = n_channels
         self.n_models = n_models  # multi-model (#81) + component sharing (#263)
@@ -580,6 +599,22 @@ class AMICAMLXNG:
         self.mineig = mineig
         self.mineig_rel = mineig_rel
         self.seed = seed
+
+        # Best-of-N restarts (issue #198), a pamica extension: Fortran has no
+        # search over seeds. Resolved here so a bad configuration fails before
+        # any data is touched, and derived from the CONSTRUCTOR seed so that a
+        # second fit() on the same instance repeats the same seeds even though
+        # fit() leaves self.seed on the winning restart.
+        self._restart_seeds = restarts.resolve_seeds(n_restarts, restart_seeds, seed)
+        self.n_restarts = int(n_restarts)
+        self.restart_seeds = None if restart_seeds is None else list(restart_seeds)
+        # Per-restart records, set by fit(): index-aligned lists of the seed each
+        # restart ran from, the log-likelihood it returned (NaN for a degenerate
+        # restart) and why it stopped. A degenerate restart is excluded from
+        # selection but kept here -- it is a fact about that seed.
+        self.restart_seeds_: List[Optional[int]] = []
+        self.restart_lls_: List[float] = []
+        self.restart_stop_reasons_: List[Optional[str]] = []
 
         self.iteration = 0
         self.ll_history: list[float] = []
@@ -1771,10 +1806,138 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     # Fit
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Best-of-N restarts (issue #198); mirrors AMICATorchNG's implementation
+    # ------------------------------------------------------------------
+    # Everything a fit writes, and therefore everything a restart snapshot must
+    # copy for the winning restart to be indistinguishable from a single fit
+    # from that seed. Together with the invariants below this must account for
+    # every ``self.x =`` in the fit path, which ``test_restart_policy.py``
+    # enforces by parsing this module -- so a field added to a fit-path method
+    # fails the suite until it is classified here.
+    _RESTART_STATE_ATTRS = (
+        # Fitted parameters and the derived per-iteration arrays ...
+        "A", "W", "c", "mu", "alpha", "beta", "rho", "gm", "comp_list", "pdtype",
+        "_comp_used_arr", "_lgamma_table", "_logdet_W", "_nd_arr",
+        # ... the schedule/counters a fit mutates ...
+        "iteration", "ll_history", "final_ll_", "stop_reason",
+        "n_newton_fallbacks", "n_kurt_done",
+        "lrate", "lrate_cap", "newtrate", "rholrate",
+        # ... the tuned block size (do_opt_block re-times per restart) and the
+        # seed the winning restart ran from.
+        "block_size", "seed",
+    )  # fmt: skip
+    # Written by the fit path but identical across the restarts of one fit()
+    # call, because they are functions of the data alone.
+    _RESTART_INVARIANT_ATTRS = (
+        "mean", "sphere", "_sphere_np", "sldet", "_sphere_pinv",
+        "n_channels", "n_comps",
+    )  # fmt: skip
+
+    @staticmethod
+    def _copy_state_value(value):
+        """:func:`pamica.restarts.copy_state_value` plus the MLX case.
+
+        ``mx.array(value)`` is a real copy (MLX arrays support item assignment,
+        so aliasing one into a snapshot would not be safe), and it preserves
+        dtype for the int/bool arrays here (``comp_list``, ``pdtype``,
+        ``_comp_used_arr``).
+        """
+        if isinstance(value, mx.array):
+            return mx.array(value)
+        return restarts.copy_state_value(value)
+
+    def _capture_restart_state(self) -> dict:
+        """Independent copy of every attribute the fit path writes."""
+        return {
+            name: self._copy_state_value(getattr(self, name))
+            for name in self._RESTART_STATE_ATTRS
+        }
+
+    def _apply_restart_state(self, state: dict) -> None:
+        """Restore the state captured by :meth:`_capture_restart_state`."""
+        for name, value in state.items():
+            setattr(self, name, value)
+
     def fit(
         self, X: np.ndarray, max_iter: int = 100, verbose: bool = True
     ) -> "AMICAMLXNG":
-        """Fit the model. ``X`` is ``(n_channels, n_samples)``.
+        """Fit the model, running ``n_restarts`` fits and keeping the best.
+
+        ``X`` is ``(n_channels, n_samples)``. With the default ``n_restarts=1``
+        this is exactly :meth:`_fit_once` -- the restart machinery draws
+        nothing, copies nothing and changes nothing, so the trajectory is
+        bit-identical to a pre-issue-#198 fit. With ``n_restarts > 1`` the model
+        is fit once per seed in ``restart_seeds`` (serially) and the returned
+        model holds the highest-``final_ll_`` non-degenerate restart's complete
+        state, exactly as a single fit from that seed would have left it.
+
+        Records (index-aligned, always populated): ``restart_seeds_``,
+        ``restart_lls_`` (NaN where a restart ended degenerate) and
+        ``restart_stop_reasons_``; the winner is named in one INFO log line. A
+        degenerate restart (``nan_ll``/``singular_ll``/``nan_params``) is
+        excluded from selection but recorded; if every restart is degenerate the
+        model is left holding the last one.
+        """
+        seeds = self._restart_seeds
+        if len(seeds) == 1:
+            # Single-restart path: seeds[0] IS self.seed unless the caller
+            # passed an explicit one-element restart_seeds, so nothing here
+            # perturbs the pre-#198 fit.
+            self.seed = seeds[0]
+            self._fit_once(X, max_iter=max_iter, verbose=verbose)
+            self.restart_seeds_ = list(seeds)
+            self.restart_lls_ = [
+                float("nan") if self.final_ll_ is None else float(self.final_ll_)
+            ]
+            self.restart_stop_reasons_ = [self.stop_reason]
+            return self
+
+        lls: List[float] = []
+        degenerate: List[bool] = []
+        stop_reasons: List[Optional[str]] = []
+        states: dict = {}
+        for index, seed in enumerate(seeds):
+            self.seed = seed
+            self._fit_once(X, max_iter=max_iter, verbose=verbose)
+            ll = float("nan") if self.final_ll_ is None else float(self.final_ll_)
+            is_degenerate = self.stop_reason in self._DEGENERATE_STOP_REASONS
+            lls.append(ll)
+            degenerate.append(is_degenerate)
+            stop_reasons.append(self.stop_reason)
+            logger.info(
+                "%s",
+                restarts.progress_message(
+                    index, len(seeds), seed, ll, self.stop_reason, is_degenerate
+                ),
+            )
+            # Keep only the best state seen so far: one copy at a time.
+            if restarts.select_best(lls, degenerate) == index:
+                states = {index: self._capture_restart_state()}
+
+        winner = restarts.select_best(lls, degenerate)
+        if winner is None:
+            logger.warning(
+                "%s", restarts.all_degenerate_message(len(seeds), stop_reasons)
+            )
+        else:
+            logger.info(
+                "%s",
+                restarts.winner_message(winner, len(seeds), seeds[winner], lls[winner]),
+            )
+            if winner != len(seeds) - 1:
+                self._apply_restart_state(states[winner])
+
+        self.restart_seeds_ = list(seeds)
+        self.restart_lls_ = lls
+        self.restart_stop_reasons_ = stop_reasons
+        return self
+
+    def _fit_once(
+        self, X: np.ndarray, max_iter: int = 100, verbose: bool = True
+    ) -> "AMICAMLXNG":
+        """Run one fit (one initialization, one EM loop) -- what :meth:`fit`
+        calls once per restart. ``X`` is ``(n_channels, n_samples)``.
 
         Under ``share_comps``, if a merge fires on the LAST iteration, the
         returned ``A``/``W``/``comp_list`` are already post-merge but
