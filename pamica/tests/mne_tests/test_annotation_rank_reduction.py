@@ -210,3 +210,37 @@ def test_auto_rank_pmi_scores_good_samples_only(
     pmi_manual = fitted_auto_rank.amica_.pmi(x_good, model_idx=0)
     assert pmi_wrapper.shape == (RANK, RANK)
     np.testing.assert_allclose(pmi_wrapper, pmi_manual)
+
+
+def test_auto_rank_mir_raises_pca_reduction_error(fitted_auto_rank, raw_annot_low_rank):
+    """Issue #283 regression, the failure mode PR #282 deliberately left
+    unpinned: mir() on a fit whose rank reduction came from AUTOMATIC
+    mineig_rel detection (no explicit pcakeep/pcadb) must raise the same
+    documented ValueError the explicit-pcakeep twin above asserts (matching
+    "incompatible with PCA reduction"), not numpy.linalg.LinAlgError. Before
+    the fix, AMICATorchNG._pca_reduced() only checked the explicit
+    pcakeep/pcadb parameters, so this exact fit slipped past the guard and
+    mir() crashed with an opaque LinAlgError instead."""
+    with pytest.raises(ValueError, match="incompatible with PCA reduction"):
+        fitted_auto_rank.mir(raw_annot_low_rank)
+
+
+# --- positive control: an ordinary, unreduced fit ---------------------------
+
+
+@pytest.fixture(scope="module")
+def fitted_full_rank(raw_annot):
+    """Annotation rejection with neither explicit pcakeep nor an artificially
+    reduced rank -- the positive control paired with the two mir() guard
+    regressions above: an ordinary fit's sphere is square, so mir() must
+    still work once the guard also checks the fitted geometry."""
+    return AMICAICA(n_mix=3, random_state=SEED, device="cpu", verbose=False).fit(
+        raw_annot, max_iter=MAX_ITER
+    )
+
+
+def test_full_rank_mir_succeeds(fitted_full_rank, raw_annot):
+    assert fitted_full_rank.n_components_ == len(fitted_full_rank.ch_names_)
+    mir_nats, variance = fitted_full_rank.mir(raw_annot)
+    assert np.isfinite(mir_nats)
+    assert np.isfinite(variance)
