@@ -42,7 +42,16 @@ Release notes are also published on the
   `block_size` is the shipped 8192 rather than 128. Its naive
   `determine_block_size` helper (which timed a bare `X.T @ X`, the shape of no
   work AMICA actually does, and could not fall back at all) is replaced
-  outright by the shared `pamica/blocktune.py`.
+  outright by the shared `pamica/blocktune.py`. That helper was worse than
+  mistuned: `X.T @ X` costs more as the block grows, so it was structurally
+  guaranteed to pick `blk_min`, and every NumPy fit ran at 128 whatever the
+  bounds said. This specifically affected `test_sample_data_numpy_vs_fortran`,
+  the issue #24 NumPy-vs-Fortran gating test, which requests `block_size=512`
+  to match the reference `input.param` but whose historical *effective* block
+  size was 128. It has been re-verified at the literal 512 it now actually
+  gets, under the new default, and still passes: Hungarian-matched component
+  correlation 0.981 (gate > 0.9) and final log-likelihood -3.4039 after 150
+  iterations.
   `do_opt_block`/`blk_min`/`blk_max`/`blk_step` also move from the Fortran
   param reader's unsupported table to identity mappings. See
   `docs/guides/amica-differences.md`.

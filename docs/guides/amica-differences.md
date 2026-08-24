@@ -325,3 +325,17 @@ default to **on** (following Fortran's header) while its sweep ran over
 128–1024, so every NumPy fit quietly re-tuned itself to a small block and
 ignored the `block_size` it was given. It is now off by default there too, and
 that backend's default `block_size` is the shipped 8192.
+
+That old search was worse than merely mistuned: because it timed `X.T @ X`,
+whose cost grows linearly with block size, it was structurally guaranteed to
+pick `blk_min`. Every NumPy fit therefore ran at 128 regardless of what the
+sweep bounds said. The place this mattered most is
+`test_sample_data_numpy_vs_fortran`, the issue #24 NumPy-vs-Fortran gating
+test: it requests `block_size=512` to match the reference `input.param`, but
+its historical *effective* block size was 128, so the parity it demonstrated
+was never at the size it asked for. That test has been re-verified on the
+literal 512 it now actually gets, under the new default, and still passes:
+Hungarian-matched component correlation 0.981 (gate > 0.9) and final
+log-likelihood −3.4039 after 150 iterations. Parity is unaffected — consistent
+with the block-size invariance measured in issue #216 — but the value it runs
+at is now the value it specifies.
