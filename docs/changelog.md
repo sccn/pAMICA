@@ -5,6 +5,23 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **`mir()`'s PCA-reduction guard now checks the fitted sphere's geometry,
+  not just which parameter caused the reduction** (issue #283).
+  `AMICATorchNG._pca_reduced()` previously only checked whether `pcakeep`/
+  `pcadb` were passed explicitly, so a fit whose rank reduction came from
+  automatic `mineig`/`mineig_rel` numerical-rank detection slipped past the
+  guard, and `mir()` then crashed with an opaque `numpy.linalg.LinAlgError`
+  instead of the documented `ValueError` ("mir() is incompatible with PCA
+  reduction"). The guard is now derived from the fitted sphere's shape
+  (`sphere.shape[0] != sphere.shape[1]`), which catches both causes. The
+  separate upfront `mir_step > 0` gate inside `fit()`, which runs before
+  that fit's sphere exists, keeps an explicit-parameter check
+  (`_pca_reduction_requested`) as a fail-fast for the one cause it can know
+  about ahead of a fit; the auto-detected case there was already caught
+  gracefully (warn + NaN, not a crash) at the first mid-fit MIR waypoint, so
+  behavior there is unchanged. No NumPy-backend counterpart exists to fix:
+  `mir()`/`pmi()` are `AMICATorchNG`-only (issues #137/#143), so there is no
+  equivalent guard on that backend.
 - **`LLt` is written from the E-step's stashed per-sample log-likelihood**
   (issue #157), on both the PyTorch and NumPy backends, instead of being
   recomputed by a fresh full-dataset forward pass at write time. This is the
