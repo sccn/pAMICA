@@ -2164,7 +2164,32 @@ class AMICATorchNG:
 
         for index, seed in enumerate(seeds):
             self.seed = seed
-            self._fit_once(X, max_iter=max_iter, verbose=verbose, mir_step=mir_step)
+            try:
+                self._fit_once(X, max_iter=max_iter, verbose=verbose, mir_step=mir_step)
+            except RuntimeError as exc:
+                # A truly singular A makes torch.linalg.inv raise
+                # torch.linalg.LinAlgError (a RuntimeError) instead of producing
+                # the non-finite likelihood the in-loop guard catches. Letting
+                # that propagate would throw away the restarts that already
+                # succeeded -- the precise opposite of what best-of-N is for --
+                # so the failure is recorded as a degenerate restart and the
+                # search moves to the next seed. Deliberately narrow: only
+                # RuntimeError (which covers every torch numerical failure,
+                # LinAlgError included). A ValueError from the argument checks at
+                # the top of _fit_once is a caller mistake, not a bad basin, and
+                # still propagates on the first restart.
+                self.stop_reason = restarts.ERROR_STOP_REASON
+                self.final_ll_ = float("nan")
+                # The crash can land before _fit_once resets the LLt arrays, in
+                # which case they still describe an EARLIER restart's E-step.
+                # Drop them: if a later restart wins, its snapshot restores its
+                # own; if every restart crashes, the model must not carry
+                # per-sample likelihoods belonging to a different seed's fit.
+                self._llt_lht = None
+                self._llt_lt = None
+                logger.warning(
+                    "%s", restarts.error_message(index, len(seeds), seed, exc)
+                )
             ll = float("nan") if self.final_ll_ is None else float(self.final_ll_)
             is_degenerate = self.stop_reason in self._DEGENERATE_STOP_REASONS
             lls.append(ll)
@@ -3312,10 +3337,12 @@ class AMICATorchNG:
     # Integer tensors in _PARAM_TENSORS: keep their dtype on load, only move device.
     _INT_PARAM_TENSORS = ("comp_list", "pdtype")
 
-    # Stop reasons that mark a fit as degenerate (non-finite log-likelihood).
-    # Such a model yields NaN sources, so state_dict() refuses to persist it
-    # rather than let it round-trip silently (silent-failure review, PR #44).
-    _DEGENERATE_STOP_REASONS = ("nan_ll", "singular_ll")
+    # Stop reasons that mark a fit as degenerate (non-finite log-likelihood, or
+    # -- only reachable under best-of-N restarts, issue #198 -- a fit that raised
+    # before it could finish). Such a model yields NaN sources, so state_dict()
+    # refuses to persist it rather than let it round-trip silently
+    # (silent-failure review, PR #44).
+    _DEGENERATE_STOP_REASONS = ("nan_ll", "singular_ll", restarts.ERROR_STOP_REASON)
 
     def state_dict(self) -> dict:
         """Serialize the fitted model to a plain, device-agnostic dict.

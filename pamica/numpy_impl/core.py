@@ -691,8 +691,31 @@ class AMICA:
 
         for index, seed in enumerate(seeds):
             self._reset_for_restart(seed)
-            self._fit_once()
-            ll = self._returned_ll()
+            crashed = False
+            try:
+                self._fit_once()
+            except (np.linalg.LinAlgError, RuntimeError) as exc:
+                # A truly singular A makes get_unmixing_matrices raise
+                # numpy.linalg.LinAlgError (a ValueError, unlike torch's, which
+                # is a RuntimeError -- hence both are named here) instead of
+                # producing the non-finite likelihood the loop guards catch.
+                # Letting it propagate would throw away the restarts that
+                # already succeeded, so record it as a degenerate restart and
+                # continue. Deliberately narrow: LinAlgError specifically, NOT
+                # ValueError at large, so a caller mistake still propagates.
+                # ``converged`` is this backend's degeneracy verdict and
+                # _fit_once never got to set it, so set it here.
+                crashed = True
+                self.converged = False
+                self.stop_reason = restarts.ERROR_STOP_REASON
+                self.logger.warning(
+                    restarts.error_message(index, len(seeds), seed, exc)
+                )
+            # A crashed restart records NaN, not the last likelihood it happened
+            # to reach before raising: self.ll stays the true trajectory, but the
+            # RECORD has to say "this restart produced no result", the same value
+            # the other two backends put there.
+            ll = float("nan") if crashed else self._returned_ll()
             # converged is this backend's degeneracy verdict: False means a
             # non-finite likelihood or non-finite fitted parameters (issue #240).
             is_degenerate = not self.converged
@@ -710,7 +733,11 @@ class AMICA:
 
         winner = restarts.select_best(lls, degenerate)
         if winner is None:
-            self.logger.error(restarts.all_degenerate_message(len(seeds), stop_reasons))
+            # WARNING, matching the other two backends (see the message helper):
+            # the terminal "did not converge" ERROR is _fit_once's to emit.
+            self.logger.warning(
+                restarts.all_degenerate_message(len(seeds), stop_reasons)
+            )
         else:
             self.logger.info(
                 restarts.winner_message(winner, len(seeds), seeds[winner], lls[winner])

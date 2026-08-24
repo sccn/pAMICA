@@ -677,7 +677,15 @@ class AMICAMLXNG:
         # cross-backend tests read.
         self._nd_arr: Optional[mx.array] = None
 
-    _DEGENERATE_STOP_REASONS = ("nan_ll", "singular_ll", "nan_params")
+    # The last entry is only reachable under best-of-N restarts (issue #198): a
+    # restart whose fit raised rather than stopping, recorded as degenerate so a
+    # search in which every restart crashed still reports an unusable model.
+    _DEGENERATE_STOP_REASONS = (
+        "nan_ll",
+        "singular_ll",
+        "nan_params",
+        restarts.ERROR_STOP_REASON,
+    )
 
     @property
     def _ndtmpsum(self) -> Optional[float]:
@@ -1899,7 +1907,22 @@ class AMICAMLXNG:
         states: dict = {}
         for index, seed in enumerate(seeds):
             self.seed = seed
-            self._fit_once(X, max_iter=max_iter, verbose=verbose)
+            try:
+                self._fit_once(X, max_iter=max_iter, verbose=verbose)
+            except RuntimeError as exc:
+                # An ill-conditioned A makes _update_unmixing_matrices raise
+                # (the issue #274 condition-number guard, which replaced MLX's
+                # process abort with a catchable RuntimeError). That guard keeps
+                # the process alive; this keeps the *search* alive, so one bad
+                # basin cannot discard the restarts that already succeeded.
+                # Mirrors AMICATorchNG._fit_restarts exactly, including catching
+                # only RuntimeError so a ValueError from _fit_once's argument
+                # checks still propagates.
+                self.stop_reason = restarts.ERROR_STOP_REASON
+                self.final_ll_ = float("nan")
+                logger.warning(
+                    "%s", restarts.error_message(index, len(seeds), seed, exc)
+                )
             ll = float("nan") if self.final_ll_ is None else float(self.final_ll_)
             is_degenerate = self.stop_reason in self._DEGENERATE_STOP_REASONS
             lls.append(ll)

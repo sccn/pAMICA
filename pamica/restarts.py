@@ -47,6 +47,30 @@ DEFAULT_N_RESTARTS = 1
 # loop and are never part of a restart snapshot.
 RECORD_ATTRS = ("restart_seeds_", "restart_lls_", "restart_stop_reasons_")
 
+# ``stop_reason`` for a restart that RAISED instead of stopping (issue #198
+# review). A truly singular mixing matrix makes the unmixing inversion raise --
+# ``torch.linalg.LinAlgError`` (a ``RuntimeError``), ``numpy.linalg.LinAlgError``
+# (a ``ValueError``), or the MLX backend's own condition-number guard
+# (``RuntimeError``, issue #274) -- rather than produce the non-finite
+# likelihood the in-loop guards catch. Inside a best-of-N search that must not
+# discard the restarts that already succeeded, so each restart's fit is wrapped,
+# the failure is recorded under this reason, and the search continues.
+#
+# It is a DEGENERATE stop reason on every backend (it is in each backend's
+# ``_DEGENERATE_STOP_REASONS``; the NumPy backend also sets ``converged=False``),
+# so a crashed restart is excluded from selection, and a search in which every
+# restart crashed leaves a model the degenerate-fit contract (issue #50) refuses
+# to transform or persist -- exactly like a search in which every restart
+# diverged. Distinct from ``singular_ll`` on purpose: that one means "the fit
+# ran and reported a non-finite likelihood", this one means "the fit could not
+# run to completion at all", and a user reading ``restart_stop_reasons_``
+# deserves to see which happened.
+#
+# Only the multi-restart path catches. A single fit (``n_restarts=1``) still
+# raises exactly as it did before this feature existed -- bit-identity includes
+# error behavior.
+ERROR_STOP_REASON = "restart_error"
+
 
 def resolve_seeds(
     n_restarts: int,
@@ -212,8 +236,31 @@ def winner_message(
     )
 
 
+def error_message(
+    index: int, n_restarts: int, seed: Optional[int], exc: BaseException
+) -> str:
+    """One line for a restart that raised (WARNING), identical on every backend.
+
+    Names the exception type and message, so a caught failure is as diagnosable
+    in the log as an uncaught one would have been in a traceback.
+    """
+    return (
+        f"Restart {index + 1}/{n_restarts} (seed={seed}) raised "
+        f"{type(exc).__name__}: {exc}; recorded as {ERROR_STOP_REASON!r} "
+        f"(degenerate, excluded from selection) and continuing with the next "
+        f"seed. A single-restart fit would have raised this instead."
+    )
+
+
 def all_degenerate_message(n_restarts: int, stop_reasons: Sequence[Any]) -> str:
-    """Warning emitted when no restart produced a usable fit."""
+    """Emitted when no restart produced a usable fit.
+
+    Logged at WARNING on every backend (the caller convention, unified in the
+    #198 review): the run still returns a model and the degenerate-fit contract
+    is what refuses it downstream, so this is the same severity as the
+    single-fit degenerate warnings it sits alongside -- not an ERROR on one
+    backend and a WARNING on the others.
+    """
     return (
         f"All {n_restarts} restarts ended degenerate ({list(stop_reasons)}); "
         f"returning the last restart, which the degenerate-fit contract "
