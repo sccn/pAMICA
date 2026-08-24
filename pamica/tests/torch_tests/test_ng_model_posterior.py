@@ -61,8 +61,9 @@ def test_model_loglik_matches_internal_lht(real_data):
       (amica15.f90:996, 1122, 1146).
 
     ``keep_best`` is off so the returned iterate is unambiguously the last one;
-    the restore case has its own test (``test_keep_best_restore_rolls_llt_back``
-    in test_ng_backend.py).
+    the restore case has its own test
+    (``test_keep_best_restore_rolls_the_llt_stash_back`` in
+    ``pamica/tests/test_llt_stash.py``).
     """
     m10 = _fit(real_data, n_models=2, max_iter=10, keep_best=False)
     m9 = _fit(real_data, n_models=2, max_iter=9, keep_best=False)
