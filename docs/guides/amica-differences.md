@@ -21,10 +21,11 @@ that is not listed, that is a bug worth
 | 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
 | 8 | Columns merged away by `share_comps` | updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided) | a fit must not end holding NaN parameters, mask or no mask; the columns are dead either way | — (see issues #60, #240) |
 | 9 | Block-size search | on (`do_opt_block=1`), sweeps 128–1024, **aborts** if a candidate cannot allocate | off; sweeps 4096–32768; a candidate that cannot allocate is skipped and the fit continues | the choice is timing-based and therefore machine-dependent, which a parity run cannot have; Fortran's range sits far below where any pamica backend peaks; and running out of memory is a reason to use a smaller block, not to stop | `do_opt_block=True` (but pin `block_size` for a bit-for-bit comparison) |
+| 10 | Restarts across seeds | none (its `maxrestarts` only *recovers* from an early NaN) | available as `n_restarts`, **off by default** (`n_restarts=1`) | the weakest under-determined components are init-basin sensitive, so best-of-N buys robustness; but a default that ran N fits would change every result and cost N times as long | `n_restarts=1` (the default) |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
 row 3 with ADR 0003; row 5 with issue #50; row 8 with issues #60 and #240;
-row 9 with issue #232.
+row 9 with issue #232; row 10 with issue #198.
 
 Two `share_comps` details are pamica's own because the reference cannot decide
 them: the A-freeze window after a merge is anchored on `share_start` (the literal
@@ -134,6 +135,7 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | `min_dll` stop | yes | yes | yes | yes |
 | `min_nd` stop / gradient norm | yes | yes (as `min_grad_norm`) | yes | yes |
 | `keep_best` best-iterate restore | yes | no | no | n/a |
+| `n_restarts` best-of-N restarts | yes | yes | yes | n/a |
 | MIR diagnostic | yes | no | no | n/a |
 | Persistence | `state_dict` | EEGLAB `amicaout` | none | EEGLAB `amicaout` |
 
@@ -453,3 +455,63 @@ Hungarian-matched component correlation 0.981 (gate > 0.9) and final
 log-likelihood −3.4039 after 150 iterations. Parity is unaffected — consistent
 with the block-size invariance measured in issue #216 — but the value it runs
 at is now the value it specifies.
+
+## Best-of-N restarts have no reference counterpart (issue #198)
+
+`n_restarts=k` runs the fit `k` times from different seeds and keeps the one
+with the highest returned log-likelihood. It is available on all three array
+backends with the same names and semantics, and it is **off by default**
+(`n_restarts=1`), which is the parity-preserving setting: with one restart the
+machinery draws nothing, copies nothing and resets nothing, so the trajectory
+is bit-for-bit what it was before the feature existed. That bit-identity is
+asserted, per backend, in `test_ng_restarts.py`, `test_numpy_restarts.py` and
+`test_mlx_restarts.py`.
+
+Fortran has nothing to compare this against. Its `maxrestarts`/`restartiter`
+machinery (`amica17.f90:1027-1060`, ported to the NumPy backend as
+`numrestarts`) is a *recovery* path — it redraws the mixing matrix after an
+early non-finite likelihood and continues the same run — not a search over
+seeds, and it never compares two completed fits. So this is a pamica extension,
+validated by construction rather than against the binary: `n_restarts=k` must
+return exactly the argmax of the same `k` fits run independently, state for
+state, which is what the acceptance test in each backend's suite pins.
+
+Why it exists: issue #145 showed the backend and the binary agree to 0.9974
+mean component correlation from an *identical* initialization, so the
+disagreement seen from *random* inits is basin choice, not a dynamics
+difference. The basins that differ are the weakest, under-determined components
+(7–10 of them on a 70-channel, k=152 recording), and picking the
+highest-likelihood of several seeds is the standard way to stop one unlucky
+draw from deciding the result. It extends issue #51's `keep_best` — best
+iterate *within* a run — across runs.
+
+Practical notes:
+
+- `n_restarts > 1` requires a base `seed` (or an explicit `restart_seeds` list
+  of exactly that length) and refuses to run without one. Best-of-N is only
+  meaningful if the winning fit can be reproduced, and seeding from the clock
+  would make that impossible. Derived seeds are `seed, seed+1, …`.
+- Restarts run **serially**, so a fit costs `n_restarts` times as long.
+  Parallel restarts are a possible follow-up, not current behavior.
+- Every restart is recorded on the fitted model in `restart_seeds_`,
+  `restart_lls_` and `restart_stop_reasons_` (index-aligned, and populated even
+  for a single-restart fit), and the winner is named in one INFO log line.
+- A restart that ends degenerate is **excluded from the selection but still
+  recorded**, with a NaN likelihood. If every restart is degenerate, the model
+  is left holding the last one, so the degenerate-fit contract (issue #50)
+  applies exactly as it does to a single degenerate fit.
+- A restart that **raises** is isolated the same way. A truly singular mixing
+  matrix makes the unmixing inversion raise rather than produce a non-finite
+  likelihood, and inside a search that must not discard the seeds that already
+  worked: the failure is recorded as `stop_reason="restart_error"` (degenerate,
+  so excluded from selection, and refused by the same contract if every restart
+  hits it), logged with the exception type and message, and the next seed runs.
+  Only the multi-restart path catches — `n_restarts=1` still raises exactly as
+  it did before this feature existed, because bit-identity includes error
+  behavior.
+- On the NumPy backend only the winner is written to `outdir` at the end of the
+  fit, but the periodic `writestep` checkpoints of every restart pass through
+  the same files while the fit runs, so a losing restart's intermediate output
+  can appear on disk mid-fit. The final write replaces it — what is on disk when
+  `fit` returns is the winner's state, which is a tested claim, not just a
+  documented intention.

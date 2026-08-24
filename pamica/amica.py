@@ -115,6 +115,15 @@ class AMICA:
         Not index-aligned with ``ll_history_``: entry ``i`` is computed after
         iteration ``i``'s update, while ``ll_history_[i]`` is the likelihood of
         the parameters before it, so the two are one update apart (issue #161).
+    restart_seeds_ : list
+        The seed each restart ran from (issue #198). One entry for a default
+        ``n_restarts=1`` fit, ``n_restarts`` entries otherwise.
+    restart_lls_ : list
+        Each restart's returned log-likelihood, index-aligned with
+        ``restart_seeds_``; NaN for a restart that ended degenerate (those are
+        recorded but excluded from the selection). ``final_ll_`` is the winner.
+    restart_stop_reasons_ : list
+        Each restart's ``stop_reason``, index-aligned with ``restart_seeds_``.
 
     Examples
     --------
@@ -154,6 +163,13 @@ class AMICA:
         self.stop_reason_ = None
         self.converged_ = False
         self.mir_history_ = []
+        # Best-of-N restart records (issue #198), mirrored off the backend by
+        # fit()/load(): index-aligned lists of the seed each restart ran from,
+        # the log-likelihood it returned (NaN for a degenerate restart) and why
+        # it stopped. One entry even for the default single-restart fit.
+        self.restart_seeds_ = []
+        self.restart_lls_ = []
+        self.restart_stop_reasons_ = []
         # Set by from_params_file (issue #132 review item 2): the full
         # translated parameter-file dict, applied by fit() as per-call
         # defaults (an explicitly passed fit()/AMICATorchNG kwarg always
@@ -226,6 +242,14 @@ class AMICA:
             ``min_nd`` -- the issue #207 convergence stops, Fortran-faithful
             defaults ``True``/``1e-9``/``5``/``True``/``1e-7``) -- the
             backend's tunables are constructor arguments, not fit() kwargs.
+
+            ``n_restarts`` (default 1) runs the fit from that many seeds and
+            keeps the highest-likelihood one (issue #198), recording every
+            restart in ``restart_seeds_``/``restart_lls_``/
+            ``restart_stop_reasons_``; it needs a base ``seed`` (or explicit
+            ``restart_seeds``) and costs proportionally more time, since
+            restarts run serially. ``n_restarts=1`` is bit-identical to a fit
+            that never heard of restarts.
 
             Rank-deficient input (Maxwell-filtered MEG, average-referenced or
             interpolated EEG) is handled by ``mineig``/``mineig_rel`` (issue
@@ -325,6 +349,9 @@ class AMICA:
         self.final_ll_ = backend.final_ll_
         self.stop_reason_ = backend.stop_reason
         self.mir_history_ = backend.mir_history_
+        self.restart_seeds_ = backend.restart_seeds_
+        self.restart_lls_ = backend.restart_lls_
+        self.restart_stop_reasons_ = backend.restart_stop_reasons_
         self.converged_ = self.stop_reason_ not in AMICATorchNG._DEGENERATE_STOP_REASONS
         # A degenerate fit (nan_ll/singular_ll) holds non-finite parameters and
         # would return NaN sources, so it is not a usable model: is_fitted_ stays
@@ -765,6 +792,12 @@ class AMICA:
         # empty; expose it anyway for attribute-surface consistency with
         # ll_history_.
         model.mir_history_ = model.model_.mir_history_
+        # Restart records ARE persisted by state_dict (issue #198), so a loaded
+        # best-of-N model can still say how its parameters were chosen; a model
+        # saved before #198 simply has none.
+        model.restart_seeds_ = model.model_.restart_seeds_
+        model.restart_lls_ = model.model_.restart_lls_
+        model.restart_stop_reasons_ = model.model_.restart_stop_reasons_
         # state_dict() refuses to serialize a degenerate model, so a loaded model
         # is always usable; carry its stop_reason through for inspection anyway.
         model.stop_reason_ = model.model_.stop_reason
