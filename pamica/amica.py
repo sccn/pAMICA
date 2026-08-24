@@ -660,9 +660,13 @@ class AMICA:
         Fortran reference (issue #92).
 
         Also writes ``LLt`` (the per-sample/per-model log-likelihood, issue
-        #155) for a model that was just fit in this process; a model restored
-        via :meth:`load` has no training data to recompute it from, so
-        ``LLt`` is omitted for it (a warning is logged).
+        #155) for a model that was just fit in this process, taken from the
+        E-step stash (issue #157); a model restored via :meth:`load` carries no
+        stash, so ``LLt`` is omitted for it (a warning is logged). As in the
+        reference, ``LLt`` is the E-step that produced ``final_ll_`` and is
+        therefore one M-step older than the ``W``/``A`` written beside it --
+        see ``docs/guides/amica-differences.md``. Use :meth:`model_loglik` for
+        the log-likelihood of the written parameters.
 
         Parameters
         ----------

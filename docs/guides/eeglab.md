@@ -36,10 +36,17 @@ For a single model the bytes are identical to the reference Fortran binary's
 
 `LLt` is what `loadmodout15.m` turns into `Lht`/`Lt` and the model-probability
 odds `v`; it is written after a fresh `fit()`, and omitted (with a warning) for
-a model restored from `load()`, which has no data to recompute it from. Under
+a model restored from `load()`, which carries no E-step stash. Under
 `do_reject`, rejected samples are written as exactly `0.0` to match the
 reference: AMICA's own `load_rej` reconstructs the rejection mask from those
 zeros, so they are load-bearing rather than padding.
+
+Like the reference, pamica writes the E-step that produced the last entry of
+`LL`, so `LLt` describes the parameters as they stood one M-step *before* the
+`W` written beside it (issue #157; see
+[amica-differences](amica-differences.md#the-written-llt-is-one-m-step-older-than-the-w-beside-it-issue-157)).
+Use `model.model_loglik(X)` if you want the log-likelihood of the written
+parameters themselves.
 
 ## Loading in EEGLAB / MATLAB
 
