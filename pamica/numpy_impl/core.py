@@ -694,15 +694,17 @@ class AMICA:
             crashed = False
             try:
                 self._fit_once()
-            except (np.linalg.LinAlgError, RuntimeError) as exc:
+            except np.linalg.LinAlgError as exc:
                 # A truly singular A makes get_unmixing_matrices raise
-                # numpy.linalg.LinAlgError (a ValueError, unlike torch's, which
-                # is a RuntimeError -- hence both are named here) instead of
-                # producing the non-finite likelihood the loop guards catch.
-                # Letting it propagate would throw away the restarts that
-                # already succeeded, so record it as a degenerate restart and
-                # continue. Deliberately narrow: LinAlgError specifically, NOT
-                # ValueError at large, so a caller mistake still propagates.
+                # numpy.linalg.LinAlgError instead of producing the non-finite
+                # likelihood the loop guards catch. Letting it propagate would
+                # throw away the restarts that already succeeded, so record it
+                # as a degenerate restart and continue. Deliberately narrow:
+                # LinAlgError specifically, NOT ValueError at large (its base
+                # class) and NOT RuntimeError (this backend's numeric fit path
+                # has no RuntimeError-raising failure; torch/MLX catch it in
+                # their loops because their linalg fails that way), so a
+                # caller or programming mistake still propagates.
                 # ``converged`` is this backend's degeneracy verdict and
                 # _fit_once never got to set it, so set it here.
                 crashed = True
