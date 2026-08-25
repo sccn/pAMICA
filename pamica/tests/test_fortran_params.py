@@ -277,10 +277,24 @@ class TestZeroRecognizedKeysGuard:
         dest.write_text("write_LLt 1\n")
         assert read_fortran_param_file(dest) == {}
 
-    def test_genuinely_empty_file_does_not_raise(self, tmp_path):
+    def test_genuinely_empty_file_raises(self, tmp_path):
+        """Changed by the PR #301 silent-failure review: an empty file used to
+        return {} (all defaults, no signal). A user pointing from_params_file
+        at a file expects it to configure something, and an empty file in
+        practice means truncation, a wrong path, or an accidental clear, so
+        it is now a named refusal like the nothing-recognized case."""
         dest = tmp_path / "input.param"
         dest.write_text("")
-        assert read_fortran_param_file(dest) == {}
+        with pytest.raises(ValueError, match="no content lines"):
+            read_fortran_param_file(dest)
+
+    def test_comment_only_file_raises(self, tmp_path):
+        """Whitespace and comments carry no settings either; previously this
+        slipped past the guard entirely (content_lines == 0 short-circuit)."""
+        dest = tmp_path / "input.param"
+        dest.write_text("# a comment\n\n   \n# another\n")
+        with pytest.raises(ValueError, match="no content lines"):
+            read_fortran_param_file(dest)
 
 
 class TestFromParamsFileIntegration:

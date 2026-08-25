@@ -15,6 +15,7 @@ the allocation error the backend genuinely raises (verified strings, see
 """
 
 import logging
+from typing import Any
 
 import pytest
 
@@ -401,3 +402,47 @@ def test_search_composes_the_cap_and_the_sweep():
     cap = blocktune.memory_capped_block_size(32 * 1024**2, 32, 3, 1, 8)
     assert cap is not None and cap < 20000
     assert chosen == max(seen) <= cap
+
+
+# ---------------------------------------------------------------------------
+# Cross-backend surface agreement (.rules/backend_parity.md; PR #301 review)
+# ---------------------------------------------------------------------------
+
+_BACKENDS = ["torch", "numpy"]
+_MLX_CLASS: Any = None
+try:  # MLX is Apple-Silicon only and optional; guard the import, not the tests.
+    from pamica.mlx_impl.core import AMICAMLXNG
+
+    _MLX_CLASS = AMICAMLXNG
+    _BACKENDS.append("mlx")
+except ImportError:  # pragma: no cover - exercised on non-Apple hosts
+    pass
+
+
+def _backend_instance(name: str):
+    """Construct each backend the minimal real way (test_restart_policy.py's
+    idiom): torch on CPU because its float64 default cannot live on MPS, the
+    NumPy backend through its params dict, and nothing is ever fitted here."""
+    if name == "torch":
+        from pamica.torch_impl.core import AMICATorchNG
+
+        return AMICATorchNG(n_channels=4, device="cpu")
+    if name == "numpy":
+        from pamica.numpy_impl.core import AMICA as AMICA_NumPy
+
+        return AMICA_NumPy(use_tqdm=False)
+    return _MLX_CLASS(n_channels=4)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_every_backend_resolves_the_same_tuner_defaults(backend: str):
+    """The block-size search must be configured identically everywhere
+    (``.rules/backend_parity.md``): off by default, the shared sweep bounds
+    from this module, and the shared 8192 static default. Nothing failed in CI
+    if one backend's copy of these defaults drifted before this test."""
+    model = _backend_instance(backend)
+    assert model.do_opt_block is False
+    assert model.block_size == 8192
+    assert model.blk_min == blocktune.DEFAULT_BLK_MIN
+    assert model.blk_max == blocktune.DEFAULT_BLK_MAX
+    assert model.blk_step == blocktune.DEFAULT_BLK_STEP

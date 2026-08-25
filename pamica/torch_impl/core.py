@@ -343,7 +343,7 @@ class AMICATorchNG:
         learning-rate *ceiling* is ratcheted down (Fortran ``maxdecs``).
     use_min_dll : bool, default=True
         Enable the small-likelihood-increase stop (Fortran ``use_min_dll``,
-        amica15_header.f90:24/109; amica15.f90:1078-1090): once the per-
+        amica15_header.f90:24/74; amica15.f90:1078-1090): once the per-
         sample-channel log-likelihood gain ``ll_history[-1] - ll_history[-2]``
         falls below ``min_dll`` for more than ``maxincs`` *consecutive*
         iterations, ``fit`` stops (``stop_reason="min_dll"``). The counter
@@ -651,7 +651,7 @@ class AMICATorchNG:
         self.maxdecs = maxdecs
 
         # Convergence stops (issue #207), Fortran-faithful defaults (both
-        # amica15_header.f90:24/74/109 flags default True): the small-
+        # amica15_header.f90:24/74 flags default True): the small-
         # likelihood-increase stop (use_min_dll/min_dll/maxincs) and the
         # weight-gradient-norm stop (use_grad_norm/min_nd). See fit() for the
         # per-iteration checks and _update_parameters for the ndtmpsum
@@ -881,7 +881,7 @@ class AMICATorchNG:
         # issue #155), STASHED as the training E-step computes it rather than
         # recomputed by a separate forward pass at write time (issue #157) --
         # which is what Fortran does, keeping ``modloglik(num_models,N)`` and
-        # ``loglik(N)`` permanently allocated (amica15.f90:2619-2620) so that
+        # ``loglik(N)`` permanently allocated (amica15.f90:2617-2620) so that
         # ``write_output`` just dumps them (amica15.f90:2338-2343).
         #
         # ``_llt_logv``/``_llt_ll`` are the live per-fit buffers (device
@@ -1407,13 +1407,25 @@ class AMICATorchNG:
         if dev == "cuda":
             try:
                 return int(torch.cuda.mem_get_info(self.device)[0])
-            except (RuntimeError, AttributeError):
+            except (RuntimeError, AttributeError) as exc:
+                logger.debug(
+                    "could not query CUDA memory (%s: %s); block-size search "
+                    "runs without a memory cap",
+                    type(exc).__name__,
+                    exc,
+                )
                 return None
         if dev == "mps":
             try:
                 # Capacity, not free memory (see the docstring).
                 return int(torch.mps.recommended_max_memory())
-            except (RuntimeError, AttributeError):
+            except (RuntimeError, AttributeError) as exc:
+                logger.debug(
+                    "could not query MPS memory (%s: %s); block-size search "
+                    "runs without a memory cap",
+                    type(exc).__name__,
+                    exc,
+                )
                 return None
         # Total host RAM, likewise capacity rather than free.
         return blocktune.host_memory_bytes()
@@ -2335,7 +2347,7 @@ class AMICATorchNG:
           Fortran computes ``LL(iter) = LLtmp2/dble(numgoodsum*nw)``
           (amica15.f90:1770) before ``reject_data`` (amica15.f90:1138) shrinks
           ``numgoodsum`` (amica15.f90:2252) and zeroes the rejected
-          ``modloglik``/``loglik`` (amica15.f90:2232-2234), and the binary shows
+          ``modloglik``/``loglik`` (amica15.f90:2231-2234), and the binary shows
           the same residual on the same schedule. Any later iteration
           re-normalizes over the shrunk good set and the equality returns.
         """
@@ -2379,7 +2391,7 @@ class AMICATorchNG:
             self._tune_block_size(X_t[:, self.good_idx] if self.do_reject else X_t)
 
         # LLt buffers (issue #157), Fortran's permanently-allocated
-        # modloglik/loglik (amica15.f90:2619-2620). Zero-filled: a do_reject
+        # modloglik/loglik (amica15.f90:2617-2620). Zero-filled: a do_reject
         # sample that is never scored again keeps the zero that Fortran's
         # load_rej reads as the rejection sentinel. Re-allocated per fit so a
         # refit on a different dataset cannot serve a stale array.
@@ -2802,7 +2814,7 @@ class AMICATorchNG:
             )
 
         # Zero the LLt stash for the samples being dropped, exactly as Fortran's
-        # reject_data does (amica15.f90:2232-2234): they are never scored again,
+        # reject_data does (amica15.f90:2231-2234): they are never scored again,
         # so without this they would keep the log-likelihood from the last
         # iteration that still considered them good, and load_rej's
         # ``sum(modloglik(:,i)) == 0`` sentinel would not see them as rejected.

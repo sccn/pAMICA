@@ -13,7 +13,7 @@ is the standard answer, and it extends issue #51's ``keep_best`` (best iterate
 
 **This is a pamica extension, not a parity feature.** The Fortran reference has
 no restart loop of this kind: its ``maxrestarts``/``restartiter`` machinery
-(amica17.f90:1027-1060, ported to the NumPy backend as ``numrestarts``) is a
+(amica15.f90:1022-1052, ported to the NumPy backend as ``numrestarts``) is a
 *recovery* path that redraws the mixing matrix after an early non-finite
 likelihood, not a search over seeds, and it never compares two completed fits.
 ``n_restarts=1`` is therefore the default in every backend, and on that path the

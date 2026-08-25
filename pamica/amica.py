@@ -240,8 +240,10 @@ class AMICA:
             constructor (e.g. ``block_size``, ``rho0``, ``seed``, ``dtype``,
             ``use_min_dll``, ``min_dll``, ``maxincs``, ``use_grad_norm``,
             ``min_nd`` -- the issue #207 convergence stops, Fortran-faithful
-            defaults ``True``/``1e-9``/``5``/``True``/``1e-7``) -- the
-            backend's tunables are constructor arguments, not fit() kwargs.
+            defaults ``True``/``1e-9``/``5``/``True``/``1e-7`` -- or
+            ``do_opt_block``/``blk_min``/``blk_max``/``blk_step``, the issue
+            #232 block-size search, off by default) -- the backend's tunables
+            are constructor arguments, not fit() kwargs.
 
             ``n_restarts`` (default 1) runs the fit from that many seeds and
             keeps the highest-likelihood one (issue #198), recording every

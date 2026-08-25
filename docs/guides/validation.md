@@ -555,8 +555,9 @@ the underlying findings are in `.context/issue-84/` and `.context/issue-90/`.
 
 `AMICA.from_params_file` also reads the literal Fortran `input.param` text format directly
 (issue #132), so the exact file that drives the reference binary can drive pamica too, instead of
-maintaining a hand-translated JSON copy. The format is auto-detected from the file (`.json` vs
-`.param` extension, falling back to content sniffing), so no new API is needed:
+maintaining a hand-translated JSON copy. The format is auto-detected by sniffing the file content (JSON starts with
+`{`/`[`; anything else is read as the Fortran text format -- the extension is
+never trusted), so no new API is needed:
 
 ```python
 from pamica import AMICA

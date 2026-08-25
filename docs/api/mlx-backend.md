@@ -19,4 +19,9 @@ Install it with `uv pip install mlx` or the `mlx` extra (`pip install pamica[mlx
 Because it computes in float32, use the [PyTorch backend](torch-backend.md) on
 CUDA/CPU for float64 Fortran-parity runs.
 
+The module also exports `PDFTYPE_NAMES`, the mapping from the density-family
+codes `get_pdftype()` returns (0-4) to their human-readable names (generalized
+Gaussian, super-Gaussian cosh, Gaussian, logistic, sub-Gaussian cosh); it is
+the same mapping `pamica.mne_compat` exposes.
+
 ::: pamica.mlx_impl.AMICAMLXNG

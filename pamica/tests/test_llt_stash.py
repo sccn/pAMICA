@@ -3,7 +3,7 @@
 Both backends used to recompute the per-sample/per-model log-likelihood with a
 fresh full-dataset forward pass at write time. They now keep what the training
 E-step already computed, exactly as the reference does: ``modloglik``/``loglik``
-are allocated once (amica15.f90:2619-2620), filled by every E-step
+are allocated once (amica15.f90:2617-2620), filled by every E-step
 (amica15.f90:1406-1411) and dumped verbatim by ``write_output``
 (amica15.f90:2338-2343).
 
@@ -308,7 +308,7 @@ def test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration(
     ``LL(iter) = LLtmp2/dble(numgoodsum*nw)`` (amica15.f90:1770) before
     ``reject_data`` (amica15.f90:1138) shrinks ``numgoodsum``
     (amica15.f90:2252) and zeroes the rejected ``modloglik``/``loglik``
-    (amica15.f90:2232-2234), and the binary shows the same residual on the same
+    (amica15.f90:2231-2234), and the binary shows the same residual on the same
     schedule.
 
     Pinned as behavior rather than silenced, on both backends, and paired with

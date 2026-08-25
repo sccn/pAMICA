@@ -118,6 +118,23 @@ def test_reject_false_keeps_all_samples(raw_annot):
     assert mask is not None and mask.all()
 
 
+def test_non_bad_annotations_are_inert(raw_annot):
+    """Annotations present but none bad_*: rejection is armed yet removes
+    nothing, so the mask must stay all-True with the full sample count
+    (boundary of the overlap computation; PR #301 review suggestion)."""
+    raw = raw_annot.copy()
+    raw.set_annotations(
+        mne.Annotations(onset=[150.0], duration=[2.0], description=["stimulus"])
+    )
+    fitted = AMICAICA(n_mix=3, random_state=SEED, device="cpu", verbose=False).fit(
+        raw, max_iter=5
+    )
+    assert fitted.reject_by_annotation_ is True
+    assert fitted._n_samples == raw.n_times
+    mask = fitted.good_sample_mask_
+    assert mask is not None and mask.all()
+
+
 def test_start_stop_composes_with_rejection(raw_annot, picked):
     start, stop = 1000, 20000
     fitted = AMICAICA(n_mix=3, random_state=SEED, device="cpu", verbose=False).fit(
