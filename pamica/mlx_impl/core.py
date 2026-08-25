@@ -2288,13 +2288,32 @@ class AMICAMLXNG:
         return self
 
     def transform(self, X: np.ndarray, model_idx: int = 0) -> np.ndarray:
-        """Not yet implemented -- fail with a clear boundary rather than a bare
-        AttributeError. Use ``AMICATorchNG.transform`` for source extraction; the
-        MLX backend validates via ``final_ll_``/``ll_history``."""
-        raise NotImplementedError(
-            "AMICAMLXNG does not implement transform yet; it is a fast-follow. "
-            "Use AMICATorchNG for source extraction."
-        )
+        """Apply the learned unmixing matrix to (new) data (issue #287, port of
+        ``AMICATorchNG.transform``, torch_impl/core.py:2853-2869).
+
+        Sources are ``S = W[model_idx]^T @ (sphere @ (X - mean) - c[:,
+        model_idx])`` (issue #24 transpose convention, issue #27 per-model
+        center) -- the exact composition ``_forward`` uses to build its ``b``
+        activation, just laid out as ``(n_channels, n_samples)`` rather than
+        ``_forward``'s ``(batch, n_channels)``: ``_forward`` computes ``b = (Xb
+        - c[:, h]).T @ W[h]``, and ``S = W[h].T @ (Xb - c[:, h])`` is exactly
+        ``b.T`` by the transpose identity ``(W^T v)^T = v^T W``. CAUTION: MLX's
+        ``W`` is ``(n_models, n, n)`` (``_update_unmixing_matrices`` stacks on
+        axis 0), NOT torch's ``(n, n, n_models)`` -- so the per-model slice
+        here is ``W[model_idx]``, not torch's ``W[:, :, model_idx]``.
+
+        Accepts any float ``np.ndarray``; computed in float32 (this backend's
+        only precision) and returned as a float32 ``np.ndarray``.
+        """
+        if self.sphere is None or self.mean is None or self.W is None or self.c is None:
+            raise RuntimeError(
+                "AMICAMLXNG.transform() requires a fitted model; call fit() first."
+            )
+        self._check_model_idx(model_idx)
+        X_arr = mx.array(np.ascontiguousarray(X).astype(np.float32))
+        X_t = self.sphere @ (X_arr - self.mean)
+        S = self.W[model_idx].T @ (X_t - self.c[:, model_idx : model_idx + 1])
+        return np.array(S)
 
     # ------------------------------------------------------------------
     # Fitted-parameter metadata (issue #265; AMICATorchNG's #142 port)
@@ -2346,3 +2365,82 @@ class AMICAMLXNG:
                 f"the valid set {sorted(PDFTYPE_NAMES)}: {sorted(bad)}."
             )
         return codes
+
+    def get_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
+        """True mixing matrix ``A_fort`` = (stored A)^T (issue #24 convention;
+        issue #287 port of ``AMICATorchNG.get_mixing_matrix``, torch_impl/
+        core.py:2872-2880)."""
+        if self.A is None or self.comp_list is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_mixing_matrix() requires a fitted model; call "
+                "fit() first."
+            )
+        self._check_model_idx(model_idx)
+        return np.array(self.A[:, self.comp_list[:, model_idx]].T)
+
+    def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
+        """Mixing matrix mapped back to input-channel space (issue #287 port of
+        ``AMICATorchNG.get_sensor_mixing_matrix``, torch_impl/core.py:
+        2893-2917): ``pinv(sphere) @ A``, via :meth:`_pinv_sphere` -- the only
+        correct back-map when rank reduction has left the sphere non-square
+        (issue #223).
+        """
+        if self.sphere is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_sensor_mixing_matrix() requires a fitted "
+                "model; call fit() first."
+            )
+        if self.A is None or self.comp_list is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_sensor_mixing_matrix() requires a fitted "
+                "model; call fit() first."
+            )
+        self._check_model_idx(model_idx)
+        A = np.array(self.A[:, self.comp_list[:, model_idx]].T, dtype=np.float64)
+        return self._pinv_sphere() @ A
+
+    def get_unmixing_matrix(self, model_idx: int = 0) -> np.ndarray:
+        """True unmixing matrix ``W_fort`` = (stored W)^T (issue #24
+        convention; issue #287 port of ``AMICATorchNG.get_unmixing_matrix``,
+        torch_impl/core.py:2919-2927). MLX's ``W`` is model-major (``(n_models,
+        n, n)``), so the per-model slice is ``W[model_idx]`` rather than
+        torch's ``W[:, :, model_idx]``."""
+        if self.W is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_unmixing_matrix() requires a fitted model; "
+                "call fit() first."
+            )
+        self._check_model_idx(model_idx)
+        return np.array(self.W[model_idx].T)
+
+    def get_rho(self, model_idx: int = 0) -> np.ndarray:
+        """Generalized-Gaussian shape parameter ``rho`` for model
+        ``model_idx`` (issue #287 port of ``AMICATorchNG.get_rho``, torch_impl/
+        core.py:3157-3182; issue #142).
+
+        One value per (mixture component, source): ``rho == 2`` is Gaussian-
+        shaped, ``rho == 1`` Laplacian, ``rho < 1`` heavier-tailed. Only the
+        generalized-Gaussian family (``pdftype=0``) updates ``rho``; for every
+        non-zero code (1-4) it stays frozen at ``rho0`` and does not describe
+        the fitted density (see :meth:`get_pdftype`).
+
+        Returns
+        -------
+        np.ndarray of float, shape (n_mix, n_sources)
+        """
+        if self.rho is None or self.comp_list is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_rho() requires a fitted model; call fit() first."
+            )
+        self._check_model_idx(model_idx)
+        # Defense-in-depth, matching state_dict()'s isfinite sweep: a
+        # degenerate multi-model fit can leave one model's rho non-finite
+        # without the aggregate LL tripping nan_ll. Refuse rather than return
+        # a silent NaN.
+        if not bool(mx.all(mx.isfinite(self.rho)).item()):
+            raise RuntimeError(
+                "AMICAMLXNG.get_rho(): rho holds non-finite values (a "
+                "degenerate fit); inspect stop_reason and refit."
+            )
+        idx = self.comp_list[:, model_idx]
+        return np.array(self.rho[:, idx])
