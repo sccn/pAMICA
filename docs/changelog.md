@@ -48,7 +48,7 @@ external tester (#221).
   (issue #157), on both the PyTorch and NumPy backends, instead of being
   recomputed by a fresh full-dataset forward pass at write time. This is the
   reference's own design -- `modloglik`/`loglik` are allocated once
-  (amica15.f90:2619-2620), filled by every E-step and dumped verbatim by
+  (amica15.f90:2617-2620), filled by every E-step and dumped verbatim by
   `write_output` -- and it removes the last full pass the write path paid for:
   a NumPy `writestep` checkpoint drops from 78 ms to 0.8 ms on the bundled
   32-channel sample, and a PyTorch fit no longer spends an extra E-step (12.8
@@ -66,7 +66,7 @@ external tester (#221).
   `final_ll_`. `model_loglik(X)` still gives the log-likelihood of the written
   parameters if that is what you need. The `do_reject` zero sentinel is
   unchanged (a rejected sample's entries are zeroed exactly as
-  amica15.f90:2232-2234 does), and one reference-faithful exception to the
+  amica15.f90:2231-2234 does), and one reference-faithful exception to the
   invariant is now pinned as behavior: a `do_reject` fit that rejects on the
   same iteration as the write leaves a small residual, because Fortran
   normalizes `LL(iter)` (amica15.f90:1770) before `reject_data` shrinks the
@@ -130,9 +130,10 @@ external tester (#221).
   constructor/`fit()` names, renaming the three that Fortran spells
   differently (`min_grad_norm` -> `min_nd`, `max_decs` -> `maxdecs`,
   `numrej` -> `maxrej`), and warns loudly (never drops silently) about the
-  36 known keywords with no pamica equivalent (checkpoint warm-start,
-  per-family EM freeze toggles, the `do_opt_block` search, FIR/DFT
-  pre-filtering, reporting cadence, ...), about any keyword it does not
+  32 known keywords with no pamica equivalent (checkpoint warm-start,
+  per-family EM freeze toggles, FIR/DFT pre-filtering, reporting cadence,
+  ...; the `do_opt_block` search keys moved to identity mappings with #232,
+  see below), about any keyword it does not
   recognize at all, and (hard `ValueError`) when a non-empty file yields
   zero recognized settings. `fit()` applies the translated dict as per-call
   defaults -- an explicitly passed argument always wins over the file's
