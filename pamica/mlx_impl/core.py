@@ -1167,7 +1167,13 @@ class AMICAMLXNG:
         """
         try:
             info = mx.device_info()
-        except (AttributeError, RuntimeError):
+        except (AttributeError, RuntimeError) as exc:
+            logger.debug(
+                "could not query MLX device memory (%s: %s); block-size "
+                "search runs without a memory cap",
+                type(exc).__name__,
+                exc,
+            )
             return None
         size = info.get("max_recommended_working_set_size") or info.get("memory_size")
         return int(size) if size else None

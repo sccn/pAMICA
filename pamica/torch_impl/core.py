@@ -1407,13 +1407,25 @@ class AMICATorchNG:
         if dev == "cuda":
             try:
                 return int(torch.cuda.mem_get_info(self.device)[0])
-            except (RuntimeError, AttributeError):
+            except (RuntimeError, AttributeError) as exc:
+                logger.debug(
+                    "could not query CUDA memory (%s: %s); block-size search "
+                    "runs without a memory cap",
+                    type(exc).__name__,
+                    exc,
+                )
                 return None
         if dev == "mps":
             try:
                 # Capacity, not free memory (see the docstring).
                 return int(torch.mps.recommended_max_memory())
-            except (RuntimeError, AttributeError):
+            except (RuntimeError, AttributeError) as exc:
+                logger.debug(
+                    "could not query MPS memory (%s: %s); block-size search "
+                    "runs without a memory cap",
+                    type(exc).__name__,
+                    exc,
+                )
                 return None
         # Total host RAM, likewise capacity rather than free.
         return blocktune.host_memory_bytes()

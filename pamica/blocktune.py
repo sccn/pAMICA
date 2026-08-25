@@ -159,7 +159,13 @@ def host_memory_bytes() -> Optional[int]:
     """
     try:
         return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
-    except (AttributeError, ValueError, OSError):
+    except (AttributeError, ValueError, OSError) as exc:
+        logger.debug(
+            "could not query host RAM via sysconf (%s: %s); block-size "
+            "search runs without a memory cap",
+            type(exc).__name__,
+            exc,
+        )
         return None
 
 
