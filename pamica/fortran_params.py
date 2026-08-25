@@ -458,6 +458,18 @@ def read_fortran_param_file(path: Union[str, Path]) -> dict:
             except ValueError as exc:
                 raise ValueError(f"{path}:{lineno}: {exc}") from exc
 
+    # A file with no content lines at all (empty, or only whitespace and
+    # comments) cannot configure anything; returning {} would silently hand
+    # the caller an all-defaults run while they believe their param file was
+    # applied (silent-failure review of PR #301). Needs no `accepted` check:
+    # emptiness is format-independent.
+    if content_lines == 0:
+        raise ValueError(
+            f"{path}: no content lines (the file is empty or holds only "
+            "comments/whitespace). Refusing to silently return an "
+            "all-defaults result."
+        )
+
     # Only meaningful when `accepted` is known: a file where not a single
     # content line's keyword was recognized as valid Fortran syntax at all is
     # very likely the wrong format entirely (e.g. JSON handed to this reader
@@ -465,7 +477,7 @@ def read_fortran_param_file(path: Union[str, Path]) -> dict:
     # result. A file of only known-but-unsupported keywords (recognized, just
     # not translatable) is a legitimate, if useless, param file and does NOT
     # hit this -- see FORTRAN_UNSUPPORTED_KEYS's warning below instead.
-    if accepted is not None and content_lines and recognized_lines == 0:
+    if accepted is not None and recognized_lines == 0:
         raise ValueError(
             f"{path}: {content_lines} content line(s) but not one keyword was "
             "recognized by the reference Fortran parser -- this usually means "
