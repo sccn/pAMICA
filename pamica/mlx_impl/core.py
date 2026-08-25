@@ -83,6 +83,7 @@ import json
 import logging
 import math
 import time
+import zipfile
 from typing import List, Optional, Sequence
 
 # mlx ships as a compiled extension with no type stubs, so ty cannot resolve
@@ -266,6 +267,37 @@ def _log_pdf(
         ),
     )
     return log_pdf, None
+
+
+def _safe_int_cast(name: str, value: np.ndarray, dtype) -> np.ndarray:
+    """Cast a restored persistence param to an integer index array without
+    numpy's undefined-behavior float-to-int cast (issue #287 load-path
+    hardening, PR review).
+
+    ``comp_list``/``pdtype`` are used directly as array indices
+    (``self.mu[:, idx]`` etc.); ``np.array([float("nan")]).astype(np.int64)``
+    silently produces an arbitrary, platform-dependent integer rather than
+    raising, which would then read or write the wrong (but validly in-range)
+    column with no error at all. An already-integer ``value`` is cast as-is.
+    Otherwise every entry must be finite AND equal to its own rounding (a
+    float array that happens to hold whole numbers, e.g. one that lost its
+    original integer dtype on a JSON/``.npz`` round trip) -- anything else
+    raises a named ``ValueError`` naming the field.
+    """
+    if np.issubdtype(value.dtype, np.integer):
+        return value.astype(dtype)
+    if not np.all(np.isfinite(value)):
+        raise ValueError(
+            f"malformed AMICAMLXNG state: restored {name!r} has non-finite "
+            f"values and cannot be safely used as an integer index array."
+        )
+    rounded = np.round(value)
+    if not np.array_equal(value, rounded):
+        raise ValueError(
+            f"malformed AMICAMLXNG state: restored {name!r} has non-integer "
+            f"values and cannot be safely used as an integer index array."
+        )
+    return rounded.astype(dtype)
 
 
 class AMICAMLXNG:
@@ -657,9 +689,12 @@ class AMICAMLXNG:
         # float64 host copy of the sphere, kept because the sharing metric's
         # back-map pinv(sphere) must be computed at the precision the sphere was
         # built with, not from the float32 GPU cast (issue #263). Set alongside
-        # self.sphere in _preprocess, which is also where _sphere_pinv is
-        # invalidated (the single point that assigns a sphere -- this backend has
-        # no load path).
+        # self.sphere in _preprocess, and _sphere_pinv is invalidated there too.
+        # _load_params (issue #287) is the other point that assigns a sphere --
+        # loading from a persisted float32 sphere rather than fitting one, so
+        # _sphere_np there is that sphere upcast to float64 rather than
+        # _preprocess's higher-precision original (see _load_params for the
+        # consequence) -- and it invalidates _sphere_pinv the same way.
         self._sphere_np: Optional[np.ndarray] = None
         self._sphere_pinv: Optional[np.ndarray] = None
         # comp_used mask, CACHED here rather than derived per call; see the
@@ -2382,6 +2417,21 @@ class AMICAMLXNG:
         self._check_model_idx(model_idx)
         return np.array(self.A[:, self.comp_list[:, model_idx]].T)
 
+    @property
+    def n_channels_in(self) -> int:
+        """Input channel count, i.e. the width of the sphere (issue #287 port
+        of ``AMICATorchNG.n_channels_in``, torch_impl/core.py:2884-2896).
+
+        Differs from ``n_channels`` only when rank reduction shrank the model
+        to the detected numerical rank (issue #223); equal to it for
+        full-rank data and before :meth:`fit`/:meth:`from_state_dict`.
+        Derived from the sphere (rather than stored) so it cannot drift from
+        the sphere it describes -- including on a reloaded rank-reduced
+        model, whose ``sphere`` width is exactly this value (see
+        :meth:`_load_params`'s shape guard).
+        """
+        return self.n_channels if self.sphere is None else int(self.sphere.shape[1])
+
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space (issue #287 port of
         ``AMICATorchNG.get_sensor_mixing_matrix``, torch_impl/core.py:
@@ -2458,16 +2508,34 @@ class AMICAMLXNG:
     # gm are the mixture-PDF EM state; pdtype is the per-source density-family
     # code (issue #265) -- a non-default pdftype model, or the adaptive
     # switcher's chosen 1/4 assignments, would otherwise silently revert to GG
-    # on reload. comp_list and pdtype are integer arrays (dtype preserved on
-    # load); the rest are float32.
+    # on reload. comp_list and pdtype are FORCE-CAST to their integer dtype on
+    # load (via _safe_int_cast, not a bare .astype -- see _load_params), not
+    # merely "preserved": a restored array that is already integer keeps its
+    # dtype unchanged, but one that arrives as float (e.g. a hand-edited or
+    # foreign-tool payload) is only accepted if every value is finite and
+    # whole, and rejected with a named error otherwise. The rest are float32.
     _PARAM_ARRAYS = (
         "A", "W", "c", "mu", "alpha", "beta", "rho", "gm",
         "comp_list", "mean", "sphere", "pdtype",
     )  # fmt: skip
     # Integer arrays in _PARAM_ARRAYS: their dtype is restored explicitly
-    # rather than following the float32 default the rest take.
-    _INT_PARAM_ARRAYS = ("comp_list", "pdtype")
+    # (via _safe_int_cast) rather than following the float32 default the rest
+    # take.
     _INT_PARAM_DTYPES = {"comp_list": np.int64, "pdtype": np.int32}
+    # extra's full key set. format_version 1 has no older on-disk files, so
+    # from_state_dict()/load() require every one of these to be present
+    # (_load_params raises a named error naming what's missing, mirroring the
+    # params check above) rather than defaulting a subset via .get(). A
+    # FUTURE additive key (the way #198's restart_seeds_/restart_lls_/
+    # restart_stop_reasons_ or #207's convergence-stop config keys were added
+    # to AMICATorchNG after payloads without them already existed) should use
+    # .get() with a documented fallback instead, once format_version 1
+    # payloads without it are actually in the wild -- not before.
+    _EXTRA_KEYS = (
+        "sldet", "iteration", "ll_history", "final_ll", "stop_reason",
+        "n_kurt_done", "n_newton_fallbacks", "lrate", "lrate_cap", "newtrate",
+        "rholrate", "restart_seeds_", "restart_lls_", "restart_stop_reasons_",
+    )  # fmt: skip
 
     # This backend owns its own format_version, independent of AMICATorchNG's
     # (currently 3): the two payloads are never interchangeable (different
@@ -2636,26 +2704,63 @@ class AMICAMLXNG:
         missing = [name for name in self._PARAM_ARRAYS if name not in params]
         if missing:
             raise ValueError(f"malformed AMICAMLXNG state: missing params {missing}")
-        # Guard against config/params drift: A and comp_list must match the
-        # dimensions the constructor just derived, or transform()/the E-step
-        # would fail later with a confusing matmul error far from load().
-        A = np.asarray(params["A"])
-        if A.shape != (self.n_channels, self.n_comps):
+        arrays = {name: np.asarray(params[name]) for name in self._PARAM_ARRAYS}
+
+        # Guard against config/params drift: every param must match the
+        # dimensions _initialize_parameters actually allocates, or
+        # transform()/the E-step would fail later with a confusing matmul
+        # error far from load() (or, worse, silently broadcast wrong).
+        # Shapes are read off _initialize_parameters/_update_unmixing_matrices
+        # (core.py, this module), not guessed: A/mu/alpha/beta/rho/gm/c/
+        # comp_list/pdtype/W are all sized from n_channels/n_models/n_mix/
+        # n_comps, every one of which the constructor (cls(**config) in
+        # from_state_dict) has already derived. ``sphere``'s SECOND
+        # dimension is the exception: it is the ORIGINAL input-channel count,
+        # which is not recoverable from config alone once rank reduction has
+        # happened (issue #223) -- self.n_channels is already the
+        # post-reduction value by the time state_dict() ran (see that
+        # method's config comment) -- so there is nothing independent to
+        # check sphere's width against. It is instead taken from the
+        # restored sphere itself, and mean (the only other array on that
+        # axis) is cross-checked against it.
+        n, m, ncomp, nmix = self.n_channels, self.n_models, self.n_comps, self.n_mix
+        sphere_shape = arrays["sphere"].shape
+        if len(sphere_shape) != 2 or sphere_shape[0] != n:
             raise ValueError(
-                f"restored A has shape {A.shape}, expected "
-                f"{(self.n_channels, self.n_comps)} for n_channels="
-                f"{self.n_channels}, n_models={self.n_models}"
+                f"restored sphere has shape {sphere_shape}, expected "
+                f"(n_channels, n_channels_in) with n_channels={n}"
             )
-        comp_list = np.asarray(params["comp_list"])
-        if comp_list.shape != (self.n_channels, self.n_models):
-            raise ValueError(
-                f"restored comp_list has shape {comp_list.shape}, expected "
-                f"{(self.n_channels, self.n_models)}"
-            )
+        n_channels_in = sphere_shape[1]
+        expected_shapes = {
+            "A": (n, ncomp),
+            "W": (m, n, n),
+            "c": (n, m),
+            "mu": (nmix, ncomp),
+            "alpha": (nmix, ncomp),
+            "beta": (nmix, ncomp),
+            "rho": (nmix, ncomp),
+            "gm": (m,),
+            "comp_list": (n, m),
+            "mean": (n_channels_in, 1),
+            "pdtype": (n, m),
+        }
+        for name, expected in expected_shapes.items():
+            actual = arrays[name].shape
+            if actual != expected:
+                raise ValueError(
+                    f"restored {name!r} has shape {actual}, expected "
+                    f"{expected} for n_channels={n}, n_models={m}, "
+                    f"n_mix={nmix}, n_comps={ncomp}, "
+                    f"n_channels_in={n_channels_in}"
+                )
+
         for name in self._PARAM_ARRAYS:
-            value = np.asarray(params[name])
-            dtype = self._INT_PARAM_DTYPES.get(name, np.float32)
-            setattr(self, name, mx.array(value.astype(dtype)))
+            value = arrays[name]
+            if name in self._INT_PARAM_DTYPES:
+                value = _safe_int_cast(name, value, self._INT_PARAM_DTYPES[name])
+            else:
+                value = value.astype(np.float32)
+            setattr(self, name, mx.array(value))
 
         # Rebuild the MLX-only per-iteration caches (module docstring):
         # unlike AMICATorchNG, which recomputes log|det W| and
@@ -2673,6 +2778,16 @@ class AMICAMLXNG:
             mx.linalg.slogdet(self.W[h], stream=_CPU)[1] for h in range(self.n_models)
         ]
         self._logdet_W = mx.stack(logdets)
+        # slogdet returns -inf (not a raised error) for a finite-but-singular
+        # matrix, so a corrupted or hand-edited W that is finite yet singular
+        # would otherwise load "successfully" and only fail later, deep
+        # inside _forward, with no diagnostic tying it back to load().
+        if not bool(mx.all(mx.isfinite(self._logdet_W)).item()):
+            raise ValueError(
+                "malformed AMICAMLXNG state: restored W is singular for at "
+                "least one model (log|det W| is non-finite); the payload may "
+                "be corrupted."
+            )
         # sphere was just replaced, so any cached back-map describes the old
         # one. _sphere_np backs _pinv_sphere (get_sensor_mixing_matrix,
         # _identify_shared_comps) at float64 precision during a live fit, but
@@ -2687,6 +2802,11 @@ class AMICAMLXNG:
         self._sphere_pinv = None
 
         extra = state["extra"]
+        missing_extra = [key for key in self._EXTRA_KEYS if key not in extra]
+        if missing_extra:
+            raise ValueError(
+                f"malformed AMICAMLXNG state: missing extra fields {missing_extra}"
+            )
         self.sldet = extra["sldet"]
         self.iteration = extra["iteration"]
         self.ll_history = list(extra["ll_history"])
@@ -2698,9 +2818,9 @@ class AMICAMLXNG:
         self.lrate_cap = extra["lrate_cap"]
         self.newtrate = extra["newtrate"]
         self.rholrate = extra["rholrate"]
-        self.restart_seeds_ = list(extra.get("restart_seeds_", []))
-        self.restart_lls_ = list(extra.get("restart_lls_", []))
-        self.restart_stop_reasons_ = list(extra.get("restart_stop_reasons_", []))
+        self.restart_seeds_ = list(extra["restart_seeds_"])
+        self.restart_lls_ = list(extra["restart_lls_"])
+        self.restart_stop_reasons_ = list(extra["restart_stop_reasons_"])
 
     def save(self, filepath: str) -> None:
         """Persist the fitted model to ``filepath`` as a single ``.npz``
@@ -2728,34 +2848,52 @@ class AMICAMLXNG:
         :meth:`save`.
 
         Wrong ``format_version``, a missing ``config``/``extra``/``params``
-        section, or a truncated archive missing one of the 12 param arrays
-        each raise a named ``ValueError`` naming what is missing, rather than
-        loading a silently partial model.
+        section, a truncated archive missing one of the 12 param arrays, or a
+        genuinely corrupt/byte-truncated ``.npz`` (not a valid zip, or a zip
+        whose central directory or a member's compressed bytes were cut off)
+        each raise a named ``ValueError`` naming what is wrong, rather than
+        raising an opaque ``zipfile``/``numpy`` error or loading a silently
+        partial model.
         """
-        with np.load(filepath, allow_pickle=False) as data:
-            files = set(data.files)
-            for section in ("format_version", "config", "extra"):
-                if section not in files:
-                    raise ValueError(
-                        f"malformed AMICAMLXNG save file {filepath!r}: missing "
-                        f"{section!r} (the file may be truncated or corrupted)."
-                    )
-            version = int(data["format_version"])
-            if version != cls._SAVE_FORMAT_VERSION:
-                raise ValueError(
-                    f"unsupported AMICAMLXNG save format_version: {version!r} "
-                    f"(expected {cls._SAVE_FORMAT_VERSION})"
-                )
-            config = json.loads(data["config"].item())
-            extra = json.loads(data["extra"].item())
-            missing_params = [name for name in cls._PARAM_ARRAYS if name not in files]
-            if missing_params:
+        # Eagerly materialize every array the archive actually contains
+        # INSIDE this try, so any corruption -- an unreadable zip (raised by
+        # np.load itself), or one truncated member's compressed bytes
+        # (raised lazily, on that member's own read) -- surfaces here as one
+        # of the well-known exception types below, not scattered across the
+        # validation logic beneath. Everything from here down reads only the
+        # already-materialized ``raw`` dict, so those checks keep raising
+        # their own specific ValueErrors unchanged.
+        try:
+            with np.load(filepath, allow_pickle=False) as data:
+                raw = {name: data[name] for name in data.files}
+        except (zipfile.BadZipFile, EOFError, OSError, ValueError) as exc:
+            raise ValueError(
+                f"malformed AMICAMLXNG save file {filepath!r}: could not read "
+                f"the archive ({exc}); the file may be truncated or corrupted."
+            ) from exc
+
+        for section in ("format_version", "config", "extra"):
+            if section not in raw:
                 raise ValueError(
                     f"malformed AMICAMLXNG save file {filepath!r}: missing "
-                    f"params {missing_params} (the file may be truncated or "
-                    f"corrupted)."
+                    f"{section!r} (the file may be truncated or corrupted)."
                 )
-            params = {name: np.array(data[name]) for name in cls._PARAM_ARRAYS}
+        version = int(raw["format_version"])
+        if version != cls._SAVE_FORMAT_VERSION:
+            raise ValueError(
+                f"unsupported AMICAMLXNG save format_version: {version!r} "
+                f"(expected {cls._SAVE_FORMAT_VERSION})"
+            )
+        config = json.loads(raw["config"].item())
+        extra = json.loads(raw["extra"].item())
+        missing_params = [name for name in cls._PARAM_ARRAYS if name not in raw]
+        if missing_params:
+            raise ValueError(
+                f"malformed AMICAMLXNG save file {filepath!r}: missing "
+                f"params {missing_params} (the file may be truncated or "
+                f"corrupted)."
+            )
+        params = {name: np.array(raw[name]) for name in cls._PARAM_ARRAYS}
         state = {
             "format_version": version,
             "config": config,
