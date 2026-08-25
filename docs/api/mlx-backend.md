@@ -8,6 +8,14 @@ multi-model natural-gradient AMICA across all five source-density families
 fastest option on Apple hardware; see [Backends & Devices](../guides/backends.md)
 for the performance comparison.
 
+Source extraction (`transform` and the `get_mixing_matrix`/`get_unmixing_matrix`/
+`get_sensor_mixing_matrix`/`get_rho` accessors) and persistence
+(`state_dict`/`from_state_dict` and `.npz` `save`/`load`) are implemented (epic
+#278 Phase 1, issue #287); the `.npz` format is device- and framework-agnostic
+(JSON-encoded config/extra plus native param arrays, no torch coupling). The
+remaining gaps are `keep_best` (epic #278 Phase 2) and outlier rejection
+(`do_reject`) + LLt/MIR (epic #278 Phase 3).
+
 MLX is an optional dependency (Apple Silicon only), so it is imported separately
 and is not part of the default `import pamica` surface:
 

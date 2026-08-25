@@ -23,9 +23,12 @@ Scope: single- and multi-model (``n_models >= 1``, issue #81), all five
 ``amica15.f90`` source-density families (``pdftype`` 0/1/2/3/4, issue #265,
 porting the PyTorch backend's issue #26), natural gradient and the Newton
 preconditioner (``do_newton``, issue #264), component sharing
-(``share_comps``, issue #263). ``transform`` still raises
-``NotImplementedError``. Outlier rejection, ``keep_best`` and save/load are
-simply absent (no such parameter/method) -- all fast-follows.
+(``share_comps``, issue #263). Source extraction (``transform`` and the
+``get_mixing_matrix``/``get_unmixing_matrix``/``get_sensor_mixing_matrix``/
+``get_rho`` accessors) and persistence (``state_dict``/``from_state_dict`` and
+``.npz`` ``save``/``load``) are implemented (epic #278 Phase 1, issue #287).
+Outlier rejection and ``keep_best`` are simply absent (no such
+parameter/method) -- epic #278 Phases 2 and 3.
 
 Newton (issue #264) runs entirely in float32 on the GPU stream: the curvature
 accumulators ride the existing E-step locals, and the direction is Fortran's

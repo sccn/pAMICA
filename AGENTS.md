@@ -85,8 +85,10 @@ Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses at the inhe
 -- not yet re-swept at 8192 like the single-model figures above). Component sharing (#263),
 Newton (#264, float32, validated against a float64 torch twin -- see `.context/issue-264/`) and the
 non-GG pdf families (#265, including the adaptive switcher; see `.context/issue-265/`) are all
-ported; the remaining MLX gaps are the non-fitting surface -- `transform`, save/load, `keep_best`,
-outlier rejection and LLt/MIR -- tracked as epic #278 (phases #287/#288/#289).
+ported; source extraction (`transform` and the mixing/unmixing/`rho` accessors) and persistence
+(`state_dict`/`.npz` save-load) landed in epic #278 Phase 1 (#287); the remaining MLX gaps --
+`keep_best` (Phase 2, #288) and outlier rejection + LLt/MIR (Phase 3, #289) -- are tracked as epic
+#278.
 
 ## Key Files
 - **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`)
