@@ -20,8 +20,10 @@ A backend may lack a behavior only when it *cannot* support it, and then:
 2. The call raises `NotImplementedError` with that reason, never a silent difference
 3. The divergence is listed in `docs/guides/amica-differences.md`
 
-Existing legitimate examples: MLX has no `transform` (raises `NotImplementedError`; source
-extraction requires the PyTorch backend); MLX is float32-only because Apple GPUs have no float64.
+Existing legitimate examples: MLX's non-fitting surface (`transform`, save/load,
+`do_reject`, `keep_best`, LLt/MIR) is absent -- `transform` raises
+`NotImplementedError` -- and is tracked as epic #278; MLX is float32-only because
+Apple GPUs have no float64.
 
 "I only had time for one" is not an exception.
 

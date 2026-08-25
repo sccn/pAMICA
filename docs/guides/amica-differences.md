@@ -138,6 +138,7 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | `n_restarts` best-of-N restarts | yes | yes | yes | n/a |
 | MIR diagnostic | yes | no | no | n/a |
 | Persistence | `state_dict` | EEGLAB `amicaout` | none | EEGLAB `amicaout` |
+| Fortran `input.param` reader | yes (`AMICA.from_params_file`, #132) | no (`params_file` is JSON-only) | no | native |
 
 The NumPy row's "GG only" corrects an earlier version of this table, which
 listed "all five": `AMICA_NumPy._compute_log_pdf` (its fit-path density

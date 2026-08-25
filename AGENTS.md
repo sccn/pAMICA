@@ -18,6 +18,9 @@ pamica/
 ├── numpy_impl/              # Legacy NumPy reference (topic-named modules, issue #34)
 │   ├── core.py              #   AMICA_NumPy (incl. inlined Newton); pdf.py, data.py, load.py, viz.py, utils.py, cli.py
 │   └── ...
+├── blocktune.py             # Shared block-size auto-tuner policy (#232, all backends)
+├── restarts.py              # Shared best-of-N restart policy (#198, all backends)
+├── fortran_params.py        # Fortran input.param reader for AMICA.from_params_file (#132)
 ├── amica17.f90, funmod2.f90 # Fortran reference source (read-only, for parity)
 ├── sample_data/             # Sample EEG data + Fortran binary (amica15mac)
 └── tests/                   # Tests, incl. tests/torch_tests/ (vs-Fortran parity)
@@ -82,8 +85,8 @@ Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses at the inhe
 -- not yet re-swept at 8192 like the single-model figures above). Component sharing (#263),
 Newton (#264, float32, validated against a float64 torch twin -- see `.context/issue-264/`) and the
 non-GG pdf families (#265, including the adaptive switcher; see `.context/issue-265/`) are all
-ported; the remaining MLX gaps are `transform`, outlier rejection and save/load (fast-follows, not
-tracked against a numbered issue).
+ported; the remaining MLX gaps are the non-fitting surface -- `transform`, save/load, `keep_best`,
+outlier rejection and LLt/MIR -- tracked as epic #278 (phases #287/#288/#289).
 
 ## Key Files
 - **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`)
