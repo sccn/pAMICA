@@ -136,6 +136,30 @@ def test_get_mixing_and_unmixing_are_inverses():
     assert np.allclose(W @ A, np.eye(NW), atol=1e-3)
 
 
+def test_n_channels_in_full_rank_equals_n_channels():
+    m = AMICAMLXNG(n_channels=NW, n_mix=NMIX)
+    assert m.n_channels_in == NW  # unfitted: falls back to n_channels
+    m = _fitted_model(n_models=1)
+    assert m.n_channels_in == NW == m.n_channels
+
+
+def test_n_channels_in_reports_original_width_on_rank_reduced_fit():
+    """On a rank-reduced fit, ``n_channels`` becomes the DETECTED rank (issue
+    #223), so ``n_channels_in`` -- the sphere's original input width -- is the
+    only place the pre-reduction channel count is still recoverable."""
+    x = _real_data(4096)
+    x = x - x.mean(axis=1, keepdims=True)
+    rank = 20
+    U_r = np.linalg.svd(x, full_matrices=False)[0][:, :rank]
+    x_low = U_r @ (U_r.T @ x)
+
+    m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED, block_size=BLOCK)
+    m.fit(x_low, max_iter=5, verbose=False)
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert m.n_channels == rank
+    assert m.n_channels_in == NW
+
+
 # --- transform(training X) reproduces the fit's own E-step activations ------
 
 
@@ -191,6 +215,24 @@ def test_transform_multimodel_routes_by_model_idx():
     S0 = m.transform(data, model_idx=0)
     S1 = m.transform(data, model_idx=1)
     assert not np.allclose(S0, S1)
+
+
+# --- defense-in-depth (non-finite parameters on an otherwise "clean" fit) ---
+
+
+def test_get_rho_raises_on_force_set_nan_rho():
+    """``get_rho``'s isfinite guard actually fires: a real fit's ``rho`` is
+    force-corrupted to NaN afterward (the same direct-attribute-assignment
+    pattern ``_force_merged_column`` uses in ``test_mlx_sharing.py``, not a
+    mock), so the model looks fitted and its ``stop_reason`` stays healthy --
+    only ``rho`` itself is broken."""
+    m = _fitted_model(n_models=1)
+    rho_np = np.array(m.rho)
+    rho_np[0, 0] = np.nan
+    m.rho = mx.array(rho_np)
+
+    with pytest.raises(RuntimeError, match="non-finite"):
+        m.get_rho()
 
 
 # --- fit-path no-op pin (plan item C7) ---------------------------------------

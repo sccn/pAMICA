@@ -184,6 +184,52 @@ def test_save_load_npz_layout(tmp_path):
         assert extra["stop_reason"] == m.stop_reason
 
 
+def test_round_trip_bit_identical_on_rank_reduced_fit(tmp_path):
+    """Round trip through BOTH ``state_dict``/``from_state_dict`` and
+    ``.npz`` ``save``/``load`` on a genuinely rank-reduced real fit (real EEG
+    projected onto a rank-20 subspace, same construction as
+    ``mlx_tests/test_mlx_newton.py::test_rank_reduced_newton_fit_completes``).
+    This is the scenario ``_load_params``'s shape guard treats specially
+    (``sphere``'s width is taken from the restored array itself, not derived
+    from config -- see that method), so it is the one round trip most likely
+    to break if that guard's reasoning were wrong.
+    """
+    x = _real_data(4096)
+    x = x - x.mean(axis=1, keepdims=True)
+    rank = 20
+    U_r = np.linalg.svd(x, full_matrices=False)[0][:, :rank]
+    x_low = U_r @ (U_r.T @ x)
+
+    m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED, block_size=BLOCK)
+    m.fit(x_low, max_iter=5, verbose=False)
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert m.n_channels == rank
+    assert m.sphere is not None and tuple(np.array(m.sphere).shape) == (rank, NW)
+
+    data = x_low[:, :64]
+    S_before = m.transform(data, model_idx=0)
+
+    m2 = AMICAMLXNG.from_state_dict(m.state_dict())
+    for name in AMICAMLXNG._PARAM_ARRAYS:
+        assert np.array_equal(
+            np.array(getattr(m, name)), np.array(getattr(m2, name))
+        ), f"{name} not bit-identical (state_dict round trip)"
+    assert np.array_equal(S_before, m2.transform(data, model_idx=0))
+    assert m2.n_channels == rank
+    assert m2.n_channels_in == NW
+
+    filepath = tmp_path / "model.npz"
+    m.save(str(filepath))
+    m3 = AMICAMLXNG.load(str(filepath))
+    for name in AMICAMLXNG._PARAM_ARRAYS:
+        assert np.array_equal(
+            np.array(getattr(m, name)), np.array(getattr(m3, name))
+        ), f"{name} not bit-identical (.npz round trip)"
+    assert np.array_equal(S_before, m3.transform(data, model_idx=0))
+    assert m3.n_channels == rank
+    assert m3.n_channels_in == NW
+
+
 # --- sharing + adaptive-switcher state round trip (plan item C5) ------------
 
 
@@ -266,6 +312,36 @@ def test_round_trip_preserves_newton_fallback_count(tmp_path):
     assert m3.n_newton_fallbacks == m.n_newton_fallbacks
 
 
+def test_round_trip_preserves_multi_restart_records(tmp_path):
+    """``n_restarts > 1`` round-trips the FULL per-restart records
+    (``restart_seeds_``/``restart_lls_``/``restart_stop_reasons_``), not a
+    vacuous length-1 list: the 12 persisted params/most of ``extra`` describe
+    only the WINNING restart's own state (as a single-restart fit's would),
+    but these three lists summarize every restart that ran, and are the only
+    place that full record survives a round trip.
+    """
+    m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=0, n_restarts=3, block_size=BLOCK)
+    m.fit(_real_data(4096), max_iter=5, verbose=False)
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert len(m.restart_seeds_) == 3
+    assert len(m.restart_lls_) == 3
+    assert len(m.restart_stop_reasons_) == 3
+
+    m2 = AMICAMLXNG.from_state_dict(m.state_dict())
+    assert m2.restart_seeds_ == m.restart_seeds_
+    assert m2.restart_lls_ == m.restart_lls_
+    assert m2.restart_stop_reasons_ == m.restart_stop_reasons_
+    assert len(m2.restart_seeds_) == 3, "restart records collapsed to a single entry"
+
+    filepath = tmp_path / "model.npz"
+    m.save(str(filepath))
+    m3 = AMICAMLXNG.load(str(filepath))
+    assert m3.restart_seeds_ == m.restart_seeds_
+    assert m3.restart_lls_ == m.restart_lls_
+    assert m3.restart_stop_reasons_ == m.restart_stop_reasons_
+    assert len(m3.restart_seeds_) == 3, "restart records collapsed to a single entry"
+
+
 # --- refusals (plan item C6) -------------------------------------------------
 
 
@@ -299,6 +375,25 @@ def test_save_refuses_degenerate_fit(tmp_path):
     assert m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS
     with pytest.raises(RuntimeError, match="degenerate"):
         m.save(str(tmp_path / "model.npz"))
+
+
+def test_state_dict_refuses_force_set_nonfinite_param_naming_it():
+    """The defense-in-depth isfinite sweep actually fires, independent of
+    ``stop_reason`` bookkeeping: a real fit with a HEALTHY ``stop_reason``
+    (``max_iter``, not one of ``_DEGENERATE_STOP_REASONS``) has one param
+    force-corrupted afterward (same direct-attribute pattern as
+    ``_force_merged_column``/``test_get_rho_raises_on_force_set_nan_rho``,
+    not a mock), so only the isfinite sweep -- not the ``stop_reason`` check
+    above it -- can catch this. The error must name the actual broken param.
+    """
+    m = _fitted_model(n_models=1, max_iter=3)
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    mu_np = np.array(m.mu)
+    mu_np[0, 0] = np.nan
+    m.mu = mx.array(mu_np)
+
+    with pytest.raises(RuntimeError, match=r"non-finite parameters \['mu'\]"):
+        m.state_dict()
 
 
 def test_from_state_dict_rejects_wrong_format_version():
@@ -344,6 +439,88 @@ def test_from_state_dict_rejects_comp_list_shape_drift():
         AMICAMLXNG.from_state_dict(state)
 
 
+@pytest.mark.parametrize("name", ["mean", "W", "mu", "gm"])
+def test_from_state_dict_rejects_shape_drift_for_every_param(name):
+    """The shape guard covers all 12 params, not just A/comp_list --
+    including ``mean``, whose expected shape is cross-checked against the
+    restored ``sphere``'s own width (``n_channels_in``), which is NOT
+    derivable from config alone under rank reduction (issue #223; see
+    ``_load_params``)."""
+    m = _fitted_model(n_models=2, max_iter=3)
+    state = m.state_dict()
+    arr = state["params"][name]
+    # Drop one entry along the array's LAST axis: valid for every shape here
+    # (1-D gm, 2-D mean/mu, 3-D W).
+    state["params"][name] = arr[..., :-1]
+    with pytest.raises(ValueError, match="shape"):
+        AMICAMLXNG.from_state_dict(state)
+
+
+def test_from_state_dict_rejects_nan_comp_list():
+    """``_safe_int_cast``: a ``comp_list`` that arrives holding NaN must not
+    silently become an arbitrary (platform-dependent) index via numpy's
+    undefined-behavior float-to-int cast -- it must raise instead."""
+    m = _fitted_model(n_models=1, max_iter=3)
+    state = m.state_dict()
+    cl = state["params"]["comp_list"].astype(np.float64)
+    cl[0, 0] = np.nan
+    state["params"]["comp_list"] = cl
+    with pytest.raises(ValueError, match="comp_list"):
+        AMICAMLXNG.from_state_dict(state)
+
+
+def test_from_state_dict_rejects_non_integer_valued_comp_list():
+    """A ``comp_list`` that arrives as float with a genuinely FRACTIONAL
+    value (not merely a different dtype) is equally rejected, not silently
+    truncated toward zero."""
+    m = _fitted_model(n_models=1, max_iter=3)
+    state = m.state_dict()
+    cl = state["params"]["comp_list"].astype(np.float64)
+    cl[0, 0] += 0.5
+    state["params"]["comp_list"] = cl
+    with pytest.raises(ValueError, match="comp_list"):
+        AMICAMLXNG.from_state_dict(state)
+
+
+def test_from_state_dict_accepts_whole_valued_float_comp_list():
+    """A ``comp_list`` that arrives as float but holds only WHOLE values
+    (e.g. from a foreign tool that did not preserve the integer dtype) is
+    accepted and cast, not rejected: ``_safe_int_cast``'s rule is
+    finite-and-whole, not "must already be an integer array"."""
+    m = _fitted_model(n_models=1, max_iter=3)
+    state = m.state_dict()
+    original = state["params"]["comp_list"]
+    state["params"]["comp_list"] = original.astype(np.float64)
+    m2 = AMICAMLXNG.from_state_dict(state)
+    assert np.array_equal(np.array(m2.comp_list), original)
+    assert np.array(m2.comp_list).dtype == np.int64
+
+
+def test_from_state_dict_rejects_singular_restored_W():
+    """``_load_params`` recomputes ``log|det W|`` from the restored ``W``; a
+    finite but SINGULAR ``W`` makes ``slogdet`` return ``-inf`` rather than
+    raise (confirmed: it does not abort the process the way MLX's ``inv``
+    does on a singular matrix, issue #274 -- ``slogdet`` is a distinct code
+    path), so this must be caught explicitly instead of silently propagating
+    a ``-inf`` into the LL Jacobian.
+
+    Zeroing a whole column, not duplicating one, is what reliably reaches
+    ``-inf`` here: duplicating a column of an already float32-rounded,
+    previously-fitted ``W`` leaves enough numerical residue that MLX's
+    float32 LU-based ``slogdet`` still returns a finite (if huge negative,
+    measured ~-19.6) value on it -- exactly the kind of near-singular-but-
+    not-exactly float32 behavior ``_INV_COND_THRESHOLD``'s docstring
+    describes for ``inv``. A zeroed column has no such residue.
+    """
+    m = _fitted_model(n_models=1, max_iter=3)
+    state = m.state_dict()
+    w = state["params"]["W"].copy()
+    w[0, :, 0] = 0.0  # a whole zero column: exactly singular, no residue
+    state["params"]["W"] = w
+    with pytest.raises(ValueError, match="singular"):
+        AMICAMLXNG.from_state_dict(state)
+
+
 def test_load_rejects_wrong_format_version(tmp_path):
     m = _fitted_model(n_models=1, max_iter=3)
     filepath = tmp_path / "model.npz"
@@ -360,9 +537,11 @@ def test_load_rejects_wrong_format_version(tmp_path):
 
 
 def test_load_rejects_truncated_file(tmp_path):
-    """A payload missing one of the required top-level sections (here,
-    ``extra``, simulating truncation) raises a named error instead of a
-    silent partial load."""
+    """A WELL-FORMED ``.npz`` missing one of the required top-level sections
+    (here, ``extra``, simulating truncation at the archive-member level)
+    raises a named error instead of a silent partial load. See
+    :func:`test_load_rejects_byte_truncated_file` for a genuinely corrupt
+    (not well-formed-zip) file."""
     m = _fitted_model(n_models=1, max_iter=3)
     filepath = tmp_path / "model.npz"
     m.save(str(filepath))
@@ -373,6 +552,25 @@ def test_load_rejects_truncated_file(tmp_path):
     np.savez_compressed(str(truncated_path), **payload)
 
     with pytest.raises(ValueError, match="extra"):
+        AMICAMLXNG.load(str(truncated_path))
+
+
+def test_load_rejects_byte_truncated_file(tmp_path):
+    """A genuinely byte-truncated file (half the raw bytes of a real save,
+    not a well-formed npz missing a key) is not a valid zip at all -- most
+    likely because chopping the file in half destroys the zip central
+    directory, which sits at the end -- and must raise the same named
+    ``ValueError``, not an opaque ``zipfile``/``numpy`` exception."""
+    m = _fitted_model(n_models=1, max_iter=3)
+    filepath = tmp_path / "model.npz"
+    m.save(str(filepath))
+
+    raw = filepath.read_bytes()
+    assert len(raw) > 1, "precondition: the save produced a real file"
+    truncated_path = tmp_path / "byte_truncated.npz"
+    truncated_path.write_bytes(raw[: len(raw) // 2])
+
+    with pytest.raises(ValueError, match="malformed AMICAMLXNG save file"):
         AMICAMLXNG.load(str(truncated_path))
 
 

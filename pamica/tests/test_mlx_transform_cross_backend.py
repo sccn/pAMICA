@@ -173,7 +173,18 @@ def test_multimodel_transform_matches_float64_twin_with_c_centering():
 
 def test_accessors_match_float64_torch_twin():
     """``get_mixing_matrix``/``get_unmixing_matrix``/``get_rho`` agree with the
-    float64 twin on a full-rank multi-model fit."""
+    float64 twin on a full-rank multi-model fit.
+
+    ``get_unmixing_matrix`` alone gets the looser 1e-3 bound: ``get_mixing_matrix``
+    and ``get_rho`` are pure reindex/transpose views of ``A``/``rho`` (which are
+    copied bit-for-bit into the twin, see ``_torch_twin``), so they agree to
+    float32 precision (~1e-4). ``W`` is instead the output of two INDEPENDENT
+    matrix inversions -- MLX's float32 CPU-stream ``mx.linalg.inv`` in
+    ``_update_unmixing_matrices`` vs. torch's float64 ``torch.linalg.inv`` -- so
+    it carries real (if still small) numerical disagreement on top of the
+    float32 gap; measured ~1e-5 to ~1e-4 across runs of this test, comfortably
+    inside the 1e-3 bound.
+    """
     model = _fit_model(n_models=2, max_iter=5)
     ng = _torch_twin(model)
 
