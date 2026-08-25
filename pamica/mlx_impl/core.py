@@ -76,6 +76,7 @@ every column is used, so the mask is all-True and drops out exactly.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
@@ -2444,3 +2445,316 @@ class AMICAMLXNG:
             )
         idx = self.comp_list[:, model_idx]
         return np.array(self.rho[:, idx])
+
+    # ------------------------------------------------------------------
+    # Persistence (issue #287)
+    # ------------------------------------------------------------------
+    # Full fitted-parameter snapshot -- the same 12-name set as AMICATorchNG's
+    # _PARAM_TENSORS (torch_impl/core.py:3372-3382): A/W/c/comp_list/mean/
+    # sphere are what transform()/get_*matrix() read back; mu/alpha/beta/rho/
+    # gm are the mixture-PDF EM state; pdtype is the per-source density-family
+    # code (issue #265) -- a non-default pdftype model, or the adaptive
+    # switcher's chosen 1/4 assignments, would otherwise silently revert to GG
+    # on reload. comp_list and pdtype are integer arrays (dtype preserved on
+    # load); the rest are float32.
+    _PARAM_ARRAYS = (
+        "A", "W", "c", "mu", "alpha", "beta", "rho", "gm",
+        "comp_list", "mean", "sphere", "pdtype",
+    )  # fmt: skip
+    # Integer arrays in _PARAM_ARRAYS: their dtype is restored explicitly
+    # rather than following the float32 default the rest take.
+    _INT_PARAM_ARRAYS = ("comp_list", "pdtype")
+    _INT_PARAM_DTYPES = {"comp_list": np.int64, "pdtype": np.int32}
+
+    # This backend owns its own format_version, independent of AMICATorchNG's
+    # (currently 3): the two payloads are never interchangeable (different
+    # param layouts, no dtype/device fields here), so there is no reason for
+    # the version numbers to track each other.
+    _SAVE_FORMAT_VERSION = 1
+
+    def state_dict(self) -> dict:
+        """Serialize the fitted model to a plain, framework-agnostic dict.
+
+        The returned dict has three parts: ``config`` (the constructor
+        arguments needed to rebuild the object), ``params`` (the fitted
+        arrays, as numpy), and ``extra`` (scalar/schedule state). Every value
+        is a numpy array or a plain Python primitive, so the dict is JSON/
+        ``.npz``-safe (see :meth:`save`). Rebuild with :meth:`from_state_dict`.
+
+        Raises if the model is unfitted or degenerate (a fit that ended on a
+        non-finite log-likelihood): a NaN model must not be persisted
+        silently.
+        """
+        if self.A is None:
+            raise RuntimeError(
+                "AMICAMLXNG.state_dict() requires a fitted model; call fit() first."
+            )
+        if self.stop_reason in self._DEGENERATE_STOP_REASONS:
+            raise RuntimeError(
+                f"Refusing to serialize a degenerate model (stop_reason="
+                f"{self.stop_reason!r}): fit() hit a non-finite log-likelihood "
+                f"at iteration {self.iteration}. Fix the instability (lower "
+                f"lrate, disable Newton, or check data conditioning) before "
+                f"saving."
+            )
+        # Defense-in-depth: catch a non-finite parameter even if stop_reason
+        # bookkeeping ever misses it (the codebase has known NaN-suppression
+        # risks). isfinite on the integer comp_list/pdtype is trivially
+        # all-True.
+        nonfinite = [
+            name
+            for name in self._PARAM_ARRAYS
+            if not bool(mx.all(mx.isfinite(getattr(self, name))).item())
+        ]
+        if nonfinite:
+            raise RuntimeError(
+                f"Refusing to serialize a model with non-finite parameters "
+                f"{nonfinite} (stop_reason={self.stop_reason!r})."
+            )
+        config = {
+            "n_channels": self.n_channels,
+            "n_models": self.n_models,
+            "n_mix": self.n_mix,
+            # block_size is the value the fit actually ran at -- which, under
+            # do_opt_block, is the size the search chose rather than the one
+            # the constructor was given (issue #232), so a reloaded model
+            # reproduces the run it came from; the sweep bounds ride along so
+            # a re-fit can search again if asked.
+            "block_size": self.block_size,
+            "do_opt_block": self.do_opt_block,
+            "blk_min": self.blk_min,
+            "blk_max": self.blk_max,
+            "blk_step": self.blk_step,
+            # lrate/newtrate/rholrate are annealed during fit; persist the
+            # original constructor values (lrate0/newtrate0/rholrate0) and
+            # restore the mutated ones from ``extra`` below.
+            "lrate": self.lrate0,
+            "minlrate": self.minlrate,
+            "lratefact": self.lratefact,
+            "maxdecs": self.maxdecs,
+            "use_min_dll": self.use_min_dll,
+            "min_dll": self.min_dll,
+            "maxincs": self.maxincs,
+            "use_grad_norm": self.use_grad_norm,
+            "min_nd": self.min_nd,
+            "newt_ramp": self.newt_ramp,
+            "newt_start": self.newt_start,
+            "newtrate": self.newtrate0,
+            "do_newton": self.do_newton,
+            "rho0": self.rho0,
+            "minrho": self.minrho,
+            "maxrho": self.maxrho,
+            "rholrate": self.rholrate0,
+            "rholratefact": self.rholratefact,
+            # Density-family selection (issue #265): needed so a reloaded
+            # model rebuilds with the right pdftype/dorho/do_choose_pdfs and
+            # switch schedule instead of the GG default.
+            "pdftype": self.pdftype,
+            "kurt_start": self.kurt_start,
+            "num_kurt": self.num_kurt,
+            "kurt_int": self.kurt_int,
+            "invsigmin": self.invsigmin,
+            "invsigmax": self.invsigmax,
+            "doscaling": self.doscaling,
+            "scalestep": self.scalestep,
+            # Component sharing (issue #263): persisted so a reloaded
+            # multi-model run keeps its schedule; the merged comp_list itself
+            # is in params.
+            "share_comps": self.share_comps,
+            "share_start": self.share_start,
+            "share_iter": self.share_iter,
+            "comp_thresh": self.comp_thresh,
+            "do_mean": self.do_mean,
+            "do_sphere": self.do_sphere,
+            "do_approx_sphere": self.do_approx_sphere,
+            "mineig": self.mineig,
+            "mineig_rel": self.mineig_rel,
+            "seed": self.seed,
+            # Best-of-N restarts (issue #198). Persisted so a reloaded model
+            # reconstructs its exact configuration; the restart the fit
+            # actually kept is in ``extra`` below.
+            "n_restarts": self.n_restarts,
+            "restart_seeds": self.restart_seeds,
+        }
+        params = {name: np.array(getattr(self, name)) for name in self._PARAM_ARRAYS}
+        extra = {
+            "sldet": float(self.sldet),
+            "iteration": int(self.iteration),
+            "ll_history": [float(v) for v in self.ll_history],
+            "final_ll": None if self.final_ll_ is None else float(self.final_ll_),
+            "stop_reason": self.stop_reason,
+            "n_kurt_done": int(self.n_kurt_done),
+            "lrate": float(self.lrate),
+            "lrate_cap": float(self.lrate_cap),
+            "newtrate": float(self.newtrate),
+            "rholrate": float(self.rholrate),
+            # Per-restart records (issue #198): which seeds ran, what each
+            # returned, and why each stopped.
+            "restart_seeds_": list(self.restart_seeds_),
+            "restart_lls_": [float(v) for v in self.restart_lls_],
+            "restart_stop_reasons_": list(self.restart_stop_reasons_),
+        }
+        return {
+            "format_version": self._SAVE_FORMAT_VERSION,
+            "config": config,
+            "params": params,
+            "extra": extra,
+        }
+
+    @classmethod
+    def from_state_dict(cls, state: dict) -> "AMICAMLXNG":
+        """Rebuild a fitted :class:`AMICAMLXNG` from :meth:`state_dict` output.
+
+        Unlike ``AMICATorchNG.from_state_dict`` there is no ``device``
+        argument: this backend always runs on ``mx.default_device()``.
+        """
+        version = state.get("format_version")
+        if version != cls._SAVE_FORMAT_VERSION:
+            raise ValueError(
+                f"unsupported AMICAMLXNG state format_version: {version!r} "
+                f"(expected {cls._SAVE_FORMAT_VERSION})"
+            )
+        for section in ("config", "params", "extra"):
+            if section not in state:
+                raise ValueError(
+                    f"malformed AMICAMLXNG state: missing {section!r} section "
+                    f"(format_version={version}); the payload may be truncated."
+                )
+        config = dict(state["config"])
+        obj = cls(**config)
+        obj._load_params(state)
+        return obj
+
+    def _load_params(self, state: dict) -> None:
+        """Restore fitted arrays/scalars from :meth:`state_dict` output onto
+        this instance."""
+        params = state["params"]
+        missing = [name for name in self._PARAM_ARRAYS if name not in params]
+        if missing:
+            raise ValueError(f"malformed AMICAMLXNG state: missing params {missing}")
+        # Guard against config/params drift: A and comp_list must match the
+        # dimensions the constructor just derived, or transform()/the E-step
+        # would fail later with a confusing matmul error far from load().
+        A = np.asarray(params["A"])
+        if A.shape != (self.n_channels, self.n_comps):
+            raise ValueError(
+                f"restored A has shape {A.shape}, expected "
+                f"{(self.n_channels, self.n_comps)} for n_channels="
+                f"{self.n_channels}, n_models={self.n_models}"
+            )
+        comp_list = np.asarray(params["comp_list"])
+        if comp_list.shape != (self.n_channels, self.n_models):
+            raise ValueError(
+                f"restored comp_list has shape {comp_list.shape}, expected "
+                f"{(self.n_channels, self.n_models)}"
+            )
+        for name in self._PARAM_ARRAYS:
+            value = np.asarray(params[name])
+            dtype = self._INT_PARAM_DTYPES.get(name, np.float32)
+            setattr(self, name, mx.array(value.astype(dtype)))
+
+        # Rebuild the MLX-only per-iteration caches (module docstring):
+        # unlike AMICATorchNG, which recomputes log|det W| and
+        # lgamma(1+1/rho) inline on every call, this backend hoists them to
+        # once-per-iteration cached arrays. A loaded model has no fit history
+        # to hoist them from, so they are rebuilt here from the restored
+        # params -- before this returns, transform()/_forward()/comp_used and
+        # every get_* accessor must work exactly as they would mid-fit.
+        self._comp_used_arr = mx.array(
+            np.isin(np.arange(self.n_comps), np.unique(np.array(self.comp_list)))
+        )
+        self._refresh_lgamma_table()
+        assert self.W is not None  # just set by the loop above
+        logdets = [
+            mx.linalg.slogdet(self.W[h], stream=_CPU)[1] for h in range(self.n_models)
+        ]
+        self._logdet_W = mx.stack(logdets)
+        # sphere was just replaced, so any cached back-map describes the old
+        # one. _sphere_np backs _pinv_sphere (get_sensor_mixing_matrix,
+        # _identify_shared_comps) at float64 precision during a live fit, but
+        # only the float32 ``sphere`` is a persisted param (the fixed
+        # 12-name set above) -- so a reloaded model's _sphere_np is the
+        # float32 sphere upcast to float64, not the higher-precision value
+        # _preprocess originally computed. This cannot affect transform()
+        # (which reads self.sphere directly, so it stays bit-identical
+        # pre/post round trip): only get_sensor_mixing_matrix() on a
+        # reloaded model carries this small extra rounding.
+        self._sphere_np = np.array(self.sphere, dtype=np.float64)
+        self._sphere_pinv = None
+
+        extra = state["extra"]
+        self.sldet = extra["sldet"]
+        self.iteration = extra["iteration"]
+        self.ll_history = list(extra["ll_history"])
+        self.final_ll_ = extra["final_ll"]
+        self.stop_reason = extra["stop_reason"]
+        self.n_kurt_done = extra["n_kurt_done"]
+        self.lrate = extra["lrate"]
+        self.lrate_cap = extra["lrate_cap"]
+        self.newtrate = extra["newtrate"]
+        self.rholrate = extra["rholrate"]
+        self.restart_seeds_ = list(extra.get("restart_seeds_", []))
+        self.restart_lls_ = list(extra.get("restart_lls_", []))
+        self.restart_stop_reasons_ = list(extra.get("restart_stop_reasons_", []))
+
+    def save(self, filepath: str) -> None:
+        """Persist the fitted model to ``filepath`` as a single ``.npz``
+        (issue #287).
+
+        Device- and framework-agnostic by construction: ``config``/``extra``
+        are embedded as JSON-encoded 0-d string arrays and ``params`` as
+        native numpy arrays, all written by ``np.savez_compressed`` -- no
+        torch coupling, no pickle. Reload with :meth:`load`. Raises the same
+        refusal guards as :meth:`state_dict` (unfitted, degenerate, or
+        non-finite parameters).
+        """
+        state = self.state_dict()
+        np.savez_compressed(
+            filepath,
+            format_version=state["format_version"],
+            config=json.dumps(state["config"]),
+            extra=json.dumps(state["extra"]),
+            **state["params"],
+        )
+
+    @classmethod
+    def load(cls, filepath: str) -> "AMICAMLXNG":
+        """Rebuild a fitted :class:`AMICAMLXNG` from a file written by
+        :meth:`save`.
+
+        Wrong ``format_version``, a missing ``config``/``extra``/``params``
+        section, or a truncated archive missing one of the 12 param arrays
+        each raise a named ``ValueError`` naming what is missing, rather than
+        loading a silently partial model.
+        """
+        with np.load(filepath, allow_pickle=False) as data:
+            files = set(data.files)
+            for section in ("format_version", "config", "extra"):
+                if section not in files:
+                    raise ValueError(
+                        f"malformed AMICAMLXNG save file {filepath!r}: missing "
+                        f"{section!r} (the file may be truncated or corrupted)."
+                    )
+            version = int(data["format_version"])
+            if version != cls._SAVE_FORMAT_VERSION:
+                raise ValueError(
+                    f"unsupported AMICAMLXNG save format_version: {version!r} "
+                    f"(expected {cls._SAVE_FORMAT_VERSION})"
+                )
+            config = json.loads(data["config"].item())
+            extra = json.loads(data["extra"].item())
+            missing_params = [name for name in cls._PARAM_ARRAYS if name not in files]
+            if missing_params:
+                raise ValueError(
+                    f"malformed AMICAMLXNG save file {filepath!r}: missing "
+                    f"params {missing_params} (the file may be truncated or "
+                    f"corrupted)."
+                )
+            params = {name: np.array(data[name]) for name in cls._PARAM_ARRAYS}
+        state = {
+            "format_version": version,
+            "config": config,
+            "params": params,
+            "extra": extra,
+        }
+        return cls.from_state_dict(state)
