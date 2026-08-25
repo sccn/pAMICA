@@ -3,8 +3,30 @@
 Release notes are also published on the
 [GitHub releases page](https://github.com/sccn/pAMICA/releases).
 
-## Unreleased
+## 0.3.3
 
+MLX fitting parity (convergence stops, component sharing, Newton, all five
+source-density families), best-of-N restarts on every backend, the
+Fortran-faithful stashed `LLt`, an OOM-safe block-size auto-tuner,
+annotation-based rejection in the MNE wrapper, and `share_comps` on
+rank-reduced fits; validated end to end on real Maxwell-filtered MEG by an
+external tester (#221).
+
+- **Best-of-N random restarts on all three backends** (issue #198, from the
+  #145 investigation). `n_restarts` and `restart_seeds` are constructor
+  parameters with identical semantics on `AMICATorchNG`, `AMICAMLXNG` and
+  `AMICA_NumPy` (forwarded by the `AMICA` wrapper): the fit runs from several
+  seeds and keeps the highest final log-likelihood, extending #51's within-run
+  `keep_best` across runs -- #145 showed random-init disagreement with the
+  reference is basin choice on weak components, not a dynamics difference.
+  Seeds default to `seed, seed+1, ..., seed+N-1`; `n_restarts > 1` without a
+  base seed or explicit seeds is refused (best-of-N must be reproducible, and
+  pamica never seeds itself from the clock). Degenerate restarts are excluded
+  from selection but recorded (`restart_seeds_`/`restart_lls_`/
+  `restart_stop_reasons_`, NaN likelihood where degenerate); ties keep the
+  earlier restart, so selection is deterministic. `n_restarts=1` (the default)
+  is bit-identical to before. Fortran has no equivalent; recorded in
+  `docs/guides/amica-differences.md`.
 - **`mir()`'s PCA-reduction guard now checks the fitted sphere's geometry,
   not just which parameter caused the reduction** (issue #283).
   `AMICATorchNG._pca_reduced()` previously only checked whether `pcakeep`/
@@ -26,7 +48,7 @@ Release notes are also published on the
   (issue #157), on both the PyTorch and NumPy backends, instead of being
   recomputed by a fresh full-dataset forward pass at write time. This is the
   reference's own design -- `modloglik`/`loglik` are allocated once
-  (amica15.f90:2619-2620), filled by every E-step and dumped verbatim by
+  (amica15.f90:2617-2620), filled by every E-step and dumped verbatim by
   `write_output` -- and it removes the last full pass the write path paid for:
   a NumPy `writestep` checkpoint drops from 78 ms to 0.8 ms on the bundled
   32-channel sample, and a PyTorch fit no longer spends an extra E-step (12.8
@@ -44,7 +66,7 @@ Release notes are also published on the
   `final_ll_`. `model_loglik(X)` still gives the log-likelihood of the written
   parameters if that is what you need. The `do_reject` zero sentinel is
   unchanged (a rejected sample's entries are zeroed exactly as
-  amica15.f90:2232-2234 does), and one reference-faithful exception to the
+  amica15.f90:2231-2234 does), and one reference-faithful exception to the
   invariant is now pinned as behavior: a `do_reject` fit that rejects on the
   same iteration as the write leaves a small residual, because Fortran
   normalizes `LL(iter)` (amica15.f90:1770) before `reject_data` shrinks the
@@ -108,9 +130,10 @@ Release notes are also published on the
   constructor/`fit()` names, renaming the three that Fortran spells
   differently (`min_grad_norm` -> `min_nd`, `max_decs` -> `maxdecs`,
   `numrej` -> `maxrej`), and warns loudly (never drops silently) about the
-  36 known keywords with no pamica equivalent (checkpoint warm-start,
-  per-family EM freeze toggles, the `do_opt_block` search, FIR/DFT
-  pre-filtering, reporting cadence, ...), about any keyword it does not
+  32 known keywords with no pamica equivalent (checkpoint warm-start,
+  per-family EM freeze toggles, FIR/DFT pre-filtering, reporting cadence,
+  ...; the `do_opt_block` search keys moved to identity mappings with #232,
+  see below), about any keyword it does not
   recognize at all, and (hard `ValueError`) when a non-empty file yields
   zero recognized settings. `fit()` applies the translated dict as per-call
   defaults -- an explicitly passed argument always wins over the file's
@@ -309,6 +332,23 @@ Release notes are also published on the
   freeze `A` permanently (`share_int <= 6`) are rejected at construction, as in
   `AMICATorchNG`. Sharing is off by default, and fits with it off are bit-
   identical.
+- **`comp_used` no longer goes stale across `share_comps` schedule points on
+  the NumPy backend** (issue #240). `identify_shared_components` rebuilt the
+  mask all-True on every call, and since the merge loop skips already-merged
+  pairs, a later schedule point resurrected merged-away columns as live: the
+  unmasked mixture updates then divided 0/0 for every merged-away column and
+  the fit returned NaN mixture parameters while reporting success.
+  `comp_used` is now derived from the final `comp_list` (exactly the set of
+  referenced columns, matching how `AMICATorchNG.comp_used` is a derived
+  property that cannot go stale), and merged-away columns are skipped and
+  frozen at their last finite value instead of carrying NaN.
+- **The `nd` gradient-norm metric is weighted by the pre-update model
+  weights** (issue #219), on the NumPy and PyTorch backends, matching the
+  reference's ordering: Fortran accumulates `dAk`/`nd` before `update_params`
+  reassigns `gm` (amica15.f90:1749-1761, :1788). Single-model fits are
+  unchanged (the weight cancels); the MLX counterpart landed with the #263
+  sharing port (see that entry). Affects the `use_grad_norm`/`min_nd` stop
+  under multi-model fits.
 - **A NumPy fit that ends non-finite no longer reports success** (issue #240).
   `fit()` checks the fitted parameters at exit, not only the likelihood, and
   sets `converged=False` with a `stop_reason` naming what went non-finite.
@@ -322,6 +362,14 @@ Release notes are also published on the
   0, so every fit wrote a checkpoint after its first iteration whatever
   `writestep` said. Final results are unaffected: `fit()` always writes the
   converged result.
+- **The MNE wrapper honors `bad_*` annotations during fitting** (issue #251,
+  contributed by the project's external MEG tester). `AMICAICA.fit(...,
+  reject_by_annotation=True)` (the default, matching
+  `mne.preprocessing.ICA.fit`'s convention) excludes samples covered by
+  annotations whose description starts with `bad` from the AMICA fit. The
+  original-timeline mask is kept in `good_sample_mask_`, and scoring stays
+  timeline-faithful: `get_model_probability` returns full-length,
+  original-time-axis output with NaN over the rejected spans.
 - **`share_comps` works on rank-reduced and rank-deficient fits** (issue #253,
   reported from Maxwell-filtered MEG in #221). The PyTorch merge metric mapped
   mixing columns back to sensor space with `inv(sphere)`, which raised
