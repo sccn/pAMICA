@@ -273,8 +273,8 @@ _NOOP_PIN_STOP_REASON = "max_iter"
 # A handful of representative A entries (two diagonal, two off-diagonal, one
 # corner), replacing the previous SHA-256 hash of the full A/W arrays: a
 # cross-machine hash can never match (any per-entry float32 noise flips it),
-# but these entries under the same _REL_TOL still catch a real fit-path
-# change while surviving cross-GPU float32 noise.
+# but these entries under the same relative tolerance still catch a real
+# fit-path change while surviving cross-GPU float32 noise.
 _NOOP_PIN_A_ENTRIES = {
     (0, 0): 0.8831924,
     (5, 5): 0.95371497,
@@ -282,6 +282,15 @@ _NOOP_PIN_A_ENTRIES = {
     (31, 31): 0.99918866,
     (0, 31): 0.032124873,
 }
+# Recorded max(|A|) from the same run (A columns are ~unit-normalized by
+# construction, so this sits near 1.0 regardless of seed/config). A[10, 20]
+# above (-0.0037) is itself near zero, so a PER-ENTRY relative bound would
+# collapse to an absolute tolerance of ~1.9e-8 there -- tighter than the
+# ~1.1e-7 cross-GPU float32 noise CI actually observed, and exactly the
+# near-zero-entry failure mode _max_rel_disagreement's docstring in
+# test_mlx_transform_cross_backend.py explains for transform's output. Scale
+# by this matrix-wide max instead, the same fix that function applies.
+_NOOP_PIN_A_MAXABS = 0.99975544
 _REL_TOL = 5e-6
 
 
@@ -295,6 +304,20 @@ def _assert_relclose(actual: float, expected: float, *, label: str) -> None:
     )
 
 
+def _assert_matrix_scale_close(actual: float, expected: float, *, label: str) -> None:
+    """Like :func:`_assert_relclose`, but scaled by the matrix-wide
+    ``_NOOP_PIN_A_MAXABS`` rather than by ``expected`` itself -- appropriate
+    for a single entry of a matrix whose entries individually pass through
+    near zero, per the module-level comment above."""
+    diff = abs(actual - expected)
+    tol = _REL_TOL * _NOOP_PIN_A_MAXABS
+    assert diff <= tol, (
+        f"{label}: {actual!r} differs from the recorded {expected!r} by "
+        f"{diff:.3e}, over the {tol:.3e} matrix-scaled tolerance "
+        f"({_REL_TOL:.0e} x max|A|={_NOOP_PIN_A_MAXABS})"
+    )
+
+
 def test_fit_path_is_unchanged_by_phase1():
     """The default fit path (``_fit_once`` and everything it calls) is
     unchanged by Phase 1's ``transform``/accessor/persistence additions,
@@ -305,11 +328,16 @@ def test_fit_path_is_unchanged_by_phase1():
     076605c, was bit-identical there -- see the module-level comment above).
     Exact equality does not survive a different Apple GPU model, though
     (MLX float32 is bit-reproducible on one machine, not across models), so
-    this CI-facing version checks per-entry RELATIVE agreement with the
-    recorded M4 Pro values instead: loose enough to survive cross-GPU
-    float32 noise (~1e-7), tight enough to still catch a genuine fit-path
-    regression (~1e-6+, see the module-level comment). ``stop_reason`` and
-    the trajectory length are still exact -- both machine-independent.
+    this CI-facing version checks agreement with the recorded M4 Pro values
+    instead: ``ll_history``/``final_ll_`` per-entry relative (safe -- their
+    magnitude, ~3.3, stays well clear of zero), the five ``A`` spot entries
+    scaled by the matrix-wide ``max|A|`` instead (``A[10, 20]`` is itself
+    near zero, so a per-entry relative bound there would be tighter than the
+    observed cross-GPU noise -- see the module-level comment). Both are
+    loose enough to survive cross-GPU float32 noise (~1e-7), tight enough to
+    still catch a genuine fit-path regression (~1e-6+, see the module-level
+    comment). ``stop_reason`` and the trajectory length are still exact --
+    both machine-independent.
     """
     m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED, block_size=BLOCK)
     m.fit(_real_data(4096), max_iter=10, verbose=False)
@@ -324,4 +352,4 @@ def test_fit_path_is_unchanged_by_phase1():
 
     a = np.array(m.A, dtype=np.float32)
     for (i, j), expected in _NOOP_PIN_A_ENTRIES.items():
-        _assert_relclose(float(a[i, j]), expected, label=f"A[{i},{j}]")
+        _assert_matrix_scale_close(float(a[i, j]), expected, label=f"A[{i},{j}]")
