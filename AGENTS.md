@@ -132,7 +132,7 @@ byte-for-byte unchanged. See `.context/decisions/` and `pamica/tests/torch_tests
 `AMICATorchNG`: on the `share_start`/`share_iter` schedule, components near-collinear across
 different models (cosine angle of their de-sphered mixing columns above `comp_thresh`) are merged
 into one shared mixing column + density, with an A-freeze for ~6 iterations after each merge
-(Fortran `identify_shared_comps`, amica15.f90:1898). The M-step already sums sufficient stats
+(Fortran `identify_shared_comps`, amica15.f90:1916). The M-step already sums sufficient stats
 through `comp_list`; the A-update was refactored to accumulate shared columns the same way
 (byte-identical when unshared), and merged-away columns are frozen (avoiding 0/0 NaN that Fortran
 tolerates behind its `comp_used` mask). OFF by default and a no-op for `n_models=1`, so single-model

@@ -16,7 +16,7 @@ that is not listed, that is a bug worth
 | 2 | Zero numerical rank | `numeigs = 0`, continues | `ValueError` naming cause and fix | fitting a zero-dimensional model is not a recoverable state | — (no reason to want it) |
 | 3 | Returned iterate | last EM iterate | highest-likelihood iterate (`keep_best`) | the lrate schedule is non-monotone; late Newton overshoots cut LL variance 12.7x → 2.0x | `keep_best=False` |
 | 4 | Newton | on (`do_newton=1`) | off | isolates the algorithm from initialization for parity work | `do_newton=True` |
-| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | PyTorch refuses `transform`/`get_*`/`save`; NumPy reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk) | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see ADR 0003, issues #50 and #240) |
+| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | PyTorch refuses `transform`/`get_*`/`save`; NumPy reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk) | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50 and #240) |
 | 6 | Precision | float64 | float64 (float32 on Apple GPUs) | Apple GPUs have no float64; float32 agrees to ~7 significant digits, not bit-parity | `dtype=torch.float64` |
 | 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
 | 8 | Columns merged away by `share_comps` | updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided) | a fit must not end holding NaN parameters, mask or no mask; the columns are dead either way | — (see issues #60, #240) |
@@ -330,7 +330,10 @@ each of `tests/torch_tests/test_ng_sharing.py`,
 One interaction worth knowing: PyTorch's `keep_best` safeguard (row 3 above)
 is disabled whenever `share_comps` is on, precisely because a merge changes
 the parameter count mid-fit -- restoring an earlier snapshot would silently
-undo the merge. So under sharing, every backend returns the last iterate, and
+undo the merge. The same guard disables it under `do_reject`, whose good-sample
+set changes mid-fit for the analogous reason (ADR 0003; the single
+`track_best` condition covers both). So under sharing, every backend returns
+the last iterate, and
 `final_ll_`/`self.ll[-1]` trailing a final-iteration merge is not a
 `keep_best` artifact; it happens the same way with `keep_best=False`.
 
@@ -339,7 +342,7 @@ undo the merge. So under sharing, every backend returns the last iterate, and
 `LLt` is the per-timepoint, per-model log-likelihood written alongside the
 model, the array EEGLAB's `loadmodout15.m` returns as `mod.Lht`/`mod.Lt`.
 pamica writes the values its last E-step computed, which is what the reference
-does: `modloglik`/`loglik` are allocated once (amica15.f90:2619-2620), filled
+does: `modloglik`/`loglik` are allocated once (amica15.f90:2617-2620), filled
 by each E-step (amica15.f90:1406-1411) and dumped verbatim by `write_output`
 (amica15.f90:2338-2343).
 
@@ -361,7 +364,7 @@ whose rejection fires on the same iteration as the write. `LL(iter)` is
 normalized over the good set as it stood *before* that rejection
 (amica15.f90:1770), and `reject_data` then shrinks `numgoodsum`
 (amica15.f90:2252) and zeroes the rejected samples' `modloglik`/`loglik`
-(amica15.f90:2232-2234), so the two sides stop counting the same samples and a
+(amica15.f90:2231-2234), so the two sides stop counting the same samples and a
 small residual remains — 0.011 on the bundled sample for a pass that drops 68
 of 4096 samples, identical on both pamica backends, and of the same order in
 the binary itself. It scales with how much that one pass drops. Any later
@@ -422,8 +425,9 @@ itself across a normal multi-hundred-iteration fit and does not across a very
 short one, which is the other half of why this is opt-in. On the bundled
 32-channel sample the block-size curve is flat enough that the win is modest
 (torch-CPU picks 16384 for ~1.13x over the 8192 default; NumPy picks 16384 for
-~1.03x); the 16–60% gaps in the table above are on the configurations where the
-optimum sits far from 8192.
+~1.03x); the big wins live where the optimum sits far from 8192, most of all
+PyTorch-MPS, whose single-block optimum runs ~2.3x faster than the 8192 default
+in the validation guide's block-size table.
 
 The behavioral difference that motivated the port is what happens when a
 candidate does not fit in memory. The search walks *upward* into larger blocks,
@@ -468,7 +472,7 @@ asserted, per backend, in `test_ng_restarts.py`, `test_numpy_restarts.py` and
 `test_mlx_restarts.py`.
 
 Fortran has nothing to compare this against. Its `maxrestarts`/`restartiter`
-machinery (`amica17.f90:1027-1060`, ported to the NumPy backend as
+machinery (`amica15.f90:1022-1052`, ported to the NumPy backend as
 `numrestarts`) is a *recovery* path — it redraws the mixing matrix after an
 early non-finite likelihood and continues the same run — not a search over
 seeds, and it never compares two completed fits. So this is a pamica extension,

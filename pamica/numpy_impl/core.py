@@ -281,7 +281,7 @@ class AMICA:
         # Consecutive small-increase iterations tolerated before stopping
         # (Fortran maxincs, amica17.f90:1087).
         self.maxincs = params.get("maxincs", 5)
-        # Restart-on-NaN (Fortran amica17.f90:1027-1060): if the LL goes
+        # Restart-on-NaN (Fortran amica15.f90:1022-1052): if the LL goes
         # non-finite at iter <= restartiter, reinitialize and start over, up to
         # maxrestarts times; a later NaN stops the fit (Fortran exits too).
         self.restartiter = params.get("restartiter", 10)
@@ -327,7 +327,7 @@ class AMICA:
         # Best-of-N restarts (issue #198), a pamica extension: run the fit from
         # several seeds and keep the highest-likelihood one. Distinct from
         # ``maxrestarts``/``numrestarts`` above, which is Fortran's *recovery*
-        # path (redraw A after an early non-finite LL, amica17.f90:1027-1060)
+        # path (redraw A after an early non-finite LL, amica15.f90:1022-1052)
         # and never compares two completed fits. Resolved here so a bad
         # configuration fails before any data is touched, and derived from the
         # constructor seed so a second fit() repeats the same seeds even though
@@ -400,7 +400,7 @@ class AMICA:
         # E-step already computes, kept for the write path instead of being
         # recomputed there by a second full-dataset forward pass. This is
         # Fortran's design -- ``modloglik(num_models,N)``/``loglik(N)`` are
-        # allocated once (amica15.f90:2619-2620), filled by every E-step
+        # allocated once (amica15.f90:2617-2620), filled by every E-step
         # (amica15.f90:1406-1411) and simply dumped by ``write_output``
         # (amica15.f90:2338-2343). Zero-filled so a ``do_reject`` sample keeps
         # the zero that ``load_rej`` reads as the rejection sentinel. Memory is
@@ -1134,7 +1134,7 @@ class AMICA:
     def _reinitialize_for_restart(self):
         """Redraw the mixing matrix after a non-finite likelihood.
 
-        Matches Fortran's restart path (amica17.f90:1032-1053): it re-draws
+        Matches Fortran's restart path (amica15.f90:1026-1046): it re-draws
         *only* the mixing matrix ``A`` (from the already-advanced RNG, a new
         random basin) and recomputes ``comp_list``/``W``; the last-successful
         mixture parameters (``mu``/``alpha``/``beta``/``rho``/``gm``/``c``) are
@@ -1613,7 +1613,7 @@ class AMICA:
         :func:`pamica.numpy_impl.load.write_amicaout`; it performs no forward
         pass of its own, so a ``writestep`` checkpoint costs no more than it did
         before ``LLt`` output existed. This is Fortran's design: ``modloglik``/
-        ``loglik`` are allocated once (amica15.f90:2619-2620), filled by every
+        ``loglik`` are allocated once (amica15.f90:2617-2620), filled by every
         E-step (amica15.f90:1406-1411) and dumped verbatim by ``write_output``
         (amica15.f90:2338-2343).
 
@@ -1639,7 +1639,7 @@ class AMICA:
 
         Under ``do_reject`` a rejected sample's entries are zero -- they are
         never scored again after ``_reject_outliers`` zeroes them (mirroring
-        amica15.f90:2232-2234), and ``load_rej`` reads exactly that zero as the
+        amica15.f90:2231-2234), and ``load_rej`` reads exactly that zero as the
         rejection sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:907).
 
         Returns
@@ -2050,7 +2050,7 @@ class AMICA:
                 # Update parameters
                 self._update_parameters(updates)
 
-                # Restart-on-NaN (Fortran amica17.f90:1027-1056): an early
+                # Restart-on-NaN (Fortran amica15.f90:1022-1050): an early
                 # non-finite LL usually means an unlucky init, so redraw A and
                 # start over, up to maxrestarts times, within the first
                 # restartiter iterations (Fortran's absolute `iter <= restartiter`
@@ -2390,7 +2390,7 @@ class AMICA:
             )
 
         # Zero the LLt stash for the samples being dropped, as Fortran's
-        # reject_data does (amica15.f90:2232-2234): they are never scored again,
+        # reject_data does (amica15.f90:2231-2234): they are never scored again,
         # so otherwise they would keep the log-likelihood from the last
         # iteration that still counted them good, and load_rej's
         # ``sum(modloglik(:,i)) == 0`` sentinel would not see them as rejected.
