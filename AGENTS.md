@@ -27,7 +27,7 @@ validate_implementations.py  # Runs both implementations, Hungarian component ma
 Module names are topic-based (`core`/`pdf`/`data`/... under `numpy_impl/`,
 `core`/`utils` under `torch_impl/`); the old `pamica.py`/`amica_*.py`/`amica_torch_ng.py`
 prefixes were dropped in issue #34. The public import surface is stable:
-`from pamica import AMICA, AMICA_NumPy, AMICATorchNG`. The optional MLX backend is
+`from pamica import AMICA, AMICA_NumPy, AMICATorchNG, AMICANative`. The optional MLX backend is
 imported separately (`from pamica.mlx_impl import AMICAMLXNG`) so `import pamica` never
 requires MLX; install it with `uv pip install mlx` or the `mlx` extra (Apple Silicon only).
 
