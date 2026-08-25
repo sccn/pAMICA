@@ -230,6 +230,42 @@ def test_round_trip_preserves_adaptive_switcher_state():
     assert np.array(m2.pdtype).dtype == np.array(m.pdtype).dtype
 
 
+def test_round_trip_preserves_newton_fallback_count(tmp_path):
+    """``n_newton_fallbacks`` round-trips exactly through both
+    ``state_dict``/``from_state_dict`` and ``.npz`` ``save``/``load``.
+
+    Driven cheaply and deterministically (not through a full ``fit()``,
+    which spreads Newton's curvature over every block of the real recording
+    and rarely rejects): hand-call ``_update_parameters`` a few times on one
+    256-sample block, genuinely under-determined for the 32-channel
+    curvature (measured min off-diagonal ``prod - 1`` = -0.96, same
+    construction as ``mlx_tests/test_mlx_newton.py::
+    test_fallback_ramps_toward_lrate_cap_and_counts``), so every call
+    rejects the Newton direction and increments the counter -- a real,
+    nonzero value to round-trip, not a vacuous 0.
+    """
+    m = AMICAMLXNG(
+        n_channels=NW, n_mix=NMIX, seed=SEED, block_size=256,
+        do_newton=True, newt_start=0,
+    )  # fmt: skip
+    x_t = m._preprocess(_real_data(4096))
+    m._initialize_parameters()
+    m.iteration = 5
+    acc = m._get_block_updates(x_t[:, :256])
+    for _ in range(3):
+        m._update_parameters(acc, 256)
+    mx.eval(m.A)
+    assert m.n_newton_fallbacks == 3, "the block is posdef; this test is vacuous"
+
+    m2 = AMICAMLXNG.from_state_dict(m.state_dict())
+    assert m2.n_newton_fallbacks == m.n_newton_fallbacks
+
+    filepath = tmp_path / "model.npz"
+    m.save(str(filepath))
+    m3 = AMICAMLXNG.load(str(filepath))
+    assert m3.n_newton_fallbacks == m.n_newton_fallbacks
+
+
 # --- refusals (plan item C6) -------------------------------------------------
 
 

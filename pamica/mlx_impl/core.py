@@ -2587,6 +2587,7 @@ class AMICAMLXNG:
             "final_ll": None if self.final_ll_ is None else float(self.final_ll_),
             "stop_reason": self.stop_reason,
             "n_kurt_done": int(self.n_kurt_done),
+            "n_newton_fallbacks": int(self.n_newton_fallbacks),
             "lrate": float(self.lrate),
             "lrate_cap": float(self.lrate_cap),
             "newtrate": float(self.newtrate),
@@ -2692,6 +2693,7 @@ class AMICAMLXNG:
         self.final_ll_ = extra["final_ll"]
         self.stop_reason = extra["stop_reason"]
         self.n_kurt_done = extra["n_kurt_done"]
+        self.n_newton_fallbacks = extra["n_newton_fallbacks"]
         self.lrate = extra["lrate"]
         self.lrate_cap = extra["lrate_cap"]
         self.newtrate = extra["newtrate"]
