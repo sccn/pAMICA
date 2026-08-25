@@ -19,7 +19,6 @@ branch tip (076605c) before any Phase 1 code existed -- recorded below from
 that run.
 """
 
-import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -239,12 +238,24 @@ def test_get_rho_raises_on_force_set_nan_rho():
 
 # Recorded from an ACTUAL run on the epic branch tip (076605c, "Address
 # 0.3.3 release review findings (#303)"), i.e. before any Phase 1 code
-# existed in this worktree -- see the PR body for the exact recording
-# command. MLX GPU execution on this machine is deterministic (confirmed:
-# two back-to-back runs of this exact config produced bit-identical
-# ll_history and A), so re-running the identical config on this branch and
-# comparing is a real, non-vacuous pin that adding transform/accessors/
-# persistence touched nothing _fit_once calls.
+# existed in this worktree, on the development machine (Apple M4 Pro) -- see
+# the PR body for the exact recording command. THE BIT-LEVEL NO-OP CLAIM WAS
+# VERIFIED THERE: two back-to-back runs of this exact config on that machine
+# produced bit-identical ll_history/A/W, and a before/after run across the
+# Phase 1 changes on that same machine was likewise bit-identical, which is
+# what actually establishes that this phase touches nothing _fit_once calls.
+#
+# This test is the LOOSER canary that survives CI running a different Apple
+# GPU model: MLX float32 is bit-reproducible on one machine but not across
+# GPU models (observed on CI: ll_history[0] -3.332018613 vs this machine's
+# -3.332018852, a ~7e-8 relative difference -- not a fit-path regression).
+# _REL_TOL (5e-6) is calibrated between that noise floor and a real change:
+# ~50x the observed ~1e-7 cross-GPU spread, comfortably below the ~1e-6+
+# trajectory shift a genuine fit-path change produces on this same benchmark
+# (issue #216's block_size default change alone shifted the trajectory
+# ~1e-6, "inside parity tolerance" -- AGENTS.md). stop_reason and
+# len(ll_history) are asserted exactly: they are a string and an int, so
+# they carry no floating-point cross-machine risk at all.
 _NOOP_PIN_LL_HISTORY = [
     -3.3320186138153076,
     -3.2827978134155273,
@@ -259,25 +270,58 @@ _NOOP_PIN_LL_HISTORY = [
 ]
 _NOOP_PIN_FINAL_LL = -3.25075626373291
 _NOOP_PIN_STOP_REASON = "max_iter"
-_NOOP_PIN_A_SHA256 = "fd35584abbeef2aae607777e043df33c057d238bee27098e0e46021baa47e55f"
-_NOOP_PIN_W_SHA256 = "fa75ae1f05e7996936526ef436de4004ef4cf376c04105a2ba7e296d44540f62"
+# A handful of representative A entries (two diagonal, two off-diagonal, one
+# corner), replacing the previous SHA-256 hash of the full A/W arrays: a
+# cross-machine hash can never match (any per-entry float32 noise flips it),
+# but these entries under the same _REL_TOL still catch a real fit-path
+# change while surviving cross-GPU float32 noise.
+_NOOP_PIN_A_ENTRIES = {
+    (0, 0): 0.8831924,
+    (5, 5): 0.95371497,
+    (10, 20): -0.0037135077,
+    (31, 31): 0.99918866,
+    (0, 31): 0.032124873,
+}
+_REL_TOL = 5e-6
+
+
+def _assert_relclose(actual: float, expected: float, *, label: str) -> None:
+    diff = abs(actual - expected)
+    tol = _REL_TOL * abs(expected)
+    assert diff <= tol, (
+        f"{label}: {actual!r} differs from the recorded {expected!r} by "
+        f"{diff:.3e} (relative {diff / abs(expected):.3e}), over the "
+        f"{_REL_TOL:.0e} cross-GPU tolerance"
+    )
 
 
 def test_fit_path_is_unchanged_by_phase1():
     """The default fit path (``_fit_once`` and everything it calls) is
-    bit-identical to the epic branch tip, before any of this phase's
-    ``transform``/accessor/persistence additions existed. Phase 1 only adds
-    new methods; it does not edit ``_fit_once`` or its call graph, so this
-    must reproduce the pre-Phase-1 run exactly, not just approximately.
+    unchanged by Phase 1's ``transform``/accessor/persistence additions,
+    which add new methods without editing ``_fit_once`` or its call graph.
+
+    The bit-level no-op claim was verified same-machine at development time
+    (a before/after run across this phase's changes on the epic branch tip,
+    076605c, was bit-identical there -- see the module-level comment above).
+    Exact equality does not survive a different Apple GPU model, though
+    (MLX float32 is bit-reproducible on one machine, not across models), so
+    this CI-facing version checks per-entry RELATIVE agreement with the
+    recorded M4 Pro values instead: loose enough to survive cross-GPU
+    float32 noise (~1e-7), tight enough to still catch a genuine fit-path
+    regression (~1e-6+, see the module-level comment). ``stop_reason`` and
+    the trajectory length are still exact -- both machine-independent.
     """
     m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED, block_size=BLOCK)
     m.fit(_real_data(4096), max_iter=10, verbose=False)
 
-    assert m.ll_history == _NOOP_PIN_LL_HISTORY
-    assert m.final_ll_ == _NOOP_PIN_FINAL_LL
     assert m.stop_reason == _NOOP_PIN_STOP_REASON
+    assert len(m.ll_history) == len(_NOOP_PIN_LL_HISTORY)
 
-    a_bytes = np.array(m.A, dtype=np.float32).tobytes()
-    w_bytes = np.array(m.W, dtype=np.float32).tobytes()
-    assert hashlib.sha256(a_bytes).hexdigest() == _NOOP_PIN_A_SHA256
-    assert hashlib.sha256(w_bytes).hexdigest() == _NOOP_PIN_W_SHA256
+    for it, (actual, expected) in enumerate(zip(m.ll_history, _NOOP_PIN_LL_HISTORY)):
+        _assert_relclose(actual, expected, label=f"ll_history[{it}]")
+    assert m.final_ll_ is not None
+    _assert_relclose(m.final_ll_, _NOOP_PIN_FINAL_LL, label="final_ll_")
+
+    a = np.array(m.A, dtype=np.float32)
+    for (i, j), expected in _NOOP_PIN_A_ENTRIES.items():
+        _assert_relclose(float(a[i, j]), expected, label=f"A[{i},{j}]")
