@@ -65,9 +65,11 @@ def test_rejects_unsupported_config():
     ``NotImplementedError`` here; now all five families (0/1/2/3/4) construct
     and are honored, so this is the canary that the boundary moved rather than
     silently vanishing. Multi-model (#81), component sharing (#263) and Newton
-    (#264) were already supported. What is still deferred -- ``transform``,
-    outlier rejection, save/load -- is exercised below and in
-    ``test_mlx_pdf_families_cross_backend.py``/``mlx_tests/test_mlx_pdf.py``."""
+    (#264) were already supported. ``transform``/save-load are now implemented
+    too (issue #287, epic #278 Phase 1) -- exercised in
+    ``mlx_tests/test_mlx_transform.py``/``test_mlx_persistence.py``. What
+    remains deferred (outlier rejection, ``keep_best``) is epic #278 Phases 2
+    and 3."""
     from pamica.mlx_impl import AMICAMLXNG
 
     for pdftype, n_mix in [(0, NMIX), (2, NMIX), (3, NMIX), (4, 1), (1, 1)]:
@@ -78,8 +80,10 @@ def test_rejects_unsupported_config():
     # gradient, which is how the pre-#264 backend would have "supported" it.
     assert AMICAMLXNG(n_channels=NW, n_mix=NMIX, do_newton=True).do_newton is True
 
-    # transform is still a genuine, still-deferred boundary.
-    with pytest.raises(NotImplementedError):
+    # transform() is implemented now; calling it unfitted still fails, just
+    # with the "call fit() first" boundary every other accessor uses instead
+    # of the old blanket NotImplementedError.
+    with pytest.raises(RuntimeError, match="requires a fitted model"):
         AMICAMLXNG(n_channels=NW, n_mix=NMIX).transform(np.zeros((NW, 10)))
 
 

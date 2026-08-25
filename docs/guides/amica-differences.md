@@ -137,7 +137,7 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | `keep_best` best-iterate restore | yes | no | no | n/a |
 | `n_restarts` best-of-N restarts | yes | yes | yes | n/a |
 | MIR diagnostic | yes | no | no | n/a |
-| Persistence | `state_dict` | EEGLAB `amicaout` | none | EEGLAB `amicaout` |
+| Persistence | `state_dict` | EEGLAB `amicaout` | `state_dict`/`.npz` `save`-`load` | EEGLAB `amicaout` |
 | Fortran `input.param` reader | yes (`AMICA.from_params_file`, #132) | no (`params_file` is JSON-only) | no | native |
 
 The NumPy row's "GG only" corrects an earlier version of this table, which
@@ -146,9 +146,17 @@ function) has no `pdtype` parameter at all, so the legacy backend never
 implemented the non-GG families the PyTorch and MLX backends carry (issue
 #265).
 
-Most MLX limitations fail loudly: `transform` and every unsupported parameter
-(outlier rejection, save/load) are simply absent from the constructor or raise
-`NotImplementedError`, rather than silently downgrading.
+`transform` and the `get_mixing_matrix`/`get_unmixing_matrix`/
+`get_sensor_mixing_matrix`/`get_rho` accessors, plus `state_dict`/
+`from_state_dict` and a device- and framework-agnostic `.npz` `save`/`load`,
+were added in epic #278 Phase 1 (issue #287): `AMICAMLXNG.transform` mirrors
+`AMICATorchNG.transform` semantically, deriving the unmixing composition from
+MLX's own `_forward` (its `W` is `(n_models, n, n)`, not torch's
+`(n, n, n_models)`), and the `.npz` layout embeds `config`/`extra` as
+JSON-encoded scalars alongside the 12 native param arrays -- no torch
+coupling, no pickle. Remaining MLX limitations still fail loudly: `keep_best`
+and every unsupported parameter (outlier rejection) are simply absent from
+the constructor, rather than silently downgrading.
 
 One MLX failure mode used to be worse than loud — it was uncatchable. MLX
 0.32's CPU-stream `mx.linalg.inv` does not raise a Python exception on a

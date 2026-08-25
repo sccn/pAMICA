@@ -3,6 +3,23 @@
 Release notes are also published on the
 [GitHub releases page](https://github.com/sccn/pAMICA/releases).
 
+## Unreleased
+
+- **MLX backend: `transform` and save/load** (issue #287, epic #278 Phase 1).
+  `AMICAMLXNG` gained source extraction (`transform`, plus the
+  `get_mixing_matrix`/`get_unmixing_matrix`/`get_sensor_mixing_matrix`/
+  `get_rho` accessors, mirroring `AMICATorchNG`'s issue #24/#27/#142/#223
+  conventions) and persistence (`state_dict`/`from_state_dict`, plus a
+  device- and framework-agnostic `.npz` `save`/`load` -- `config`/`extra` as
+  JSON-encoded scalars, params as native arrays, no torch coupling, no
+  pickle). `transform` derives the unmixing composition from MLX's own
+  `_forward` rather than transcribing torch's tensor layout: MLX's `W` is
+  `(n_models, n, n)`, not torch's `(n, n, n_models)`. Fitting is untouched
+  (`_fit_once` and its call graph are unmodified; a default fit is
+  bit-identical to before this phase). Remaining MLX gaps -- `keep_best`
+  (Phase 2, #288) and outlier rejection + LLt/MIR (Phase 3, #289) -- are
+  tracked under epic #278.
+
 ## 0.3.3
 
 MLX fitting parity (convergence stops, component sharing, Newton, all five
