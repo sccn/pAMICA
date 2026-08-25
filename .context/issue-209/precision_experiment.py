@@ -356,6 +356,13 @@ def _fit_fortran(
             )
         except OSError as exc:  # wrong binary format (e.g. mac Mach-O on Linux)
             return {"available": False, "reason": f"exec failed: {exc}"}
+        except subprocess.TimeoutExpired:
+            # A hung binary raises TimeoutExpired, not OSError; keep it inside
+            # the structured result like every other failure mode here.
+            return {
+                "available": False,
+                "reason": f"timed out after {_FORTRAN_TIMEOUT}s",
+            }
         elapsed = time.perf_counter() - t0
         if res.returncode != 0:
             return {
