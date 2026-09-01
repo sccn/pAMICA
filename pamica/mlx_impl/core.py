@@ -2948,6 +2948,106 @@ class AMICAMLXNG:
         return np.array(self.rho[:, idx])
 
     # ------------------------------------------------------------------
+    # Multi-model posterior (issue #141; epic #278 Phase 3/#289 port of
+    # AMICATorchNG.model_loglik/model_probability, torch_impl/core.py:
+    # 3041-3132)
+    # ------------------------------------------------------------------
+    def model_loglik(self, X: np.ndarray) -> np.ndarray:
+        """Per-model, per-sample log-likelihood ``Lht`` on (new) data.
+
+        For each model ``h`` and sample ``t`` this is the joint log-likelihood
+        ``log(gm[h]) + log|det W_h| + sldet + sum_i log p_h(s_i)`` (Fortran's
+        ``Lht``/``modloglik``), evaluated on arbitrary raw data via the
+        STORED sphere/mean -- never re-preprocessing, which would overwrite
+        them. The per-sample posterior over models (model dominance) is
+        ``softmax(Lht, axis=0)``; see :meth:`model_probability`.
+
+        This does not replicate a training-time ``do_reject`` mask: it
+        scores every sample of ``X``. On a ``do_reject`` fit's own training
+        data it therefore returns real values where the stored ``_llt_lht``
+        carries Fortran's sentinel zeros for rejected samples (issue #155),
+        so the two agree bit-for-bit only when the fit did not use
+        ``do_reject``. Like :meth:`transform`, it assumes a usable
+        (non-degenerate) fit; the :class:`~pamica.AMICA` wrapper enforces
+        that via ``_check_usable``.
+
+        Parameters
+        ----------
+        X : np.ndarray of shape (n_channels, n_samples)
+            Raw (unpreprocessed) data.
+
+        Returns
+        -------
+        Lht : np.ndarray of shape (n_models, n_samples)
+
+        Raises
+        ------
+        RuntimeError
+            If the model is unfitted.
+        ValueError
+            If ``X`` contains non-finite (NaN/Inf) values.
+        """
+        if self.sphere is None or self.mean is None or self.W is None:
+            raise RuntimeError(
+                "AMICAMLXNG.model_loglik() requires a fitted model; call fit() first."
+            )
+        X = np.ascontiguousarray(X)
+        if not np.isfinite(X).all():
+            bad = np.flatnonzero(~np.isfinite(X).all(axis=1))
+            raise ValueError(
+                "AMICAMLXNG.model_loglik(): input contains non-finite "
+                f"(NaN/Inf) values in {bad.size} channel(s) {bad.tolist()}; "
+                "clean bad segments before scoring."
+            )
+        X_arr = mx.array(X.astype(np.float32))
+        X_t = self.sphere @ (X_arr - self.mean)
+        n_samples = X_t.shape[1]
+        Lht = np.zeros((self.n_models, n_samples), dtype=np.float32)
+        for start in range(0, n_samples, self.block_size):
+            end = min(start + self.block_size, n_samples)
+            logV, *_ = self._forward(X_t[:, start:end])
+            Lht[:, start:end] = np.array(logV).T
+        return Lht
+
+    def model_probability(self, X: np.ndarray) -> np.ndarray:
+        """Per-sample posterior probability of each model (model dominance).
+
+        The column-wise ``softmax`` over models of :meth:`model_loglik`,
+        i.e. ``P(model h | x_t)``; each column sums to 1. For a single model
+        this is all ones.
+
+        Parameters
+        ----------
+        X : np.ndarray of shape (n_channels, n_samples)
+            Raw (unpreprocessed) data.
+
+        Returns
+        -------
+        prob : np.ndarray of shape (n_models, n_samples)
+
+        Raises
+        ------
+        RuntimeError
+            If the model is unfitted.
+        ValueError
+            If ``X`` is non-finite, or if every model underflows to ``-inf``
+            log-likelihood at some sample (the posterior is undefined
+            there).
+        """
+        Lht = self.model_loglik(X)
+        col_max = Lht.max(axis=0, keepdims=True)
+        if not np.isfinite(col_max).all():
+            n_bad = int((~np.isfinite(col_max)).sum())
+            raise ValueError(
+                f"AMICAMLXNG.model_probability(): every model has -inf "
+                f"log-likelihood at {n_bad} sample(s), so the posterior is "
+                "undefined there (an extreme outlier under a tight source "
+                "density)."
+            )
+        ex = np.exp(Lht - col_max)
+        return ex / ex.sum(axis=0, keepdims=True)
+
+    # ------------------------------------------------------------------
     # Persistence (issue #287)
     # ------------------------------------------------------------------
     # Full fitted-parameter snapshot -- the same 12-name set as AMICATorchNG's
