@@ -17,9 +17,11 @@ best-iterate safeguard (`keep_best`) is implemented (epic #278 Phase 2, issue
 #288). Outlier rejection (`do_reject`), the LLt-stash-backed scoring accessors
 (`model_loglik`/`model_probability`), the EEGLAB `write_amica_output` export,
 and the MIR/PMI diagnostics (`mir`/`pmi`, `fit(mir_step=...)` waypoints) are
-implemented (epic #278 Phase 3, issue #289) -- epic #278 is complete; there
-are no remaining gaps against the PyTorch backend other than float32-only
-precision (Apple GPUs have no float64).
+implemented (epic #278 Phase 3, issue #289). The `variance_order` accessor
+(the EEGLAB back-projected-variance component order) landed in the epic's
+post-Phase-3 polish round, ahead of merge to `dev` -- epic #278 is complete;
+there are no remaining gaps against the PyTorch backend other than
+float32-only precision (Apple GPUs have no float64).
 
 MLX is an optional dependency (Apple Silicon only), so it is imported separately
 and is not part of the default `import pamica` surface:
