@@ -447,6 +447,22 @@ the good set and which does not -- a WORK divergence, matching the
 `do_choose_pdfs`-adjacent `drho_n`/lgamma-table WORK divergences already
 documented above, not a correctness one.
 
+## `mir_step`'s upfront PCA-reduction gate: MLX has none, and that is parity, not a gap
+
+`AMICATorchNG.fit(mir_step=...)` rejects an EXPLICIT `pcakeep`/`pcadb`
+request up front (before any preprocessing runs), but -- deliberately, as of
+issue #300 -- never an AUTOMATIC `mineig`/`mineig_rel`-detected reduction
+upfront: that case is only ever caught downstream, inside the first
+per-waypoint `mir()` call, by the geometry-based `_pca_reduced()` guard
+issue #300 introduced (`sphere.shape[0] != sphere.shape[1]`). `AMICAMLXNG`
+has no explicit `pcakeep`/`pcadb` constructor parameter at all (only
+automatic rank detection, same as every other MLX rank-reduction path), so
+there is nothing for an upfront gate to check regardless of when it would
+run -- MLX's `mir_step` validation is the bare `mir_step >= 0` check, and
+automatic reduction degrades to the same warned, all-`NaN` `mir_history_`
+waypoints on both backends. This is intentional torch-parity for the
+auto-detected case, not a knowability limitation of MLX's fit-loop timing.
+
 ## The block-size search picks a machine-dependent value (issue #232)
 
 `do_opt_block` times a few candidate `block_size` values on your data and

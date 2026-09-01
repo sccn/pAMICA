@@ -2352,15 +2352,26 @@ class AMICAMLXNG:
         ``ll_history``: entry ``i`` is computed after iteration ``i``'s
         parameter update, while ``ll_history[i]`` is the likelihood of the
         parameters before it, so the two are one update apart (issue #161).
-        Unlike ``AMICATorchNG``, there is no upfront PCA-reduction gate
-        here: this backend has no explicit ``pcakeep``/``pcadb`` parameter
-        (only automatic ``mineig``/``mineig_rel`` reduction, which cannot be
-        known before :meth:`_preprocess` builds THIS fit's sphere), so an
-        incompatible reduction is instead caught once the sphere exists,
-        inside the per-waypoint :meth:`mir` call below -- whose
-        ``ValueError`` is already caught and logged rather than propagated,
-        exactly like ``AMICATorchNG``'s equivalent automatic-reduction case
-        (issue #283).
+        There is no upfront PCA-reduction ``ValueError`` gate here, but this
+        is NOT a knowability limitation -- the fitted sphere's shape is
+        known immediately after :meth:`_preprocess` runs, a few lines below
+        this docstring, well before the iteration loop (let alone the first
+        waypoint) starts. It is PARITY with ``AMICATorchNG``'s own deliberate
+        scope: that backend's upfront gate (``_pca_reduction_requested()``)
+        only ever fires for an EXPLICIT ``pcakeep``/``pcadb`` request --
+        checked before ``_preprocess`` runs at all, purely so a bad explicit
+        config fails fast without paying for any preprocessing work -- and
+        never for AUTOMATIC ``mineig``/``mineig_rel``-detected reduction,
+        which torch itself only catches downstream, per-waypoint, inside its
+        own :meth:`mir` call (issue #283's fix targeted exactly that
+        automatic-detection gap, not the upfront-vs-downstream split, which
+        issue #300 chose to keep). This backend has no explicit
+        ``pcakeep``/``pcadb`` parameter at all, so there is nothing for an
+        upfront gate to check regardless of preprocessing order -- the
+        automatic-reduction case is caught the same way on both backends:
+        downstream, per-waypoint, inside :meth:`mir`'s own :meth:`_pca_reduced`
+        guard, whose ``ValueError`` is caught and logged here rather than
+        propagated.
         """
         if X.ndim != 2:
             raise ValueError(f"X must be 2D (n_channels, n_samples), got {X.shape}")

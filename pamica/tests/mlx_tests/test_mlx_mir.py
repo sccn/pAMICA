@@ -235,6 +235,43 @@ def test_mir_full_rank_succeeds(real_data):
     assert math.isfinite(mir_nats) and math.isfinite(variance)
 
 
+def test_mir_step_on_rank_reduced_data_completes_with_warned_nan_waypoints(
+    real_data, caplog
+):
+    """No upfront mir_step gate exists for AUTOMATIC rank reduction on
+    EITHER backend (see amica-differences.md's "mir_step's upfront
+    PCA-reduction gate" section -- this is intentional torch-parity, not a
+    gap): fit(mir_step=N) on rank-reduced real data must still complete,
+    with every waypoint recorded as a warned (iter, NaN, NaN) entry via
+    the same failed-waypoint guard test_failing_mir_waypoint_does_not_
+    kill_the_fit exercises via injection -- here the failure is organic
+    (mir()'s own #300 guard), not injected."""
+    x = real_data - real_data.mean(axis=1, keepdims=True)
+    u16 = np.linalg.svd(x, full_matrices=False)[0][:, :16]
+    x_low = u16 @ (u16.T @ x)
+
+    m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED, block_size=BLOCK)
+    with caplog.at_level(logging.WARNING, logger="pamica.mlx_impl.core"):
+        m.fit(x_low, max_iter=4, verbose=False, mir_step=2)
+
+    assert m.n_channels_in != m.n_channels, (
+        "test setup: automatic rank detection did not reduce the sphere"
+    )
+    assert m.stop_reason == "max_iter"
+    assert m.final_ll_ is not None and math.isfinite(m.final_ll_)
+
+    assert m.mir_history_, "test setup: mir_step recorded nothing"
+    iters = [row[0] for row in m.mir_history_]
+    assert iters == [0, 2], iters
+    for _, mir_nats, variance in m.mir_history_:
+        assert math.isnan(mir_nats) and math.isnan(variance)
+    assert sum(
+        "MIR waypoint failed" in r.getMessage()
+        and "incompatible with PCA reduction" in r.getMessage()
+        for r in caplog.records
+    ) == len(m.mir_history_)
+
+
 # --- mir_history_ vs keep_best / state_dict (issue #161) --------------------
 def test_mir_history_survives_keep_best_restore(real_data):
     """mir_history_ is a TRUE trajectory that a keep_best restore does NOT
