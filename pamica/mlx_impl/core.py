@@ -759,6 +759,24 @@ class AMICAMLXNG:
         # cross-backend tests read.
         self._nd_arr: Optional[mx.array] = None
 
+        # Full-dataset per-sample/per-model log-likelihood (Fortran's LLt,
+        # issue #155), STASHED as the training E-step computes it rather than
+        # recomputed by a separate forward pass at write time (issue #157;
+        # epic #278 Phase 3, issue #289 -- port of AMICATorchNG's identical
+        # mechanism, torch_impl/core.py:880-902). ``_llt_logv``/``_llt_ll``
+        # are the live per-fit buffers (Fortran's ``modloglik``/``loglik``),
+        # zero-filled so a ``do_reject`` sample keeps Fortran's zero
+        # sentinel. ``fit`` converts them into the compact numpy
+        # ``_llt_lht``/``_llt_lt`` that :meth:`write_amica_output` consumes,
+        # then drops the mx buffers. Not fitted parameters (absent from
+        # ``state_dict()``/``_PARAM_ARRAYS``): a model restored via
+        # :meth:`from_state_dict` has none, so ``write_amica_output`` writes
+        # no LLt for it.
+        self._llt_logv: Optional[mx.array] = None
+        self._llt_ll: Optional[mx.array] = None
+        self._llt_lht: Optional[np.ndarray] = None
+        self._llt_lt: Optional[np.ndarray] = None
+
     # The last entry is only reachable under best-of-N restarts (issue #198): a
     # restart whose fit raised rather than stopping, recorded as degenerate so a
     # search in which every restart crashed still reports an unusable model.
@@ -1120,9 +1138,20 @@ class AMICAMLXNG:
         uniformly on ``self.dorho`` (fixed for the whole model, not per-block)
         keeps the key consistently present-or-absent across every block of a
         fit, exactly like the Newton keys above.
+
+        Also returns two per-sample (non-summable) entries consumed and
+        removed by :meth:`_accumulate_blocks`: ``logV`` (batch, n_models) and
+        ``ll_samples`` (batch,) -- Fortran's ``modloglik``/``loglik`` columns
+        for this block, stashed for the LLt output (issue #157).
         """
         logV, b_list, z_list, y_list, azrho_list = self._forward(Xb)
-        block_ll = mx.logsumexp(logV, axis=1).sum()
+        # Per-sample total log-likelihood (Fortran ``P``/``loglik``,
+        # amica15.f90:1402), kept as a vector rather than folded straight into
+        # the scalar sum so the LLt stash can reuse it (issue #157, epic #278
+        # Phase 3/#289, porting AMICATorchNG core.py:1222-1227); ``block_ll``
+        # is the same summation as before, bit for bit.
+        block_ll_samples = mx.logsumexp(logV, axis=1)
+        block_ll = block_ll_samples.sum()
         v = mx.softmax(logV, axis=1)  # (batch, n_models) model responsibilities
         nmix, ncomp = self.n_mix, self.n_comps
         tiny = float(np.finfo(np.float32).tiny)
@@ -1205,6 +1234,12 @@ class AMICAMLXNG:
             "dWtmp": mx.stack(dwtmp_mods, axis=0),  # (n_models, n_ch, n_ch)
             "dc_numer": mx.stack(dc_cols, axis=1),  # (n_channels, n_models)
             "ll": block_ll,
+            # Per-sample E-step outputs for the LLt stash (issue #157). NOT
+            # summable accumulators -- _accumulate_blocks pops them before
+            # folding the rest -- and cost nothing extra: both are already
+            # computed above for ``ll``/``v``.
+            "logV": logV,
+            "ll_samples": block_ll_samples,
         }
         if self.dorho:
             updates["drho_n"] = drho_n
@@ -1214,14 +1249,43 @@ class AMICAMLXNG:
             updates["dlambda_numer"] = mx.stack(dlambda_mods)  # (n_models, n_mix, n_ch)
         return updates
 
-    def _accumulate_blocks(self, X: mx.array) -> dict:
+    def _accumulate_blocks(self, X: mx.array, stash_llt: bool = False) -> dict:
         """Sum sufficient statistics over all blocks as one lazy graph (no
-        per-block ``mx.eval`` -- that over-syncs 2.6x)."""
+        per-block ``mx.eval`` -- that over-syncs 2.6x).
+
+        Parameters
+        ----------
+        X : mx.array
+            The (sphered) data to accumulate over, already restricted to the
+            good set under ``do_reject``.
+        stash_llt : bool, default=False
+            Scatter each block's per-sample ``logV``/``ll_samples`` into the
+            ``_llt_logv``/``_llt_ll`` buffers as it goes, so the LLt output
+            never needs a second pass over the data (issue #157, epic #278
+            Phase 3/#289 -- port of AMICATorchNG._accumulate_blocks,
+            torch_impl/core.py:1339-1388). The scatter is itself just another
+            lazy MLX op (``self._llt_logv[rows] = logv``), so it joins the
+            same per-iteration graph ``fit`` already evaluates once -- no
+            extra sync is added here. Only the training loop sets this; the
+            ``_tune_block_size`` probes leave the buffers untouched, so the
+            tuner still leaves no state behind. The per-sample values are
+            dropped from the returned dict either way -- they are per-block
+            quantities, not accumulators, and summing them would be
+            meaningless.
+        """
         n_samples = X.shape[1]
         acc: Optional[dict] = None
         for start in range(0, n_samples, self.block_size):
             end = min(start + self.block_size, n_samples)
             block_acc = self._get_block_updates(X[:, start:end])
+            logv = block_acc.pop("logV")
+            ll_samples = block_acc.pop("ll_samples")
+            if stash_llt:
+                assert self._llt_logv is not None and self._llt_ll is not None
+                # Map this block's rows back onto the full-dataset index.
+                rows = slice(start, end)
+                self._llt_logv[rows] = logv
+                self._llt_ll[rows] = ll_samples
             if acc is None:
                 acc = block_acc
             else:
@@ -1751,14 +1815,26 @@ class AMICAMLXNG:
         two out of sync in a returned model (mirrors the torch silent-failure
         fix this ports).
 
-        NO LLt stash here: unlike AMICATorchNG, this backend has no LLt
-        stash to roll back (epic #278 Phase 3, issue #289, will add one and
-        must extend this snapshot then).
+        Also captures the LLt stash (issue #157, epic #278 Phase 3/#289; port
+        of AMICATorchNG._snapshot_params, torch_impl/core.py:2025-2057).
+        ``fit`` snapshots immediately after the E-step that produced both the
+        candidate ``best_ll`` and this iteration's ``_llt_logv``/``_llt_ll``,
+        so a restore rolls the on-disk LLt back to the E-step of the restored
+        iterate rather than leaving the last (discarded) iterate's per-sample
+        values behind -- what keeps the exported LLt the one belonging to the
+        exported parameters.
         """
         snap: dict = {
             name: mx.array(getattr(self, name)) for name in self._PARAM_ARRAYS
         }
         snap["n_kurt_done"] = self.n_kurt_done
+        # Present for every in-fit call (fit allocates the buffers before the
+        # loop and frees them only after the restore); absent only for a
+        # direct call on an already-returned model, where there is nothing to
+        # roll back.
+        if self._llt_logv is not None and self._llt_ll is not None:
+            snap["_llt_logv"] = mx.array(self._llt_logv)
+            snap["_llt_ll"] = mx.array(self._llt_ll)
         return snap
 
     def _restore_params(self, snapshot: dict) -> None:
@@ -1953,6 +2029,9 @@ class AMICAMLXNG:
         "iteration", "ll_history", "final_ll_", "stop_reason",
         "n_newton_fallbacks", "n_kurt_done",
         "lrate", "lrate_cap", "newtrate", "rholrate",
+        # ... the LLt stash and its materialized arrays (issue #157, epic
+        # #278 Phase 3/#289) ...
+        "_llt_logv", "_llt_ll", "_llt_lht", "_llt_lt",
         # ... the tuned block size (do_opt_block re-times per restart) and the
         # seed the winning restart ran from.
         "block_size", "seed",
@@ -2088,6 +2167,17 @@ class AMICAMLXNG:
         returned ``A``/``W``/``comp_list`` are already post-merge but
         ``final_ll_`` still reports the pre-merge log-likelihood; see that
         attribute's comment (issue #269).
+
+        LLt semantics (issue #157, epic #278 Phase 3/#289). The exported
+        ``LLt`` (``_llt_lht``/``_llt_lt``, written by
+        :meth:`write_amica_output`) is the per-sample log-likelihood stashed
+        by the E-step that produced ``final_ll_``, never a separate post-fit
+        forward pass -- so it is one M-step older than the returned ``W``/
+        ``A`` (Fortran's own convention; see ``docs/guides/amica-differences.md``'s
+        "one M-step older" section) unless the ``keep_best`` safeguard
+        restored an earlier iterate, in which case the restored stash and the
+        restored parameters come from the same point in the loop and there is
+        no staleness at all.
         """
         if X.ndim != 2:
             raise ValueError(f"X must be 2D (n_channels, n_samples), got {X.shape}")
@@ -2109,6 +2199,16 @@ class AMICAMLXNG:
         # the search off is byte-for-byte what it was before this existed.
         if self.do_opt_block:
             self._tune_block_size(X_t)
+
+        # LLt buffers (issue #157), Fortran's permanently-allocated
+        # modloglik/loglik (amica15.f90:2617-2620). Zero-filled: a do_reject
+        # sample that is never scored again keeps the zero that Fortran's
+        # load_rej reads as the rejection sentinel. Re-allocated per fit so a
+        # refit on a different dataset cannot serve a stale array.
+        self._llt_logv = mx.zeros((n_total, self.n_models), dtype=mx.float32)
+        self._llt_ll = mx.zeros((n_total,), dtype=mx.float32)
+        self._llt_lht = None
+        self._llt_lt = None
 
         numdecs = 0
         # Consecutive-small-likelihood-gain counter for the min_dll stop (Fortran
@@ -2148,10 +2248,13 @@ class AMICAMLXNG:
 
         for it in rng:
             self.iteration = it
-            acc = self._accumulate_blocks(X_t)
+            acc = self._accumulate_blocks(X_t, stash_llt=True)
 
             ll_arr = acc["ll"] / (n_total * self.n_channels)
-            mx.eval(ll_arr)  # materialize the accumulate graph once
+            # The stash scatter (_accumulate_blocks) is part of the same lazy
+            # graph as ll_arr, so materializing both here costs exactly the
+            # one sync this line already paid -- not a second one (issue #157).
+            mx.eval(ll_arr, self._llt_logv, self._llt_ll)
             ll = float(ll_arr.item())
             if not math.isfinite(ll):
                 self.stop_reason = "nan_ll" if math.isnan(ll) else "singular_ll"
@@ -2461,6 +2564,31 @@ class AMICAMLXNG:
             )
             self._restore_params(best_snapshot)
             self.final_ll_ = best_ll
+
+        # LLt (Fortran's per-sample/per-model log-likelihood, issue #155):
+        # materialized from the stash the training E-step filled, with NO
+        # extra forward pass (issue #157). Runs strictly after the keep-best
+        # restore above, which rolls the stash back alongside the parameters
+        # (see _snapshot_params/_restore_params), so these arrays are always
+        # the E-step of the iterate fit() returns -- i.e. the very E-step
+        # whose total is ``final_ll_``:
+        #     Lt.sum() / (n_good_samples * n_channels) == final_ll_
+        # where n_good_samples is the count that E-step ran over. This is
+        # Fortran's own convention (see the module docstring's staleness
+        # note) and holds for the reference binary's own output too.
+        # Converted to compact numpy here so the mx buffers can be freed; a
+        # refit reallocates them.
+        if self._llt_logv is not None and self._llt_ll is not None and self.ll_history:
+            self._llt_lht = np.array(self._llt_logv).T
+            self._llt_lt = np.array(self._llt_ll)
+        # Else: no iteration ever completed an E-step whose LL was recorded
+        # (max_iter=0, or a degenerate first iteration that broke before
+        # ll_history.append). The buffers hold nothing but zeros, which
+        # load_rej would misread as "every sample rejected", so leave
+        # _llt_lht/_llt_lt None and let write_amica_output omit the file
+        # with its existing warning rather than write a misleading one.
+        self._llt_logv = None
+        self._llt_ll = None
 
         return self
 
