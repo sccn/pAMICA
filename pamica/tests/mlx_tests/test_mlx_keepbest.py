@@ -452,8 +452,8 @@ class _NaNAfterIteration(AMICAMLXNG):
 
     nan_after: int = 10**9  # effectively never, unless overridden
 
-    def _accumulate_blocks(self, X):
-        acc = super()._accumulate_blocks(X)
+    def _accumulate_blocks(self, X, stash_llt=False):
+        acc = super()._accumulate_blocks(X, stash_llt=stash_llt)
         if self.iteration >= self.nan_after:
             acc["ll"] = acc["ll"] * float("nan")
         return acc

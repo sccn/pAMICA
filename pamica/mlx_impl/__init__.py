@@ -11,9 +11,13 @@ linear algebra on MLX's CPU stream (issues #76/#81, epic #74 Phase C/D). It
 supports single- and multi-model, all five ``amica15.f90`` source-density
 families (``pdftype`` 0/1/2/3/4, including the extended-Infomax adaptive
 switcher, issue #265), natural gradient, component sharing (``share_comps``,
-issue #263) and the Newton preconditioner (``do_newton``, issue #264 --
-float32 throughout, validated against a float64 PyTorch twin); outlier
-rejection and save/load remain fast-follows.
+issue #263), the Newton preconditioner (``do_newton``, issue #264 -- float32
+throughout, validated against a float64 PyTorch twin), source extraction and
+persistence (``transform``, ``state_dict``/``.npz`` ``save``/``load``, issue
+#287), the best-iterate safeguard (``keep_best``, issue #288), outlier
+rejection (``do_reject``, issue #123's mechanism), the EEGLAB
+``write_amica_output`` export, and the MIR/PMI diagnostics (issue #137) --
+epic #278 is complete as of Phase 3 (issue #289).
 """
 
 from .core import PDFTYPE_NAMES, AMICAMLXNG

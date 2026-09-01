@@ -87,8 +87,9 @@ Newton (#264, float32, validated against a float64 torch twin -- see `.context/i
 non-GG pdf families (#265, including the adaptive switcher; see `.context/issue-265/`) are all
 ported; source extraction (`transform` and the mixing/unmixing/`rho` accessors) and persistence
 (`state_dict`/`.npz` save-load) landed in epic #278 Phase 1 (#287); the best-iterate safeguard
-(`keep_best`) landed in Phase 2 (#288); the remaining MLX gap is outlier rejection + LLt/MIR,
-tracked as epic #278 Phase 3 (#289).
+(`keep_best`) landed in Phase 2 (#288); outlier rejection, the LLt-stash-backed scoring accessors,
+the EEGLAB export, and MIR/PMI landed in Phase 3 (#289) -- epic #278 is complete; the remaining MLX
+gap vs the PyTorch backend is none, other than float32-only precision (Apple GPUs have no float64).
 
 ## Key Files
 - **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`)
