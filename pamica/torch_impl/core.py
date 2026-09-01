@@ -1078,7 +1078,24 @@ class AMICATorchNG:
         A_stack = torch.stack(
             [self.A[:, self.comp_list[:, h]] for h in range(self.n_models)], dim=0
         )
-        W_stack = torch.linalg.inv(A_stack)
+        try:
+            W_stack = torch.linalg.inv(A_stack)
+        except torch.linalg.LinAlgError:
+            # Mid-loop invariant raise (PR #318 review): this is called from
+            # inside _update_parameters, after A/mu/beta/rho/alpha/gm/c have
+            # already been reassigned to this iterate's values -- so a
+            # singular A here would otherwise strand the instance holding an
+            # inconsistent mix of new params and stale self.W, with
+            # stop_reason still "max_iter", while the exception propagates
+            # uncaught through the single-restart fit() path (no try/except
+            # there). Set the degenerate marker before re-raising so every
+            # downstream state_dict()/write_amica_output() refusal check
+            # catches it regardless of whether the caller catches this.
+            # _fit_restarts's except block also sets this -- now
+            # redundant-but-harmless there, kept so that path does not
+            # depend on this site doing it correctly.
+            self.stop_reason = restarts.ERROR_STOP_REASON
+            raise
         self.W = W_stack.permute(1, 2, 0).contiguous()
 
     def _pdtype_h(self, h: int) -> Optional[torch.Tensor]:
@@ -1930,6 +1947,15 @@ class AMICATorchNG:
                 # Only a degenerate fit (non-finite input data) gets here. Say
                 # so, rather than letting LAPACK report a confusing
                 # "ill-conditioned / repeated singular values" SVD failure.
+                # Mid-loop invariant raise (PR #318 review): _pinv_sphere is
+                # called from _identify_shared_comps, itself called from
+                # inside _fit_once's iteration body under share_comps -- so
+                # this can fire with the instance already holding this
+                # iterate's updated A/mu/etc, mid-fit, propagating uncaught
+                # through the single-restart fit() path. Set the degenerate
+                # marker before raising, same reasoning as
+                # _update_unmixing_matrices above.
+                self.stop_reason = restarts.ERROR_STOP_REASON
                 raise RuntimeError(
                     "The sphere holds non-finite values, so it has no "
                     "pseudo-inverse: the fit is degenerate. Check the input "

@@ -1104,6 +1104,22 @@ class AMICAMLXNG:
                         if n_bad
                         else ""
                     )
+                    # Set the degenerate marker BEFORE raising (PR #318
+                    # review): this fires mid-_update_parameters, after A/mu/
+                    # beta/rho/alpha/gm/c have already been reassigned to the
+                    # new iterate but before self.W/_logdet_W are (the stack
+                    # below never runs). The single-restart fit() path has no
+                    # try/except, so this RuntimeError propagates straight to
+                    # the caller with the instance left holding that
+                    # inconsistent state -- stop_reason must already say so by
+                    # the time it does, or every state_dict()/write_amica_
+                    # output() degenerate check downstream (which key off
+                    # stop_reason, not "did an exception fire once") would
+                    # accept it. The multi-restart path's except block also
+                    # sets this -- now redundant there, but harmless, and kept
+                    # so that path does not depend on every raise site
+                    # upstream doing this correctly.
+                    self.stop_reason = restarts.ERROR_STOP_REASON
                     raise RuntimeError(
                         f"Singular unmixing matrix for model {h} at iteration "
                         f"{self.iteration}: cond(A[:, comp_list[:, {h}]]) = "
@@ -1833,6 +1849,17 @@ class AMICAMLXNG:
         # GG density evaluated against a rho frozen by self.dorho, silently.
         bad = set(np.unique(new_pdtype).tolist()) - {1, 4}
         if bad:
+            # Mid-loop invariant raise (PR #318 review): _choose_pdfs runs
+            # from inside _fit_once's iteration body, after this iteration's
+            # _update_parameters already reassigned A/mu/beta/rho/alpha/gm/c
+            # -- so leaving this uncaught in the single-restart fit() path
+            # (no try/except there) would strand the instance holding a new
+            # iterate's parameters with a stale self.pdtype (the assignment
+            # below never runs) and stop_reason still "max_iter". Set the
+            # degenerate marker before raising so every downstream
+            # state_dict()/write_amica_output() refusal check catches it
+            # regardless of whether the caller catches this exception.
+            self.stop_reason = restarts.ERROR_STOP_REASON
             raise RuntimeError(
                 f"_choose_pdfs produced pdtype code(s) outside {{1, 4}}: "
                 f"{sorted(bad)} (adaptive-switcher invariant violated)."
@@ -2092,6 +2119,15 @@ class AMICAMLXNG:
                 # Only a degenerate fit (non-finite input data) gets here. Say
                 # so, rather than letting LAPACK report a confusing
                 # "ill-conditioned / repeated singular values" SVD failure.
+                # Mid-loop invariant raise (PR #318 review): _pinv_sphere is
+                # called from _identify_shared_comps, itself called from
+                # inside _fit_once's iteration body under share_comps -- so
+                # this can fire with the instance already holding this
+                # iterate's updated A/mu/etc, mid-fit, propagating uncaught
+                # through the single-restart fit() path. Set the degenerate
+                # marker before raising, same reasoning as the #274 guard
+                # above and _choose_pdfs's invariant.
+                self.stop_reason = restarts.ERROR_STOP_REASON
                 raise RuntimeError(
                     "The sphere holds non-finite values, so it has no "
                     "pseudo-inverse: the fit is degenerate. Check the input "
