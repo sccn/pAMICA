@@ -198,6 +198,37 @@ def test_keep_best_inactive_under_do_reject_warns(real_data, caplog):
     assert "keep_best is inactive under do_reject" in text
 
 
+def test_keep_best_inactive_reason_prefers_do_reject_when_both_are_on(
+    real_data, caplog
+):
+    """PR #311 review: when do_reject AND share_comps are BOTH on, the
+    reported reason must be "do_reject", matching AMICATorchNG's exact
+    precedence (torch_impl/core.py:2425, ``"do_reject" if self.do_reject
+    else "share_comps"``) -- the two backends must report the same reason
+    for the same configuration, not whichever flag MLX happened to check
+    first."""
+    import logging
+
+    m = _model(
+        n_models=2,
+        seed=1,
+        do_reject=True,
+        rejstart=2,
+        rejint=2,
+        maxrej=1,
+        share_comps=True,
+        share_start=10,
+        share_iter=10,
+        comp_thresh=0.9,
+    )
+    assert m.keep_best is True
+    with caplog.at_level(logging.WARNING, logger="pamica.mlx_impl.core"):
+        m.fit(real_data, max_iter=6, verbose=False)
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "keep_best is inactive under do_reject" in text
+    assert "keep_best is inactive under share_comps" not in text
+
+
 def test_keep_best_restore_never_fires_under_do_reject(real_data):
     """Even the aggressive-Newton recipe known to overshoot under plain
     keep_best (test_mlx_llt_stash.py) never restores when do_reject is on:

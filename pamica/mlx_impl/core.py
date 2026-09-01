@@ -2430,16 +2430,21 @@ class AMICAMLXNG:
         if self.keep_best and (self.share_comps or self.do_reject):
             # keep_best defaults on, so a user enabling sharing/rejection
             # would otherwise silently lose the safeguard; surface it once.
-            reason = "share_comps" if self.share_comps else "do_reject"
+            # do_reject checked first, matching AMICATorchNG's precedence
+            # exactly (torch_impl/core.py:2425) -- both can be true at once
+            # (see test_mlx_reject.py's genuine-merge-plus-reject test), and
+            # the two backends must report the same reason for the same
+            # configuration.
+            reason = "do_reject" if self.do_reject else "share_comps"
             logger.warning(
                 "keep_best is inactive under %s: best-iterate selection by "
                 "LL is not well-defined (%s), so fit() returns the last "
                 "iterate.",
                 reason,
-                "a merge changes the parameter count and reverting to an "
-                "earlier snapshot would undo the merge"
-                if self.share_comps
-                else "the good-sample set / LL normalization changes across iterations",
+                "the good-sample set / LL normalization changes across iterations"
+                if self.do_reject
+                else "a merge changes the parameter count and reverting to an "
+                "earlier snapshot would undo the merge",
             )
 
         rng = range(max_iter)
