@@ -3066,8 +3066,9 @@ class AMICAMLXNG:
 
         The parameters are pulled off the GPU with ``np.array(...)`` and the
         ordering arithmetic (the gamma ratio, the sphere pseudo-inverse) runs
-        host-side in float64 via NumPy/SciPy -- the same precision
-        ``AMICATorchNG`` uses for this method -- so the only float32 step is
+        host-side in float64 via NumPy/SciPy -- matching what
+        ``AMICATorchNG.variance_order`` computes in at its default
+        ``dtype=torch.float64`` -- so the only float32 step is
         the fitted parameters themselves, not how the order is computed from
         them.
 
