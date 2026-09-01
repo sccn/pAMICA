@@ -3303,6 +3303,15 @@ class AMICATorchNG:
         so ``LLt`` is omitted for it (a warning is logged) -- the rest of the
         output is unaffected.
 
+        Raises if the model is unfitted or degenerate (a fit that ended on a
+        non-finite log-likelihood): a NaN model must not be written silently.
+        The scikit-learn-style :class:`~pamica.AMICA` wrapper already refuses
+        this via its own usability gate, but a caller using
+        :class:`AMICATorchNG` directly has no such gate in front of this
+        method -- mirrors :meth:`state_dict`'s two-layer guard (stop_reason
+        refusal, then a defense-in-depth isfinite sweep over the parameter
+        tensors) so the same protection applies here (PR #311 review).
+
         Parameters
         ----------
         outdir : str or path-like
@@ -3311,6 +3320,28 @@ class AMICATorchNG:
         if self.A is None:
             raise RuntimeError(
                 "write_amica_output requires a fitted model; call fit() first."
+            )
+        if self.stop_reason in self._DEGENERATE_STOP_REASONS:
+            raise RuntimeError(
+                f"Refusing to write output for a degenerate model (stop_reason="
+                f"{self.stop_reason!r}): fit() hit a non-finite log-likelihood at "
+                f"iteration {self.iteration}. Fix the instability (lower lrate, "
+                f"disable Newton, or check data conditioning) before writing."
+            )
+        # Defense-in-depth, mirroring state_dict(): catch a non-finite
+        # parameter even if stop_reason bookkeeping ever misses it. Also
+        # neutralizes a stale LLt stash: a failed final iteration's
+        # _llt_lht/_llt_lt (from before the nan_params/nan_ll break) can no
+        # longer reach disk once this guard refuses the write outright.
+        nonfinite = [
+            name
+            for name in self._PARAM_TENSORS
+            if not torch.isfinite(getattr(self, name)).all()
+        ]
+        if nonfinite:
+            raise RuntimeError(
+                f"Refusing to write output for a model with non-finite "
+                f"parameters {nonfinite} (stop_reason={self.stop_reason!r})."
             )
 
         from ..numpy_impl.load import write_amicaout

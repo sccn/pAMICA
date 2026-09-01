@@ -1096,6 +1096,46 @@ def test_state_dict_refuses_nonfinite_params():
 
 
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
+def test_write_amica_output_refuses_degenerate_model(tmp_path):
+    """PR #311 review: write_amica_output had no refusal guard at all --
+    unlike state_dict(), which already refuses (test_state_dict_refuses_
+    degenerate_model above). The scikit-learn-style AMICA wrapper's own
+    usability gate (test_amica_ng_wrapper.py::test_degenerate_fit_refuses_
+    output) only protects callers going through it; a caller using
+    AMICATorchNG directly had no gate whatsoever. Same direct-marker
+    pattern as test_state_dict_refuses_degenerate_model: the guard is
+    exercised on the marker deterministically, without needing to induce
+    an actual blow-up."""
+    data = _load_real_data()
+    m = _fresh_ng(block_size=512)
+    m.fit(data[:, :2048], max_iter=2, verbose=False)
+
+    m.stop_reason = "nan_ll"
+    with pytest.raises(RuntimeError, match="degenerate"):
+        m.write_amica_output(str(tmp_path / "degenerate_out"))
+    assert not (tmp_path / "degenerate_out").exists()
+
+
+@pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
+def test_write_amica_output_refuses_nonfinite_params(tmp_path):
+    """Defense-in-depth, mirroring test_state_dict_refuses_nonfinite_params:
+    even with a non-degenerate stop_reason, a non-finite parameter tensor
+    blocks the write. Also confirms the fix's stale-stash note: this
+    model's LLt stash is otherwise healthy, yet the corrupted A parameter
+    alone is enough to refuse the write."""
+    data = _load_real_data()
+    m = _fresh_ng(block_size=512)
+    m.fit(data[:, :2048], max_iter=2, verbose=False)
+
+    m.stop_reason = "max_iter"  # not a degenerate marker
+    assert m.A is not None
+    m.A[0, 0] = float("nan")
+    with pytest.raises(RuntimeError, match="non-finite"):
+        m.write_amica_output(str(tmp_path / "corrupt_out"))
+    assert not (tmp_path / "corrupt_out").exists()
+
+
+@pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
 def test_state_dict_snapshots_not_aliases():
     """state_dict() must snapshot params, not alias live tensors: fit() mutates
     A/mu/beta in place, so an aliased CPU snapshot would silently roll forward

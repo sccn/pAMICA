@@ -185,6 +185,48 @@ def test_write_amica_output_requires_a_fitted_model(tmp_path):
         m.write_amica_output(tmp_path / "should-not-be-created")
 
 
+def test_write_amica_output_refuses_a_degenerate_fit(tmp_path, real_data):
+    """PR #311 review: write_amica_output had no refusal guard at all for a
+    degenerate (non-finite-LL) model -- unlike state_dict()/save(), which
+    already refuse (test_mlx_persistence.py's
+    test_state_dict_refuses_degenerate_fit). AMICAMLXNG has no
+    scikit-learn-style wrapper in front of it, so a caller using it
+    directly had no gate whatsoever. Same NaN-injection recipe as that
+    test (do_sphere=False/do_mean=False so the NaN reaches the fit
+    directly, not absorbed by sphering)."""
+    data = real_data.copy()
+    data[0, 0] = np.nan
+    m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=1, do_sphere=False, do_mean=False)
+    m.fit(data, max_iter=5, verbose=False)
+    assert m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    with pytest.raises(RuntimeError, match="degenerate"):
+        m.write_amica_output(tmp_path / "degenerate_out")
+    assert not (tmp_path / "degenerate_out").exists()
+
+
+def test_write_amica_output_refuses_force_set_nonfinite_param(tmp_path, real_data):
+    """The defense-in-depth isfinite sweep fires independent of
+    stop_reason bookkeeping, mirroring
+    test_mlx_persistence.py::test_state_dict_refuses_force_set_nonfinite_param_naming_it.
+    A real fit with a HEALTHY stop_reason has one param force-corrupted
+    afterward (direct-attribute pattern, not a mock), so only the isfinite
+    sweep -- not the stop_reason check above it -- can catch this. Also
+    confirms the stale-stash note in the fix's commit message: the model's
+    _llt_lht/_llt_lt are still the healthy fit's real stash (nothing wrong
+    with them here), yet the write is refused anyway because a corrupted
+    PARAMETER must never reach disk regardless of the stash's own health.
+    """
+    m = _model(seed=1, keep_best=False)
+    m.fit(real_data, max_iter=4, verbose=False)
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    mu_np = np.array(m.mu)
+    mu_np[0, 0] = np.nan
+    m.mu = mx.array(mu_np)
+    with pytest.raises(RuntimeError, match="non-finite parameters.*mu"):
+        m.write_amica_output(tmp_path / "corrupt_out")
+    assert not (tmp_path / "corrupt_out").exists()
+
+
 def test_write_amica_output_makes_no_extra_forward_pass(
     real_data, tmp_path, monkeypatch
 ):
