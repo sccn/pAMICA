@@ -473,6 +473,26 @@ class AMICAMLXNG:
         Explicit per-restart seeds, exactly ``n_restarts`` of them; otherwise
         ``seed, seed + 1, ...``.
 
+    The outlier-rejection parameters (issue #123's AMICATorchNG mechanism,
+    epic #278 Phase 3/#289) likewise carry AMICATorchNG's names, defaults and
+    validation:
+
+    ``do_reject`` (False)
+        Permanently drop samples whose per-sample log-likelihood is a low
+        outlier on the ``rejstart``/``rejint``/``maxrej`` schedule (Fortran
+        ``reject_data``, amica15.f90:2380-2464). The rejection statistic is
+        read FROM the LLt stash (``_llt_ll``, issue #157) rather than a
+        second forward pass over the good set -- the NumPy backend's design,
+        pre-empting AMICATorchNG's own open follow-up (issue #298) to drop
+        its separate ``_sample_ll`` pass; the statistic is mathematically
+        identical either way. OFF by default, so a default fit is unaffected.
+    ``rejsig`` (3.0)
+        Reject a sample when its log-likelihood is below ``mean - rejsig *
+        std`` (population std) over the current good set.
+    ``rejstart`` (2) / ``rejint`` (3) / ``maxrej`` (1)
+        Rejection schedule: first iteration to reject, interval between
+        subsequent passes, and the maximum number of passes.
+
     The best-iterate safeguard (issue #51, epic #278 Phase 2/#288) likewise
     carries AMICATorchNG's name, default and semantics:
 
@@ -486,9 +506,9 @@ class AMICAMLXNG:
         bit-exact no-op. Automatically inactive under ``share_comps`` (a merge
         changes the parameter count, so pre- and post-merge LLs are not
         comparable and reverting to an earlier snapshot would silently undo
-        the merge; issue #269) -- and, once ``do_reject`` lands on this
-        backend (epic #278 Phase 3), under that too, for the same reason it is
-        inactive on AMICATorchNG.
+        the merge; issue #269) and under ``do_reject`` (the good-sample set,
+        and so the LL normalization, changes across iterations, so
+        per-iteration LLs are not comparable), matching AMICATorchNG.
     """
 
     def __init__(
@@ -514,6 +534,11 @@ class AMICAMLXNG:
         newt_start: int = 20,
         newtrate: float = 0.5,
         do_newton: bool = False,
+        do_reject: bool = False,
+        rejsig: float = 3.0,
+        rejstart: int = 2,
+        rejint: int = 3,
+        maxrej: int = 1,
         rho0: float = 1.5,
         minrho: float = 1.0,
         maxrho: float = 2.0,
@@ -590,6 +615,27 @@ class AMICAMLXNG:
         # definite and the natural gradient used instead (AMICATorchNG's counter
         # of the same name); reset per fit in _initialize_parameters.
         self.n_newton_fallbacks = 0
+
+        # Outlier rejection (issue #123's AMICATorchNG mechanism, epic #278
+        # Phase 3/#289), same names/defaults/validation as AMICATorchNG
+        # (torch_impl/core.py:593-597, 679-685; Fortran do_reject/rejsig/
+        # rejstart/rejint/maxrej, amica15_header.f90). numrej/good_idx are set
+        # up per fit in _fit_once (good_idx = None until then, matching the
+        # do_reject=False no-op path).
+        self.do_reject = do_reject
+        self.rejsig = rejsig
+        self.rejstart = rejstart
+        self.rejint = rejint
+        self.maxrej = maxrej
+        if do_reject:
+            if rejint < 1:
+                raise ValueError(f"rejint must be >= 1, got {rejint}")
+            if rejsig <= 0:
+                raise ValueError(f"rejsig must be > 0, got {rejsig}")
+            if maxrej < 0:
+                raise ValueError(f"maxrej must be >= 0, got {maxrej}")
+        self.numrej = 0
+        self.good_idx: Optional[mx.array] = None
 
         self.rho0 = rho0
         self.minrho = minrho
@@ -1283,7 +1329,14 @@ class AMICAMLXNG:
             if stash_llt:
                 assert self._llt_logv is not None and self._llt_ll is not None
                 # Map this block's rows back onto the full-dataset index.
-                rows = slice(start, end)
+                # Under do_reject the caller passed X_t[:, good_idx], so block
+                # [start:end] of X is good_idx[start:end] of the dataset;
+                # otherwise the block index is the sample index.
+                rows = (
+                    self.good_idx[start:end]
+                    if self.good_idx is not None
+                    else slice(start, end)
+                )
                 self._llt_logv[rows] = logv
                 self._llt_ll[rows] = ll_samples
             if acc is None:
@@ -1843,6 +1896,81 @@ class AMICAMLXNG:
             setattr(self, name, value)
 
     # ------------------------------------------------------------------
+    # Outlier rejection (issue #123's AMICATorchNG mechanism; epic #278
+    # Phase 3/#289)
+    # ------------------------------------------------------------------
+    def _reject_outliers(self, ll_vec: np.ndarray) -> None:
+        """Permanently drop samples whose (pre-update) log-likelihood is a low
+        outlier.
+
+        Fortran ``reject_data`` (amica15.f90:2380-2464): reject any
+        currently-good sample with ``loglik < mean - rejsig*std`` (population
+        std). The rejection is one-directional; ``good_idx`` only ever
+        shrinks, and the good-sample count drives the ``gm``/LL normalization
+        thereafter. ``ll_vec`` is the per-sample log-likelihood over the
+        current good set, in ``good_idx`` order, read from the LLt stash by
+        the caller (the design decision documented in :meth:`_fit_once`).
+
+        Runs on the host in numpy: the keep-mask COMPRESSION below
+        (``good[keep]``, dropping an arbitrary subset of entries) has no MLX
+        equivalent -- MLX has no boolean-mask gather, the same limitation
+        noted in :meth:`_newton_direction` -- so this mirrors
+        ``_identify_shared_comps``' host-side control flow rather than
+        AMICATorchNG's/the NumPy backend's in-place tensor masking.
+        """
+        assert self.good_idx is not None
+        good = np.array(self.good_idx)
+        mean = float(ll_vec.mean())
+        std = float(np.sqrt(max(float(np.mean(ll_vec**2) - mean**2), 0.0)))
+        keep = ll_vec >= (mean - self.rejsig * std)
+
+        if not bool(keep.any()):
+            # For finite log-likelihoods the max sample is always >= mean >=
+            # mean - rejsig*std (rejsig>0 is validated at construction), so it
+            # is always kept; the only way every sample is dropped is a
+            # non-finite per-sample LL (one NaN poisons mean/std, making every
+            # comparison False). Report that accurately instead of blaming
+            # rejsig (issue #127), which a user cannot fix by tuning rejsig.
+            n_bad = int(np.count_nonzero(~np.isfinite(ll_vec)))
+            if n_bad:
+                raise ValueError(
+                    f"{n_bad} of {ll_vec.size} samples have a non-finite "
+                    "log-likelihood; this indicates numerical instability "
+                    "upstream (singular W / overflow), not a rejsig "
+                    "miscalibration. Check for rank-deficient or "
+                    "average-referenced data, or reduce the learning rate."
+                )
+            raise ValueError(  # defensive: unreachable for finite LL, rejsig>0
+                f"Outlier rejection removed all {good.size} samples "
+                f"(rejsig={self.rejsig} too aggressive for this data)."
+            )
+
+        # Zero the LLt stash for the samples being dropped, exactly as
+        # Fortran's reject_data does (amica15.f90:2231-2234): they are never
+        # scored again, so without this they would keep the log-likelihood
+        # from the last iteration that still considered them good, and
+        # load_rej's ``sum(modloglik(:,i)) == 0`` sentinel would not see them
+        # as rejected.
+        dropped = good[~keep]
+        if self._llt_logv is not None and self._llt_ll is not None and dropped.size:
+            dropped_mx = mx.array(dropped)
+            self._llt_logv[dropped_mx] = mx.zeros(
+                (dropped.size, self.n_models), dtype=mx.float32
+            )
+            self._llt_ll[dropped_mx] = mx.zeros((dropped.size,), dtype=mx.float32)
+
+        self.good_idx = mx.array(good[keep])
+        self.numrej += 1
+        n_rejected = int(good.size - int(self.good_idx.size))
+        logger.info(
+            "Rejection %d at iter %d: dropped %d samples (%d good remaining).",
+            self.numrej,
+            self.iteration,
+            n_rejected,
+            int(self.good_idx.size),
+        )
+
+    # ------------------------------------------------------------------
     # Component sharing (issue #263; AMICATorchNG's #60 port)
     # ------------------------------------------------------------------
     def _a_frozen(self) -> bool:
@@ -2032,6 +2160,9 @@ class AMICAMLXNG:
         # ... the LLt stash and its materialized arrays (issue #157, epic
         # #278 Phase 3/#289) ...
         "_llt_logv", "_llt_ll", "_llt_lht", "_llt_lt",
+        # ... outlier-rejection state (issue #123's AMICATorchNG mechanism,
+        # epic #278 Phase 3/#289) ...
+        "numrej", "good_idx",
         # ... the tuned block size (do_opt_block re-times per restart) and the
         # seed the winning restart ran from.
         "block_size", "seed",
@@ -2190,7 +2321,9 @@ class AMICAMLXNG:
         n_total = X_t.shape[1]
         self._initialize_parameters()
         self.ll_history = []
+        self.numrej = 0
         self.stop_reason = "max_iter"
+        self.good_idx = mx.arange(n_total) if self.do_reject else None
 
         # Block-size search (issue #232): after preprocessing and parameter
         # initialization, before the first EM iteration, so it times the real
@@ -2198,7 +2331,7 @@ class AMICAMLXNG:
         # no-op when off, and its probes leave no state behind, so a fit with
         # the search off is byte-for-byte what it was before this existed.
         if self.do_opt_block:
-            self._tune_block_size(X_t)
+            self._tune_block_size(X_t[:, self.good_idx] if self.do_reject else X_t)
 
         # LLt buffers (issue #157), Fortran's permanently-allocated
         # modloglik/loglik (amica15.f90:2617-2620). Zero-filled: a do_reject
@@ -2220,21 +2353,27 @@ class AMICAMLXNG:
         # the returned model below a peak it already reached. Inactive under
         # share_comps (a merge drops parameters, so pre- and post-merge LLs
         # are not comparable AND the snapshot's comp_list would revert the
-        # merge -- the returned model would silently be unmerged; #60) --
-        # AMICATorchNG also excludes do_reject there, which this backend does
-        # not yet have (epic #278 Phase 3, #289; extend this condition then).
-        # Fit returns the last iterate when inactive, matching Fortran.
-        track_best = self.keep_best and not self.share_comps
+        # merge -- the returned model would silently be unmerged; #60) and
+        # under do_reject (the good-sample set, and so the LL normalization,
+        # changes across iterations -- AMICATorchNG excludes it there for the
+        # same reason). Fit returns the last iterate when inactive, matching
+        # Fortran.
+        track_best = self.keep_best and not self.share_comps and not self.do_reject
         best_ll = -math.inf
         best_snapshot: Optional[dict] = None
-        if self.keep_best and self.share_comps:
-            # keep_best defaults on, so a user enabling sharing would
-            # otherwise silently lose the safeguard; surface it once.
+        if self.keep_best and (self.share_comps or self.do_reject):
+            # keep_best defaults on, so a user enabling sharing/rejection
+            # would otherwise silently lose the safeguard; surface it once.
+            reason = "share_comps" if self.share_comps else "do_reject"
             logger.warning(
-                "keep_best is inactive under share_comps: best-iterate "
-                "selection by LL is not well-defined (a merge changes the "
-                "parameter count and reverting to an earlier snapshot would "
-                "undo the merge), so fit() returns the last iterate.",
+                "keep_best is inactive under %s: best-iterate selection by "
+                "LL is not well-defined (%s), so fit() returns the last "
+                "iterate.",
+                reason,
+                "a merge changes the parameter count and reverting to an "
+                "earlier snapshot would undo the merge"
+                if self.share_comps
+                else "the good-sample set / LL normalization changes across iterations",
             )
 
         rng = range(max_iter)
@@ -2248,9 +2387,11 @@ class AMICAMLXNG:
 
         for it in rng:
             self.iteration = it
-            acc = self._accumulate_blocks(X_t, stash_llt=True)
+            X_use = X_t[:, self.good_idx] if self.do_reject else X_t
+            n_use = X_use.shape[1]
+            acc = self._accumulate_blocks(X_use, stash_llt=True)
 
-            ll_arr = acc["ll"] / (n_total * self.n_channels)
+            ll_arr = acc["ll"] / (n_use * self.n_channels)
             # The stash scatter (_accumulate_blocks) is part of the same lazy
             # graph as ll_arr, so materializing both here costs exactly the
             # one sync this line already paid -- not a second one (issue #157).
@@ -2270,7 +2411,41 @@ class AMICAMLXNG:
                 best_ll = ll
                 best_snapshot = self._snapshot_params()
 
-            self._update_parameters(acc, n_total)
+            # Whether rejection fires this iteration (Fortran schedule,
+            # amica15.f90:1142). Captured here, before _update_parameters, so
+            # the statistic is the PRE-update per-sample log-likelihood --
+            # matching Fortran's ordering (loglik is filled in
+            # get_updates_and_likelihood, before update_params runs).
+            #
+            # DESIGN DECISION (epic #278 Phase 3/#289): the statistic is read
+            # FROM the stash just written above (self._llt_ll indexed by
+            # good_idx), the NumPy backend's design (numpy_impl/core.py's
+            # _last_ll_samples), rather than AMICATorchNG's extra
+            # _sample_ll forward pass over the good set -- which open issue
+            # #298 records as the pass to eliminate there. The statistic is
+            # mathematically identical either way (both read the same
+            # per-sample logsumexp); this backend simply never pays for the
+            # second pass in the first place. Fancy-indexed straight out of
+            # the mx stash, so no host round-trip is needed to decide whether
+            # to reject.
+            will_reject = (
+                self.do_reject
+                and self.maxrej > 0
+                and (
+                    it == self.rejstart
+                    or (
+                        max(1, it - self.rejstart) % self.rejint == 0
+                        and self.numrej < self.maxrej
+                    )
+                )
+            )
+            if will_reject:
+                assert self.good_idx is not None and self._llt_ll is not None
+                reject_ll = np.array(self._llt_ll[self.good_idx])
+            else:
+                reject_ll = None
+
+            self._update_parameters(acc, n_use)
             # One eval per iteration bounds the lazy graph to a single iteration's
             # worth of ops (the updated params feed the next accumulate). gm/c are
             # included so their dependency chain is materialized each iteration too
@@ -2528,6 +2703,13 @@ class AMICAMLXNG:
 
             if leave:
                 break
+
+            # Outlier rejection, after the parameter update (Fortran order,
+            # amica15.f90:1141-1146) but using the pre-update per-sample LL
+            # captured above.
+            if will_reject:
+                assert reject_ll is not None
+                self._reject_outliers(reject_ll)
 
         # Log-likelihood of the parameters fit() returns. A degenerate stop
         # leaves the model on the diverged parameters, whose LL is NOT the
@@ -2788,15 +2970,19 @@ class AMICAMLXNG:
     # (via _safe_int_cast) rather than following the float32 default the rest
     # take.
     _INT_PARAM_DTYPES = {"comp_list": np.int64, "pdtype": np.int32}
-    # extra's full key set. format_version 1 has no older on-disk files, so
+    # extra's full key set as of format_version 1's original release.
     # from_state_dict()/load() require every one of these to be present
     # (_load_params raises a named error naming what's missing, mirroring the
-    # params check above) rather than defaulting a subset via .get(). A
-    # FUTURE additive key (the way #198's restart_seeds_/restart_lls_/
-    # restart_stop_reasons_ or #207's convergence-stop config keys were added
-    # to AMICATorchNG after payloads without them already existed) should use
-    # .get() with a documented fallback instead, once format_version 1
-    # payloads without it are actually in the wild -- not before.
+    # params check above) rather than defaulting a subset via .get() --
+    # phase-1-era payloads genuinely have all of them, so silently
+    # defaulting one would hide real corruption. A field added LATER, once
+    # payloads without it already exist, is instead loaded additively via
+    # extra.get() with a documented fallback and deliberately left OUT of
+    # this tuple (the pattern AMICATorchNG's #198 restart_seeds_/
+    # restart_lls_/restart_stop_reasons_ and #207 convergence-stop config
+    # keys established): epic #278 Phase 3/#289's ``numrej``/``good_idx``
+    # (outlier rejection, issue #123's mechanism) are the first such case --
+    # see their extra.get() reads in _load_params.
     _EXTRA_KEYS = (
         "sldet", "iteration", "ll_history", "final_ll", "stop_reason",
         "n_kurt_done", "n_newton_fallbacks", "lrate", "lrate_cap", "newtrate",
@@ -2878,6 +3064,17 @@ class AMICAMLXNG:
             "newt_start": self.newt_start,
             "newtrate": self.newtrate0,
             "do_newton": self.do_newton,
+            # Outlier rejection (issue #123's AMICATorchNG mechanism, epic
+            # #278 Phase 3/#289): a phase-1/2-era payload's config dict lacks
+            # these keys, and cls(**config) then falls back to the
+            # constructor's do_reject=False default -- no format_version bump
+            # needed (same precedent as keep_best above). The rejection state
+            # a fit actually reached (numrej/good_idx) is in ``extra`` below.
+            "do_reject": self.do_reject,
+            "rejsig": self.rejsig,
+            "rejstart": self.rejstart,
+            "rejint": self.rejint,
+            "maxrej": self.maxrej,
             "rho0": self.rho0,
             "minrho": self.minrho,
             "maxrho": self.maxrho,
@@ -2938,6 +3135,21 @@ class AMICAMLXNG:
             "restart_seeds_": list(self.restart_seeds_),
             "restart_lls_": [float(v) for v in self.restart_lls_],
             "restart_stop_reasons_": list(self.restart_stop_reasons_),
+            # Outlier rejection (issue #123's AMICATorchNG mechanism, epic
+            # #278 Phase 3/#289). Deliberately NOT added to _EXTRA_KEYS
+            # (which _load_params checks strictly): these are the first
+            # extra fields added after format_version 1 shipped, so a
+            # phase-1/2-era payload genuinely lacks them, and _load_params
+            # falls back with extra.get() -- the additive pattern
+            # AMICATorchNG's #198 restart_seeds_/restart_lls_/
+            # restart_stop_reasons_ established there. ``good_idx`` is
+            # written as a plain list (not a numpy array): ``save()`` JSON-
+            # encodes ``extra`` via ``json.dumps``, which cannot serialize
+            # ndarrays.
+            "numrej": int(self.numrej),
+            "good_idx": None
+            if self.good_idx is None
+            else np.array(self.good_idx).astype(np.int64).tolist(),
         }
         return {
             "format_version": self._SAVE_FORMAT_VERSION,
@@ -3094,6 +3306,17 @@ class AMICAMLXNG:
         self.restart_seeds_ = list(extra["restart_seeds_"])
         self.restart_lls_ = list(extra["restart_lls_"])
         self.restart_stop_reasons_ = list(extra["restart_stop_reasons_"])
+        # Additive-only (issue #123's AMICATorchNG mechanism, epic #278
+        # Phase 3/#289), NOT in _EXTRA_KEYS: a payload written before Phase 3
+        # simply has no rejection state, and a good_idx of None / numrej of 0
+        # is the honest description of a model that never rejected anything
+        # (the same fallback AMICATorchNG's _load_params uses for its own
+        # #198-era restart_seeds_/restart_lls_/restart_stop_reasons_ keys).
+        self.numrej = int(extra.get("numrej", 0))
+        good_idx = extra.get("good_idx")
+        self.good_idx = (
+            None if good_idx is None else mx.array(np.asarray(good_idx, dtype=np.int64))
+        )
 
     def save(self, filepath: str) -> None:
         """Persist the fitted model to ``filepath`` as a single ``.npz``
