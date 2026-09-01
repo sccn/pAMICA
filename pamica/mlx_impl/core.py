@@ -3857,6 +3857,21 @@ class AMICAMLXNG:
                 value = _safe_int_cast(name, value, self._INT_PARAM_DTYPES[name])
             else:
                 value = value.astype(np.float32)
+                # Named-error isfinite validation (PR #318 review): the 10
+                # float _PARAM_ARRAYS had NO finiteness check at all --
+                # _safe_int_cast above only covers comp_list/pdtype -- so a
+                # NaN/inf-poisoned payload (corrupted file, hand-edited
+                # .npz, truncated write) would load "successfully" and only
+                # surface later as a confusing downstream NaN with no
+                # diagnostic tying it back to load(), the exact failure mode
+                # the W-singularity check just below this loop already
+                # guards against for W specifically. Extends that same
+                # promise to every float param, matching load()'s docstring.
+                if not np.all(np.isfinite(value)):
+                    raise ValueError(
+                        f"malformed AMICAMLXNG state: restored {name!r} has "
+                        f"non-finite values; the payload may be corrupted."
+                    )
             setattr(self, name, mx.array(value))
 
         # Rebuild the MLX-only per-iteration caches (module docstring):

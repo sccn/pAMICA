@@ -496,6 +496,24 @@ def test_from_state_dict_accepts_whole_valued_float_comp_list():
     assert np.array(m2.comp_list).dtype == np.int64
 
 
+def test_from_state_dict_rejects_nonfinite_mu():
+    """PR #318 review: _load_params's isfinite validation covered only
+    comp_list/pdtype (via _safe_int_cast) -- the other 10 float
+    _PARAM_ARRAYS had no finiteness check at all, so a NaN-poisoned payload
+    (corrupted file, hand-edited .npz) would load "successfully" and only
+    surface later as a confusing downstream NaN with no diagnostic tying it
+    back to load(). mu is used here as the representative float param
+    (matching test_mlx_export.py's write_amica_output force-corrupted-mu
+    test), but the fix covers all 10."""
+    m = _fitted_model(n_models=1, max_iter=3)
+    state = m.state_dict()
+    mu = state["params"]["mu"].copy()
+    mu[0, 0] = np.nan
+    state["params"]["mu"] = mu
+    with pytest.raises(ValueError, match="mu"):
+        AMICAMLXNG.from_state_dict(state)
+
+
 def test_from_state_dict_rejects_singular_restored_W():
     """``_load_params`` recomputes ``log|det W|`` from the restored ``W``; a
     finite but SINGULAR ``W`` makes ``slogdet`` return ``-inf`` rather than
