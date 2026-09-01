@@ -146,6 +146,16 @@ def test_error_handling():
     with pytest.raises(ValueError):
         model.fit(np.ones((10,)))  # 1D array
 
+    # __init__ already rejects a non-positive max_iter (see
+    # test_amica_initialization above), but max_iter is a plain public
+    # attribute a caller can reassign after construction; fit() must
+    # re-check it too rather than silently running the EM loop zero times
+    # (PR #318 review item 5).
+    bad_max_iter = AMICA(num_models=1, num_mix=3)
+    bad_max_iter.max_iter = 0
+    with pytest.raises(ValueError, match="max_iter"):
+        bad_max_iter.fit(np.ones((4, 20)))
+
     # Test transform before fit
     with pytest.raises(RuntimeError):
         model.transform(np.random.randn(10, 100))

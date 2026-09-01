@@ -633,6 +633,14 @@ class AMICA:
         if data.size == 0:
             raise ValueError("data must not be empty")
 
+        # __init__ already rejects a non-positive max_iter (line ~189), but
+        # max_iter is a plain public attribute a caller can reassign after
+        # construction (unlike torch/mlx, where it is a fit() parameter
+        # re-validated every call) -- re-check at fit entry so that path is
+        # not a silent bypass (PR #318 review item 5).
+        if self.max_iter < 1:
+            raise ValueError(f"max_iter must be >= 1, got {self.max_iter}")
+
         # Log initial message
         self.logger.info("Starting AMICA fitting...")
 
