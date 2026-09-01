@@ -1922,11 +1922,37 @@ class AMICAMLXNG:
         iterate rather than leaving the last (discarded) iterate's per-sample
         values behind -- what keeps the exported LLt the one belonging to the
         exported parameters.
+
+        Also captures ``_logdet_W``/``_lgamma_table`` (PR #318 review): unlike
+        AMICATorchNG, which recomputes ``log|det W|``/``lgamma(1+1/rho)``
+        inline on every call, this backend hoists them to once-per-iteration
+        cached arrays (module docstring) -- and neither is in
+        ``_PARAM_ARRAYS``, so without this they would silently stay at
+        whatever the LAST (discarded) iterate left them at after a restore,
+        corrupting every subsequent ``_forward``/``model_loglik``/
+        ``model_probability``/``mir`` call on the "restored" model even
+        though ``W``/``rho`` themselves rolled back correctly. Captured
+        unconditionally (both always exist once :meth:`_initialize_parameters`
+        has run): at the point ``fit`` calls this, ``_logdet_W``/
+        ``_lgamma_table`` still hold the values the just-computed E-step
+        (``best_ll``) actually used -- they are only refreshed at the END of
+        ``_update_parameters``, i.e. AFTER this snapshot is taken -- so this
+        is precisely the state consistent with ``best_ll``, the same
+        E-step-not-yet-M-stepped point the rest of the snapshot captures.
+        Chosen over rebuilding them post-restore (:meth:`_load_params`'s
+        approach) because it keeps the snapshot a single self-contained
+        point-in-time capture with no follow-up step a future caller of
+        :meth:`_restore_params` could forget -- the generic ``setattr`` loop
+        there already restores whatever this dict holds.
         """
         snap: dict = {
             name: mx.array(getattr(self, name)) for name in self._PARAM_ARRAYS
         }
         snap["n_kurt_done"] = self.n_kurt_done
+        if self._logdet_W is not None:
+            snap["_logdet_W"] = mx.array(self._logdet_W)
+        if self._lgamma_table is not None:
+            snap["_lgamma_table"] = mx.array(self._lgamma_table)
         # Present for every in-fit call (fit allocates the buffers before the
         # loop and frees them only after the restore); absent only for a
         # direct call on an already-returned model, where there is nothing to

@@ -257,6 +257,47 @@ def test_keep_best_restores_a_genuine_overshoot(real_data):
     assert argmax < len(m.ll_history) - 1
 
 
+def test_forced_restore_model_loglik_matches_state_dict_round_trip(real_data):
+    """PR #318 review: ``_snapshot_params``/``_restore_params`` roll back
+    ``W``/``rho``/etc, but the MLX-only per-iteration caches ``_logdet_W``
+    (feeds ``log|det W|`` directly into every ``logV``) and ``_lgamma_table``
+    (feeds the GG log-density) are NOT among ``_PARAM_ARRAYS`` -- so without
+    capturing them too, a restore leaves them at the LAST (discarded)
+    iterate's values, silently corrupting ``model_loglik``/
+    ``model_probability``/``mir`` on the "restored" model even though
+    ``W``/``rho`` themselves rolled back correctly.
+
+    The oracle: a ``state_dict()``/``from_state_dict()`` round trip
+    independently REBUILDS both caches from the restored ``W``/``rho``
+    (``_load_params``, unaffected by this bug), so it is a ground truth the
+    live in-memory restored model must agree with. This is the regression
+    test itself, not a synthetic unit test of the caches in isolation --
+    it fails before the fix and passes after (both measured; see below)."""
+    x = real_data[:, :4096]
+    m = _model(keep_best=True, **_FORCED_RESTORE_KWARGS)
+    m.fit(x, max_iter=_FORCED_RESTORE_MAX_ITER, verbose=False)
+    assert m.stop_reason == "min_dll"
+    assert m.final_ll_ != m.ll_history[-1], "test setup: the restore did not fire"
+
+    direct = m.model_loglik(x)
+    round_tripped = AMICAMLXNG.from_state_dict(m.state_dict()).model_loglik(x)
+    max_diff = float(np.abs(direct - round_tripped).max())
+    print(
+        f"forced-restore model_loglik vs state_dict round trip: max_diff={max_diff!r}"
+    )  # noqa: T201, E501
+    np.testing.assert_allclose(
+        direct,
+        round_tripped,
+        rtol=0,
+        atol=1e-6,
+        err_msg=(
+            "model_loglik(training X) diverged from the state_dict round-trip "
+            "oracle after a keep_best restore -- _logdet_W/_lgamma_table are "
+            "likely stale (PR #318 review)"
+        ),
+    )
+
+
 def test_keep_best_restore_does_not_rewrite_ll_history(real_data):
     """``ll_history`` stays the true per-iteration trajectory regardless of
     whether a restore fires -- only ``final_ll_``/the parameter arrays roll
