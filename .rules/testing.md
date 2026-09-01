@@ -77,6 +77,16 @@ fabricated result, and the injected exception type must be one the real call
 site can actually raise. Never use a subclass to bypass or fake the numeric
 path itself.
 
+A lighter direct-call variant of the same pattern (no subclass needed): call
+the real method directly on a hand-built input that forces an organically
+unreachable branch, instead of driving a full fit to reach it. Established in
+`test_numpy_reject.py`/`test_mlx_reject.py`'s `_reject_outliers(ll_vec)` calls
+with a NaN-poisoned `ll_vec` -- the all-rejected branch is provably impossible
+from a real fit (the max of any finite log-likelihood vector is always kept),
+so a real fit can never exercise it. Same rule applies: the method under test
+runs its real, unmodified logic; only the input is hand-built, and only to
+reach a branch the method's own code proves is otherwise unreachable.
+
 ## When Real Testing Seems Impossible
 **Think creatively before giving up:**
 - Can you use Docker for a test database?
