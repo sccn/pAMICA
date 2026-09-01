@@ -432,8 +432,8 @@ guarded to a no-op so the parity results above stay byte-for-byte unchanged.
 | Best-iterate safeguard (`keep_best`, #51) | on by default | returns the highest-LL iterate; cuts multi-model LL sd from 12.7x to 2.0x Fortran's. Single-model parity stays bit-exact (monotone, no restore). ADR 0003 |
 | Per-model bias `c` update (#27) | on for `n_models>1` | Fortran `update_c`; per-block stats bit-exact; no-op for `n_models=1` |
 | Component sharing (`share_comps`, #60) | off by default | Fortran `identify_shared_comps` ported; no bit-exact oracle (`Spinv2` is unrunnable), behavior-validated; byte-identical when unshared |
-| Outlier rejection (`do_reject`, #123) | off by default | `good_idx` mechanism in both backends; NumPy port validated vs the PyTorch backend |
-| Degenerate-fit contract (#50) | always | a NaN or singular fit is refused (`converged_` / `stop_reason_`); `transform`/`get_*`/`save`/`write_amica_output` raise instead of returning NaN sources |
+| Outlier rejection (`do_reject`, #123) | off by default | `good_idx` mechanism on all three backends (NumPy, PyTorch, MLX -- the last landed epic #278 Phase 3, #289); MLX/NumPy ports validated vs the PyTorch backend |
+| Degenerate-fit contract (#50) | always | the `AMICA` wrapper refuses a NaN or singular fit (`converged_` / `stop_reason_`); `transform`/`get_*`/`save` raise through the wrapper instead of returning NaN sources. This is a wrapper-level contract, not a raw-backend one -- calling a raw `AMICATorchNG`/`AMICAMLXNG`/`AMICA_NumPy` instance's `transform`/`get_*`/`save` directly, bypassing the wrapper, is not gated (tracked as issue #306). `write_amica_output` is the one exception: both the PyTorch and MLX backends gained the same degenerate/non-finite refusal directly on the raw class in this epic, since it has no wrapper equivalent to gate it. |
 
 Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests/test_ng_sharing.py`, `torch_tests/test_amica_ng_wrapper.py`, and `test_numpy_reject.py`.
 
