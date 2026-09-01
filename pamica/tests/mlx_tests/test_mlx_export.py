@@ -4,10 +4,11 @@ torch_impl/core.py:3285-3366).
 
 Round-trips through the shared :func:`pamica.numpy_impl.load.loadmodout`
 reader (the same reader real EEGLAB output is validated against, issue
-#159), plus a torch-twin byte comparison: a float64 ``AMICATorchNG`` built
+#159), plus a torch-twin file comparison: a float64 ``AMICATorchNG`` built
 from the exact fitted MLX state (the ``_torch_twin`` pattern from
 ``pamica/tests/test_mlx_sharing_cross_backend.py``) exports the same
-parameters, so the two on-disk files can be diffed directly. This embeds an
+parameters, so the on-disk files agree to float32 precision (only the
+integer ``comp_list`` is compared exactly). This embeds an
 inline torch comparison in an ``mlx_tests`` file, the same precedent
 ``test_mlx_backend.py``/``test_mlx_sharing.py`` already set for non-drift-
 guard torch comparisons; the anti-drift AGREEMENT pin for ``do_reject``
@@ -85,7 +86,7 @@ def test_write_amica_output_round_trips_through_loadmodout(
     # #159), so only order-independent quantities are checked through this
     # reader -- exact byte-level reproduction (raw files, no reordering) is
     # pinned separately below, against a torch twin
-    # (test_export_is_byte_compatible_with_a_torch_twin), mirroring
+    # (test_export_matches_a_torch_twin_to_float32_precision), mirroring
     # torch_tests/test_amica_ng_wrapper.py's split between
     # test_write_amica_output_bytes (raw bytes) and
     # test_write_amica_output_loadmodout_readable (order-independent, via
@@ -277,7 +278,7 @@ def test_write_amica_output_makes_no_extra_forward_pass(
     assert (tmp_path / "amicaout" / "LLt").exists()
 
 
-# --- torch-twin byte comparison (W layout, single-model Fortran parity) ----
+# --- torch-twin file comparison (W layout, single-model Fortran parity) ----
 def _torch_twin(model, sphere_np: np.ndarray):
     """A float64 AMICATorchNG holding ``model``'s exact fitted state, for a
     direct file-level export comparison. Mirrors
@@ -334,7 +335,9 @@ _FLOAT_FILES = (
 
 
 @pytest.mark.parametrize("n_models", [1, 2])
-def test_export_is_byte_compatible_with_a_torch_twin(real_data, tmp_path, n_models):
+def test_export_matches_a_torch_twin_to_float32_precision(
+    real_data, tmp_path, n_models
+):
     m = _model(n_models=n_models, seed=42, keep_best=False)
     m.fit(real_data, max_iter=6, verbose=False)
     assert m._sphere_np is not None

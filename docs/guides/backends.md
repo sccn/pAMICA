@@ -8,12 +8,17 @@ interface, plus an optional Apple-GPU backend and a legacy NumPy reference.
 | Backend | Class | Role |
 |---|---|---|
 | PyTorch natural-gradient EM | [`AMICATorchNG`](../api/torch-backend.md) | **Default.** Fortran-parity backend; CUDA / CPU, and float32 on MPS. |
-| MLX (Apple GPU) | [`AMICAMLXNG`](../api/mlx-backend.md) (`pamica.mlx_impl`) | Optional Apple-Silicon GPU backend; float32 only. Full torch-equivalent feature surface as of epic #278, including EEGLAB export -- see the [backend table](amica-differences.md#backend-differences). |
+| MLX (Apple GPU) | [`AMICAMLXNG`](../api/mlx-backend.md) (`pamica.mlx_impl`) | Optional Apple-Silicon GPU backend; float32 only. |
 | NumPy reference | [`AMICA_NumPy`](../api/numpy-backend.md) | Legacy oracle + CLI; carries the same parity fixes. |
 
 The `AMICA` wrapper uses `AMICATorchNG`. The MLX backend is imported separately
 (`from pamica.mlx_impl import AMICAMLXNG`) so that `import pamica` never
-requires MLX.
+requires MLX. As of epic #278 the MLX backend carries the full
+`AMICATorchNG`-equivalent surface (all pdf families, Newton, rejection,
+persistence, EEGLAB export, MIR/PMI); the wrapper conveniences -- among them
+the `from_params_file` reader -- remain PyTorch-only (issue #313 tracks
+backend selection there). See the
+[backend table](amica-differences.md#backend-differences).
 
 ## Device selection
 
