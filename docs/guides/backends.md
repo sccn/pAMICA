@@ -13,7 +13,12 @@ interface, plus an optional Apple-GPU backend and a legacy NumPy reference.
 
 The `AMICA` wrapper uses `AMICATorchNG`. The MLX backend is imported separately
 (`from pamica.mlx_impl import AMICAMLXNG`) so that `import pamica` never
-requires MLX.
+requires MLX. As of epic #278 the MLX backend carries the full
+`AMICATorchNG`-equivalent surface (all pdf families, Newton, rejection,
+persistence, EEGLAB export, MIR/PMI); the wrapper conveniences -- among them
+the `from_params_file` reader -- remain PyTorch-only (issue #313 tracks
+backend selection there). See the
+[backend table](amica-differences.md#backend-differences).
 
 ## Device selection
 

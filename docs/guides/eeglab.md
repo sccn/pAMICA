@@ -34,6 +34,21 @@ This writes the raw binary files EEGLAB's AMICA loader reads:
 For a single model the bytes are identical to the reference Fortran binary's
 `amicaout` files, so the directory is interchangeable with a native AMICA run.
 
+The MLX backend writes the same directory: an Apple-Silicon fit exports to
+EEGLAB directly, with no torch round trip (epic #278). The export is
+validated against a torch twin in the test suite to float32 precision
+(max abs diff < 1e-5; `comp_list` is the only field compared exactly --
+MLX computes in float32, so its files are not bit-identical to a float64
+export the way a torch fit's are to Fortran's):
+
+```python
+from pamica.mlx_impl import AMICAMLXNG  # requires the mlx extra
+
+model = AMICAMLXNG(n_channels=X.shape[0], n_mix=3)
+model.fit(X)                      # X is (n_channels, n_samples)
+model.write_amica_output("amicaout")
+```
+
 `LLt` is what `loadmodout15.m` turns into `Lht`/`Lt` and the model-probability
 odds `v`; it is written after a fresh `fit()`, and omitted (with a warning) for
 a model restored from `load()`, which carries no E-step stash. Under

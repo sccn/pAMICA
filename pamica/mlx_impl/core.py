@@ -328,7 +328,7 @@ def _safe_int_cast(name: str, value: np.ndarray, dtype) -> np.ndarray:
 
 
 class AMICAMLXNG:
-    """MLX natural-gradient EM backend (GG, single- and multi-model; #76/#81).
+    """MLX natural-gradient EM backend, full torch-equivalent surface (#76/#81, epic #278).
 
     Parameters mirror the subset of :class:`AMICATorchNG` that is supported;
     the same ``seed`` produces the same initial parameters as the PyTorch/NumPy
