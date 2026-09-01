@@ -5,6 +5,32 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Epic #278 polish round: audit-driven fixes ahead of merge to `dev`.**
+  `AMICAMLXNG` gained `variance_order` (issue #92), the EEGLAB
+  back-projected-variance component order, closing the one accessor gap the
+  epic's feature-parity audit found in an otherwise-complete Phase 3
+  (validated on real data against a float64 `AMICATorchNG` twin holding
+  identical fitted parameters: the component order matches exactly on a
+  config with non-degenerate variance gaps). The audit also found several
+  stale/misattributed doc claims, fixed here: `docs/guides/amica-differences.md`
+  now attributes the degenerate-fit refusal to the `AMICA` wrapper rather than
+  the raw PyTorch backend (the raw-backend gap is issue #306), and gained an
+  "Unmapped Fortran keywords" section pointing to `fortran_params.py`'s
+  `FORTRAN_UNSUPPORTED_KEYS` as the enumeration, naming three keywords dead in
+  the reference itself (`filter_length`/`dft_length`/`decwindow`), and
+  recording the `do_rho`-vs-`pdftype` divergence explicitly; `AGENTS.md` and
+  `.context/progress_summary.md` no longer claim `validate_implementations.py`
+  covers the NumPy/MLX backends (it is torch-vs-Fortran only; extending it is
+  issue #315); `.context/feature_parity.md` and `.context/progress_summary.md`
+  no longer claim the runtime-vs-Fortran benchmark is unmeasured or that issue
+  #15 (save/load and `plot_components` test coverage) is open, both stale
+  since earlier work landed; and `fortran_params.py`'s unsupported-keys table
+  no longer claims `writestep`/`do_history`/`histstep` have no pamica
+  equivalent -- they are implemented on the legacy NumPy backend, just not
+  yet on torch/MLX (issue #312). Also aligned the legacy NumPy backend's
+  inert `pdftype` constructor default to 0, matching torch/MLX (the value is
+  never read, so this is a documentation-equivalent surface fix, not a
+  behavior change).
 - **MLX backend: outlier rejection, LLt stash, EEGLAB export, MIR/PMI**
   (issue #289, epic #278 Phase 3 -- completes the epic). `AMICAMLXNG` gains:
   the LLt stash (issue #157), filled per-block by the E-step (never a second
