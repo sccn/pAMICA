@@ -14,7 +14,7 @@ pamica/
 │   ├── core.py              #   Natural-gradient EM port (AMICATorchNG); Fortran-parity, primary backend
 │   └── utils.py             #   Preprocessing (sphering, PCA), device selection
 ├── mlx_impl/                # Optional MLX backend (Apple GPU; AMICAMLXNG, #76/#81)
-│   └── core.py              #   float32 GPU E/M-step + CPU-stream linalg (single- & multi-model GG, NG)
+│   └── core.py              #   float32 GPU E/M-step + CPU-stream linalg; all five pdf families, full torch-equivalent surface (epic #278)
 ├── numpy_impl/              # Legacy NumPy reference (topic-named modules, issue #34)
 │   ├── core.py              #   AMICA_NumPy (incl. inlined Newton); pdf.py, data.py, load.py, viz.py, utils.py, cli.py
 │   └── ...

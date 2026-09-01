@@ -68,7 +68,9 @@ The wrapper auto-selects a device and computes in float64 for Fortran parity.
 - float32 (about 7 significant digits, not parity) is required on the Apple GPUs
   and modestly faster on CPU; it is not a general speedup, since CUDA is
   overhead-bound (float32 is about as fast as float64).
-- On Apple Silicon the MLX backend is the fastest option; import it explicitly.
+- On Apple Silicon the MLX backend is the fastest option and carries the full
+  feature surface (all pdf families, Newton, rejection, EEGLAB export, MIR);
+  import it explicitly.
 
 ```python
 AMICA(device="cuda").fit(X)               # NVIDIA GPU, float64
