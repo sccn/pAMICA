@@ -303,7 +303,10 @@ class AMICA:
         self.min_grad_norm = params.get("min_grad_norm", 1e-7)
         self.use_min_dll = params.get("use_min_dll", True)
         self.use_grad_norm = params.get("use_grad_norm", True)
-        self.pdftype = params.get("pdftype", 1)
+        # Inert: never read after assignment (this backend always runs the GG
+        # update; _compute_log_pdf takes no pdftype). Aligned to 0 to match
+        # the torch/MLX constructor default, for surface consistency only.
+        self.pdftype = params.get("pdftype", 0)
         self.outdir = Path(params.get("outdir", "output"))
 
         # Data-source config (used by fit() when called without explicit
