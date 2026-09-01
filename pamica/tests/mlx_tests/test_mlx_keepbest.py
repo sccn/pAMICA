@@ -44,9 +44,36 @@ iteration ``argmax`` at all -- so ``max_iter=argmax+1`` (which DOES run
 iteration ``argmax``'s M-step) is one M-step too far and is NOT bit-identical
 to the restored snapshot. This was verified empirically before writing the
 assertion below, not assumed.
+
+Two more scenarios, added after PR #310 review:
+
+* ``test_keep_best_does_not_rescue_a_diverged_fit_that_peaked_earlier`` covers
+  the end-of-fit restore guard's ``stop_reason not in
+  _DEGENERATE_STOP_REASONS`` exclusion, which the forced-restore tests above
+  never exercise (they always end on a healthy ``min_dll`` stop). Uses the
+  sanctioned error-injection subclass pattern (``.rules/testing.md``'s
+  "Sanctioned Exception", the same construction as ``test_mlx_restarts.py``'s
+  ``_NaNForSeeds``): a subclass that runs the real fit untouched for
+  ``nan_after`` iterations -- long enough to capture a genuine, better
+  ``best_snapshot`` -- then corrupts the real E-step's ``acc["ll"]`` to force
+  a ``nan_ll`` stop. Deliberately NOT the grad_norm-stop or lrate_floor-stop
+  variants of a degenerate-adjacent-but-healthy run: the restore guard
+  branches on ``stop_reason in _DEGENERATE_STOP_REASONS`` as a set membership
+  test, not on which specific reason fired, so ``nan_ll`` alone already
+  exercises the branch; hunting a second forcing recipe for a different
+  non-degenerate stop would add cost with no new code path covered.
+* ``test_keep_best_restart_record_reports_the_restored_iterate`` covers the
+  composition of ``keep_best`` with best-of-N restarts (issue #198): the
+  ``_FORCED_RESTORE_KWARGS`` recipe run as restart index 0 (seed 0) inside an
+  ``n_restarts=2`` search must record ``restart_lls_[0]`` as the RESTORED
+  best iterate's LL, not the raw last iterate -- i.e. the same value a
+  standalone seed-0 fit's ``final_ll_`` reports, confirmed bit-identical in
+  the same process. The second restart (seed 1) is cheap: it converges in
+  under 60 iterations on the same recipe with no forcing needed.
 """
 
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -403,3 +430,129 @@ def test_missing_keep_best_key_loads_with_the_default(real_data):
 
     m2 = AMICAMLXNG.from_state_dict(state)
     assert m2.keep_best is True  # falls back to the constructor default
+
+
+# ---------------------------------------------------------------------------
+# Degenerate-stop exclusion (PR #310 review): the restore guard's
+# ``stop_reason not in _DEGENERATE_STOP_REASONS`` branch
+# ---------------------------------------------------------------------------
+
+
+class _NaNAfterIteration(AMICAMLXNG):
+    """Forces a ``nan_ll`` stop after ``nan_after`` REAL iterations have run.
+
+    Sanctioned error-injection subclass (``.rules/testing.md``'s "Sanctioned
+    Exception"; same construction as ``test_mlx_restarts.py``'s
+    ``_NaNForSeeds``, gated on iteration count instead of seed): every
+    iteration up to ``nan_after`` runs the untouched production
+    ``_accumulate_blocks``/``_update_parameters`` on real data, so
+    ``best_snapshot`` captures a genuine, better earlier peak before the
+    injected divergence -- exactly the scenario the guard exists for.
+    """
+
+    nan_after: int = 10**9  # effectively never, unless overridden
+
+    def _accumulate_blocks(self, X):
+        acc = super()._accumulate_blocks(X)
+        if self.iteration >= self.nan_after:
+            acc["ll"] = acc["ll"] * float("nan")
+        return acc
+
+
+_DEGENERATE_AFTER_KWARGS: dict[str, Any] = dict(
+    n_channels=NW, n_models=1, n_mix=NMIX, seed=42, block_size=BLOCK, lrate=0.1
+)
+_DEGENERATE_NAN_AFTER = 5
+
+
+def test_keep_best_does_not_rescue_a_diverged_fit_that_peaked_earlier(real_data):
+    """The end-of-fit restore guard must actually refuse to rescue a
+    diverged fit, not merely never happen to need to: a fit that ran
+    ``_DEGENERATE_NAN_AFTER`` real iterations (so a genuine, better
+    ``best_snapshot`` exists) and then hits an injected ``nan_ll`` must end
+    degenerate with NO restore -- state_dict()'s refusal to persist a
+    degenerate model (#50) would otherwise be silently bypassed by a
+    restored, "successful-looking" return."""
+    x = real_data[:, :4096]
+    on = _NaNAfterIteration(keep_best=True, **_DEGENERATE_AFTER_KWARGS)
+    on.nan_after = _DEGENERATE_NAN_AFTER
+    on.fit(x, max_iter=20, verbose=False)
+
+    assert on.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert on.stop_reason == "nan_ll"
+    assert on.final_ll_ is not None and math.isnan(on.final_ll_)
+    # A genuine, finite earlier trajectory existed for the guard to have
+    # (wrongly) rescued, if it were broken.
+    assert len(on.ll_history) == _DEGENERATE_NAN_AFTER
+    assert all(math.isfinite(v) for v in on.ll_history)
+
+    # No restore fired: bit-identical to keep_best=False on the identical
+    # forced-degenerate trajectory. If the guard were broken, keep_best=True
+    # would roll back to the earlier peak and diverge from this.
+    off = _NaNAfterIteration(keep_best=False, **_DEGENERATE_AFTER_KWARGS)
+    off.nan_after = _DEGENERATE_NAN_AFTER
+    off.fit(x, max_iter=20, verbose=False)
+    assert off.stop_reason == "nan_ll"
+    for name in AMICAMLXNG._PARAM_ARRAYS:
+        a = np.array(getattr(on, name))
+        b = np.array(getattr(off, name))
+        assert np.array_equal(a, b), (
+            f"{name} differs: keep_best rescued a diverged fit despite the "
+            f"degenerate stop"
+        )
+
+    # Positive proof the returned params are the diverged LAST state, not
+    # the (better) snapshot: reconstruct what the snapshot would have held
+    # (params before the peak iteration's own M-step, the same truncated-
+    # refit trick as the forced-restore tests above) and confirm the
+    # degenerate run's params differ from it.
+    argmax = int(np.argmax(on.ll_history))
+    would_be_snapshot = AMICAMLXNG(**_DEGENERATE_AFTER_KWARGS)
+    would_be_snapshot.fit(x, max_iter=argmax, verbose=False)
+    differs = any(
+        not np.array_equal(
+            np.array(getattr(on, name)), np.array(getattr(would_be_snapshot, name))
+        )
+        for name in AMICAMLXNG._PARAM_ARRAYS
+    )
+    assert differs, (
+        "returned params equal the would-be best snapshot: the restore "
+        "fired despite the degenerate stop"
+    )
+
+
+# ---------------------------------------------------------------------------
+# keep_best x best-of-N restarts composition (PR #310 review, issue #198)
+# ---------------------------------------------------------------------------
+
+
+def test_keep_best_restart_record_reports_the_restored_iterate(real_data):
+    """A restart's recorded ``restart_lls_`` entry must be the RESTORED best
+    iterate's LL, not the raw last iterate -- ``_fit_once`` (called once per
+    restart) applies its own keep_best restore before returning, and
+    ``fit()`` reads ``final_ll_`` off that already-restored state, so this
+    should hold by construction; this test pins it against regression.
+
+    The forced-restore recipe (module docstring) runs as restart index 0
+    (seed 0); a cheap, unforced seed 1 fills out ``n_restarts=2`` so the
+    restart machinery (not just a bare single fit) is actually exercised."""
+    x = real_data[:, :4096]
+
+    single = _model(keep_best=True, **_FORCED_RESTORE_KWARGS)
+    single.fit(x, max_iter=_FORCED_RESTORE_MAX_ITER, verbose=False)
+    assert single.stop_reason == "min_dll"
+    assert max(single.ll_history) - single.ll_history[-1] > _KEEP_BEST_TOL
+
+    kwargs: dict[str, Any] = dict(_FORCED_RESTORE_KWARGS)
+    del kwargs["seed"]  # superseded by restart_seeds below
+    multi = _model(keep_best=True, n_restarts=2, restart_seeds=[0, 1], **kwargs)
+    multi.fit(x, max_iter=_FORCED_RESTORE_MAX_ITER, verbose=False)
+
+    assert multi.restart_seeds_ == [0, 1]
+    assert multi.restart_stop_reasons_[0] == "min_dll"
+    # The restart record for seed 0 reports the RESTORED best-iterate LL,
+    # bit-identical to what a standalone seed-0 fit returns as final_ll_ --
+    # not ll_history[-1], which the module docstring's recipe establishes is
+    # strictly lower on this seed.
+    assert multi.restart_lls_[0] == single.final_ll_
+    assert multi.restart_lls_[0] != single.ll_history[-1]
