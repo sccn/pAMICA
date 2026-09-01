@@ -25,6 +25,11 @@ Release notes are also published on the
   unaffected, verified bit-identical to the epic tip before this phase.
   Cross-backend agreement (same real data/config, MLX vs PyTorch reject the
   same sample set) is the evidence for the stash-based design decision.
+  `write_amica_output` also gained `state_dict`'s two-layer degenerate/
+  non-finite refusal guard, on **both** the MLX and PyTorch backends: a
+  caller using either backend class directly (bypassing the `AMICA`
+  wrapper's own usability gate) could previously write a NaN model to disk
+  silently.
 - **MLX backend: `keep_best` best-iterate safeguard** (issue #288, epic #278
   Phase 2). `AMICAMLXNG` gained the #51 best-iterate restore: `fit` now tracks
   the highest-log-likelihood iterate and, if the run ends more than
