@@ -25,7 +25,7 @@ DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
 NW = 32
 FIELD = 30504
 
-# Fortran log-normalizer literals (amica15.f90:1315/1328/1341/1353).
+# Fortran log-normalizer literals (amica15.f90:1333/1346/1359/1371).
 _LOG4 = math.log(4.0)
 _LSQ2PI = math.log(2.506628274)
 _LNSUB = math.log(4.132731354)
@@ -42,19 +42,19 @@ def _load_real_data() -> np.ndarray:
 
 def _fortran_z0(y: np.ndarray, code: int) -> np.ndarray:
     """Literal amica15.f90 log-density (alpha=beta=1, mu=0 so y=b)."""
-    if code == 2:  # Gaussian, :1314
+    if code == 2:  # Gaussian, :1333
         return -0.5 * y * y - _LSQ2PI
-    if code == 3:  # logistic, :1327
+    if code == 3:  # logistic, :1346
         return -2.0 * np.log(np.cosh(0.5 * y)) - _LOG4
-    if code == 4:  # sub-Gaussian cosh+, :1340
+    if code == 4:  # sub-Gaussian cosh+, :1359
         return -0.5 * y * y + np.log(np.cosh(y)) - _LNSUB
-    if code == 1:  # super-Gaussian cosh-, :1352
+    if code == 1:  # super-Gaussian cosh-, :1371
         return -0.5 * y * y - np.log(np.cosh(y)) - _LNSUP
     raise ValueError(code)
 
 
 def _fortran_fp(y: np.ndarray, code: int) -> np.ndarray:
-    """Literal amica15.f90 score (:1465-1472)."""
+    """Literal amica15.f90 score (:1467-1491)."""
     return {
         2: y,
         3: np.tanh(y / 2.0),
@@ -393,3 +393,109 @@ def test_family_converged_ll_matches_fortran(pdftype: int, n_mix: int):
     )
     m.fit(data, max_iter=150, verbose=False)
     assert abs(m.ll_history[-1] - fres["final_ll"]) < 0.02
+
+
+# --- three-way: sharing x Newton x pdf family (issue #277) -------------------
+
+
+@pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
+def test_sharing_newton_and_fixed_family_fit_completes():
+    """``share_comps`` + ``do_newton`` + a non-default fixed ``pdftype``
+    together.
+
+    The three features have only pairwise coverage elsewhere: sharing x Newton
+    is ``test_ng_sharing.py::test_two_model_share_fit_survives_merge``, Newton
+    x families is ``test_family_fit_with_newton`` above. Risk is structural
+    rather than numerical -- the Newton curvature is indexed by (model,
+    channel), not by ``comp_list``, and the family dispatch reads only
+    ``pdtype``/``rho`` -- but nothing had run all three together before this
+    test (mirrors ``mlx_tests/test_mlx_pdf.py::
+    test_sharing_newton_and_fixed_family_fit_completes``). Newton fallbacks are
+    PERMITTED, not asserted to zero: a rejected direction under a non-GG
+    family is expected, per ``test_family_fit_with_newton``.
+
+    ``comp_thresh=0.99``/``seed=3``, not the loose 0.9 the pairwise sharing x
+    Newton test uses: at 0.9 on a 2-model fit ``.context/issue-264/
+    newton_findings.md`` measures 26-31 of 32 cross-model pairs merging --
+    near-total model collapse -- as "trajectory chaos" where Newton can drive
+    a component to zero curvature and the fit degenerates, seed-dependently
+    (seed 42 specifically degenerates on a nearby config). 0.99 is the doc's
+    verified stable zone (two genuinely near-collinear pairs merge there),
+    already used by ``test_ng_sharing.py::
+    test_low_rank_projected_data_share_fit_completes``; seed=3 is its
+    doc-verified stable seed. Measured at this config: 11 of 32 pairs merge,
+    comfortably short of the chaos threshold, so the ``comp_used`` guard
+    below stays non-vacuous without courting the documented degeneracy.
+    """
+    data = _load_real_data()[:, :8192]
+    m = AMICATorchNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=3,
+        pdftype=2,
+        device="cpu",
+        seed=3,
+        block_size=1024,
+        do_newton=True,
+        newt_start=5,
+        share_comps=True,
+        share_start=8,
+        share_iter=10,
+        comp_thresh=0.99,
+    )
+    m.fit(data, max_iter=30, verbose=False)
+
+    ll = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(ll))
+    assert m.A is not None and torch.isfinite(m.A).all()
+    assert m.W is not None and torch.isfinite(m.W).all()
+    assert m.pdtype is not None
+    assert np.all(m.pdtype.cpu().numpy() == 2)
+    used = int(m.comp_used.sum())
+    assert used < m.n_comps, "no merge fired; the three-way interplay is untested"
+    assert 0 <= m.n_newton_fallbacks <= len(ll)
+
+
+@pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
+def test_sharing_newton_and_adaptive_switcher_fit_completes():
+    """The single-component adaptive-switcher variant of the three-way
+    interplay: ``share_comps`` + ``do_newton`` + the extended-Infomax switcher
+    (``pdftype=1``, ``n_mix=1``) together (mirrors ``mlx_tests/test_mlx_pdf.py::
+    test_sharing_newton_and_adaptive_switcher_fit_completes``).
+
+    Same ``comp_thresh=0.99``/``seed=3`` safe-zone choice as
+    ``test_sharing_newton_and_fixed_family_fit_completes`` above, for the same
+    reason (``.context/issue-264/newton_findings.md``'s documented chaos
+    regime at the loose 0.9 cutoff). Measured here: 8 of 32 pairs merge.
+    """
+    data = _load_real_data()[:, :8192]
+    m = AMICATorchNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=1,
+        pdftype=1,
+        device="cpu",
+        seed=3,
+        block_size=1024,
+        do_newton=True,
+        newt_start=5,
+        share_comps=True,
+        share_start=8,
+        share_iter=10,
+        comp_thresh=0.99,
+        kurt_start=3,
+        num_kurt=5,
+        kurt_int=1,
+    )
+    m.fit(data, max_iter=30, verbose=False)
+
+    ll = np.asarray(m.ll_history, dtype=float)
+    assert np.all(np.isfinite(ll))
+    assert m.A is not None and torch.isfinite(m.A).all()
+    assert m.W is not None and torch.isfinite(m.W).all()
+    assert m.pdtype is not None
+    codes = set(np.unique(m.pdtype.cpu().numpy()).tolist())
+    assert codes.issubset({1, 4})
+    used = int(m.comp_used.sum())
+    assert used < m.n_comps, "no merge fired; the three-way interplay is untested"
+    assert 0 <= m.n_newton_fallbacks <= len(ll)

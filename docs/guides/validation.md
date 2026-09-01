@@ -321,8 +321,45 @@ so MLX-versus-CUDA reads as "best Apple-GPU path versus a strong NVIDIA GPU", no
 | 70 | 25.2 | 35.6 | 38.6 | 173 | 193 | 255 | 622 |
 
 MLX is the fastest option on Apple Silicon and stays roughly flat with channel count (~7x over torch-CPU).
-PyTorch-MPS is *not* a win (at or worse than CPU), so use MLX rather than `device="mps"` on Apple hardware.
+PyTorch-MPS is *not* a win at this `block_size=512` (at or worse than CPU); it is also markedly more
+block-size-sensitive than the CPU or MLX figures above (issue #216, bundled sample): it falls to 30.5
+ms/iteration at the current 8192 default, still behind CPU's 21.7 ms/iteration there, and to 13.5
+ms/iteration at a further-tuned single-block size that puts the whole sample in one block -- memory-limited
+rather than a free win, since peak block memory scales with `block_size`, which is why 8192 stays the
+shipped default -- below the CPU's 15.8 ms there. MLX remains fastest throughout,
+so it stays the recommendation over `device="mps"` on Apple hardware.
 CUDA float32 and float64 are near-identical here (launch-bound at this size). NumPy is the reference implementation, not a production path.
+
+### Block-size sensitivity
+
+`block_size` trades memory for dispatch overhead, and backends differ sharply in how much they benefit.
+Measured on an Apple M4 Pro (14 cores), the bundled 32-channel sample (30504 frames), float32,
+`n_mix=3`, `pdftype=0`, seed 42, warm, per-iteration cost in ms (issue #216):
+
+| block_size | PyTorch-MPS | MLX | PyTorch-CPU |
+|---:|---:|---:|---:|
+| 512 (former default) | 431.3 | 29.5 | 144.0 |
+| 2048 | 89.7 | 12.4 | 49.3 |
+| 8192 (current default) | 30.5 | 11.3 | 21.7 |
+| 30504 (single block) | 13.5 | 11.4 | 15.8 |
+
+All three backends are dispatch-bound at small block sizes, but by very different margins: PyTorch-MPS
+improves 32x from 512 to a single block, PyTorch-CPU 9x, MLX only 2.6x. Log-likelihood after 40
+iterations is unchanged across every block size on both devices (-3.43856 to six significant digits),
+so this is a pure throughput knob on this data, not a correctness one, and the comparison across block
+sizes is valid. MLX is the fastest Apple backend at every block size measured here, including the
+current 8192 default and the further-tuned single-block setting, so it stays the recommendation on
+Apple hardware regardless of how `block_size` is tuned. The `30504` row is a memory-bound extreme
+(the whole sample as one block), not a free win: peak block memory scales with `block_size`, which is
+why 8192, not 30504, stays the shipped default.
+
+Since the optimum moves with host, device and data, `do_opt_block` (issue #232, off by default) can
+search for it instead: it times candidate sizes on your actual data at the start of `fit` and keeps
+the fastest, on all three backends, under Fortran's `blk_min`/`blk_max`/`blk_step` names. The choice
+is timing-based and therefore machine-dependent, so a parity run must leave it off and pin
+`block_size`; see [the block-size search](amica-differences.md#the-block-size-search-picks-a-machine-dependent-value-issue-232)
+for the full caveat and for how a candidate that cannot be allocated is handled (skipped, not fatal --
+the one place the reference implementation exits where it should degrade).
 
 ### CPU core-scaling and native Fortran
 
@@ -367,7 +404,10 @@ the full 16/32/48/70-channel grid is in the result JSONs alongside `.context/iss
 | 32 | 38 | 187 | 291 | 869 |
 | 70 | 45 | 224 | 270 | 928 |
 
-The Apple-GPU win extends to multi-model: MLX ~38-45 ms/iteration, ~5x over torch-CPU, with MPS still losing.
+The Apple-GPU win extends to multi-model at this `block_size=512`: MLX ~38-45 ms/iteration, ~5x over
+torch-CPU, with MPS still losing. Unlike the single-model figures above, this configuration has not
+been re-swept at the current 8192 default (issue #216 covered single-model only), so whether the gap
+narrows here too is untested.
 
 ### Cross-backend log-likelihood agreement (single-model)
 
@@ -396,6 +436,74 @@ guarded to a no-op so the parity results above stay byte-for-byte unchanged.
 | Degenerate-fit contract (#50) | always | a NaN or singular fit is refused (`converged_` / `stop_reason_`); `transform`/`get_*`/`save`/`write_amica_output` raise instead of returning NaN sources |
 
 Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests/test_ng_sharing.py`, `torch_tests/test_amica_ng_wrapper.py`, and `test_numpy_reject.py`.
+
+## Which convergence criterion actually stops a fit
+
+AMICA ships four stops. On recordings the size of the bundled sample, only two of
+them fire, and it is worth knowing which before concluding that one is broken.
+
+Two of the four defaults differ between the backends, so read the column that
+matches the entry point you use. `AMICA_NumPy` resolves its defaults from the
+bundled `pamica/numpy_impl/params.json`; `AMICA`/`AMICATorchNG` and `AMICAMLXNG`
+take theirs from the constructor signature (`max_iter` from `fit`); Fortran
+compiles in the values in `amica15_header.f90` and the bundled
+`pamica/sample_data/input.param` overrides several.
+
+| Stop | `AMICA` / `AMICATorchNG` | `AMICA_NumPy` | `AMICAMLXNG` (MLX) | Fortran (compiled / `input.param`) |
+|---|---|---|---|---|
+| `max_iter` | **100** | 2000 | **100** | none / 2000 |
+| `min_dll` (`use_min_dll`) | on, `1e-9` | on, `1e-9` | on, `1e-9` | on, `1e-9` |
+| `min_nd` (`use_grad_norm`) | on, `1e-7` | on, `1e-7` (named `min_grad_norm`) | on, `1e-7` | on, `1e-7` |
+| `minlrate` (`lrate_floor`) | `1e-12` | `1e-12` | `1e-12` | `1e-12` / `1e-8` |
+| `do_newton` | **off** | **on** | **off** | off / on |
+
+The MLX column dates from issue #248, which ported both stops to that backend;
+before it, an MLX fit had no convergence criterion at all and always ran to
+`max_iter`. `do_newton` joined it in issue #264 (float32 throughout; see the
+backend-differences guide), taking `AMICATorchNG`'s off-by-default.
+
+Which of them actually ends a fit:
+
+- **`min_dll` normally wins**, at iteration 326-1076 depending on the BLAS build
+  — but only when `max_iter` is large enough to let it. At `AMICATorchNG`'s
+  default `max_iter=100` the fit always ends on `max_iter` before `min_dll` can
+  fire, so the default PyTorch run is iteration-limited, not converged. Raise
+  `max_iter` if you want the likelihood stop to be the one that decides.
+- **`min_nd` never fires** on a recording this size, in any of the four
+  implementations. This is the subject of the rest of this section.
+- **`minlrate` needs sustained likelihood decreases** to anneal the learning rate
+  all the way to the floor. The bundled sample stops on `min_dll` (or `max_iter`)
+  long before that, so it is not a stop you will meet here.
+
+**`min_nd` is not reachable on a recording this size, in any of the four
+implementations.** Running the reference binary to completion under a matched
+configuration, its own gradient norm oscillates rather than shrinking:
+
+| iteration | Fortran `nd` |
+|---:|---:|
+| 1000 | 4.7e-5 |
+| 1300 | 2.8e-5 |
+| 1500 | 3.1e-5 |
+| 1700 | 3.2e-5 |
+| 2000 | 2.5e-5 |
+
+It then plateaus at 1.0-1.65e-5 out to iteration 5073 without ever crossing the
+`1e-7` threshold, which sits about two orders of magnitude below the reference's
+own floor. The Python backends plateau roughly two orders higher again — near
+a fixed point `dAk` tends to zero, so the norm is measuring a near-total
+cancellation where floating-point and BLAS ordering differences dominate what is
+left.
+
+This is a property of the data rather than a defect. 30504 samples is small
+against the free parameters (1024 in `A` alone, before the mixture parameters),
+so the natural-gradient residual has a finite-sample noise floor above the
+threshold. The reference ships the same default and behaves the same way, so
+retuning it here would mean changing a Fortran-faithful default to manufacture a
+desired outcome.
+
+What data size *would* make `min_nd` meaningful has not been characterized. If
+you need a gradient-based stop, measure the plateau on your own recording first
+and set `min_nd` above it; otherwise leave `min_dll` to do the work.
 
 ## Reproducing these results
 
@@ -443,6 +551,71 @@ the underlying findings are in `.context/issue-84/` and `.context/issue-90/`.
 `sample_data/sample_params.json` is the JSON parameter file used above (loaded via
 `AMICA.from_params_file`); its keys mostly reuse Fortran's `.param` names (`lrate`, `do_newton`,
 `rho0`, `block_size`, `max_iter`, `num_models`, ...), but not all of them match one-to-one
-(for example `num_mix` here vs `num_mix_comps` in Fortran's `input.param`), and pamica does not
-yet parse the literal Fortran `.param` text format. A native `.param` reader, so the same file
-drives both implementations, is tracked as a future issue.
+(for example `num_mix` here vs `num_mix_comps` in Fortran's `input.param`).
+
+`AMICA.from_params_file` also reads the literal Fortran `input.param` text format directly
+(issue #132), so the exact file that drives the reference binary can drive pamica too, instead of
+maintaining a hand-translated JSON copy. The format is auto-detected by sniffing the file content (JSON starts with
+`{`/`[`; anything else is read as the Fortran text format -- the extension is
+never trusted), so no new API is needed:
+
+```python
+from pamica import AMICA
+
+model = AMICA.from_params_file("sample_data/input.param")   # Fortran text format
+model = AMICA.from_params_file("sample_data/sample_params.json")  # JSON, as before
+```
+
+The translation lives in `pamica/fortran_params.py` (`read_fortran_param_file`), which parses
+Fortran's whitespace-separated `key value` lines (`#` full-line comments, plus a deliberately
+permissive inline `" #..."` trailing comment; ints/floats/strings, including Fortran's `d`/`D`
+double-precision exponent marker; `0`/`1` boolean flags using Fortran's own `k == 1` semantics)
+into a dict targeting pamica's actual Python call surface: `AMICA.fit`'s named parameters
+(`max_iter`, `lrate`, `do_mean`, `do_sphere`, `do_newton`) and `AMICATorchNG` constructor
+keywords. It was built by reading every `case('...')` arm of `amica15.f90`'s parameter parser
+(~amica15.f90:3100-3700) against `AMICATorchNG`'s constructor and `validate_implementations.py`'s
+`_NG_PARAMS`/`_HANDLED_KEYS`. `AMICA.from_params_file` (which sniffs `.param` vs `.json` content
+rather than trusting the file extension) stashes the translated dict on the returned instance, and
+`fit()` applies it as **per-call defaults**: an argument passed explicitly to `fit()` always wins
+over the file's value, whether that argument is one of the five named parameters above or an
+`AMICATorchNG` keyword passed through `**kwargs` (e.g. `block_size`, `rho0`, `newt_start`).
+
+89 Fortran keywords are recognized; 57 (56 distinct pamica-side names) are translated and 32 are
+deliberately unsupported (checkpoint warm-start, per-family EM freeze toggles, FIR/DFT
+pre-filtering, console/output-file reporting, ...) --
+a keyword this reader drops always fires a `logger.warning` naming it, whether that is because
+it is a real Fortran keyword pamica has no equivalent for, or because it is not a Fortran keyword
+this reader recognizes at all (the bundled `sample_data/input.param` template itself carries three
+such stale entries -- `field_blocksize`, `doPCA`, `load_W` -- that predate this parser and are not
+`case('...')` arms in `amica15.f90` either, so the reference binary already ignores them too). A
+malformed line (a keyword with no value, or a non-empty file where not one keyword is recognized
+by the reference parser at all -- e.g. a JSON file mistakenly handed to this reader) raises
+`ValueError` rather than being dropped or defaulted silently. Data-location metadata the file
+carries (`files`, `outdir`, `data_dim`, `field_dim`, ...) matches no `fit()`/`AMICATorchNG`
+parameter by design; `fit()` names these in a single warning as "not applied" rather than
+forwarding or silently dropping them.
+
+Only three keywords are renamed, because Fortran spells them differently from the pamica-side
+(constructor) name:
+
+| Fortran keyword (`input.param`) | pamica key   | Note                                    |
+| -------------------------------- | ------------ | ---------------------------------------- |
+| `min_grad_norm`                  | `min_nd`     | matches `AMICATorchNG.min_nd`            |
+| `max_decs`                       | `maxdecs`    | matches `AMICATorchNG.maxdecs`           |
+| `numrej`                         | `maxrej`     | matches `AMICATorchNG.maxrej`            |
+
+`num_mix_comps`/`num_mix` both collapse to the pamica key `num_mix`, read directly by
+`from_params_file` to size the instance (`AMICA(n_mix=...)`) before the rest of the dict ever
+reaches `fit()`. `share_iter` is **not** renamed -- it already matches `AMICATorchNG.share_iter`
+exactly, unlike `sample_params.json`'s own schema, which spells the same setting `share_int` (a
+pre-existing mismatch in that JSON file, out of scope here, that `fit()`'s per-call-default merge
+now surfaces as a "not applied" warning when fitting from it rather than silently ignoring it).
+
+`do_opt_block`, `blk_min`, `blk_max` and `blk_step` moved from the unsupported table to identity
+mappings with issue #232: pamica now implements the block-size search under Fortran's own four
+names and Fortran's arithmetic stepping, so a file carrying them is applied rather than warned
+about and dropped. pamica's *defaults* for the three bounds differ (Fortran's 128-1024 is far
+below where any pamica backend peaks), but a file that sets them is honored as written.
+
+Every other translated keyword keeps its Fortran spelling; see `FORTRAN_TO_PAMICA_KEY` and
+`FORTRAN_UNSUPPORTED_KEYS` in `pamica/fortran_params.py` for the full tables.

@@ -93,3 +93,97 @@ def test_grad_norm_uses_the_pre_step_mixing_matrix():
     dAk = (a_before - np.asarray(model.A)) / model.lrate
     expected = np.sqrt(np.sum(dAk**2) / (model.data_dim * model.num_comps))
     assert np.isclose(model.nd[-1], expected, rtol=1e-8)
+
+
+# --- gm ordering under sharing (issue #219) ---------------------------------
+def _shared_two_model_fit(max_iter=3):
+    """A fitted 2-model NumPy model whose comp_list genuinely shares a column.
+
+    Sharing is forced directly rather than waited for: `share_comps` reaches a
+    shared column only after a merge fires, and a short fit on this sample is
+    not guaranteed to produce one.
+    """
+    model = AMICA(num_models=2, num_mix=3, max_iter=max_iter, seed=42)
+    model.fit(_real_data(4096))
+    assert model.comp_list is not None
+    model.comp_list[0, 1] = model.comp_list[0, 0]
+    # comp_used goes with comp_list: a fit-time merge derives the mask from the
+    # merged list (issue #240). Leaving it all-True would mark the merged-away
+    # column live, so the M-step would divide its empty statistics 0/0 --
+    # the stale-mask state that issue, not this one, is about.
+    model.comp_used = np.zeros(model.num_comps, dtype=bool)
+    model.comp_used[np.unique(model.comp_list)] = True
+    return model
+
+
+def _nd_for_pre_update_gm(model, updates, gm_pre):
+    """Run one M-step with `gm` preset to `gm_pre`, return the resulting nd.
+
+    `updates` is held fixed across calls, so the *post*-update gm
+    (`updates["dgm"] / num_samples`) is identical whichever `gm_pre` is passed.
+    Any difference in nd therefore comes from the pre-update value.
+    """
+    saved = {
+        name: np.array(getattr(model, name), copy=True)
+        for name in ("A", "mu", "beta", "rho", "alpha", "gm", "c")
+        if getattr(model, name, None) is not None
+    }
+    model.gm = np.array(gm_pre, dtype=float)
+    model.nd = []
+    model._update_parameters(updates)
+    nd = float(np.asarray(model.nd)[-1])
+    for name, value in saved.items():
+        setattr(model, name, value)
+    return nd
+
+
+def test_nd_uses_pre_update_model_weights():
+    """nd is weighted by the model weights from before the mixture update.
+
+    Fortran builds dAk in accum_updates_and_likelihood (amica15.f90:1753) and
+    only reassigns gm in update_params (:1788), so its ndtmpsum never sees the
+    current iteration's weights.
+
+    The two M-steps below share one `updates` dict, so they agree on the
+    post-update gm exactly. They differ only in the gm present when dAk is
+    built. Weighting by the post-update value would make them identical; the
+    assertion is that they are not.
+    """
+    model = _shared_two_model_fit()
+    updates = model._get_updates_and_likelihood()
+
+    nd_a = _nd_for_pre_update_gm(model, updates, [0.9, 0.1])
+    nd_b = _nd_for_pre_update_gm(model, updates, [0.1, 0.9])
+
+    assert np.isfinite(nd_a) and np.isfinite(nd_b)
+    assert nd_a != nd_b, (
+        "nd is identical under opposite pre-update model weights, so it is "
+        "being built from the post-update gm"
+    )
+
+
+def test_nd_ignores_the_post_update_model_weights():
+    """The complement: holding the pre-update gm fixed pins nd.
+
+    Guards the other direction, so the test above cannot be satisfied by nd
+    simply being sensitive to unrelated state.
+    """
+    model = _shared_two_model_fit()
+    updates = model._get_updates_and_likelihood()
+
+    first = _nd_for_pre_update_gm(model, updates, [0.7, 0.3])
+    second = _nd_for_pre_update_gm(model, updates, [0.7, 0.3])
+    assert first == second
+
+
+def test_shared_column_keeps_grad_norm_finite():
+    """A column shared across models divides by `zeta = sum_h gm[h]` over both.
+
+    The guard that matters is that a shared column cannot produce a 0/0: `zeta`
+    accumulates a positive weight per contributing model, so the division stays
+    finite even when one model's weight collapses.
+    """
+    model = _shared_two_model_fit()
+    updates = model._get_updates_and_likelihood()
+    nd = _nd_for_pre_update_gm(model, updates, [1.0, 0.0])
+    assert np.isfinite(nd) and nd > 0.0

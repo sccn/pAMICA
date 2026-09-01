@@ -5,7 +5,65 @@
 **Think:** Every pipeline failure is a production bug prevented.
 **Goal:** Fast feedback, high confidence, zero surprises.
 
-## Essential Workflows
+## pAMICA CI Topology (actual, issue #246)
+
+The generic template below stays as guidance for other projects; this project's
+real workflows live in `.github/workflows/` and diverge from it in ways worth
+recording:
+
+- **`ci.yml`** -- `pull_request` (any branch) plus `push` to `main` (release
+  branch) and `dev` (integration/default branch), so post-merge drift on `dev`
+  is caught, not just PR-time state. Concurrency grouping differs by event:
+  `pull_request` groups by ref, so a rapid push to the same PR branch still
+  cancels its own older, superseded run; `push` groups **per-SHA**, so every
+  commit landing on main/dev gets its own group and its own CI result --
+  pushes never cancel each other. Jobs: `lint` (ruff) -> `typecheck` (ty) ->
+  `test` (Linux, `-m "not slow"`, `--cov-fail-under=80`, builds the
+  dependency-free native AMICA binary for engine E2E tests) -> `test-macos`
+  (Apple Silicon, `--extra mlx --extra mne`, asserts a real MLX GPU device,
+  builds the same native binary via Accelerate, `-m "not slow"`, `--no-cov`)
+  -> `test-mne` (Linux, `--extra mne`) -> `build` (sdist/wheel import matrix,
+  Python 3.12/3.13). `typecheck`/`lint` gate every test job via `needs:`.
+  - **Bot-bump interaction (PR #290 review):** `auto-bump-dev.yml`/
+    `auto-tag.yml` push a version-bump commit straight back to `dev`/`main`
+    with a PAT specifically so it re-triggers workflows. Per-SHA push grouping
+    means that bump push can never land in the same concurrency group as the
+    merge commit's own run, so it cannot cancel it -- a same-ref grouping
+    would have let it do exactly that (cancel the real merge commit's
+    still-running CI and leave the trivial bump commit as the one tested,
+    doubling compute and moving the green check onto the wrong commit).
+    `lint`/`typecheck` additionally carry the same author-email + `Bump
+    version to` message-prefix `if:` guard those two workflows already use on
+    themselves; every other `ci.yml` job `needs` one of them, so GitHub
+    cascades the skip across the whole run. With per-SHA grouping this guard's
+    job is purely to avoid spending compute re-verifying state the merge
+    commit's own run already covered, not to prevent a cancellation.
+- **`weekly-macos-slow.yml`** -- schedule-only (Sunday cron) plus manual
+  `workflow_dispatch`, never on `push`/`pull_request`, so it cannot block or
+  slow a PR. Runs the full suite with no `-m` filter on macOS (Apple Silicon):
+  `@pytest.mark.slow` tests, plus the Fortran-parity tests gated on
+  `PAMICA_NATIVE_BINARY` (native `native/build.sh` shim, arm64) and
+  `AMICA_RUN_FORTRAN=1`, plus `test_fortran_adapter.py`'s
+  `AMICA_FORTRAN_BIN`-gated tests (a *second*, separately built native
+  binary, `benchmarks/fortran/build_amica.sh`, real mpif90 as a single-rank
+  singleton). Neither native build needs Rosetta -- both compile
+  `amica15.f90`/`funmod2.f90` from source for the runner's own arch; only the
+  legacy bundled `pamica/sample_data/amica15mac` fixture is x86_64-only, and
+  nothing in CI runs it. On failure it opens (or comments on) a tracking
+  issue titled "Weekly macOS slow run failed" (`actions/github-script`) --
+  otherwise, being the repo's only scheduled workflow, a failure would surface
+  only as an email to whoever last edited the schedule. `timeout-minutes: 180`
+  is a first estimate pending an actual run. GitHub auto-disables a schedule
+  trigger after 60 days of repo inactivity; re-enable via the Actions tab or
+  `gh workflow enable weekly-macos-slow.yml` if Sunday runs stop appearing.
+- **`release-binaries.yml`**, **`publish.yml`**, **`auto-tag.yml`**,
+  **`auto-bump-dev.yml`**, **`sync-dev.yml`**, **`docs.yml`**, **`typos.yml`**,
+  **`draft-pdf.yml`** each own one concern (native-binary release assets, PyPI
+  publish, version tagging, dev version bump, post-release dev sync, MkDocs
+  deploy, spell-check, JOSS paper PDF) and trigger independently -- see each
+  file's header comment for its exact trigger and rationale.
+
+## Essential Workflows (generic template)
 
 ### 1. Testing (`test.yml`)
 **Triggers:** `on: [push, pull_request]` to main branches

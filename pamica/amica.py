@@ -8,6 +8,7 @@ Fortran parity; see ``.context/decisions/0001-torch-backend-natural-gradient-em.
 
 import numpy as np
 import torch
+from pathlib import Path
 from typing import Optional, Union
 import inspect
 import logging
@@ -20,6 +21,29 @@ logger = logging.getLogger(__name__)
 # wrapper's MPS/float64 fallback below stays in lockstep if that default ever
 # changes (rather than duplicating the literal).
 _NG_DEFAULT_DTYPE = inspect.signature(AMICATorchNG).parameters["dtype"].default
+
+# fit()'s own named parameters that a parameter-file dict can default.
+_FIT_NAMED_PARAMS = {"max_iter", "lrate", "do_mean", "do_sphere", "do_newton"}
+
+# AMICATorchNG constructor keywords eligible to be defaulted from a
+# from_params_file dict via **kwargs (issue #132 review item 2).
+# n_channels/n_models/n_mix/device are excluded because fit() always passes
+# those positionally in the AMICATorchNG(...) call below; lrate/do_mean/
+# do_sphere/do_newton are excluded because, despite also being AMICATorchNG
+# constructor parameters, fit() resolves and passes those as its own named
+# arguments (_FIT_NAMED_PARAMS) -- merging them into **kwargs too would raise
+# "got multiple values for keyword argument".
+_NG_CTOR_PARAMS = (
+    set(inspect.signature(AMICATorchNG).parameters)
+    - {"n_channels", "n_models", "n_mix", "device"}
+    - _FIT_NAMED_PARAMS
+)
+
+# Sentinel distinguishing "caller did not pass this fit() argument" from
+# "caller explicitly passed the same value as the hard default", so a
+# from_params_file default can be overridden by an explicit call-site value
+# without also being masked by fit()'s own hard-coded defaults.
+_UNSET = object()
 
 
 class AMICA:
@@ -88,6 +112,18 @@ class AMICA:
         the mid-fit ``W``/``sphere``. Like ``ll_history_``, a ``keep_best``
         restore does not rewrite it -- use :meth:`mir` on the fitted model for
         the value of the *returned* parameters, not ``mir_history_[-1]``.
+        Not index-aligned with ``ll_history_``: entry ``i`` is computed after
+        iteration ``i``'s update, while ``ll_history_[i]`` is the likelihood of
+        the parameters before it, so the two are one update apart (issue #161).
+    restart_seeds_ : list
+        The seed each restart ran from (issue #198). One entry for a default
+        ``n_restarts=1`` fit, ``n_restarts`` entries otherwise.
+    restart_lls_ : list
+        Each restart's returned log-likelihood, index-aligned with
+        ``restart_seeds_``; NaN for a restart that ended degenerate (those are
+        recorded but excluded from the selection). ``final_ll_`` is the winner.
+    restart_stop_reasons_ : list
+        Each restart's ``stop_reason``, index-aligned with ``restart_seeds_``.
 
     Examples
     --------
@@ -127,6 +163,18 @@ class AMICA:
         self.stop_reason_ = None
         self.converged_ = False
         self.mir_history_ = []
+        # Best-of-N restart records (issue #198), mirrored off the backend by
+        # fit()/load(): index-aligned lists of the seed each restart ran from,
+        # the log-likelihood it returned (NaN for a degenerate restart) and why
+        # it stopped. One entry even for the default single-restart fit.
+        self.restart_seeds_ = []
+        self.restart_lls_ = []
+        self.restart_stop_reasons_ = []
+        # Set by from_params_file (issue #132 review item 2): the full
+        # translated parameter-file dict, applied by fit() as per-call
+        # defaults (an explicitly passed fit()/AMICATorchNG kwarg always
+        # wins). None for an instance built directly via AMICA(...).
+        self._file_params: Optional[dict] = None
 
     def _select_device(self, ng_dtype) -> Union[str, torch.device]:
         """Resolve the compute device, applying the MPS/float64 fallback.
@@ -156,11 +204,11 @@ class AMICA:
     def fit(
         self,
         X: np.ndarray,
-        max_iter: int = 100,
-        lrate: float = 0.05,
-        do_mean: bool = True,
-        do_sphere: bool = True,
-        do_newton: bool = False,
+        max_iter=_UNSET,
+        lrate=_UNSET,
+        do_mean=_UNSET,
+        do_sphere=_UNSET,
+        do_newton=_UNSET,
         mir_step: int = 0,
         **kwargs,
     ) -> "AMICA":
@@ -192,8 +240,18 @@ class AMICA:
             constructor (e.g. ``block_size``, ``rho0``, ``seed``, ``dtype``,
             ``use_min_dll``, ``min_dll``, ``maxincs``, ``use_grad_norm``,
             ``min_nd`` -- the issue #207 convergence stops, Fortran-faithful
-            defaults ``True``/``1e-9``/``5``/``True``/``1e-7``) -- the
-            backend's tunables are constructor arguments, not fit() kwargs.
+            defaults ``True``/``1e-9``/``5``/``True``/``1e-7`` -- or
+            ``do_opt_block``/``blk_min``/``blk_max``/``blk_step``, the issue
+            #232 block-size search, off by default) -- the backend's tunables
+            are constructor arguments, not fit() kwargs.
+
+            ``n_restarts`` (default 1) runs the fit from that many seeds and
+            keeps the highest-likelihood one (issue #198), recording every
+            restart in ``restart_seeds_``/``restart_lls_``/
+            ``restart_stop_reasons_``; it needs a base ``seed`` (or explicit
+            ``restart_seeds``) and costs proportionally more time, since
+            restarts run serially. ``n_restarts=1`` is bit-identical to a fit
+            that never heard of restarts.
 
             Rank-deficient input (Maxwell-filtered MEG, average-referenced or
             interpolated EEG) is handled by ``mineig``/``mineig_rel`` (issue
@@ -201,6 +259,16 @@ class AMICA:
             :meth:`AMICATorchNG.get_sensor_mixing_matrix` maps components back
             to input channels. ``mineig`` is an absolute eigenvalue floor and so
             unit-dependent; pass ``mineig_rel`` for data far from unit scale.
+
+            When the instance was built via :meth:`from_params_file` (issue
+            #132), any of the parameters above -- named or in ``**kwargs`` --
+            left unset here falls back to that file's translated value instead
+            of the hard-coded default; an explicitly passed argument always
+            wins over the file. Settings the file carries that match neither a
+            named ``fit()`` parameter nor an :class:`AMICATorchNG` constructor
+            keyword (data-location metadata like ``files``/``outdir``/
+            ``data_dim``, or a setting with no pamica equivalent) are not
+            applied and are named in a single ``logger.warning``.
 
         Returns
         -------
@@ -212,6 +280,43 @@ class AMICA:
             raise ValueError(f"X must be 2D array, got shape {X.shape}")
 
         n_channels, n_samples = X.shape
+
+        # Apply from_params_file's translated dict as per-call defaults
+        # (issue #132 review item 2): an explicitly passed argument here
+        # always wins, whether named (max_iter/lrate/do_mean/do_sphere/
+        # do_newton, via the _UNSET sentinel) or in **kwargs (AMICATorchNG
+        # constructor keywords, via plain dict membership). Settings the file
+        # carries that apply to neither surface are named in one warning
+        # rather than silently discarded.
+        file_params = self._file_params or {}
+
+        def _file_default(explicit, name, hard_default):
+            if explicit is not _UNSET:
+                return explicit
+            return file_params.get(name, hard_default)
+
+        max_iter = _file_default(max_iter, "max_iter", 100)
+        lrate = _file_default(lrate, "lrate", 0.05)
+        do_mean = _file_default(do_mean, "do_mean", True)
+        do_sphere = _file_default(do_sphere, "do_sphere", True)
+        do_newton = _file_default(do_newton, "do_newton", False)
+
+        if file_params:
+            for key, value in file_params.items():
+                if key in _NG_CTOR_PARAMS and key not in kwargs:
+                    kwargs[key] = value
+            handled = _FIT_NAMED_PARAMS | _NG_CTOR_PARAMS | {"num_models", "num_mix"}
+            unhandled = sorted(set(file_params) - handled)
+            if unhandled:
+                logger.warning(
+                    "AMICA.fit: %d parameter-file setting(s) match neither a "
+                    "fit()/AMICATorchNG parameter and were NOT applied "
+                    "(informational only -- data-location metadata like "
+                    "files/outdir/data_dim/num_comps is expected here; "
+                    "anything else means pamica has no equivalent): %s",
+                    len(unhandled),
+                    unhandled,
+                )
 
         if self.verbose:
             print(f"Fitting AMICA with {n_channels} channels, {n_samples} samples")
@@ -246,6 +351,9 @@ class AMICA:
         self.final_ll_ = backend.final_ll_
         self.stop_reason_ = backend.stop_reason
         self.mir_history_ = backend.mir_history_
+        self.restart_seeds_ = backend.restart_seeds_
+        self.restart_lls_ = backend.restart_lls_
+        self.restart_stop_reasons_ = backend.restart_stop_reasons_
         self.converged_ = self.stop_reason_ not in AMICATorchNG._DEGENERATE_STOP_REASONS
         # A degenerate fit (nan_ll/singular_ll) holds non-finite parameters and
         # would return NaN sources, so it is not a usable model: is_fitted_ stays
@@ -387,8 +495,9 @@ class AMICA:
         Raises
         ------
         ValueError
-            If the model is unfitted; or if PCA reduction (``pcakeep``/
-            ``pcadb``) is active, which leaves the sphere rank-deficient so
+            If the model is unfitted; or if the fitted sphere is rank-reduced
+            (explicit ``pcakeep``/``pcadb`` or automatic ``mineig``/
+            ``mineig_rel`` detection), which leaves it rank-deficient so
             MIR's log-Jacobian term is undefined; or if ``X`` is non-finite or
             has a constant channel. See :meth:`AMICATorchNG.mir` and
             :func:`pamica.metrics.mir`.
@@ -581,9 +690,13 @@ class AMICA:
         Fortran reference (issue #92).
 
         Also writes ``LLt`` (the per-sample/per-model log-likelihood, issue
-        #155) for a model that was just fit in this process; a model restored
-        via :meth:`load` has no training data to recompute it from, so
-        ``LLt`` is omitted for it (a warning is logged).
+        #155) for a model that was just fit in this process, taken from the
+        E-step stash (issue #157); a model restored via :meth:`load` carries no
+        stash, so ``LLt`` is omitted for it (a warning is logged). As in the
+        reference, ``LLt`` is the E-step that produced ``final_ll_`` and is
+        therefore one M-step older than the ``W``/``A`` written beside it --
+        see ``docs/guides/amica-differences.md``. Use :meth:`model_loglik` for
+        the log-likelihood of the written parameters.
 
         Parameters
         ----------
@@ -682,6 +795,12 @@ class AMICA:
         # empty; expose it anyway for attribute-surface consistency with
         # ll_history_.
         model.mir_history_ = model.model_.mir_history_
+        # Restart records ARE persisted by state_dict (issue #198), so a loaded
+        # best-of-N model can still say how its parameters were chosen; a model
+        # saved before #198 simply has none.
+        model.restart_seeds_ = model.model_.restart_seeds_
+        model.restart_lls_ = model.model_.restart_lls_
+        model.restart_stop_reasons_ = model.model_.restart_stop_reasons_
         # state_dict() refuses to serialize a degenerate model, so a loaded model
         # is always usable; carry its stop_reason through for inspection anyway.
         model.stop_reason_ = model.model_.stop_reason
@@ -694,14 +813,32 @@ class AMICA:
     @classmethod
     def from_params_file(cls, params_file: str, **kwargs) -> "AMICA":
         """
-        Create AMICA instance from parameter file.
+        Create AMICA instance from a parameter file.
+
+        Accepts two formats, auto-detected from ``params_file``'s *content*
+        (issue #132): pamica's own JSON schema (``sample_data/
+        sample_params.json``) and the literal Fortran ``input.param`` text
+        format (``sample_data/input.param``), so the same file that drives
+        the reference binary can drive pamica too. Detection always sniffs
+        the content (JSON if it starts with ``{``/``[``, Fortran text
+        otherwise) rather than trusting the extension -- a compact JSON file
+        saved with a ``.param`` extension must still parse as JSON, not be
+        silently misread as garbled Fortran text (issue #132 review item 3).
+        See :func:`pamica.fortran_params.read_fortran_param_file` for the
+        Fortran-side key-mapping table and the deliberately-unmapped keys it
+        warns about rather than silently drops.
+
+        The full translated dict (beyond the ``n_models``/``n_mix`` used to
+        size the instance here) is stashed on the returned instance and
+        applied by :meth:`fit` as per-call defaults -- see ``fit``'s
+        docstring for the precedence rule.
 
         Parameters
         ----------
         params_file : str
-            Path to JSON parameter file
+            Path to a JSON or Fortran-format parameter file.
         **kwargs
-            Additional parameters to override
+            Additional parameters to override.
 
         Returns
         -------
@@ -710,8 +847,14 @@ class AMICA:
         """
         import json
 
-        with open(params_file, "r") as f:
-            params = json.load(f)
+        path = Path(params_file)
+        text = path.read_text()
+        if text.lstrip().startswith(("{", "[")):
+            params = json.loads(text)
+        else:
+            from .fortran_params import read_fortran_param_file
+
+            params = read_fortran_param_file(path)
 
         # Extract relevant parameters
         n_models = params.get("num_models", 1)
@@ -721,4 +864,6 @@ class AMICA:
         n_models = kwargs.pop("n_models", n_models)
         n_mix = kwargs.pop("n_mix", n_mix)
 
-        return cls(n_models=n_models, n_mix=n_mix, **kwargs)
+        model = cls(n_models=n_models, n_mix=n_mix, **kwargs)
+        model._file_params = params
+        return model

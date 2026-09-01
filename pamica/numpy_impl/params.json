@@ -37,11 +37,11 @@
     "do_history": false,
     "histstep": 10,
     
-    "do_opt_block": true,
-    "block_size": 128,
-    "blk_min": 128,
-    "blk_max": 1024,
-    "blk_step": 128,
+    "do_opt_block": false,
+    "block_size": 8192,
+    "blk_min": 4096,
+    "blk_max": 32768,
+    "blk_step": 4096,
     
     "share_comps": false,
     "comp_thresh": 0.99,

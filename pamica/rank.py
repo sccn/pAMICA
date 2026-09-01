@@ -3,8 +3,8 @@
 The Fortran reference detects the numerical rank of the data covariance and
 sizes the model to it::
 
-    numeigs = min(pcakeep, count(eigs > mineig))    ! amica15.f90:395
-    nw = numeigs                                    ! amica15.f90:545
+    numeigs = min(pcakeep, count(eigs > mineig))    ! amica15.f90:413
+    nw = numeigs                                    ! amica15.f90:563
 
 Rank-deficient input is ordinary in this field -- Maxwell-filtered MEG, average
 referencing, channel interpolation all produce it -- so every backend needs the

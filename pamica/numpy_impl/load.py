@@ -179,7 +179,7 @@ def write_amicaout(
     # multi-model interleave it replaces was never MATLAB-readable (issue #159).
     # The symmetric sphere S is order-agnostic; mean/gm/LL are 1-D.
     _w("W", np.asarray(W).transpose(2, 0, 1))
-    # Fortran always writes S at recl = 2*nbyte*nx*nx (amica15.f90:2299): the
+    # Fortran always writes S at recl = 2*nbyte*nx*nx (amica15.f90:2423): the
     # array is allocated (nx, nx) and zero-filled, and a rank-reduced sphere
     # occupies only its first `numeigs` rows. Pad to that shape so a reduced fit
     # is readable by loadmodout15.m and by loadmodout() below, which both reshape
@@ -225,7 +225,7 @@ def write_amicaout(
         )
     if Lht is not None and Lt is not None:
         # Fortran writes, per timepoint, each model's log-likelihood then the
-        # total (write_output, amica15.f90:2308-2333) -- a column-major
+        # total (write_output, amica15.f90:2338-2343) -- a column-major
         # (num_models+1, n_samples) matrix. Stacking Lt as the last row and
         # flattening order="F" reproduces that per-timepoint sequence exactly.
         _w("LLt", np.vstack([np.atleast_2d(Lht), np.atleast_2d(Lt)]), order="F")

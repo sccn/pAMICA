@@ -80,7 +80,7 @@ def compute_pdf(
         else:
             # General case: p(y) = exp(-|y|^rho) / (2 * Gamma(1 + 1/rho)).
             # gamma, NOT gammaln: the Fortran reference computes this in LOG
-            # space (`- gamln(1+1/rho) - log(2)`, amica15.f90:1305-1306), where
+            # space (`- gamln(1+1/rho) - log(2)`, amica15.f90:1323-1324), where
             # log-gamma is correct; transcribing that gamln into this
             # linear-space expression divided by log(Gamma(...)) instead of
             # Gamma(...). That is negative for every rho in (1, 2) -- at the

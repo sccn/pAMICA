@@ -65,6 +65,18 @@ def test_user_creation(real_db):
 - Document required test infrastructure
 - See `ci_cd.md` for pipeline setup
 
+## Sanctioned Exception: Error-Injection Subclasses
+Testing an error-handling branch sometimes requires the error to fire on real
+data that does not naturally produce it. The sanctioned pattern (established
+in `test_ng_rank_deficient.py`, `test_mlx_sharing.py::_force_merged_column`,
+and the `_RaiseForSeeds` subclasses of the restart tests) is a subclass that
+raises the trigger exception at the real call site, or forces the triggering
+state, while every other code path stays the real implementation on real
+sample data. This is NOT the forbidden mock pattern: nothing returns a
+fabricated result, and the injected exception type must be one the real call
+site can actually raise. Never use a subclass to bypass or fake the numeric
+path itself.
+
 ## When Real Testing Seems Impossible
 **Think creatively before giving up:**
 - Can you use Docker for a test database?

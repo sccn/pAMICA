@@ -1,0 +1,157 @@
+name: Weekly macOS full suite (slow + Fortran parity)
+
+# Runs the parts of the test suite ci.yml deliberately excludes from every
+# PR/push because they are wall-clock heavy or invoke a Fortran reference
+# binary (issue #246):
+#   * @pytest.mark.slow -- multi-hundred/thousand-iteration fits and the
+#     Newton/MLX-vs-torch cross-backend comparisons.
+#   * pamica/tests/torch_tests/test_ng_backend.py's end-to-end tests and
+#     test_ng_pdf_families.py::test_family_converged_ll_matches_fortran,
+#     which shell out to a Fortran reference binary via
+#     validate_implementations.run_fortran_amica. That resolves (absent an
+#     explicit binary_path) via PAMICA_NATIVE_BINARY -- the same
+#     dependency-free native/build.sh binary ci.yml's test-macos job already
+#     builds for arm64 -- so these never need the bundled x86_64
+#     pamica/sample_data/amica15mac under Rosetta.
+#   * pamica/tests/test_fortran_adapter.py's three AMICA_FORTRAN_BIN-gated
+#     tests, CI-skipped everywhere else. AMICA_FORTRAN_BIN wants
+#     benchmarks/fortran/build_amica.sh's output, a *different* native build
+#     (real mpif90 + LAPACK, per benchmarks/fortran/README.md) from the
+#     dependency-free shim above; both are built from the same
+#     amica15.f90/funmod2.f90 parity source and both run natively on
+#     Apple Silicon, no Rosetta needed either way.
+#
+# Schedule-only (plus a manual workflow_dispatch escape hatch): this never
+# triggers on a push or pull_request, so it cannot block or slow a PR. A
+# failure here is a real finding (e.g. an Accelerate-vs-OpenBLAS divergence,
+# per #241's precedent) and should be reported, not papered over -- the last
+# step below opens (or comments on) a tracking issue on failure, because this
+# is the repo's only scheduled workflow and GitHub's default failure
+# notification (an email to whoever last edited the schedule) is otherwise
+# the only signal.
+#
+# GitHub disables a schedule trigger automatically after 60 days with no
+# repository activity (pushes/PRs), regardless of whether this workflow
+# itself ran. If Sunday runs stop appearing in the Actions tab, check
+# Actions -> this workflow -> "..." menu for a disabled banner and re-enable
+# it there (or `gh workflow enable weekly-macos-slow.yml`).
+on:
+  schedule:
+    # Sunday 06:00 UTC.
+    - cron: "0 6 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: weekly-macos-slow-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  full-suite-macos:
+    name: Full suite incl. slow + Fortran parity (macOS 26, Apple Silicon)
+    runs-on: macos-26
+    # First estimate (full suite + two from-source native builds + slow/parity
+    # tests on a real, non--large hosted runner) -- generous but bounded.
+    # Revisit against the actual wall-clock once the first Sunday run (or a
+    # manual workflow_dispatch) has completed.
+    timeout-minutes: 180
+    env:
+      PYTORCH_ENABLE_MPS_FALLBACK: "1"
+      # Opts test_ng_pdf_families.py::test_family_converged_ll_matches_fortran
+      # in; it is independently gated on this env var, not on @pytest.mark.slow.
+      AMICA_RUN_FORTRAN: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # Both extras, same as ci.yml's test-macos job: mlx_tests/ and
+      # mne_tests/ are part of "the full suite" this job exists to run.
+      - run: uv sync --extra mlx --extra mne
+      - name: Assert MLX sees an Apple GPU
+        run: |
+          uv run python -c "
+          import mlx.core as mx
+          dev = mx.default_device()
+          print('mlx', mx.__version__, 'device', dev)
+          assert dev.type == mx.DeviceType.gpu, f'no Apple GPU: {dev}'
+          "
+      # gcc -> gfortran for both builds below; open-mpi -> mpif90 for the
+      # benchmarks/fortran build only (native/build.sh's shim needs neither
+      # mpif90 nor open-mpi at runtime); lapack is the benchmarks/fortran
+      # build's documented preference, falling back to Accelerate.
+      - name: Install Fortran toolchain (brew)
+        run: brew install gcc open-mpi lapack
+      - name: Build native AMICA binary (dependency-free, for E2E parity tests)
+        # Same recipe as ci.yml's test-macos job.
+        run: |
+          LAPACK_LIBS="-framework Accelerate" EXTRA_LDFLAGS="-static-libquadmath" \
+            bash native/build.sh
+          echo "PAMICA_NATIVE_BINARY=$PWD/native/amica15_shim" >> "$GITHUB_ENV"
+      - name: Build native amica15 from source (for test_fortran_adapter.py)
+        # benchmarks/fortran/build_amica.sh, NOT the bundled x86_64
+        # amica15mac: it links real Open MPI (single-rank singleton, no
+        # mpirun needed) and runs natively on Apple Silicon, so
+        # test_fortran_adapter.py's AMICA_FORTRAN_BIN-gated tests run without
+        # Rosetta (see benchmarks/fortran/README.md).
+        run: |
+          bash benchmarks/fortran/build_amica.sh
+          echo "AMICA_FORTRAN_BIN=$PWD/benchmarks/fortran/amica15" >> "$GITHUB_ENV"
+      # No -m filter (runs slow tests too) and no AMICA_RUN_FORTRAN gate left
+      # unset (see env: above). --no-cov: this job is not the coverage gate
+      # (ci.yml's Linux `test` job owns --cov-fail-under and the Codecov
+      # upload), and a partial weekly run would report a different total for
+      # the same commit than the PR that landed it did.
+      - name: pytest (full suite, including slow + Fortran-parity tests)
+        run: uv run pytest -n auto --no-cov
+      # This is the repo's only scheduled workflow, so a failure here would
+      # otherwise surface only as an email to whoever last edited the cron
+      # schedule. Open a tracking issue instead (or comment on the existing
+      # one, so repeated Sunday failures do not spam a fresh issue every
+      # week) -- matching "a failure here is a real finding" in the header.
+      - name: Open or update failure-tracking issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "Weekly macOS slow run failed";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `The scheduled full-suite run (slow tests + Fortran parity, macOS) failed.`,
+              ``,
+              `Run: ${runUrl}`,
+              `Commit: ${context.sha}`,
+              `Trigger: ${context.eventName}`,
+              ``,
+              `This could be a real regression (e.g. an Accelerate-vs-OpenBLAS `,
+              `divergence, per issue #241's precedent) or CI infrastructure `,
+              `(a brew/native-build failure). See the run log for which step failed.`,
+            ].join("\n");
+
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100,
+            });
+            const match = existing.find((i) => i.title === title);
+
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+            }

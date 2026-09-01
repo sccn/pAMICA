@@ -5,6 +5,8 @@ Adds a `native-fortran-f64` backend to `benchmarks/benchmark_dimsweep.py` that t
 
 ## gfortran build portability (source targets ifort + MKL)
 
+> Update (PR #295, 2026-08-23): item 2 below is obsolete -- #235 rewrote the source's seeding to the portable deterministic form, and build_amica.sh no longer patches it. Kept for history.
+
 `amica15.f90` assumes Intel's toolchain. A plain `gfortran` + LAPACK build needs three
 fixes, applied by `build_amica.sh` to a **build copy** (the tracked `pamica/amica15.f90`
 reference is never modified):

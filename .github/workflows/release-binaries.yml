@@ -27,7 +27,7 @@ jobs:
       matrix:
         include:
           - target: macos-arm64
-            runner: macos-14
+            runner: macos-26
             shell: bash
           - target: linux-x64
             runner: ubuntu-latest

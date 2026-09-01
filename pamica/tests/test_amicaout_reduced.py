@@ -4,7 +4,7 @@ The genuine ``num_pcs < data_dim`` path was unreachable until #223 fixed the fit
 crash, so ``write_amica_output``/``loadmodout``/``AmicaOutput.sources`` had no
 coverage for a non-square sphere.
 
-Fortran always writes ``S`` at ``recl = 2*nbyte*nx*nx`` (amica15.f90:2299): the
+Fortran always writes ``S`` at ``recl = 2*nbyte*nx*nx`` (amica15.f90:2423): the
 array is allocated ``(nx, nx)`` and zero-filled, and a reduced sphere occupies
 only its first ``numeigs`` rows. Both readers (``loadmodout`` here and EEGLAB's
 ``loadmodout15.m``) reshape to ``(nx, nx)`` and slice ``[:num_pcs]``, so the

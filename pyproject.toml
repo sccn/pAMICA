@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pamica"
-version = "0.3.2"
+version = "0.3.3.dev7"
 description = "pAMICA: Python implementation of the Adaptive Mixture ICA algorithm"
 readme = "README.md"
 authors = [
@@ -84,8 +84,10 @@ omit = [
     # argparse CLI entrypoint: exercised via subprocess, not unit-covered here.
     "pamica/numpy_impl/cli.py",
     # Optional MLX backend (Apple Silicon only): its tests require MLX + an Apple
-    # GPU, so CI (ubuntu, no mlx) cannot exercise it and always measures 0%. It is
-    # covered locally by tests/mlx_tests/ on Apple hardware (issue #76).
+    # GPU. The `test-macos` job does now run them for real (issue #246), but it
+    # runs with --no-cov, so the coverage total still comes only from the ubuntu
+    # `test` job -- where mlx is absent and this package always measures 0%. The
+    # omission stays required until coverage is combined across both runners.
     "pamica/mlx_impl/*",
     # Optional MNE compatibility layer (issue #139): imports mne, absent from the
     # base test env, so the base coverage run always measures 0%. Exercised by

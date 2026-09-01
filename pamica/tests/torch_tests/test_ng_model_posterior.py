@@ -4,10 +4,16 @@
 per-sample log-likelihood the E-step already computes internally. Real sample
 EEG only (no synthetic data): the internal training-data ``_llt_lht`` (Fortran's
 LLt, issue #155) is an exact oracle for ``model_loglik`` evaluated on that same
-data, so the live accessor is pinned bit-for-bit rather than by eyeball. The
-equality holds when the fit did not use ``do_reject`` (the default here);
-``_compute_full_posterior_ll`` zeroes rejected columns as Fortran's ``load_rej``
-sentinel, which ``model_loglik`` (rejection-unaware) does not reproduce.
+data, so the live accessor is pinned bit-for-bit rather than by eyeball.
+
+Since issue #157 that oracle is the E-step of the iterate *before* the fit's
+last M-step, not of the returned parameters -- ``_llt_lht`` is stashed during
+training exactly as Fortran fills ``modloglik``. So the bit-exact pairing is
+``fit(max_iter=N)._llt_lht`` against ``fit(max_iter=N-1).model_loglik(X)``,
+which is what the test below asserts (and it doubles as the ordering pin). The
+equality holds when the fit did not use ``do_reject``; a rejected sample's
+stash column is zeroed as Fortran's ``load_rej`` sentinel, which
+``model_loglik`` (rejection-unaware) does not reproduce.
 """
 
 from pathlib import Path
@@ -34,20 +40,46 @@ def real_data():
     )
 
 
-def _fit(X, n_models, max_iter=10):
-    m = AMICATorchNG(n_channels=NW, n_models=n_models, n_mix=3, seed=SEED, device="cpu")
+def _fit(X, n_models, max_iter=10, **kwargs):
+    m = AMICATorchNG(
+        n_channels=NW, n_models=n_models, n_mix=3, seed=SEED, device="cpu", **kwargs
+    )
     m.fit(X, max_iter=max_iter, verbose=False)
     return m
 
 
 def test_model_loglik_matches_internal_lht(real_data):
-    """model_loglik on the training data equals the stored _llt_lht exactly."""
-    m = _fit(real_data, n_models=2)
-    lht = m.model_loglik(real_data)
-    assert lht.shape == (2, real_data.shape[1])
-    # _llt_lht is the E-step's own per-model per-sample LL, recomputed post-fit
-    # from the same parameters -- an exact oracle for the live accessor.
-    np.testing.assert_array_equal(lht, m._llt_lht)
+    """model_loglik equals the stash of a fit run one iteration further.
+
+    Two claims in one, both bit-exact on real EEG:
+
+    * ``model_loglik`` really is the E-step's own per-model per-sample LL (no
+      drift between the live accessor and the training forward pass);
+    * the stash written as ``LLt`` is the E-step of the parameters as they
+      stood BEFORE the fit's last M-step -- Fortran's ordering (issue #157),
+      ``get_updates_and_likelihood`` -> ``update_params`` -> ``write_output``
+      (amica15.f90:996, 1122, 1146).
+
+    ``keep_best`` is off so the returned iterate is unambiguously the last one;
+    the restore case has its own test
+    (``test_keep_best_restore_rolls_the_llt_stash_back`` in
+    ``pamica/tests/test_llt_stash.py``).
+    """
+    m10 = _fit(real_data, n_models=2, max_iter=10, keep_best=False)
+    m9 = _fit(real_data, n_models=2, max_iter=9, keep_best=False)
+    # Both must have spent their whole budget for "one M-step apart" to mean
+    # anything; an early stop would make the two fits the same iterate.
+    assert len(m10.ll_history) == 10 and len(m9.ll_history) == 9
+    assert m10._llt_lht is not None
+    assert m10._llt_lht.shape == (2, real_data.shape[1])
+
+    lht_pre = m9.model_loglik(real_data)
+    np.testing.assert_array_equal(lht_pre, m10._llt_lht)
+
+    # Not vacuous: the M-step in between genuinely moves the per-sample LL, so
+    # the stash is NOT the post-update value that the pre-#157 recompute wrote.
+    lht_post = m10.model_loglik(real_data)
+    assert np.abs(lht_post - m10._llt_lht).max() > 1e-6
 
 
 def test_model_probability_is_normalized(real_data):

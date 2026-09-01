@@ -522,9 +522,9 @@ def test_loadmodout_llt_gm_reorder_alignment(real_data, tmp_path):
 def test_write_amica_output_llt_reject_zeroes_rejected_samples(real_data, tmp_path):
     """Under ``do_reject``, rejected samples must be exactly zero in the
     written ``LLt`` (issue #155 Fix 1): Fortran zeroes a rejected sample's
-    ``modloglik``/``loglik`` on write (amica15.f90:2211-2216) and its
+    ``modloglik``/``loglik`` on write (amica15.f90:2231-2234) and its
     ``load_rej`` reader reconstructs the rejection mask from that exact zero
-    sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:887-896). Good
+    sentinel (``sum(modloglik(:,i)) == 0.0``, amica15.f90:907). Good
     samples must stay non-zero and finite.
     """
     from pamica.numpy_impl.load import loadmodout
@@ -928,3 +928,44 @@ def test_mir_step_raises_under_pca_reduction_up_front(real_data):
             pcakeep=20,
             mir_step=1,
         )
+
+
+def test_mir_raises_under_auto_detected_rank_reduction(real_data):
+    """Issue #283 regression: rank reduction from AUTOMATIC ``mineig_rel``
+    numerical-rank detection (no explicit ``pcakeep``/``pcadb``) must trip the
+    same documented ``ValueError`` as explicit ``pcakeep``, not the opaque
+    ``numpy.linalg.LinAlgError`` the old parameter-only guard let through.
+
+    Real EEG projected onto a rank-16 subspace via SVD, the same pattern
+    ``test_annotation_rank_reduction.py`` uses, so the covariance is
+    genuinely rank-deficient rather than merely ill-conditioned.
+    """
+    x = real_data[:, :4096]
+    x = x - x.mean(axis=1, keepdims=True)
+    u16 = np.linalg.svd(x, full_matrices=False)[0][:, :16]
+    x_low = u16 @ (u16.T @ x)
+
+    model = AMICA(n_models=1, n_mix=3, device="cpu", verbose=False)
+    model.fit(x_low, max_iter=2, block_size=1024, seed=42)  # no pcakeep/pcadb
+
+    ng = model.model_
+    assert ng is not None
+    assert ng.n_channels_in != ng.n_channels, (
+        "test setup: automatic rank detection did not reduce the sphere"
+    )
+
+    with pytest.raises(ValueError, match="incompatible with PCA reduction"):
+        model.mir(x_low)
+
+
+def test_mir_full_rank_succeeds(fitted_ng, real_data):
+    """Positive control paired with the regression above: an ordinary
+    full-rank fit's sphere is square, so mir() must not trip the
+    PCA-reduction guard."""
+    ng = fitted_ng.model_
+    assert ng is not None
+    assert ng.n_channels_in == ng.n_channels
+
+    mir_nats, variance = fitted_ng.mir(real_data[:, :4096])
+    assert np.isfinite(mir_nats)
+    assert np.isfinite(variance)

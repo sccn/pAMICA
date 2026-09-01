@@ -16,18 +16,21 @@ pamica/
 ├── mlx_impl/                # Optional MLX backend (Apple GPU; AMICAMLXNG, #76/#81)
 │   └── core.py              #   float32 GPU E/M-step + CPU-stream linalg (single- & multi-model GG, NG)
 ├── numpy_impl/              # Legacy NumPy reference (topic-named modules, issue #34)
-│   ├── core.py              #   AMICA_NumPy; newton.py, pdf.py, data.py, load.py, viz.py, utils.py, cli.py
+│   ├── core.py              #   AMICA_NumPy (incl. inlined Newton); pdf.py, data.py, load.py, viz.py, utils.py, cli.py
 │   └── ...
+├── blocktune.py             # Shared block-size auto-tuner policy (#232, all backends)
+├── restarts.py              # Shared best-of-N restart policy (#198, all backends)
+├── fortran_params.py        # Fortran input.param reader for AMICA.from_params_file (#132)
 ├── amica17.f90, funmod2.f90 # Fortran reference source (read-only, for parity)
 ├── sample_data/             # Sample EEG data + Fortran binary (amica15mac)
 └── tests/                   # Tests, incl. tests/torch_tests/ (vs-Fortran parity)
 
 validate_implementations.py  # Runs both implementations, Hungarian component matching, reports
 ```
-Module names are topic-based (`core`/`newton`/`pdf`/`data`/... under `numpy_impl/`,
+Module names are topic-based (`core`/`pdf`/`data`/... under `numpy_impl/`,
 `core`/`utils` under `torch_impl/`); the old `pamica.py`/`amica_*.py`/`amica_torch_ng.py`
 prefixes were dropped in issue #34. The public import surface is stable:
-`from pamica import AMICA, AMICA_NumPy, AMICATorchNG`. The optional MLX backend is
+`from pamica import AMICA, AMICA_NumPy, AMICATorchNG, AMICANative`. The optional MLX backend is
 imported separately (`from pamica.mlx_impl import AMICAMLXNG`) so `import pamica` never
 requires MLX; install it with `uv pip install mlx` or the `mlx` extra (Apple Silicon only).
 
@@ -51,6 +54,10 @@ largest throughput knob: ~6x on CPU float64 for the bundled sample (217 -> 36 ms
 than larger because peak block memory scales with it and 8192 stays safe at high channel counts.
 Runs compared bit-for-bit against the Fortran binary must set `block_size` on both sides (the
 bundled `input.param` uses 512); the trajectory shifts ~1e-6 with it, inside parity tolerance.
+`do_opt_block` (#232, `pamica/blocktune.py`, all three backends, OFF by default) searches for the
+per-host optimum instead of using the static default; its choice is timing-based and so
+machine-dependent, which is why parity runs must leave it off and pin `block_size`. Unlike Fortran,
+a candidate that cannot be allocated is skipped rather than aborting the run.
 CUDA float64 is ~4.5x over a 16-thread CPU (RTX 4090, warmed) and agrees with the CPU LL
 to 5 sig digits (auto-selected by the wrapper). float32 now converges reliably on
 full-size data across seeds (#75 guarded the one float32-only divide-by-zero: a sample rounding an
@@ -64,11 +71,22 @@ laptop sweep; 8+ regressed).
 
 **Cross-platform benchmark (#77, `.context/issue-77/benchmark_findings.md`, `benchmarks/benchmark_dimsweep.py`,
 real 70-ch EEG):** on Apple Silicon the **MLX backend is the GPU win: ~15-25 ms/it, flat across 16-70
-channels, ~7x over torch-CPU and faster than an RTX 4090 (CUDA ~36 ms/it) at EEG scale**; **PyTorch-MPS
-never wins (162-255 ms/it, at or worse than CPU)**, so use MLX, not `device="mps"`, on Apple hardware.
-CUDA float64 stays the bit-safe NVIDIA path. All backends agree on the LL to ~3 digits on real data.
-Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses); the remaining MLX follow-up
-is component sharing.
+channels, ~7x over torch-CPU and faster than an RTX 4090 (CUDA ~36 ms/it) at EEG scale**. The #77
+PyTorch-MPS figures (162-255 ms/it, at or worse than CPU) were measured at the then-default
+`block_size=512`; #216's block_size sweep (bundled 32-ch sample) found PyTorch-MPS far more
+block-size-sensitive than CPU or MLX -- 431 -> 30.5 ms/it from 512 to the current 8192 default (still
+behind CPU's 21.7 ms/it there), and down to 13.5 ms/it (beating CPU's 15.8) at a further-tuned
+single-block size -- the whole 30504-frame sample as one block, memory-limited rather than a free win
+(peak block memory scales with `block_size`, which is why 8192 stays the shipped default) -- so
+"PyTorch-MPS never wins" is not a general claim. MLX stays fastest throughout the sweep, so it
+remains the recommendation over `device="mps"` on Apple hardware. CUDA float64 stays the bit-safe
+NVIDIA path. All backends agree on the LL to ~3 digits on real data.
+Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses at the inherited `block_size=512`
+-- not yet re-swept at 8192 like the single-model figures above). Component sharing (#263),
+Newton (#264, float32, validated against a float64 torch twin -- see `.context/issue-264/`) and the
+non-GG pdf families (#265, including the adaptive switcher; see `.context/issue-265/`) are all
+ported; the remaining MLX gaps are the non-fitting surface -- `transform`, save/load, `keep_best`,
+outlier rejection and LLt/MIR -- tracked as epic #278 (phases #287/#288/#289).
 
 ## Key Files
 - **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`)
@@ -111,13 +129,13 @@ was never amica17. The fixed families are bit-exact vs the literal Fortran `z0`/
 converge to the binary within ~0.005 LL (Newton-matched). The dynamic `do_choose_pdfs` switch is
 dead code even in amica15 (the moment buffers are never accumulated), so the auto-switcher has no
 bit-exact oracle and is validated by real-data LL. `pdftype=0` stays the default and is
-byte-for-byte unchanged. See `.context/decisions/` and `tests/torch_tests/test_ng_pdf_families.py`.
+byte-for-byte unchanged. See `.context/decisions/` and `pamica/tests/torch_tests/test_ng_pdf_families.py`.
 
 **Component sharing (#60): DONE.** `share_comps` multi-model reassignment is ported to
 `AMICATorchNG`: on the `share_start`/`share_iter` schedule, components near-collinear across
 different models (cosine angle of their de-sphered mixing columns above `comp_thresh`) are merged
 into one shared mixing column + density, with an A-freeze for ~6 iterations after each merge
-(Fortran `identify_shared_comps`, amica15.f90:1898). The M-step already sums sufficient stats
+(Fortran `identify_shared_comps`, amica15.f90:1916). The M-step already sums sufficient stats
 through `comp_list`; the A-update was refactored to accumulate shared columns the same way
 (byte-identical when unshared), and merged-away columns are frozen (avoiding 0/0 NaN that Fortran
 tolerates behind its `comp_used` mask). OFF by default and a no-op for `n_models=1`, so single-model

@@ -22,7 +22,7 @@ Port the five `amica15.f90` families into `AMICATorchNG`, exposed through Fortra
 sub-Gaussian cosh+, and `pdftype=1` = the extended-Infomax adaptive switcher (Fortran's
 `do_choose_pdfs` trigger), which flips each source between the super-Gaussian (code 1) and
 sub-Gaussian (code 4) cosh densities by kurtosis sign on the `kurt_start`/`num_kurt`/
-`kurt_int` schedule. `rho` is frozen for every non-GG family (`amica15.f90:3682`), and the
+`kurt_int` schedule. `rho` is frozen for every non-GG family (`amica15.f90:3704`), and the
 single-component families 1/4 require `n_mix=1`. The ground-truth `amica15.f90`/
 `amica15_header.f90` are copied into `pamica/`.
 
@@ -43,7 +43,7 @@ single-component families 1/4 require `n_mix=1`. The ground-truth `amica15.f90`/
 - **Fortran-faithful `do_choose_pdfs` reconstructed from amica17:** rejected once amica15 was
   found to be the binary's source; amica17 only declares the arrays and the switch body is
   absent in both, so there is nothing faithful to reconstruct beyond the family densities.
-- **Reuse the NumPy `amica_pdf.py` family set (Laplace/Student-t/logistic/GMM):** rejected;
+- **Reuse the NumPy `numpy_impl/pdf.py` family set (Laplace/Student-t/logistic/GMM):** rejected;
   its numbering and formulas do not match `amica15.f90`, and it is used by no fit loop, so it
   is not an oracle. The issue's "Laplace/Student-t" phrasing traces to this unvalidated code.
 - **Mixture-only families (0/2/3), defer cosh 1/4:** rejected; the user chose the full scope
@@ -51,9 +51,9 @@ single-component families 1/4 require `n_mix=1`. The ground-truth `amica15.f90`/
 
 ## Receipts
 
-- `pamica/amica15.f90` select-cases at :1277 (likelihood) / :1449 (score); `dorho=.false.`
-  at :3682; `do_choose_pdfs` at :594; the `m2sum`/`m4sum` moment buffers are allocated/zeroed
-  (:590-591) but never accumulated, confirming the dynamic switch is dead code in the binary.
+- `pamica/amica15.f90` select-cases at :1295 (likelihood) / :1467 (score); `dorho=.false.`
+  at :3704; `do_choose_pdfs` at :612; the `m2sum`/`m4sum` moment buffers are allocated/zeroed
+  (:608-609) but never accumulated, confirming the dynamic switch is dead code in the binary.
 - The extended-Infomax intent comes from the upstream AMICA MATLAB wrapper `runamica15.m`
   (sccn/amica), which documents the schedule parameters verbatim (not copied into this repo):
   ```
@@ -63,6 +63,6 @@ single-component families 1/4 require `n_mix=1`. The ground-truth `amica15.f90`/
   ```
   and defaults `pdftype=0; kurt_start=3; num_kurt=5; kurt_int=1;`. The super/sub-Gaussian
   scores `y +/- tanh(y)` (amica15 codes 1/4) are the classic extended-Infomax nonlinearities.
-- `pamica/torch_impl/amica_torch_ng.py`: `_log_pdf_and_deriv`, `_score`, `_choose_pdfs`.
+- `pamica/torch_impl/core.py`: `_log_pdf_and_deriv`, `_score`, `_choose_pdfs`.
 - `pamica/tests/torch_tests/test_ng_pdf_families.py` (formula parity + real-data + opt-in
   binary integration behind `AMICA_RUN_FORTRAN=1`).

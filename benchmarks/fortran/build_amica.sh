@@ -82,21 +82,15 @@ work_src="$build_dir/src"
 mkdir -p "$work_src"
 cp "$src_dir/funmod2.f90" "$src_dir/amica15.f90" "$src_dir/amica15_header.f90" "$work_src/"
 
-# Patch ONLY the build copy (the tracked amica15.f90 stays the read-only parity
-# reference). gfortran's random_seed wants a PUT array of its own size (8);
-# the source's size-2 seed array (sized for ifort/MKL) is rejected. That seed
-# only affects random initialization, which is already clock-based (hence
-# non-reproducible run-to-run), so a portable default seed is timing-neutral and
-# result-equivalent for the benchmark.
-sed -i.bak \
-  's/.*random_seed(PUT = c1 .*/      call random_seed()  ! benchmark build: portable default seed (build_amica.sh)/' \
-  "$work_src/amica15.f90"
-# sed exits 0 even on a no-op, so verify the patch landed: if the tracked source
-# ever renames the seed line, an unpatched random_seed(PUT=...) would otherwise
-# reach the compiler and (with -fallow-argument-mismatch) build a binary that
-# only crashes at runtime.
-if ! grep -q 'call random_seed()  ! benchmark build' "$work_src/amica15.f90"; then
-  echo "ERROR: random_seed patch did not apply -- amica15.f90 source may have drifted" >&2
+# No random_seed patch is needed anymore: since #235 the tracked source seeds
+# portably itself (random_seed(size=nseed) then an allocated seedvec(nseed),
+# sccn/amica PR #54), which gfortran accepts and which keeps the deterministic
+# `seed`-param behavior the parity tests rely on. The old sed patch targeted the
+# pre-#235 size-2 ifort-only seed line and would now both fail its anchor check
+# and, if it matched, destroy the deterministic seeding. Verify the portable
+# seeding is present so a future source change fails loudly here, not at runtime.
+if ! grep -q 'call random_seed(size = nseed)' "$work_src/amica15.f90"; then
+  echo "ERROR: expected portable random_seed(size=nseed) seeding in amica15.f90 (post-#235); source drifted" >&2
   exit 1
 fi
 

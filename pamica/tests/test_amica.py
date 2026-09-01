@@ -8,7 +8,6 @@ import unittest
 
 from pamica.numpy_impl.data import load_data_file, preprocess_data
 from pamica.numpy_impl.pdf import compute_pdf
-from pamica.numpy_impl.newton import compute_newton_direction
 
 
 class TestAMICA(unittest.TestCase):
@@ -71,44 +70,22 @@ class TestAMICA(unittest.TestCase):
         np.testing.assert_allclose(pdf, np.exp(-y * y) / np.sqrt(np.pi))
         np.testing.assert_allclose(dpdf, -2 * y * pdf)
 
-    def test_newton_direction(self):
-        """Test Newton direction computation matches Fortran."""
-        rng = np.random.RandomState(42)
-
-        # Create test inputs
-        data_dim = 10
-        dA = rng.randn(data_dim, data_dim)
-        sigma2 = np.abs(rng.randn(data_dim))
-        lambda_ = np.abs(rng.randn(data_dim))
-        kappa = np.abs(rng.randn(data_dim))
-
-        # Compute Newton direction
-        H = compute_newton_direction(
-            dA, sigma2[:, None], lambda_[:, None], kappa[:, None], 0
-        )
-
-        # Test diagonal elements
-        for i in range(data_dim):
-            self.assertAlmostEqual(H[i, i], dA[i, i] / lambda_[i])
-
-        # Test off-diagonal elements
-        for i in range(data_dim):
-            for j in range(data_dim):
-                if i != j:
-                    sk1 = sigma2[i] * kappa[j]
-                    sk2 = sigma2[j] * kappa[i]
-                    if sk1 * sk2 > 1.0:
-                        self.assertAlmostEqual(
-                            H[i, j], (sk1 * dA[i, j] - dA[j, i]) / (sk1 * sk2 - 1.0)
-                        )
-                    else:
-                        self.assertAlmostEqual(H[i, j], 0.0)
-
     # NOTE: the former synthetic-data source-recovery test (test_full_amica) was
     # removed: it fabricated data (against the NO-MOCK policy) and used a broken
     # metric (corrcoef on raveled sources, no permutation/sign/scale matching, so
     # it could never pass). Real-data NumPy-vs-Fortran parity is covered by
     # tests/test_sample_data.py::test_sample_data_numpy_vs_fortran.
+    #
+    # NOTE: the former test_newton_direction test (issue #270) pinned the
+    # standalone numpy_impl/newton.py module, which was dead pre-#21/#24 math:
+    # compute_newton_parameters took the density derivative dpdf instead of the
+    # score and omitted the sbeta^2 factor on kappa and the mu^2 fold in lambda,
+    # and update_unmixing_matrix used the += right-multiply form that was the
+    # issue #24 root cause. That module was never imported by the live numpy
+    # Newton path (inlined in numpy_impl/core.py) and was removed in #270. Its
+    # behavior is superseded by the live-path Newton coverage in
+    # tests/torch_tests/test_ng_backend.py and
+    # tests/test_numpy_newton_multimodel.py (#267).
 
     @classmethod
     def tearDownClass(cls):
