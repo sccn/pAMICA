@@ -224,6 +224,100 @@ def test_keep_best_restore_never_fires_under_do_reject(real_data):
     assert m.final_ll_ == m.ll_history[-1]
 
 
+# --- interaction with best-of-N restarts and component sharing -------------
+def test_do_reject_survives_best_of_n_restarts_winner_not_last(real_data):
+    """PR #311 review: do_reject's good_idx/numrej must round-trip through
+    the restart snapshot/restore exactly like every other fit-path state
+    (they are already in _RESTART_STATE_ATTRS, added alongside do_reject
+    itself), pinned explicitly for a winner that is NOT the last restart --
+    the only scenario that actually exercises _apply_restart_state rather
+    than leaving the live (already-correct) final restart's state in place.
+
+    Reuses test_mlx_restarts.py's SEEDS = [54, 50, 42] (measured there,
+    without do_reject, to have the winner strictly first); confirmed
+    empirically to still produce winner index 0 (not the last restart)
+    under this do_reject config on this data.
+    """
+    seeds = [54, 50, 42]
+    kwargs: dict[str, Any] = dict(
+        n_channels=NW,
+        n_mix=NMIX,
+        do_reject=True,
+        rejsig=2.0,
+        rejstart=2,
+        rejint=3,
+        maxrej=2,
+    )
+
+    solo_fits = []
+    for seed in seeds:
+        solo = AMICAMLXNG(seed=seed, **kwargs)
+        solo.fit(real_data, max_iter=5, verbose=False)
+        solo_fits.append(solo)
+
+    best_of_n = AMICAMLXNG(seed=0, n_restarts=len(seeds), restart_seeds=seeds, **kwargs)
+    best_of_n.fit(real_data, max_iter=5, verbose=False)
+
+    winner = max(range(len(seeds)), key=lambda i: solo_fits[i].final_ll_)
+    assert winner != len(seeds) - 1, (
+        "test setup: the winning seed must not be the last restart, or the "
+        "restore path (_apply_restart_state) goes untested"
+    )
+    assert best_of_n.seed == seeds[winner]
+
+    winning_solo = solo_fits[winner]
+    assert winning_solo.good_idx is not None and best_of_n.good_idx is not None
+    assert best_of_n.numrej == winning_solo.numrej
+    np.testing.assert_array_equal(
+        np.array(best_of_n.good_idx), np.array(winning_solo.good_idx)
+    )
+    np.testing.assert_array_equal(np.array(best_of_n.A), np.array(winning_solo.A))
+    assert best_of_n.final_ll_ == winning_solo.final_ll_
+
+
+def test_do_reject_with_a_genuine_share_comps_merge(real_data):
+    """do_reject x share_comps, both firing for real within one fit (not
+    the standalone-_identify_shared_comps pattern test_mlx_sharing.py uses
+    elsewhere): comp_thresh=0.9 is the same real-data recipe
+    test_mlx_sharing.py::test_merge_on_the_final_iteration_completes uses
+    to force a genuine merge (not synthetic/forced-column data), combined
+    with a do_reject schedule that also fires. The fit must complete with
+    finite parameters, the merged (shrunken) comp_used mask must survive
+    on the returned model, and good_idx must have shrunk too -- i.e.
+    neither mechanism silently no-ops or corrupts the other.
+    """
+    m = _model(
+        n_models=2,
+        seed=42,
+        share_comps=True,
+        share_start=8,
+        share_iter=100,
+        comp_thresh=0.9,
+        do_reject=True,
+        rejsig=2.0,
+        rejstart=2,
+        rejint=3,
+        maxrej=2,
+        keep_best=False,
+    )
+    m.fit(real_data, max_iter=15, verbose=False)
+
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert m.final_ll_ is not None and np.isfinite(m.final_ll_)
+    for name in ("A", "W", "mu", "alpha", "beta", "rho", "gm", "c"):
+        assert np.all(np.isfinite(np.array(getattr(m, name)))), name
+
+    used = int(np.array(m.comp_used).sum())
+    assert used < m.n_comps, "test setup: no merge fired"
+    cl = np.array(m.comp_list)
+    assert used == np.unique(cl).size, "comp_list disagrees with comp_used"
+
+    assert m.good_idx is not None
+    n_good = int(m.good_idx.size)
+    assert n_good < real_data.shape[1], "test setup: no rejection fired"
+    assert m.numrej > 0
+
+
 # --- persistence -----------------------------------------------------------
 def test_state_dict_round_trip_persists_numrej_and_good_idx(real_data):
     m = _model(seed=42, do_reject=True, rejsig=2.0, rejstart=2, rejint=3, maxrej=2)
