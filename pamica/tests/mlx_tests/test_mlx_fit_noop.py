@@ -119,7 +119,22 @@ def historical_amicamlxng():
         del sys.modules[_HISTORICAL_MODULE_NAME]
 
 
-_PARAM_NAMES = ("A", "W", "c", "mu", "alpha", "beta", "rho", "gm", "comp_list")
+_PARAM_NAMES = (
+    "A",
+    "W",
+    "c",
+    "mu",
+    "alpha",
+    "beta",
+    "rho",
+    "gm",
+    "comp_list",
+    "mean",
+    "sphere",
+    "pdtype",
+)  # every array in AMICAMLXNG._PARAM_ARRAYS (PR #318 review item 10) -- the
+# docstring above claims "every fitted array is compared bit for bit"; this
+# list is what makes that literally true rather than a subset.
 
 
 @pytest.mark.parametrize("n_models", [1, 2])
