@@ -87,6 +87,16 @@ so a real fit can never exercise it. Same rule applies: the method under test
 runs its real, unmodified logic; only the input is hand-built, and only to
 reach a branch the method's own code proves is otherwise unreachable.
 
+A third variant proves a code path is NOT taken: a call-counting spy wraps a
+real method with `monkeypatch.setattr`, recording each call (e.g. its input
+shape) into a list before delegating to the original, unmodified
+implementation -- established in `test_mlx_export.py`'s
+`test_write_amica_output_makes_no_extra_forward_pass`, which wraps `_forward`
+this way to prove `write_amica_output` makes zero E-step passes (it reads the
+LLt stash instead, issue #157). The wrapped method still runs its real logic
+end to end; the spy only observes call count/arguments, never substitutes a
+fabricated return value.
+
 ## When Real Testing Seems Impossible
 **Think creatively before giving up:**
 - Can you use Docker for a test database?
