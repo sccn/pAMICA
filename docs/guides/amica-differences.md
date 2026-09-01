@@ -134,7 +134,7 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | Rank detection | yes | yes | yes | yes (absolute floor) |
 | `min_dll` stop | yes | yes | yes | yes |
 | `min_nd` stop / gradient norm | yes | yes (as `min_grad_norm`) | yes | yes |
-| `keep_best` best-iterate restore | yes | no | no | n/a |
+| `keep_best` best-iterate restore | yes | no | yes | n/a |
 | `n_restarts` best-of-N restarts | yes | yes | yes | n/a |
 | MIR diagnostic | yes | no | no | n/a |
 | Persistence | `state_dict` | EEGLAB `amicaout` | `state_dict`/`.npz` `save`-`load` | EEGLAB `amicaout` |
@@ -154,9 +154,12 @@ were added in epic #278 Phase 1 (issue #287): `AMICAMLXNG.transform` mirrors
 MLX's own `_forward` (its `W` is `(n_models, n, n)`, not torch's
 `(n, n, n_models)`), and the `.npz` layout embeds `config`/`extra` as
 JSON-encoded scalars alongside the 12 native param arrays -- no torch
-coupling, no pickle. Remaining MLX limitations still fail loudly: `keep_best`
-and every unsupported parameter (outlier rejection) are simply absent from
-the constructor, rather than silently downgrading.
+coupling, no pickle. The best-iterate safeguard (`keep_best`, row 3 above)
+followed in epic #278 Phase 2 (issue #288), a direct port of PyTorch's #51
+restore decision onto MLX's float32 trajectory. Remaining MLX limitations
+still fail loudly: outlier rejection (`do_reject`) and every other
+unsupported parameter are simply absent from the constructor, rather than
+silently downgrading.
 
 One MLX failure mode used to be worse than loud — it was uncatchable. MLX
 0.32's CPU-stream `mx.linalg.inv` does not raise a Python exception on a
@@ -336,12 +339,15 @@ behavior rather than fixed (`test_merge_on_the_final_iteration_completes` in
 each of `tests/torch_tests/test_ng_sharing.py`,
 `tests/test_numpy_share_comps.py` and `tests/mlx_tests/test_mlx_sharing.py`).
 
-One interaction worth knowing: PyTorch's `keep_best` safeguard (row 3 above)
-is disabled whenever `share_comps` is on, precisely because a merge changes
-the parameter count mid-fit -- restoring an earlier snapshot would silently
-undo the merge. The same guard disables it under `do_reject`, whose good-sample
+One interaction worth knowing: the `keep_best` safeguard (row 3 above,
+implemented on PyTorch and, since epic #278 Phase 2, MLX) is disabled
+whenever `share_comps` is on, precisely because a merge changes the parameter
+count mid-fit -- restoring an earlier snapshot would silently undo the merge.
+On PyTorch the same guard disables it under `do_reject`, whose good-sample
 set changes mid-fit for the analogous reason (ADR 0003; the single
-`track_best` condition covers both). So under sharing, every backend returns
+`track_best` condition covers both) -- MLX has no `do_reject` yet (epic #278
+Phase 3), so its `track_best` condition only excludes `share_comps` for now.
+So under sharing, every backend returns
 the last iterate, and
 `final_ll_`/`self.ll[-1]` trailing a final-iteration merge is not a
 `keep_best` artifact; it happens the same way with `keep_best=False`.

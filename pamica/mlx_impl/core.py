@@ -26,9 +26,11 @@ preconditioner (``do_newton``, issue #264), component sharing
 (``share_comps``, issue #263). Source extraction (``transform`` and the
 ``get_mixing_matrix``/``get_unmixing_matrix``/``get_sensor_mixing_matrix``/
 ``get_rho`` accessors) and persistence (``state_dict``/``from_state_dict`` and
-``.npz`` ``save``/``load``) are implemented (epic #278 Phase 1, issue #287).
-Outlier rejection and ``keep_best`` are simply absent (no such
-parameter/method) -- epic #278 Phases 2 and 3.
+``.npz`` ``save``/``load``) are implemented (epic #278 Phase 1, issue #287),
+and the best-iterate safeguard (``keep_best``) is implemented (epic #278
+Phase 2, issue #288). Outlier rejection (``do_reject``) and the LLt stash/MIR
+diagnostic are simply absent (no such parameter/method) -- epic #278 Phase 3,
+issue #289.
 
 Newton (issue #264) runs entirely in float32 on the GPU stream: the curvature
 accumulators ride the existing E-step locals, and the direction is Fortran's
@@ -169,6 +171,24 @@ _CPU = mx.cpu
 # less predictable cost than one host-side np.linalg.cond call, for a defect
 # this guard already makes rare in practice.
 _INV_COND_THRESHOLD = 1e12
+
+# Best-iterate safeguard (issue #51, ported from AMICATorchNG core.py:90-113 --
+# epic #278 Phase 2, issue #288). The lrate schedule is deliberately
+# non-monotone: it anneals only *after* an LL decrease, so a late Newton
+# fallback can overshoot and a run can end below a peak it already reached.
+# fit() therefore tracks the highest-LL iterate and restores it when the final
+# LL falls more than this tolerance below that peak. Units: mean
+# log-likelihood per sample-channel, the same normalized scale as
+# ``ll_history`` (``ll = acc["ll"] / (n_total * n_channels)``, see
+# ``_fit_once``), so the comparison needs no extra scaling -- identical
+# reasoning to AMICATorchNG's constant. Kept at torch's exact value for
+# cross-backend semantic parity even though float32 trajectories make the
+# practical gap that trips a restore much larger than this tolerance; 1e-9
+# still reads as "numerical noise, not a real overshoot" on this scale, and
+# keeps a monotone single-model run (issue #24 parity) a bit-exact no-op --
+# its final iterate already IS the best, the gap is 0 < tol, so no restore
+# fires.
+_KEEP_BEST_TOL = 1e-9
 
 
 def _logcosh(x: mx.array) -> mx.array:
@@ -452,6 +472,23 @@ class AMICAMLXNG:
     ``restart_seeds`` (None)
         Explicit per-restart seeds, exactly ``n_restarts`` of them; otherwise
         ``seed, seed + 1, ...``.
+
+    The best-iterate safeguard (issue #51, epic #278 Phase 2/#288) likewise
+    carries AMICATorchNG's name, default and semantics:
+
+    ``keep_best`` (True)
+        Return the highest-log-likelihood iterate instead of the last one. The
+        lrate schedule is non-monotone (it anneals only after an LL
+        *decrease*), so a late Newton-fallback overshoot can leave the final
+        iterate below a peak the run already reached. When the final LL falls
+        more than a small tolerance below that peak, ``fit`` restores the
+        peak's parameters. A monotone single-model run (issue #24 parity) is a
+        bit-exact no-op. Automatically inactive under ``share_comps`` (a merge
+        changes the parameter count, so pre- and post-merge LLs are not
+        comparable and reverting to an earlier snapshot would silently undo
+        the merge; issue #269) -- and, once ``do_reject`` lands on this
+        backend (epic #278 Phase 3), under that too, for the same reason it is
+        inactive on AMICATorchNG.
     """
 
     def __init__(
@@ -502,6 +539,7 @@ class AMICAMLXNG:
         seed: Optional[int] = None,
         n_restarts: int = restarts.DEFAULT_N_RESTARTS,
         restart_seeds: Optional[Sequence[int]] = None,
+        keep_best: bool = True,
     ):
         self.n_channels = n_channels
         self.n_models = n_models  # multi-model (#81) + component sharing (#263)
@@ -634,6 +672,10 @@ class AMICAMLXNG:
         # Numerical-rank floors (issue #223); see pamica/rank.py and ADR 0004.
         self.mineig = mineig
         self.mineig_rel = mineig_rel
+        # Best-iterate safeguard (issue #51, epic #278 Phase 2/#288), same
+        # name/default/semantics as AMICATorchNG. See _fit_once for the
+        # per-iteration tracking and the end-of-fit restore decision.
+        self.keep_best = keep_best
         self.seed = seed
 
         # Best-of-N restarts (issue #198), a pamica extension: Fortran has no
@@ -655,16 +697,17 @@ class AMICAMLXNG:
         self.iteration = 0
         self.ll_history: list[float] = []
         # Log-likelihood of the returned parameters, set by fit() to
-        # ll_history[-1] (there is no keep_best restore on this backend, see
-        # the module docstring). Under share_comps, if a merge fires on the
-        # LAST fit iteration, the returned A/W/comp_list are already
-        # post-merge but final_ll_ still reports the pre-merge
-        # log-likelihood -- the merge runs after that iteration's LL is
-        # recorded, so its effect on the LL only shows up in the next
-        # iteration's E-step, which never runs. This matches the reference
-        # ordering (Fortran identify_shared_comps runs after the iteration's
-        # LL accumulation, amica15.f90:1856-1858) and AMICATorchNG's ordering, so
-        # it is documented behavior, not a bug (issue #269).
+        # ll_history[-1], or to the best iterate's LL if the keep_best
+        # safeguard (issue #51) restores it -- see _fit_once. Under
+        # share_comps, if a merge fires on the LAST fit iteration, the
+        # returned A/W/comp_list are already post-merge but final_ll_ still
+        # reports the pre-merge log-likelihood -- the merge runs after that
+        # iteration's LL is recorded, so its effect on the LL only shows up
+        # in the next iteration's E-step, which never runs. This matches the
+        # reference ordering (Fortran identify_shared_comps runs after the
+        # iteration's LL accumulation, amica15.f90:1856-1858) and
+        # AMICATorchNG's ordering, so it is documented behavior, not a bug
+        # (issue #269).
         self.final_ll_: Optional[float] = None
         self.stop_reason: Optional[str] = None
 
@@ -1690,6 +1733,40 @@ class AMICAMLXNG:
         return result
 
     # ------------------------------------------------------------------
+    # Best-iterate safeguard (issue #51, epic #278 Phase 2/#288; port of
+    # AMICATorchNG._snapshot_params/_restore_params, core.py:2025-2062)
+    # ------------------------------------------------------------------
+    def _snapshot_params(self) -> dict:
+        """Snapshot the fitted state for the best-iterate safeguard (issue #51).
+
+        Copies each ``_PARAM_ARRAYS`` array (``mx.array(x)``, not an alias) so
+        a later in-fit rebind of ``self.A``/``self.W``/etc. does not roll the
+        snapshot forward -- MLX's M-step rebinds these attributes to new
+        arrays each iteration rather than mutating in place, but this clones
+        regardless so the invariant does not depend on that implementation
+        detail holding forever. Also captures the scalar ``n_kurt_done`` (the
+        adaptive-PDF switch counter that gates ``pdtype``) so a restored
+        model's switch count stays consistent with its rolled-back ``pdtype``
+        -- otherwise a switch applied after the peak iterate would leave the
+        two out of sync in a returned model (mirrors the torch silent-failure
+        fix this ports).
+
+        NO LLt stash here: unlike AMICATorchNG, this backend has no LLt
+        stash to roll back (epic #278 Phase 3, issue #289, will add one and
+        must extend this snapshot then).
+        """
+        snap: dict = {
+            name: mx.array(getattr(self, name)) for name in self._PARAM_ARRAYS
+        }
+        snap["n_kurt_done"] = self.n_kurt_done
+        return snap
+
+    def _restore_params(self, snapshot: dict) -> None:
+        """Restore the state captured by :meth:`_snapshot_params`."""
+        for name, value in snapshot.items():
+            setattr(self, name, value)
+
+    # ------------------------------------------------------------------
     # Component sharing (issue #263; AMICATorchNG's #60 port)
     # ------------------------------------------------------------------
     def _a_frozen(self) -> bool:
@@ -2038,6 +2115,28 @@ class AMICAMLXNG:
         # numincs, amica15.f90:1079-1089). Reset here so a refit starts clean.
         numincs = 0
 
+        # Best-iterate safeguard (issue #51, epic #278 Phase 2/#288): track the
+        # highest-LL iterate so a late Newton-fallback overshoot cannot leave
+        # the returned model below a peak it already reached. Inactive under
+        # share_comps (a merge drops parameters, so pre- and post-merge LLs
+        # are not comparable AND the snapshot's comp_list would revert the
+        # merge -- the returned model would silently be unmerged; #60) --
+        # AMICATorchNG also excludes do_reject there, which this backend does
+        # not yet have (epic #278 Phase 3, #289; extend this condition then).
+        # Fit returns the last iterate when inactive, matching Fortran.
+        track_best = self.keep_best and not self.share_comps
+        best_ll = -math.inf
+        best_snapshot: Optional[dict] = None
+        if self.keep_best and self.share_comps:
+            # keep_best defaults on, so a user enabling sharing would
+            # otherwise silently lose the safeguard; surface it once.
+            logger.warning(
+                "keep_best is inactive under share_comps: best-iterate "
+                "selection by LL is not well-defined (a merge changes the "
+                "parameter count and reverting to an earlier snapshot would "
+                "undo the merge), so fit() returns the last iterate.",
+            )
+
         rng = range(max_iter)
         if verbose:
             try:
@@ -2060,6 +2159,13 @@ class AMICAMLXNG:
                     "Non-finite log-likelihood (%s) at iteration %d; stopping.", ll, it
                 )
                 break
+
+            # Best-iterate safeguard (issue #51): remember the parameters that
+            # produced this LL when it is the best seen, so a later overshoot
+            # does not leave the returned model below this peak.
+            if track_best and ll > best_ll:
+                best_ll = ll
+                best_snapshot = self._snapshot_params()
 
             self._update_parameters(acc, n_total)
             # One eval per iteration bounds the lazy graph to a single iteration's
@@ -2320,10 +2426,42 @@ class AMICAMLXNG:
             if leave:
                 break
 
+        # Log-likelihood of the parameters fit() returns. A degenerate stop
+        # leaves the model on the diverged parameters, whose LL is NOT the
+        # last finite ll_history value (the guard breaks before appending),
+        # so report NaN there rather than a stale healthy-looking number.
+        # Otherwise it is the last trajectory value, overwritten with the
+        # best iterate's LL below if the safeguard restores it.
         if self.stop_reason in self._DEGENERATE_STOP_REASONS:
             self.final_ll_ = float("nan")
         else:
             self.final_ll_ = self.ll_history[-1] if self.ll_history else float("nan")
+
+        # Restore the best iterate if the run ended materially below it
+        # (issue #51). Skipped for a degenerate stop -- state_dict() already
+        # refuses to persist any model whose stop_reason is degenerate, and
+        # salvaging a diverged run here would pre-empt that contract (issue
+        # #50). Also skipped when the final LL is within _KEEP_BEST_TOL of the
+        # best -- a monotone single-model run has final == best, so no
+        # restore fires and issue #24 parity stays byte-for-byte.
+        # ll_history is NEVER rewritten here: it stays the true per-iteration
+        # trajectory regardless of whether a restore fires below.
+        if (
+            track_best
+            and best_snapshot is not None
+            and self.stop_reason not in self._DEGENERATE_STOP_REASONS
+            and self.ll_history
+            and best_ll - self.ll_history[-1] > _KEEP_BEST_TOL
+        ):
+            logger.info(
+                "Restoring best iterate (LL %.6f) over final LL %.6f "
+                "(issue #51 best-iterate safeguard).",
+                best_ll,
+                self.ll_history[-1],
+            )
+            self._restore_params(best_snapshot)
+            self.final_ll_ = best_ll
+
         return self
 
     def transform(self, X: np.ndarray, model_idx: int = 0) -> np.ndarray:
@@ -2646,6 +2784,13 @@ class AMICAMLXNG:
             # actually kept is in ``extra`` below.
             "n_restarts": self.n_restarts,
             "restart_seeds": self.restart_seeds,
+            # Best-iterate safeguard flag (issue #51, epic #278 Phase 2/#288);
+            # only affects a re-fit, but persisted so a reloaded model
+            # reconstructs its exact configuration. Additive: a phase-1-era
+            # payload's config dict lacks this key, and ``cls(**config)`` then
+            # falls back to the constructor default (True) -- no
+            # format_version bump needed (same precedent as torch's #207).
+            "keep_best": self.keep_best,
         }
         params = {name: np.array(getattr(self, name)) for name in self._PARAM_ARRAYS}
         extra = {

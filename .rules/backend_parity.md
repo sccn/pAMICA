@@ -22,9 +22,9 @@ A backend may lack a behavior only when it *cannot* support it, and then:
 
 Existing legitimate examples: MLX's non-fitting surface gained `transform`,
 the mixing/unmixing/`rho` accessors and `state_dict`/`.npz` save-load in epic
-#278 Phase 1 (#287); `do_reject`, `keep_best` and LLt/MIR are still absent --
-tracked as epic #278 Phases 2/3 (#288/#289). MLX is float32-only because
-Apple GPUs have no float64.
+#278 Phase 1 (#287); it gained the `keep_best` best-iterate safeguard in Phase
+2 (#288); `do_reject` and LLt/MIR are still absent -- tracked as epic #278
+Phase 3 (#289). MLX is float32-only because Apple GPUs have no float64.
 
 "I only had time for one" is not an exception.
 

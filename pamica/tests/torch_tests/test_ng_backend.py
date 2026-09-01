@@ -6,6 +6,7 @@ validated NumPy reference (``AMICA_NumPy._get_block_updates``) to float64
 precision on an identical block with identical parameters.
 """
 
+import math
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -1425,6 +1426,91 @@ def test_keep_best_inactive_under_reject():
     m.fit(data, max_iter=12, verbose=False)
     assert m.numrej >= 1  # rejection actually fired, so the good set changed
     assert m.final_ll_ == m.ll_history[-1]  # no best-iterate restore under reject
+
+
+class _NaNAfterIteration(AMICATorchNG):
+    """Forces a ``nan_ll`` stop after ``nan_after`` REAL iterations have run.
+
+    Sanctioned error-injection subclass (``.rules/testing.md``'s "Sanctioned
+    Exception"; same construction as ``test_ng_restarts.py``'s
+    ``_NaNForSeeds``, gated on iteration count instead of seed): every
+    iteration up to ``nan_after`` runs the untouched production
+    ``_accumulate_blocks``/``_update_parameters`` on real data, so
+    ``best_snapshot`` captures a genuine, better earlier peak before the
+    injected divergence -- the same construction as the MLX backend's
+    ``test_mlx_keepbest.py::_NaNAfterIteration`` (PR #310 review: this guard
+    is shared semantics between backends, so it gets the same test shape in
+    both).
+    """
+
+    nan_after: int = 10**9  # effectively never, unless overridden
+
+    def _accumulate_blocks(self, X, stash_llt=False):
+        acc = super()._accumulate_blocks(X, stash_llt=stash_llt)
+        if self.iteration >= self.nan_after:
+            acc["ll"] = acc["ll"] * float("nan")
+        return acc
+
+
+@pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
+def test_keep_best_does_not_rescue_a_diverged_fit_that_peaked_earlier():
+    """The end-of-fit restore guard's ``stop_reason not in
+    _DEGENERATE_STOP_REASONS`` exclusion (core.py:2725) had zero coverage:
+    every existing keep_best test either never diverges or diverges on
+    iteration 0 (no ``best_snapshot`` yet to wrongly rescue). This forces a
+    fit to run ``_DEGENERATE_NAN_AFTER`` real iterations -- so a genuine,
+    better ``best_snapshot`` exists -- and then hits an injected ``nan_ll``:
+    the fit must end degenerate with NO restore, or state_dict()'s refusal
+    to persist a degenerate model (#50) would be silently bypassed by a
+    restored, "successful-looking" return."""
+    data = _load_real_data()[:, :4096]
+    kwargs: dict[str, Any] = dict(
+        n_channels=NW, n_models=1, n_mix=NMIX, seed=SEED, device="cpu",
+        dtype=torch.float64, block_size=512, lrate=0.1,
+    )  # fmt: skip
+    nan_after = 5
+
+    on = _NaNAfterIteration(keep_best=True, **kwargs)
+    on.nan_after = nan_after
+    on.fit(data, max_iter=20, verbose=False)
+
+    assert on.stop_reason in AMICATorchNG._DEGENERATE_STOP_REASONS
+    assert on.stop_reason == "nan_ll"
+    assert on.final_ll_ is not None and math.isnan(on.final_ll_)
+    # A genuine, finite earlier trajectory existed for the guard to have
+    # (wrongly) rescued, if it were broken.
+    assert len(on.ll_history) == nan_after
+    assert all(math.isfinite(v) for v in on.ll_history)
+
+    # No restore fired: bit-identical to keep_best=False on the identical
+    # forced-degenerate trajectory. If the guard were broken, keep_best=True
+    # would roll back to the earlier peak and diverge from this.
+    off = _NaNAfterIteration(keep_best=False, **kwargs)
+    off.nan_after = nan_after
+    off.fit(data, max_iter=20, verbose=False)
+    assert off.stop_reason == "nan_ll"
+    for name in AMICATorchNG._PARAM_TENSORS:
+        assert torch.equal(getattr(on, name), getattr(off, name)), (
+            f"{name} differs: keep_best rescued a diverged fit despite the "
+            f"degenerate stop"
+        )
+
+    # Positive proof the returned params are the diverged LAST state, not
+    # the (better) snapshot: reconstruct what the snapshot would have held
+    # (params before the peak iteration's own M-step) via a fresh fit
+    # truncated at argmax, and confirm the degenerate run's params differ
+    # from it.
+    argmax = int(np.argmax(on.ll_history))
+    would_be_snapshot = AMICATorchNG(**kwargs)
+    would_be_snapshot.fit(data, max_iter=argmax, verbose=False)
+    differs = any(
+        not torch.equal(getattr(on, name), getattr(would_be_snapshot, name))
+        for name in AMICATorchNG._PARAM_TENSORS
+    )
+    assert differs, (
+        "returned params equal the would-be best snapshot: the restore "
+        "fired despite the degenerate stop"
+    )
 
 
 @pytest.mark.slow
