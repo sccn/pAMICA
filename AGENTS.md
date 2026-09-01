@@ -104,8 +104,10 @@ gap vs the PyTorch backend is none, other than float32-only precision (Apple GPU
 - PyTorch backend with GPU/MPS/CPU support; the `AMICATorchNG` natural-gradient EM backend now
   matches the Fortran reference (LL ~ -3.40, component correlation ~0.997) with Newton enabled
   and positive-definite (issue #24).
-- Validation harness runs both implementations (NG + NumPy) and matches components via the Hungarian
-  algorithm.
+- `validate_implementations.py` runs the PyTorch (NG) backend against the Fortran binary and matches
+  components via the Hungarian algorithm; it does not exercise the NumPy or MLX backends. NumPy-vs-
+  Fortran parity lives in pytest (`test_sample_data_numpy_vs_fortran`), and MLX validation lives in
+  `mlx_tests/` plus the cross-backend suites (extending the harness itself is tracked as issue #315).
 - Newton and exact-EM updates are implemented in `AMICATorchNG` and the legacy NumPy `numpy_impl/core.py`
   (both Fortran-faithful). Adaptive PDF (#26) is DONE (all five `pdftype` families + ext-Infomax
   switcher); full multi-model matching (#27) is validated by distributional equivalence.
