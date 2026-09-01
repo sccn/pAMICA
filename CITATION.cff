@@ -29,8 +29,8 @@ authors:
     affiliation:
       name: "Swartz Center for Computational Neuroscience"
       ror: "https://ror.org/01bt2qm76"
-version: 0.3.3.dev7
-date-released: "2026-08-17"
+version: 0.3.4.dev1
+date-released: "2026-09-01"
 license: BSD-3-Clause
 repository-code: "https://github.com/sccn/pAMICA"
 url: "https://eeglab.org/pAMICA/"
