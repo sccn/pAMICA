@@ -85,8 +85,8 @@ def test_write_amica_output_round_trips_through_loadmodout(
     # #159), so only order-independent quantities are checked through this
     # reader -- exact byte-level reproduction (raw files, no reordering) is
     # pinned separately below, against a torch twin
-    # (test_single_model_export_is_byte_compatible_with_a_torch_twin),
-    # mirroring torch_tests/test_amica_ng_wrapper.py's split between
+    # (test_export_is_byte_compatible_with_a_torch_twin), mirroring
+    # torch_tests/test_amica_ng_wrapper.py's split between
     # test_write_amica_output_bytes (raw bytes) and
     # test_write_amica_output_loadmodout_readable (order-independent, via
     # loadmodout).
@@ -300,8 +300,9 @@ _FLOAT_FILES = (
 )
 
 
-def test_single_model_export_is_byte_compatible_with_a_torch_twin(real_data, tmp_path):
-    m = _model(n_models=1, seed=42, keep_best=False)
+@pytest.mark.parametrize("n_models", [1, 2])
+def test_export_is_byte_compatible_with_a_torch_twin(real_data, tmp_path, n_models):
+    m = _model(n_models=n_models, seed=42, keep_best=False)
     m.fit(real_data, max_iter=6, verbose=False)
     assert m._sphere_np is not None
     ng = _torch_twin(m, m._sphere_np)
@@ -324,3 +325,22 @@ def test_single_model_export_is_byte_compatible_with_a_torch_twin(real_data, tmp
     mc = np.fromfile(mdir / "comp_list", dtype=np.int32)
     tc = np.fromfile(tdir / "comp_list", dtype=np.int32)
     np.testing.assert_array_equal(mc, tc)
+
+    # PR #311 review: pin the (n_models, n, n) -> (n, n, num_models) transpose
+    # on a MEANINGFUL axis, not just aggregate flat bytes -- reshape the raw
+    # W file back to write_amicaout's own on-disk contract (the writer does
+    # ``np.asarray(W).transpose(2, 0, 1).ravel(order="C")``, so the inverse
+    # is ``reshape(num_models, nw, nw).transpose(1, 2, 0)``) and diff each
+    # model's (nw, nw) slice separately, so a per-model swap or a wrong axis
+    # in the transpose shows up as a named model index, not just "W differs
+    # somewhere". n_models=2 is what actually exercises a non-trivial model
+    # axis; n_models=1 is the degenerate case where this collapses to the
+    # aggregate check above.
+    mw = np.fromfile(mdir / "W", dtype=np.float64).reshape(n_models, NW, NW)
+    mw = mw.transpose(1, 2, 0)
+    tw = np.fromfile(tdir / "W", dtype=np.float64).reshape(n_models, NW, NW)
+    tw = tw.transpose(1, 2, 0)
+    assert mw.shape == (NW, NW, n_models)
+    for h in range(n_models):
+        max_diff = float(np.abs(mw[:, :, h] - tw[:, :, h]).max())
+        assert max_diff < 1e-5, f"model {h}: W max abs diff {max_diff:.3e}"
