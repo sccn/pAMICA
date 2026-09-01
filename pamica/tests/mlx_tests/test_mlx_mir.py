@@ -128,6 +128,42 @@ def test_mir_real_fitted_unmixing_is_large_and_positive(real_data):
     assert mir_nats > identity_mir
 
 
+def test_mir_on_a_share_comps_merged_model(real_data):
+    """``mir()`` composes ``get_unmixing_matrix(model_idx) @ sphere`` directly
+    from the fitted ``W``/``sphere`` -- neither reads ``comp_list``/
+    ``comp_used`` -- so it must still produce a finite, sane value on a model
+    where ``share_comps`` genuinely merged components (PR #318 review item
+    9). Same forcing recipe as ``test_mlx_sharing.py``'s
+    ``test_two_model_share_fit_completes_and_merges``.
+
+    With every model-1 component merged into model 0 on this fixture (a
+    known property of this exact recipe -- see
+    ``test_mlx_export.py::test_share_comps_export_round_trips_through_
+    loadmodout``), the two models' A columns coincide, so their unmixing
+    -- and thus their MIR -- also agree; this also pins that per-model MIR
+    does not silently ignore ``model_idx`` under sharing.
+    """
+    m = _fit(
+        real_data,
+        n_models=2,
+        max_iter=25,
+        seed=3,
+        share_comps=True,
+        share_start=4,
+        share_iter=8,
+        comp_thresh=0.9,
+        keep_best=False,
+    )
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert int(np.array(m.comp_used).sum()) < m.n_comps, "no merge survived the fit"
+
+    mir0, var0 = m.mir(real_data, model_idx=0)
+    mir1, var1 = m.mir(real_data, model_idx=1)
+    assert np.isfinite(mir0) and np.isfinite(var0) and mir0 > 0
+    assert np.isfinite(mir1) and np.isfinite(var1) and mir1 > 0
+    np.testing.assert_allclose(mir0, mir1, rtol=1e-5)
+
+
 def test_mir_requires_a_fitted_model():
     m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED)
     with pytest.raises(RuntimeError, match="fitted"):

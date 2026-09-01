@@ -105,6 +105,39 @@ def test_write_amica_output_round_trips_through_loadmodout(
     assert abs(inv - out.LL[-1]) <= _LL_TOL
 
 
+def test_share_comps_export_round_trips_through_loadmodout(real_data, tmp_path):
+    """A ``share_comps`` fit that genuinely merges components must still
+    export and round-trip through ``loadmodout`` -- PR #318 review item 9.
+
+    Same forcing recipe as ``test_mlx_sharing.py``'s
+    ``test_two_model_share_fit_completes_and_merges`` (``share_start=4``,
+    ``share_iter=8``, ``comp_thresh=0.9``, ``max_iter=25``): deterministic
+    on this fixture, not a "if it happens to merge" check.
+    """
+    m = _model(
+        n_models=2,
+        seed=3,
+        share_comps=True,
+        share_start=4,
+        share_iter=8,
+        comp_thresh=0.9,
+        keep_best=False,
+    )
+    m.fit(real_data, max_iter=25, verbose=False)
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    used = int(np.array(m.comp_used).sum())
+    assert used < m.n_comps, "no merge survived the fit"
+    groups = m.shared_components()
+    assert groups
+
+    outdir = tmp_path / "shared_amicaout"
+    m.write_amica_output(outdir)
+    out = loadmodout(outdir)
+    assert out.W.shape == (NW, NW, m.n_models)
+    assert out.LL is not None and np.isfinite(out.LL[-1])
+    assert np.all(np.isfinite(out.W))
+
+
 def test_written_ll_ends_at_the_keep_best_restored_iterate(real_data):
     """Under a genuine keep_best restore (test_mlx_llt_stash.py's forced
     recipe), the written LL trajectory ends at the restored iterate, not
