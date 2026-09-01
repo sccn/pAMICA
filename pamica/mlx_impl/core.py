@@ -86,7 +86,7 @@ import logging
 import math
 import time
 import zipfile
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 # mlx ships as a compiled extension with no type stubs, so ty cannot resolve
 # it statically even when installed; scope the suppression to this one import.
@@ -96,6 +96,8 @@ from scipy.special import digamma, gammaln
 
 from .. import blocktune
 from .. import restarts
+from ..metrics import mir as mir_metric
+from ..metrics import pairwise_mi
 from ..numpy_impl.utils import identify_shared_components
 from ..rank import MINEIG, MINEIG_REL, numerical_rank
 
@@ -742,6 +744,18 @@ class AMICAMLXNG:
 
         self.iteration = 0
         self.ll_history: list[float] = []
+        # Mutual Information Reduction (MIR) waypoint trajectory (issue
+        # #137, epic #278 Phase 3/#289), populated by fit() when mir_step >
+        # 0: (iteration, mir_nats, variance) tuples from the CURRENT
+        # (mid-fit) W/sphere. Like ll_history, this is a true trajectory
+        # that a keep_best restore does NOT rewrite -- the fit-end MIR is
+        # mir() on the returned parameters, not mir_history_[-1]. Not part
+        # of state_dict(): it's a diagnostic, not a fitted parameter. Not
+        # index-aligned with ll_history: the entry for iteration i is
+        # computed AFTER that iteration's _update_parameters, while
+        # ll_history[i] is the likelihood of the parameters BEFORE it, so
+        # the two describe states one update apart (issue #161).
+        self.mir_history_: list[tuple[int, float, float]] = []
         # Log-likelihood of the returned parameters, set by fit() to
         # ll_history[-1], or to the best iterate's LL if the keep_best
         # safeguard (issue #51) restores it -- see _fit_once. Under
@@ -2163,6 +2177,9 @@ class AMICAMLXNG:
         # ... outlier-rejection state (issue #123's AMICATorchNG mechanism,
         # epic #278 Phase 3/#289) ...
         "numrej", "good_idx",
+        # ... the MIR waypoint trajectory (issue #137, epic #278 Phase
+        # 3/#289) ...
+        "mir_history_",
         # ... the tuned block size (do_opt_block re-times per restart) and the
         # seed the winning restart ran from.
         "block_size", "seed",
@@ -2200,7 +2217,11 @@ class AMICAMLXNG:
             setattr(self, name, value)
 
     def fit(
-        self, X: np.ndarray, max_iter: int = 100, verbose: bool = True
+        self,
+        X: np.ndarray,
+        max_iter: int = 100,
+        verbose: bool = True,
+        mir_step: int = 0,
     ) -> "AMICAMLXNG":
         """Fit the model, running ``n_restarts`` fits and keeping the best.
 
@@ -2218,6 +2239,9 @@ class AMICAMLXNG:
         degenerate restart (``nan_ll``/``singular_ll``/``nan_params``) is
         excluded from selection but recorded; if every restart is degenerate the
         model is left holding the last one.
+
+        ``mir_step``, as :meth:`_fit_once`, is passed through to every
+        restart unchanged.
         """
         seeds = self._restart_seeds
         if len(seeds) == 1:
@@ -2225,7 +2249,7 @@ class AMICAMLXNG:
             # passed an explicit one-element restart_seeds, so nothing here
             # perturbs the pre-#198 fit.
             self.seed = seeds[0]
-            self._fit_once(X, max_iter=max_iter, verbose=verbose)
+            self._fit_once(X, max_iter=max_iter, verbose=verbose, mir_step=mir_step)
             self.restart_seeds_ = list(seeds)
             self.restart_lls_ = [
                 float("nan") if self.final_ll_ is None else float(self.final_ll_)
@@ -2240,7 +2264,7 @@ class AMICAMLXNG:
         for index, seed in enumerate(seeds):
             self.seed = seed
             try:
-                self._fit_once(X, max_iter=max_iter, verbose=verbose)
+                self._fit_once(X, max_iter=max_iter, verbose=verbose, mir_step=mir_step)
             except RuntimeError as exc:
                 # An ill-conditioned A makes _update_unmixing_matrices raise
                 # (the issue #274 condition-number guard, which replaced MLX's
@@ -2289,7 +2313,11 @@ class AMICAMLXNG:
         return self
 
     def _fit_once(
-        self, X: np.ndarray, max_iter: int = 100, verbose: bool = True
+        self,
+        X: np.ndarray,
+        max_iter: int = 100,
+        verbose: bool = True,
+        mir_step: int = 0,
     ) -> "AMICAMLXNG":
         """Run one fit (one initialization, one EM loop) -- what :meth:`fit`
         calls once per restart. ``X`` is ``(n_channels, n_samples)``.
@@ -2309,6 +2337,27 @@ class AMICAMLXNG:
         restored an earlier iterate, in which case the restored stash and the
         restored parameters come from the same point in the loop and there is
         no staleness at all.
+
+        ``mir_step`` (issue #137, epic #278 Phase 3/#289), if > 0, computes
+        MIR from the current ``W``/``sphere`` every ``mir_step`` iterations
+        and appends it to ``mir_history_`` as ``(iteration, mir_nats,
+        variance)``. ``0`` (default) disables the waypoints and leaves fit
+        behaviour byte-for-byte unchanged. ``mir_history_`` is a true
+        trajectory like ``ll_history``: a ``keep_best`` restore does not
+        rewrite it, so the fit-end MIR is ``self.mir(X)`` on the returned
+        parameters, not ``mir_history_[-1]``. Not index-aligned with
+        ``ll_history``: entry ``i`` is computed after iteration ``i``'s
+        parameter update, while ``ll_history[i]`` is the likelihood of the
+        parameters before it, so the two are one update apart (issue #161).
+        Unlike ``AMICATorchNG``, there is no upfront PCA-reduction gate
+        here: this backend has no explicit ``pcakeep``/``pcadb`` parameter
+        (only automatic ``mineig``/``mineig_rel`` reduction, which cannot be
+        known before :meth:`_preprocess` builds THIS fit's sphere), so an
+        incompatible reduction is instead caught once the sphere exists,
+        inside the per-waypoint :meth:`mir` call below -- whose
+        ``ValueError`` is already caught and logged rather than propagated,
+        exactly like ``AMICATorchNG``'s equivalent automatic-reduction case
+        (issue #283).
         """
         if X.ndim != 2:
             raise ValueError(f"X must be 2D (n_channels, n_samples), got {X.shape}")
@@ -2316,11 +2365,14 @@ class AMICAMLXNG:
             raise ValueError(
                 f"X has {X.shape[0]} channels, model expects {self.n_channels}"
             )
+        if mir_step < 0:
+            raise ValueError(f"mir_step must be >= 0, got {mir_step}")
 
         X_t = self._preprocess(X)
         n_total = X_t.shape[1]
         self._initialize_parameters()
         self.ll_history = []
+        self.mir_history_ = []
         self.numrej = 0
         self.stop_reason = "max_iter"
         self.good_idx = mx.arange(n_total) if self.do_reject else None
@@ -2580,6 +2632,30 @@ class AMICAMLXNG:
                     self._update_unmixing_matrices()
 
             self.ll_history.append(ll)
+
+            # MIR waypoint (issue #137), following AMICATorchNG's idiom.
+            # Computed from the CURRENT W/sphere (just rebuilt above by
+            # _update_parameters / the share_comps block) against the raw,
+            # un-preprocessed X.
+            #
+            # A failed waypoint must never kill the fit. mir() raises on a
+            # near-singular unmixing or PCA reduction, and a near-singular W
+            # mid-fit is a transient the natural gradient can pass through.
+            # Warn and record NaN instead: the gap stays visible in
+            # mir_history_ rather than being silently absent.
+            if mir_step > 0 and it % mir_step == 0:
+                try:
+                    mir_nats, mir_var = self.mir(X)
+                except (ValueError, np.linalg.LinAlgError) as exc:
+                    logger.warning(
+                        "MIR waypoint failed at iter %d (%s: %s); recording "
+                        "NaN and continuing. The fit itself is unaffected.",
+                        it,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    mir_nats = mir_var = float("nan")
+                self.mir_history_.append((it, mir_nats, mir_var))
 
             # Learning-rate control (Fortran amica17.f90:1062-1108): anneal on an
             # LL decrease; ratchet the ceilings after maxdecs persistent decreases.
@@ -2946,6 +3022,113 @@ class AMICAMLXNG:
             )
         idx = self.comp_list[:, model_idx]
         return np.array(self.rho[:, idx])
+
+    # ------------------------------------------------------------------
+    # MIR/PMI diagnostics (issue #137; epic #278 Phase 3/#289 port of
+    # AMICATorchNG.mir/pmi, torch_impl/core.py:2929-3036)
+    # ------------------------------------------------------------------
+    def _pca_reduced(self) -> bool:
+        """Whether the fitted sphere is rank-reduced (non-square) -- the #300
+        fitted-geometry guard (port of ``AMICATorchNG._pca_reduced``,
+        torch_impl/core.py:2942-2956).
+
+        Derived from the fitted geometry -- ``sphere.shape[0] !=
+        sphere.shape[1]`` -- so it also catches rank reduction from
+        AUTOMATIC numerical-rank detection (``mineig``/``mineig_rel``), not
+        just an explicit reduction request. Unlike ``AMICATorchNG``, this
+        backend has no explicit ``pcakeep``/``pcadb`` constructor parameter
+        (only automatic ``mineig``/``mineig_rel`` reduction), so there is no
+        separate config-only ``_pca_reduction_requested()`` check to make
+        redundant here: this geometry check is the only PCA guard MIR needs.
+        ``False`` before :meth:`fit` (``sphere`` is ``None``) and for a
+        full-rank fit.
+        """
+        return self.sphere is not None and self.sphere.shape[0] != self.sphere.shape[1]
+
+    def mir(
+        self, X: np.ndarray, *, model_idx: int = 0, nbins: Optional[int] = None
+    ) -> Tuple[float, float]:
+        """Mutual Information Reduction (issue #137) of this model's unmixing
+        on ``X``.
+
+        Composes the full raw-data-to-sources transform ``W_fort @ sphere``
+        -- i.e. ``get_unmixing_matrix(model_idx) @ sphere`` -- and delegates
+        to :func:`pamica.metrics.mir`. MIR is shift-invariant, so the
+        data-space mean/``c`` centering :meth:`transform` applies is
+        irrelevant here. Computed through this backend's float32 parameters,
+        so treat the result as ~7-significant-digit, not float64-parity --
+        fine for a diagnostic (see the module docstring's precision note).
+
+        Parameters
+        ----------
+        X : np.ndarray of shape (n_channels, n_samples)
+            Raw (unpreprocessed) data.
+        model_idx : int, default=0
+            Which model's unmixing to use.
+        nbins : int, optional
+            Histogram bin count; see :func:`pamica.metrics.mir`.
+
+        Returns
+        -------
+        mir_nats : float
+        variance : float
+
+        Raises
+        ------
+        RuntimeError
+            If the model is unfitted.
+        ValueError
+            If the fitted sphere is rank-reduced (non-square): whether from
+            automatic ``mineig``/``mineig_rel`` numerical-rank detection (the
+            only source of reduction on this backend), the sphere is
+            rank-deficient, so MIR's log-Jacobian term is undefined
+            (issue #283/#300).
+        """
+        if self.A is None or self.W is None or self.sphere is None:
+            raise RuntimeError(
+                "AMICAMLXNG.mir() requires a fitted model; call fit() first."
+            )
+        self._check_model_idx(model_idx)
+        if self._pca_reduced():
+            raise ValueError(
+                "mir() is incompatible with PCA reduction: the fitted "
+                f"sphere is rank-deficient ({self.n_channels} of "
+                f"{self.n_channels_in} channels kept) from automatic "
+                "mineig/mineig_rel numerical-rank detection, so MIR's "
+                "log-Jacobian term is undefined for the resulting "
+                "non-square/non-invertible unmixing."
+            )
+        unmixing = np.array(self.W[model_idx].T @ self.sphere)
+        return mir_metric(unmixing, X, nbins)
+
+    def pmi(
+        self, X: np.ndarray, *, model_idx: int = 0, nbins: Optional[int] = None
+    ) -> np.ndarray:
+        """Pairwise Mutual Information (issue #137) between this model's
+        sources on ``X``.
+
+        Delegates to :func:`pamica.metrics.pairwise_mi` on
+        ``transform(X, model_idx)``.
+
+        Parameters
+        ----------
+        X : np.ndarray of shape (n_channels, n_samples)
+            Raw (unpreprocessed) data.
+        model_idx : int, default=0
+            Which model's sources to use.
+        nbins : int, optional
+            Histogram bin count; see :func:`pamica.metrics.pairwise_mi`.
+
+        Returns
+        -------
+        mi_matrix : np.ndarray of shape (n_sources, n_sources)
+
+        Raises
+        ------
+        RuntimeError
+            If the model is unfitted (via :meth:`transform`).
+        """
+        return pairwise_mi(self.transform(X, model_idx=model_idx), nbins)
 
     # ------------------------------------------------------------------
     # Multi-model posterior (issue #141; epic #278 Phase 3/#289 port of
