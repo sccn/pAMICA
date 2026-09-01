@@ -160,15 +160,27 @@ def test_run_fortran_smoke():
     not bench._fortran_available(_FBIN),
     reason="needs a runnable native amica binary; skipped on CI / Apple-only checkouts",
 )
-def test_run_fortran_rejects_sub_resolution_config():
-    """A config whose per-iteration time rounds to 0.00 s (below amica's ~10 ms
-    stamp) raises rather than reporting a bogus 0 ms/iter. 8ch x 2000 samples
-    reliably stays under the floor on real hardware."""
+def test_run_fortran_never_reports_a_bogus_zero():
+    """The 0.00 s stamp guard's actual contract: for a config at amica's ~10 ms
+    out.txt stamp floor, ``_run_fortran`` either raises the named
+    sub-resolution error or returns a genuinely nonzero mean -- never a bogus
+    0.0 ms/iter. 8ch x 2000 samples sits at the floor: on fast hardware every
+    stamp rounds to 0.00 and the guard fires, but on a loaded runner a single
+    iteration can cross a 0.01 stamp and the mean is then a legitimate
+    nonzero (the 2026-08-30 weekly-run flake, issue #308), so both outcomes
+    are asserted instead of betting on host speed."""
     data = load_data_file(str(FDT), DATA_DIM, FIELD_DIM, dtype=np.float32)[:8, :2000]
-    with pytest.raises(RuntimeError, match="rounds to 0.00 s"):
-        bench._run_fortran(
+    try:
+        ms_per_iter, _ = bench._run_fortran(
             np.ascontiguousarray(data), iters=8, repeats=1, binary=_FBIN, threads=2
         )
+    except RuntimeError as exc:
+        assert "rounds to 0.00 s" in str(exc)
+    else:
+        # Stamps are multiples of 0.01 s, so a non-raising mean over the 7
+        # timed iters is at least 10/7 ms; a returned 0.0 is exactly the bug
+        # the guard exists to prevent.
+        assert ms_per_iter >= 10.0 / 7 - 1e-9
 
 
 @pytest.mark.skipif(
