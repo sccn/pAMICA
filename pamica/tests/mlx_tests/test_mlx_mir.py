@@ -177,7 +177,13 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
     test_amica_ng_wrapper.py::test_failing_mir_waypoint_does_not_kill_the_fit
     -- the real trigger is a transient that cannot be induced on demand, so
     this exercises the fit's RESPONSE to a raising waypoint on otherwise
-    real data/arithmetic."""
+    real data/arithmetic.
+
+    Since PR #318's flood fix, a ValueError (unlike a LinAlgError) also
+    disables all LATER scheduled waypoints for this fit -- it is treated as
+    a geometry fact that will not spontaneously resolve, not a one-off
+    transient -- so `flaky_mir` must never be called a third time here, and
+    `mir_history_` stops at the failed entry instead of continuing."""
     real_mir = AMICAMLXNG.mir
     calls = {"n": 0}
 
@@ -196,15 +202,20 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
     assert m.stop_reason is not None
     assert m.final_ll_ is not None and math.isfinite(m.final_ll_)
 
+    assert calls["n"] == 2, "mir() must not be called again after the ValueError"
     iters = [row[0] for row in m.mir_history_]
-    assert iters == [0, 1, 2, 3], iters
+    assert iters == [0, 1], iters
     values = [row[1] for row in m.mir_history_]
+    assert math.isfinite(values[0])
     assert math.isnan(values[1]), "failed waypoint must be a visible NaN"
-    assert all(math.isfinite(v) for i, v in enumerate(values) if i != 1)
-    assert any(
-        "MIR waypoint failed" in r.getMessage() and "iter 1" in r.getMessage()
-        for r in caplog.records
+    assert (
+        sum(
+            "MIR waypoint failed" in r.getMessage() and "iter 1" in r.getMessage()
+            for r in caplog.records
+        )
+        == 1
     )
+    assert any("disabled" in r.getMessage() for r in caplog.records)
 
 
 # --- the #300 fitted-geometry PCA guard -------------------------------------
@@ -235,24 +246,32 @@ def test_mir_full_rank_succeeds(real_data):
     assert math.isfinite(mir_nats) and math.isfinite(variance)
 
 
-def test_mir_step_on_rank_reduced_data_completes_with_warned_nan_waypoints(
+def test_mir_step_on_rank_reduced_data_completes_with_one_warned_nan_waypoint(
     real_data, caplog
 ):
     """No upfront mir_step gate exists for AUTOMATIC rank reduction on
     EITHER backend (see amica-differences.md's "mir_step's upfront
     PCA-reduction gate" section -- this is intentional torch-parity, not a
-    gap): fit(mir_step=N) on rank-reduced real data must still complete,
-    with every waypoint recorded as a warned (iter, NaN, NaN) entry via
-    the same failed-waypoint guard test_failing_mir_waypoint_does_not_
-    kill_the_fit exercises via injection -- here the failure is organic
-    (mir()'s own #300 guard), not injected."""
+    gap): fit(mir_step=N) on rank-reduced real data must still complete.
+    The PCA-reduction ValueError is a geometry fact of this fit -- it will
+    fire identically on EVERY scheduled waypoint for as long as the fit
+    runs -- so PR #318's flood fix means only the FIRST scheduled waypoint
+    gets a (iter, NaN, NaN) entry and one warning; every later scheduled
+    iteration is silently skipped (mir() is not even called again), rather
+    than re-logging the identical warning at every one of them. Here the
+    failure is organic (mir()'s own #300 guard), not injected -- the
+    injected-failure mechanics are
+    test_failing_mir_waypoint_does_not_kill_the_fit's job."""
     x = real_data - real_data.mean(axis=1, keepdims=True)
     u16 = np.linalg.svd(x, full_matrices=False)[0][:, :16]
     x_low = u16 @ (u16.T @ x)
 
     m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED, block_size=BLOCK)
     with caplog.at_level(logging.WARNING, logger="pamica.mlx_impl.core"):
-        m.fit(x_low, max_iter=4, verbose=False, mir_step=2)
+        # mir_step=1 schedules a waypoint every iteration (0, 1, 2, 3) --
+        # without the flood fix this would be four identical warnings; the
+        # assertions below confirm it is exactly one.
+        m.fit(x_low, max_iter=4, verbose=False, mir_step=1)
 
     assert m.n_channels_in != m.n_channels, (
         "test setup: automatic rank detection did not reduce the sphere"
@@ -262,14 +281,18 @@ def test_mir_step_on_rank_reduced_data_completes_with_warned_nan_waypoints(
 
     assert m.mir_history_, "test setup: mir_step recorded nothing"
     iters = [row[0] for row in m.mir_history_]
-    assert iters == [0, 2], iters
-    for _, mir_nats, variance in m.mir_history_:
-        assert math.isnan(mir_nats) and math.isnan(variance)
-    assert sum(
-        "MIR waypoint failed" in r.getMessage()
-        and "incompatible with PCA reduction" in r.getMessage()
-        for r in caplog.records
-    ) == len(m.mir_history_)
+    assert iters == [0], iters
+    mir_nats, variance = m.mir_history_[0][1], m.mir_history_[0][2]
+    assert math.isnan(mir_nats) and math.isnan(variance)
+    assert (
+        sum(
+            "MIR waypoint failed" in r.getMessage()
+            and "incompatible with PCA reduction" in r.getMessage()
+            for r in caplog.records
+        )
+        == 1
+    )
+    assert any("disabled" in r.getMessage() for r in caplog.records)
 
 
 # --- mir_history_ vs keep_best / state_dict (issue #161) --------------------

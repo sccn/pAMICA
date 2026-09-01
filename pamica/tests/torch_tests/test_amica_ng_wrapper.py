@@ -845,6 +845,12 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
     input, and what is under test is the fit's response to a raising waypoint,
     not any numerical claim. The fit's own inputs and arithmetic stay real
     throughout.
+
+    Since PR #318's flood fix, a ValueError (unlike a LinAlgError) also
+    disables all LATER scheduled waypoints for this fit -- it is treated as
+    a geometry fact that will not spontaneously resolve, not a one-off
+    transient -- so `flaky_mir` must never be called a third time here, and
+    `mir_history_` stops at the failed entry instead of continuing.
     """
     real_mir = AMICATorchNG.mir
     calls = {"n": 0}
@@ -867,18 +873,25 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
     assert model.final_ll_ is not None
     assert math.isfinite(model.final_ll_)
 
-    # The failed waypoint is recorded as a visible NaN gap, not silently dropped.
+    # The failed waypoint is recorded as a visible NaN, then waypoints stop
+    # being scheduled entirely -- no entries for iterations 2/3, and mir()
+    # is never called again after the failure.
+    assert calls["n"] == 2, "mir() must not be called again after the ValueError"
     iters = [row[0] for row in model.mir_history_]
-    assert iters == [0, 1, 2, 3], iters
+    assert iters == [0, 1], iters
     values = [row[1] for row in model.mir_history_]
+    assert math.isfinite(values[0])
     assert math.isnan(values[1]), "failed waypoint must be a visible NaN"
-    assert all(math.isfinite(v) for i, v in enumerate(values) if i != 1)
 
-    # And it warned rather than failing silently.
-    assert any(
-        "MIR waypoint failed" in r.getMessage() and "iter 1" in r.getMessage()
-        for r in caplog.records
+    # And it warned once, naming that waypoints are now disabled.
+    assert (
+        sum(
+            "MIR waypoint failed" in r.getMessage() and "iter 1" in r.getMessage()
+            for r in caplog.records
+        )
+        == 1
     )
+    assert any("disabled" in r.getMessage() for r in caplog.records)
 
 
 def test_mir_step_zero_matches_omitted_argument(real_data):

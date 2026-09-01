@@ -2477,6 +2477,15 @@ class AMICAMLXNG:
         # Consecutive-small-likelihood-gain counter for the min_dll stop (Fortran
         # numincs, amica15.f90:1079-1089). Reset here so a refit starts clean.
         numincs = 0
+        # MIR waypoint flood guard (PR #318 review): a ValueError from mir()
+        # (PCA reduction, or metrics.mir's own near-singular-unmixing check)
+        # is a per-fit-geometry condition, not a per-iteration one -- it does
+        # not spontaneously resolve, so leaving the schedule running would
+        # log the identical warning on every remaining waypoint of a long
+        # fit. A local (not self.<attr>): it only matters within this one
+        # _fit_once call, never needs to survive a restart snapshot or be
+        # inspected after fit() returns.
+        mir_waypoints_disabled = False
 
         # Best-iterate safeguard (issue #51, epic #278 Phase 2/#288): track the
         # highest-LL iterate so a late Newton-fallback overshoot cannot leave
@@ -2726,10 +2735,25 @@ class AMICAMLXNG:
             # mid-fit is a transient the natural gradient can pass through.
             # Warn and record NaN instead: the gap stays visible in
             # mir_history_ rather than being silently absent.
-            if mir_step > 0 and it % mir_step == 0:
+            #
+            # ValueError vs LinAlgError get different treatment (PR #318
+            # review): a ValueError (PCA reduction, or metrics.mir's own
+            # near-singular-unmixing check) reflects the fit's GEOMETRY --
+            # the sphere shape or the current unmixing's conditioning as a
+            # structural fact -- not a one-off numerical hiccup, so it will
+            # keep firing identically on every remaining scheduled waypoint
+            # of a long fit. Warn once, then stop scheduling waypoints for
+            # the rest of THIS fit (mir_history_ simply gets no more
+            # entries -- every one it would have gotten is the same NaN
+            # anyway, so nothing is lost). LinAlgError stays per-waypoint:
+            # it is the genuinely transient case the comment above already
+            # describes, which the natural gradient can pass through.
+            if mir_waypoints_disabled:
+                pass
+            elif mir_step > 0 and it % mir_step == 0:
                 try:
                     mir_nats, mir_var = self.mir(X)
-                except (ValueError, np.linalg.LinAlgError) as exc:
+                except np.linalg.LinAlgError as exc:
                     logger.warning(
                         "MIR waypoint failed at iter %d (%s: %s); recording "
                         "NaN and continuing. The fit itself is unaffected.",
@@ -2738,7 +2762,22 @@ class AMICAMLXNG:
                         exc,
                     )
                     mir_nats = mir_var = float("nan")
-                self.mir_history_.append((it, mir_nats, mir_var))
+                    self.mir_history_.append((it, mir_nats, mir_var))
+                except ValueError as exc:
+                    logger.warning(
+                        "MIR waypoint failed at iter %d (%s: %s); this "
+                        "condition will not resolve mid-fit, so MIR "
+                        "waypoints are now disabled for the rest of this "
+                        "fit (mir_history_ gets no further entries). The "
+                        "fit itself is unaffected.",
+                        it,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    self.mir_history_.append((it, float("nan"), float("nan")))
+                    mir_waypoints_disabled = True
+                else:
+                    self.mir_history_.append((it, mir_nats, mir_var))
 
             # Learning-rate control (Fortran amica17.f90:1062-1108): anneal on an
             # LL decrease; ratchet the ceilings after maxdecs persistent decreases.
