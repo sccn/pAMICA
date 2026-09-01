@@ -26,7 +26,15 @@ pins ride here together.
    with clear headroom rather than right at a borderline threshold (the
    Phase 1/2 flakiness lesson).
 
-2. **mir() agreement**: from ONE real fitted MLX state copied into a
+2. **do_reject x pdftype=1 agreement**: a PR review regression
+   (``_choose_pdfs`` was called with the FULL sphered dataset on MLX,
+   ``X_t``, instead of the do_reject-restricted good set ``X_use`` AMICATorchNG
+   passes -- so the kurtosis-based family decision silently saw the
+   outliers torch excludes). Fixed to pass ``X_use``; pinned here against a
+   float64 torch twin, same seed/data/config, so a regression shows up as a
+   per-source ``pdtype`` mismatch, not just a shrinking-size assertion.
+
+3. **mir() agreement**: from ONE real fitted MLX state copied into a
    float64 ``AMICATorchNG`` twin (the ``_torch_twin`` pattern from
    ``test_mlx_sharing_cross_backend.py``), both backends' ``mir()`` must
    agree to float32 precision.
@@ -114,6 +122,67 @@ def test_reject_same_sample_set_across_backends(n_models):
     assert mlx_set == torch_set, (
         f"rejected-sample sets diverged: {len(mlx_set ^ torch_set)} samples "
         "differ between backends"
+    )
+
+
+def test_reject_x_pdftype1_kurtosis_switch_matches_across_backends():
+    """Regression: _choose_pdfs must see the do_reject-restricted good set
+    (X_use), not the full dataset (X_t) -- verified against a float64 torch
+    twin from identical seed/data/config. Before the fix this mismatched 1
+    of 32 per-source pdtype decisions on this exact config (the switcher's
+    kurtosis estimate over the full set, contaminated by the outliers
+    do_reject had already dropped by the time the switch ran, disagreed
+    with torch's estimate over the good set); after the fix the decisions
+    are bit-for-bit identical.
+
+    rejstart=2/rejint=2 fires the first rejection at iteration 2, strictly
+    before kurt_start=3's first switch at iteration 3, so the switcher's
+    FIRST call already sees a shrunken good set on both backends -- the
+    scenario the bug needed.
+    """
+    X = _real_data()
+    kwargs: dict[str, Any] = dict(
+        n_channels=NW,
+        n_models=1,
+        n_mix=1,
+        pdftype=1,
+        seed=2,
+        block_size=BLOCK,
+        do_reject=True,
+        rejsig=2.0,
+        rejstart=2,
+        rejint=2,
+        maxrej=3,
+        kurt_start=3,
+        num_kurt=5,
+        kurt_int=1,
+        keep_best=False,
+    )
+
+    mlx_model = AMICAMLXNG(**kwargs)
+    mlx_model.fit(X, max_iter=15, verbose=False)
+
+    torch_kwargs: dict[str, Any] = dict(kwargs, device="cpu", dtype=torch.float64)
+    torch_model = AMICATorchNG(**torch_kwargs)
+    torch_model.fit(X, max_iter=15, verbose=False)
+
+    assert mlx_model.numrej > 0, "test setup: no rejection fired"
+    assert mlx_model.n_kurt_done > 0, "test setup: the switcher never ran"
+    assert mlx_model.good_idx is not None and torch_model.good_idx is not None
+    assert int(mlx_model.good_idx.size) == int(torch_model.good_idx.numel()), (
+        "test setup: the two backends rejected a different number of samples"
+    )
+
+    assert torch_model.pdtype is not None
+    mlx_pdtype = np.array(mlx_model.pdtype)
+    torch_pdtype = torch_model.pdtype.numpy()
+    np.testing.assert_array_equal(
+        mlx_pdtype,
+        torch_pdtype,
+        err_msg=(
+            "per-source pdtype decision diverged from the torch twin -- "
+            "_choose_pdfs is likely seeing a different sample set again"
+        ),
     )
 
 

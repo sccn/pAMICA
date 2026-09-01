@@ -2609,7 +2609,7 @@ class AMICAMLXNG:
                     itf >= self.kurt_start
                     and (itf - self.kurt_start) % self.kurt_int == 0
                 ):
-                    self._choose_pdfs(X_t)
+                    self._choose_pdfs(X_use)
                     self.n_kurt_done += 1
 
             # Component sharing (Fortran identify_shared_comps schedule,
