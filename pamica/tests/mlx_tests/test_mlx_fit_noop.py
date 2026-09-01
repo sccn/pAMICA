@@ -74,15 +74,38 @@ def historical_amicamlxng():
     Registered under a private name in ``sys.modules`` for the duration of
     this test module and removed afterward, so it cannot leak into any
     other test's import cache.
+
+    CI runs from a shallow (depth-1) checkout, where ``_EPIC_TIP`` is not
+    a reachable object and a bare ``git show`` fails with "bad object" --
+    reproduced empirically on the macOS job. ``git fetch --depth 1`` that
+    one commit first (deepening the clone by exactly the object needed,
+    tolerating failure -- e.g. no network, or a remote that has since been
+    pruned) and only then read it; if the object is still unreachable,
+    skip loudly naming the shallow-clone cause rather than erroring the
+    whole module.
     """
     repo_root = Path(__file__).resolve().parents[3]
+    subprocess.run(
+        ["git", "fetch", "origin", _EPIC_TIP, "--depth", "1"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )  # best-effort: a shallow CI checkout may not have `origin`, or may
+    # already have the object; either way the git show below is the real
+    # check, so a fetch failure here is not itself fatal.
     result = subprocess.run(
         ["git", "show", f"{_EPIC_TIP}:pamica/mlx_impl/core.py"],
         cwd=repo_root,
         capture_output=True,
         text=True,
-        check=True,
     )
+    if result.returncode != 0:
+        pytest.skip(
+            f"git object {_EPIC_TIP} is not reachable in this checkout "
+            f"(likely a shallow/depth-1 clone that the fetch above could "
+            f"not deepen -- e.g. no network or the remote history was "
+            f"pruned); git show stderr: {result.stderr.strip()!r}"
+        )
     module = types.ModuleType(_HISTORICAL_MODULE_NAME)
     module.__package__ = "pamica.mlx_impl"
     module.__name__ = _HISTORICAL_MODULE_NAME
