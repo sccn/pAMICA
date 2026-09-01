@@ -59,7 +59,7 @@ The GG shape parameter ``rho`` is frozen for every non-GG family
 (``self.dorho = pdftype == 0``, Fortran ``dorho=.false.``), which also gates
 the ``drho_n`` accumulation and the per-iteration lgamma-table refresh here.
 AMICATorchNG already gates its digamma pull behind the same ``self.dorho``
-flag (core.py:1483-1489), so that is not a divergence; its genuine dead work
+flag (core.py:1664-1678), so that is not a divergence; its genuine dead work
 for a non-GG fit is the ``drho_n`` accumulation, which it computes
 unconditionally in ``_get_block_updates`` (no ``dorho`` gate there), and the
 inline ``torch.lgamma(1+1/rho)`` term ``_log_pdf_only`` recomputes on every
@@ -1620,9 +1620,9 @@ class AMICAMLXNG:
         # GG shape update with the 1/psi(1+1/rho) digamma factor (Fortran
         # :2013-2014); digamma is computed host-side (MLX has none). A NaN here
         # (e.g. from an upstream mu/beta blow-up) is reset to rho0 and surfaced,
-        # matching AMICATorchNG (core.py:1483-1504), so it does not silently
+        # matching AMICATorchNG (core.py:1671-1693), so it does not silently
         # poison the lgamma table and every subsequent E-step.
-        # Deliberate divergence from AMICATorchNG (core.py:1483-1487), which also
+        # Deliberate divergence from AMICATorchNG (core.py:1671-1675), which also
         # skips the update when rho is pinned to a boundary (all 1.0 or all 2.0):
         # that early-exit needs a host sync on a (n_mix, n_comps) reduction over
         # rho every iteration. This backend does make a few scalar host syncs per
@@ -2983,7 +2983,7 @@ class AMICAMLXNG:
 
     def transform(self, X: np.ndarray, model_idx: int = 0) -> np.ndarray:
         """Apply the learned unmixing matrix to (new) data (issue #287, port of
-        ``AMICATorchNG.transform``, torch_impl/core.py:2853-2869).
+        ``AMICATorchNG.transform``, torch_impl/core.py:2928-2946).
 
         Sources are ``S = W[model_idx]^T @ (sphere @ (X - mean) - c[:,
         model_idx])`` (issue #24 transpose convention, issue #27 per-model
@@ -3014,7 +3014,7 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _check_model_idx(self, model_idx: int) -> None:
         """Validate a model index against the fitted ``n_models`` (AMICATorchNG
-        ``_check_model_idx``, core.py:2338-2353). Raises a clear ``ValueError``
+        ``_check_model_idx``, core.py:2911-2926). Raises a clear ``ValueError``
         (rejecting negatives, which MLX's negative indexing would otherwise turn
         into a silent wrong-model result) instead of an opaque array error."""
         if not isinstance(model_idx, (int, np.integer)):
@@ -3063,7 +3063,7 @@ class AMICAMLXNG:
     def get_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """True mixing matrix ``A_fort`` = (stored A)^T (issue #24 convention;
         issue #287 port of ``AMICATorchNG.get_mixing_matrix``, torch_impl/
-        core.py:2872-2880)."""
+        core.py:2948-2956)."""
         if self.A is None or self.comp_list is None:
             raise RuntimeError(
                 "AMICAMLXNG.get_mixing_matrix() requires a fitted model; call "
@@ -3075,7 +3075,7 @@ class AMICAMLXNG:
     @property
     def n_channels_in(self) -> int:
         """Input channel count, i.e. the width of the sphere (issue #287 port
-        of ``AMICATorchNG.n_channels_in``, torch_impl/core.py:2884-2896).
+        of ``AMICATorchNG.n_channels_in``, torch_impl/core.py:2958-2967).
 
         Differs from ``n_channels`` only when rank reduction shrank the model
         to the detected numerical rank (issue #223); equal to it for
@@ -3090,7 +3090,7 @@ class AMICAMLXNG:
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space (issue #287 port of
         ``AMICATorchNG.get_sensor_mixing_matrix``, torch_impl/core.py:
-        2893-2917): ``pinv(sphere) @ A``, via :meth:`_pinv_sphere` -- the only
+        2969-2991): ``pinv(sphere) @ A``, via :meth:`_pinv_sphere` -- the only
         correct back-map when rank reduction has left the sphere non-square
         (issue #223).
         """
@@ -3111,7 +3111,7 @@ class AMICAMLXNG:
     def get_unmixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """True unmixing matrix ``W_fort`` = (stored W)^T (issue #24
         convention; issue #287 port of ``AMICATorchNG.get_unmixing_matrix``,
-        torch_impl/core.py:2919-2927). MLX's ``W`` is model-major (``(n_models,
+        torch_impl/core.py:2993-3001). MLX's ``W`` is model-major (``(n_models,
         n, n)``), so the per-model slice is ``W[model_idx]`` rather than
         torch's ``W[:, :, model_idx]``."""
         if self.W is None:
@@ -3125,7 +3125,7 @@ class AMICAMLXNG:
     def get_rho(self, model_idx: int = 0) -> np.ndarray:
         """Generalized-Gaussian shape parameter ``rho`` for model
         ``model_idx`` (issue #287 port of ``AMICATorchNG.get_rho``, torch_impl/
-        core.py:3157-3182; issue #142).
+        core.py:3231-3259; issue #142).
 
         One value per (mixture component, source): ``rho == 2`` is Gaussian-
         shaped, ``rho == 1`` Laplacian, ``rho < 1`` heavier-tailed. Only the
@@ -3439,7 +3439,7 @@ class AMICAMLXNG:
 
     # ------------------------------------------------------------------
     # EEGLAB export (issue #92; epic #278 Phase 3/#289 port of
-    # AMICATorchNG.write_amica_output, torch_impl/core.py:3285-3366)
+    # AMICATorchNG.write_amica_output, torch_impl/core.py:3359-3471)
     # ------------------------------------------------------------------
     def write_amica_output(self, outdir) -> None:
         """Write this fitted model as the Fortran/EEGLAB AMICA output
@@ -3572,7 +3572,7 @@ class AMICAMLXNG:
     # Persistence (issue #287)
     # ------------------------------------------------------------------
     # Full fitted-parameter snapshot -- the same 12-name set as AMICATorchNG's
-    # _PARAM_TENSORS (torch_impl/core.py:3372-3382): A/W/c/comp_list/mean/
+    # _PARAM_TENSORS (torch_impl/core.py:3484-3489): A/W/c/comp_list/mean/
     # sphere are what transform()/get_*matrix() read back; mu/alpha/beta/rho/
     # gm are the mixture-PDF EM state; pdtype is the per-source density-family
     # code (issue #265) -- a non-default pdftype model, or the adaptive
