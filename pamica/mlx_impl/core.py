@@ -3048,6 +3048,104 @@ class AMICAMLXNG:
         return ex / ex.sum(axis=0, keepdims=True)
 
     # ------------------------------------------------------------------
+    # EEGLAB export (issue #92; epic #278 Phase 3/#289 port of
+    # AMICATorchNG.write_amica_output, torch_impl/core.py:3285-3366)
+    # ------------------------------------------------------------------
+    def write_amica_output(self, outdir) -> None:
+        """Write this fitted model as the Fortran/EEGLAB AMICA output
+        directory.
+
+        Produces the raw binary files that EEGLAB's ``loadmodout15.m`` (and
+        the Python port :func:`pamica.numpy_impl.load.loadmodout`) read:
+        ``gm``, ``W``, ``S``, ``mean``, ``c``, ``alpha``, ``mu``, ``sbeta``,
+        ``rho``, ``comp_list``, ``LL``, so an MLX fit drops directly into an
+        EEGLAB workflow, exactly like ``AMICATorchNG.write_amica_output``.
+        ``loadmodout15`` performs the variance-ordering and unit-norm
+        normalization on load, so the on-disk parameters are written in fit
+        order. Single-model output is byte-compatible with the Fortran
+        reference.
+
+        Also writes ``LLt`` (the per-sample/per-model log-likelihood, issue
+        #155) for a model that was just :meth:`fit` in this process, from the
+        stash the training E-step filled (issue #157) -- so, exactly as in
+        the reference, ``LLt`` is the E-step of the returned iterate and is
+        one M-step older than the ``W``/``A`` written beside it (see
+        :meth:`_fit_once`'s docstring). A model restored via
+        :meth:`from_state_dict`/:meth:`load` carries no stash, so ``LLt`` is
+        omitted for it (a warning is logged) -- the rest of the output is
+        unaffected. Under ``do_reject``, a rejected sample's ``LLt`` entries
+        are written as exactly 0.0 (the load-bearing sentinel ``load_rej``
+        reconstructs from, amica15.f90:2231-2234): this is automatic,
+        because :meth:`_reject_outliers` already zeroes the stash for
+        dropped samples as it drops them.
+
+        Parameters
+        ----------
+        outdir : str or path-like
+            Destination directory (created if absent).
+        """
+        if self.A is None:
+            raise RuntimeError(
+                "write_amica_output requires a fitted model; call fit() first."
+            )
+
+        from ..numpy_impl.load import write_amicaout
+
+        # The exported parameters are the fit()-kept iterate (LL ==
+        # final_ll_). Under the keep_best safeguard (#51) that can be an
+        # earlier iterate than the last, so end the written LL trajectory at
+        # that iterate rather than at a later, discarded overshoot --
+        # otherwise LL[-1] would not match the model just written. Monotone
+        # runs keep the full trajectory unchanged.
+        ll = np.asarray(self.ll_history, dtype=np.float64)
+        if (
+            self.final_ll_ is not None
+            and np.isfinite(self.final_ll_)
+            and ll.size
+            and not np.isclose(ll[-1], self.final_ll_)
+        ):
+            ll = ll[: int(np.argmax(ll)) + 1]
+
+        # LLt (Fortran's per-sample/per-model log-likelihood, issue #155):
+        # computed once at the end of fit() (after any keep-best restore)
+        # and stored compactly on self. A model restored via
+        # from_state_dict()/load() never ran fit() in this process, so it
+        # has neither -- warn rather than silently omitting the file
+        # (silent-failure review).
+        if self._llt_lht is not None and self._llt_lt is not None:
+            Lht, Lt = self._llt_lht, self._llt_lt
+        else:
+            logger.warning(
+                "No LLt data available (model was restored via "
+                "from_state_dict()/load(), not freshly fit()); writing "
+                "output without the LLt file."
+            )
+            Lht = Lt = None
+
+        write_amicaout(
+            outdir,
+            gm=np.array(self.gm),
+            # write_amicaout's contract is W(nw, nw, num_models) -- the
+            # SAME layout AMICATorchNG's W already is. MLX's W is
+            # model-major, (n_models, n, n) (see the module docstring and
+            # transform()'s CAUTION note), so move the model axis from
+            # front to back rather than transposing torch's tensor layout.
+            W=np.array(self.W).transpose(1, 2, 0),
+            sphere=np.array(self.sphere),
+            mean=np.array(self.mean),
+            c=np.array(self.c),
+            alpha=np.array(self.alpha),
+            mu=np.array(self.mu),
+            sbeta=np.array(self.beta),  # Fortran's 'sbeta' is pamica's beta
+            rho=np.array(self.rho),
+            comp_list=np.array(self.comp_list),
+            ll=ll,
+            A=np.array(self.A),
+            Lht=Lht,
+            Lt=Lt,
+        )
+
+    # ------------------------------------------------------------------
     # Persistence (issue #287)
     # ------------------------------------------------------------------
     # Full fitted-parameter snapshot -- the same 12-name set as AMICATorchNG's
