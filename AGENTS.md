@@ -85,8 +85,14 @@ Multi-model MLX (#81) also wins (~5x over torch-CPU; MPS still loses at the inhe
 -- not yet re-swept at 8192 like the single-model figures above). Component sharing (#263),
 Newton (#264, float32, validated against a float64 torch twin -- see `.context/issue-264/`) and the
 non-GG pdf families (#265, including the adaptive switcher; see `.context/issue-265/`) are all
-ported; the remaining MLX gaps are the non-fitting surface -- `transform`, save/load, `keep_best`,
-outlier rejection and LLt/MIR -- tracked as epic #278 (phases #287/#288/#289).
+ported; source extraction (`transform` and the mixing/unmixing/`rho` accessors) and persistence
+(`state_dict`/`.npz` save-load) landed in epic #278 Phase 1 (#287); the best-iterate safeguard
+(`keep_best`) landed in Phase 2 (#288); outlier rejection, the LLt-stash-backed scoring accessors,
+the EEGLAB export, and MIR/PMI landed in Phase 3 (#289); `variance_order` (the EEGLAB
+back-projected-variance component order) landed in the epic's post-Phase-3 polish round, ahead of
+merge to `dev`, closing the one accessor gap Phase 3 left open -- epic #278 is complete; the
+remaining MLX gap vs the PyTorch backend is none, other than float32-only precision (Apple GPUs
+have no float64).
 
 ## Key Files
 - **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`)
@@ -101,8 +107,10 @@ outlier rejection and LLt/MIR -- tracked as epic #278 (phases #287/#288/#289).
 - PyTorch backend with GPU/MPS/CPU support; the `AMICATorchNG` natural-gradient EM backend now
   matches the Fortran reference (LL ~ -3.40, component correlation ~0.997) with Newton enabled
   and positive-definite (issue #24).
-- Validation harness runs both implementations (NG + NumPy) and matches components via the Hungarian
-  algorithm.
+- `validate_implementations.py` runs the PyTorch (NG) backend against the Fortran binary and matches
+  components via the Hungarian algorithm; it does not exercise the NumPy or MLX backends. NumPy-vs-
+  Fortran parity lives in pytest (`test_sample_data_numpy_vs_fortran`), and MLX validation lives in
+  `mlx_tests/` plus the cross-backend suites (extending the harness itself is tracked as issue #315).
 - Newton and exact-EM updates are implemented in `AMICATorchNG` and the legacy NumPy `numpy_impl/core.py`
   (both Fortran-faithful). Adaptive PDF (#26) is DONE (all five `pdftype` families + ext-Infomax
   switcher); full multi-model matching (#27) is validated by distributional equivalence.

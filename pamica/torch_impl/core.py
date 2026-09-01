@@ -1078,7 +1078,24 @@ class AMICATorchNG:
         A_stack = torch.stack(
             [self.A[:, self.comp_list[:, h]] for h in range(self.n_models)], dim=0
         )
-        W_stack = torch.linalg.inv(A_stack)
+        try:
+            W_stack = torch.linalg.inv(A_stack)
+        except torch.linalg.LinAlgError:
+            # Mid-loop invariant raise (PR #318 review): this is called from
+            # inside _update_parameters, after A/mu/beta/rho/alpha/gm/c have
+            # already been reassigned to this iterate's values -- so a
+            # singular A here would otherwise strand the instance holding an
+            # inconsistent mix of new params and stale self.W, with
+            # stop_reason still "max_iter", while the exception propagates
+            # uncaught through the single-restart fit() path (no try/except
+            # there). Set the degenerate marker before re-raising so every
+            # downstream state_dict()/write_amica_output() refusal check
+            # catches it regardless of whether the caller catches this.
+            # _fit_restarts's except block also sets this -- now
+            # redundant-but-harmless there, kept so that path does not
+            # depend on this site doing it correctly.
+            self.stop_reason = restarts.ERROR_STOP_REASON
+            raise
         self.W = W_stack.permute(1, 2, 0).contiguous()
 
     def _pdtype_h(self, h: int) -> Optional[torch.Tensor]:
@@ -1930,6 +1947,15 @@ class AMICATorchNG:
                 # Only a degenerate fit (non-finite input data) gets here. Say
                 # so, rather than letting LAPACK report a confusing
                 # "ill-conditioned / repeated singular values" SVD failure.
+                # Mid-loop invariant raise (PR #318 review): _pinv_sphere is
+                # called from _identify_shared_comps, itself called from
+                # inside _fit_once's iteration body under share_comps -- so
+                # this can fire with the instance already holding this
+                # iterate's updated A/mu/etc, mid-fit, propagating uncaught
+                # through the single-restart fit() path. Set the degenerate
+                # marker before raising, same reasoning as
+                # _update_unmixing_matrices above.
+                self.stop_reason = restarts.ERROR_STOP_REASON
                 raise RuntimeError(
                     "The sphere holds non-finite values, so it has no "
                     "pseudo-inverse: the fit is degenerate. Check the input "
@@ -2361,6 +2387,15 @@ class AMICATorchNG:
             )
         if mir_step < 0:
             raise ValueError(f"mir_step must be >= 0, got {mir_step}")
+        if max_iter < 1:
+            # PR #318 review: max_iter=0 used to run the loop zero times and
+            # complete "successfully" with stop_reason="max_iter" (not a
+            # _DEGENERATE_STOP_REASONS marker) and final_ll_=NaN -- an
+            # untrained model that every state_dict()/write_amica_output()
+            # degenerate-fit guard then accepted, since none of them check
+            # "did an E-step ever actually run", only "did stop_reason end
+            # up degenerate". Reject up front instead.
+            raise ValueError(f"max_iter must be >= 1, got {max_iter}")
         if mir_step > 0 and self._pca_reduction_requested():
             raise ValueError(
                 "mir_step > 0 is incompatible with PCA reduction "
@@ -2407,6 +2442,15 @@ class AMICATorchNG:
         # numincs, amica15.f90:1079-1089; issue #207). Reset here so a refit on
         # the same instance gets a fresh count, matching numdecs.
         numincs = 0
+        # MIR waypoint flood guard (PR #318 review): a ValueError from mir()
+        # (PCA reduction, or metrics.mir's own near-singular-unmixing check)
+        # is a per-fit-geometry condition, not a per-iteration one -- it does
+        # not spontaneously resolve, so leaving the schedule running would
+        # log the identical warning on every remaining waypoint of a long
+        # fit. A local (not self.<attr>): it only matters within this one
+        # _fit_once call, never needs to survive a restart snapshot or be
+        # inspected after fit() returns.
+        mir_waypoints_disabled = False
 
         # Best-iterate safeguard (issue #51): track the highest-LL iterate so a
         # late Newton-fallback overshoot cannot leave the returned model below a
@@ -2543,10 +2587,25 @@ class AMICATorchNG:
             # decomposition. Warn and record NaN instead: the gap stays visible
             # in mir_history_ rather than being silently absent, so a plotted
             # trajectory shows a hole exactly where the transient was.
-            if mir_step > 0 and it % mir_step == 0:
+            #
+            # ValueError vs LinAlgError get different treatment (PR #318
+            # review): a ValueError (PCA reduction, or metrics.mir's own
+            # near-singular-unmixing check) reflects the fit's GEOMETRY --
+            # the sphere shape or the current unmixing's conditioning as a
+            # structural fact -- not a one-off numerical hiccup, so it will
+            # keep firing identically on every remaining scheduled waypoint
+            # of a long fit. Warn once, then stop scheduling waypoints for
+            # the rest of THIS fit (mir_history_ simply gets no more
+            # entries -- every one it would have gotten is the same NaN
+            # anyway, so nothing is lost). LinAlgError stays per-waypoint:
+            # it is the genuinely transient case the comment above already
+            # describes, which the natural gradient can pass through.
+            if mir_waypoints_disabled:
+                pass
+            elif mir_step > 0 and it % mir_step == 0:
                 try:
                     mir_nats, mir_var = self.mir(X)
-                except (ValueError, np.linalg.LinAlgError) as exc:
+                except np.linalg.LinAlgError as exc:
                     logger.warning(
                         "MIR waypoint failed at iter %d (%s: %s); recording NaN "
                         "and continuing. The fit itself is unaffected.",
@@ -2555,7 +2614,22 @@ class AMICATorchNG:
                         exc,
                     )
                     mir_nats = mir_var = float("nan")
-                self.mir_history_.append((it, mir_nats, mir_var))
+                    self.mir_history_.append((it, mir_nats, mir_var))
+                except ValueError as exc:
+                    logger.warning(
+                        "MIR waypoint failed at iter %d (%s: %s); this "
+                        "condition will not resolve mid-fit, so MIR "
+                        "waypoints are now disabled for the rest of this "
+                        "fit (mir_history_ gets no further entries). The "
+                        "fit itself is unaffected.",
+                        it,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    self.mir_history_.append((it, float("nan"), float("nan")))
+                    mir_waypoints_disabled = True
+                else:
+                    self.mir_history_.append((it, mir_nats, mir_var))
 
             # Learning-rate control, ported from Fortran (amica17.f90:1062-1108).
             # Natural-gradient/Newton ascent is not monotonic at a fixed rate:
@@ -3303,6 +3377,15 @@ class AMICATorchNG:
         so ``LLt`` is omitted for it (a warning is logged) -- the rest of the
         output is unaffected.
 
+        Raises if the model is unfitted or degenerate (a fit that ended on a
+        non-finite log-likelihood): a NaN model must not be written silently.
+        The scikit-learn-style :class:`~pamica.AMICA` wrapper already refuses
+        this via its own usability gate, but a caller using
+        :class:`AMICATorchNG` directly has no such gate in front of this
+        method -- mirrors :meth:`state_dict`'s two-layer guard (stop_reason
+        refusal, then a defense-in-depth isfinite sweep over the parameter
+        tensors) so the same protection applies here (PR #311 review).
+
         Parameters
         ----------
         outdir : str or path-like
@@ -3311,6 +3394,28 @@ class AMICATorchNG:
         if self.A is None:
             raise RuntimeError(
                 "write_amica_output requires a fitted model; call fit() first."
+            )
+        if self.stop_reason in self._DEGENERATE_STOP_REASONS:
+            raise RuntimeError(
+                f"Refusing to write output for a degenerate model (stop_reason="
+                f"{self.stop_reason!r}): fit() hit a non-finite log-likelihood at "
+                f"iteration {self.iteration}. Fix the instability (lower lrate, "
+                f"disable Newton, or check data conditioning) before writing."
+            )
+        # Defense-in-depth, mirroring state_dict(): catch a non-finite
+        # parameter even if stop_reason bookkeeping ever misses it. Also
+        # neutralizes a stale LLt stash: a failed final iteration's
+        # _llt_lht/_llt_lt (from before the nan_params/nan_ll break) can no
+        # longer reach disk once this guard refuses the write outright.
+        nonfinite = [
+            name
+            for name in self._PARAM_TENSORS
+            if not torch.isfinite(getattr(self, name)).all()
+        ]
+        if nonfinite:
+            raise RuntimeError(
+                f"Refusing to write output for a model with non-finite "
+                f"parameters {nonfinite} (stop_reason={self.stop_reason!r})."
             )
 
         from ..numpy_impl.load import write_amicaout

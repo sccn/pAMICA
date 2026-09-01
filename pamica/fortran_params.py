@@ -61,8 +61,11 @@ Every other translated key keeps its Fortran spelling.
 
 ``FORTRAN_UNSUPPORTED_KEYS`` lists the remaining 32 keywords the Fortran
 parser accepts (checkpoint warm-start, per-family EM freeze toggles, FIR/DFT
-pre-filtering, console/file reporting cadence, ...) that have no pamica
-equivalent; these are
+pre-filtering, console/file reporting cadence, ...) that this module does not
+translate -- most with no pamica equivalent anywhere, but a few
+(``writestep``/``do_history``/``histstep``) exist on the legacy NumPy backend
+only (see the table entry below); this module's output targets the torch
+wrapper, which has no matching mechanism (issue #312). These are
 *deliberately* unmapped, not missed, and ``read_fortran_param_file`` warns
 about them by name rather than dropping them in silence. A keyword absent
 from *both* dicts is not a Fortran keyword this module knows about at all
@@ -300,9 +303,16 @@ FORTRAN_UNSUPPORTED_KEYS: dict = {
     "print_debug": "Fortran console verbosity, no pamica equivalent",
     "write_nd": "Fortran output-file toggle (weight/gradient dumps)",
     "write_LLt": "Fortran output-file toggle (per-sample log-likelihood dumps)",
-    "writestep": "Fortran output-file write cadence",
-    "do_history": "Fortran periodic weight-history dump",
-    "histstep": "Fortran periodic weight-history dump cadence",
+    # Periodic on-disk checkpointing DOES have a pamica equivalent, but only
+    # on the legacy NumPy backend (numpy_impl/core.py's fit loop, ~2195-2198,
+    # and _write_history, ~2460-2489), which implements writestep/do_history/
+    # histstep with the same names and cadence semantics as Fortran. These
+    # stay unsupported HERE only because this module's output targets the
+    # torch wrapper (AMICA.fit/AMICATorchNG), which has no matching
+    # mechanism; porting it to torch/MLX is tracked as issue #312.
+    "writestep": "on-disk checkpoint write cadence; NumPy backend only (issue #312)",
+    "do_history": "periodic weight-history dump; NumPy backend only (issue #312)",
+    "histstep": "weight-history dump cadence; NumPy backend only (issue #312)",
     # Misc.
     "decwindow": "decrease-count window size; pamica exposes only max_decs/maxdecs",
     "fix_init": "fixed initialization scheme, not ported",

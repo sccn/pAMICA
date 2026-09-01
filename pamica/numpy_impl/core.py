@@ -303,7 +303,10 @@ class AMICA:
         self.min_grad_norm = params.get("min_grad_norm", 1e-7)
         self.use_min_dll = params.get("use_min_dll", True)
         self.use_grad_norm = params.get("use_grad_norm", True)
-        self.pdftype = params.get("pdftype", 1)
+        # Inert: never read after assignment (this backend always runs the GG
+        # update; _compute_log_pdf takes no pdftype). Aligned to 0 to match
+        # the torch/MLX constructor default, for surface consistency only.
+        self.pdftype = params.get("pdftype", 0)
         self.outdir = Path(params.get("outdir", "output"))
 
         # Data-source config (used by fit() when called without explicit
@@ -629,6 +632,14 @@ class AMICA:
             )
         if data.size == 0:
             raise ValueError("data must not be empty")
+
+        # __init__ already rejects a non-positive max_iter (line ~189), but
+        # max_iter is a plain public attribute a caller can reassign after
+        # construction (unlike torch/mlx, where it is a fit() parameter
+        # re-validated every call) -- re-check at fit entry so that path is
+        # not a silent bypass (PR #318 review item 5).
+        if self.max_iter < 1:
+            raise ValueError(f"max_iter must be >= 1, got {self.max_iter}")
 
         # Log initial message
         self.logger.info("Starting AMICA fitting...")

@@ -3,6 +3,87 @@
 Release notes are also published on the
 [GitHub releases page](https://github.com/sccn/pAMICA/releases).
 
+## Unreleased
+
+- **Epic #278 polish round: audit-driven fixes ahead of merge to `dev`.**
+  `AMICAMLXNG` gained `variance_order` (issue #92), the EEGLAB
+  back-projected-variance component order, closing the one accessor gap the
+  epic's feature-parity audit found in an otherwise-complete Phase 3
+  (validated on real data against a float64 `AMICATorchNG` twin holding
+  identical fitted parameters: the component order matches exactly on a
+  config with non-degenerate variance gaps). The audit also found several
+  stale/misattributed doc claims, fixed here: `docs/guides/amica-differences.md`
+  now attributes the degenerate-fit refusal to the `AMICA` wrapper rather than
+  the raw PyTorch backend (the raw-backend gap is issue #306), and gained an
+  "Unmapped Fortran keywords" section pointing to `fortran_params.py`'s
+  `FORTRAN_UNSUPPORTED_KEYS` as the enumeration, naming three keywords dead in
+  the reference itself (`filter_length`/`dft_length`/`decwindow`), and
+  recording the `do_rho`-vs-`pdftype` divergence explicitly; `AGENTS.md` and
+  `.context/progress_summary.md` no longer claim `validate_implementations.py`
+  covers the NumPy/MLX backends (it is torch-vs-Fortran only; extending it is
+  issue #315); `.context/feature_parity.md` and `.context/progress_summary.md`
+  no longer claim the runtime-vs-Fortran benchmark is unmeasured or that issue
+  #15 (save/load and `plot_components` test coverage) is open, both stale
+  since earlier work landed; and `fortran_params.py`'s unsupported-keys table
+  no longer claims `writestep`/`do_history`/`histstep` have no pamica
+  equivalent -- they are implemented on the legacy NumPy backend, just not
+  yet on torch/MLX (issue #312). Also aligned the legacy NumPy backend's
+  inert `pdftype` constructor default to 0, matching torch/MLX (the value is
+  never read, so this is a documentation-equivalent surface fix, not a
+  behavior change).
+- **MLX backend: outlier rejection, LLt stash, EEGLAB export, MIR/PMI**
+  (issue #289, epic #278 Phase 3 -- see the polish-round entry above for the
+  `variance_order` accessor gap this phase left open and the epic-completing
+  follow-up). `AMICAMLXNG` gains:
+  the LLt stash (issue #157), filled per-block by the E-step (never a second
+  forward pass) and rolled back on a `keep_best` restore; `do_reject`
+  (issue #123's `good_idx` mechanism), with the rejection statistic read FROM
+  the stash rather than a second forward pass -- the NumPy backend's design,
+  pre-empting `AMICATorchNG`'s open follow-up to drop its own extra
+  `_sample_ll` pass (issue #298); `model_loglik`/`model_probability`
+  (issue #141); `write_amica_output` (issue #92), a thin adapter over the
+  shared `numpy_impl.load.write_amicaout` with MLX's `W` transposed from
+  `(n_models, n, n)` to the writer's `(nw, nw, num_models)` contract; and
+  `mir`/`pmi` plus `fit(mir_step=...)` waypoints (issue #137), including the
+  #300 fitted-geometry PCA guard. `do_reject`/rejection state (`numrej`/
+  `good_idx`) persists additively in `state_dict`'s `extra` (`extra.get`
+  fallback for pre-Phase-3 payloads); `mir_history_` stays out of both the
+  `keep_best` snapshot and `state_dict` (a diagnostic trajectory, not a
+  fitted parameter). A default fit (`do_reject` off, `mir_step=0`) is
+  unaffected, verified bit-identical to the epic tip before this phase.
+  Cross-backend agreement (same real data/config, MLX vs PyTorch reject the
+  same sample set) is the evidence for the stash-based design decision.
+  `write_amica_output` also gained `state_dict`'s two-layer degenerate/
+  non-finite refusal guard, on **both** the MLX and PyTorch backends: a
+  caller using either backend class directly (bypassing the `AMICA`
+  wrapper's own usability gate) could previously write a NaN model to disk
+  silently.
+- **MLX backend: `keep_best` best-iterate safeguard** (issue #288, epic #278
+  Phase 2). `AMICAMLXNG` gained the #51 best-iterate restore: `fit` now tracks
+  the highest-log-likelihood iterate and, if the run ends more than
+  `_KEEP_BEST_TOL` (1e-9, same constant as `AMICATorchNG`) below that peak,
+  restores it instead of returning the last iterate. Same name, default
+  (`keep_best=True`) and semantics as the PyTorch backend, including the
+  `share_comps` interaction (a merge changes the parameter count, so the
+  safeguard is inactive under sharing -- `do_reject` joined that exclusion
+  when it landed in Phase 3, see above). `ll_history` is never rewritten; only
+  `final_ll_` and the twelve fitted-parameter arrays roll back. Persisted
+  additively in `state_dict`'s config (no format_version bump -- a Phase-1-era
+  payload without the key loads with the default).
+- **MLX backend: `transform` and save/load** (issue #287, epic #278 Phase 1).
+  `AMICAMLXNG` gained source extraction (`transform`, plus the
+  `get_mixing_matrix`/`get_unmixing_matrix`/`get_sensor_mixing_matrix`/
+  `get_rho` accessors, mirroring `AMICATorchNG`'s issue #24/#27/#142/#223
+  conventions) and persistence (`state_dict`/`from_state_dict`, plus a
+  device- and framework-agnostic `.npz` `save`/`load` -- `config`/`extra` as
+  JSON-encoded scalars, params as native arrays, no torch coupling, no
+  pickle). `transform` derives the unmixing composition from MLX's own
+  `_forward` rather than transcribing torch's tensor layout: MLX's `W` is
+  `(n_models, n, n)`, not torch's `(n, n, n_models)`. Fitting is untouched
+  (`_fit_once` and its call graph are unmodified; a default fit is
+  bit-identical to before this phase). Remaining MLX gap -- outlier rejection
+  + LLt/MIR (Phase 3, #289) -- is tracked under epic #278.
+
 ## 0.3.3
 
 MLX fitting parity (convergence stops, component sharing, Newton, all five

@@ -16,7 +16,7 @@ that is not listed, that is a bug worth
 | 2 | Zero numerical rank | `numeigs = 0`, continues | `ValueError` naming cause and fix | fitting a zero-dimensional model is not a recoverable state | — (no reason to want it) |
 | 3 | Returned iterate | last EM iterate | highest-likelihood iterate (`keep_best`) | the lrate schedule is non-monotone; late Newton overshoots cut LL variance 12.7x → 2.0x | `keep_best=False` |
 | 4 | Newton | on (`do_newton=1`) | off | isolates the algorithm from initialization for parity work | `do_newton=True` |
-| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | PyTorch refuses `transform`/`get_*`/`save`; NumPy reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk) | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50 and #240) |
+| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | the `AMICA` wrapper refuses `transform`/`get_*`/`save` (the raw `AMICATorchNG` backend has no such guard of its own — tracked as issue #306); NumPy reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk) | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50 and #240) |
 | 6 | Precision | float64 | float64 (float32 on Apple GPUs) | Apple GPUs have no float64; float32 agrees to ~7 significant digits, not bit-parity | `dtype=torch.float64` |
 | 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
 | 8 | Columns merged away by `share_comps` | updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided) | a fit must not end holding NaN parameters, mask or no mask; the columns are dead either way | — (see issues #60, #240) |
@@ -129,15 +129,15 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | Newton | yes | yes | yes (float32) | yes |
 | PDF families | all five | GG only | all five (float32) | all five |
 | Component sharing | yes | yes | yes | yes |
-| Outlier rejection | yes | yes | no | yes |
+| Outlier rejection | yes | yes | yes | yes |
 | Precision | f64/f32 | f64 | f32 only | f64 |
 | Rank detection | yes | yes | yes | yes (absolute floor) |
 | `min_dll` stop | yes | yes | yes | yes |
 | `min_nd` stop / gradient norm | yes | yes (as `min_grad_norm`) | yes | yes |
-| `keep_best` best-iterate restore | yes | no | no | n/a |
+| `keep_best` best-iterate restore | yes | no | yes | n/a |
 | `n_restarts` best-of-N restarts | yes | yes | yes | n/a |
-| MIR diagnostic | yes | no | no | n/a |
-| Persistence | `state_dict` | EEGLAB `amicaout` | none | EEGLAB `amicaout` |
+| MIR diagnostic | yes | no | yes | n/a |
+| Persistence | `state_dict` + EEGLAB `amicaout` export | EEGLAB `amicaout` | `state_dict`/`.npz` `save`-`load` + EEGLAB `amicaout` export | EEGLAB `amicaout` |
 | Fortran `input.param` reader | yes (`AMICA.from_params_file`, #132) | no (`params_file` is JSON-only) | no | native |
 
 The NumPy row's "GG only" corrects an earlier version of this table, which
@@ -146,9 +146,22 @@ function) has no `pdtype` parameter at all, so the legacy backend never
 implemented the non-GG families the PyTorch and MLX backends carry (issue
 #265).
 
-Most MLX limitations fail loudly: `transform` and every unsupported parameter
-(outlier rejection, save/load) are simply absent from the constructor or raise
-`NotImplementedError`, rather than silently downgrading.
+`transform` and the `get_mixing_matrix`/`get_unmixing_matrix`/
+`get_sensor_mixing_matrix`/`get_rho` accessors, plus `state_dict`/
+`from_state_dict` and a device- and framework-agnostic `.npz` `save`/`load`,
+were added in epic #278 Phase 1 (issue #287): `AMICAMLXNG.transform` mirrors
+`AMICATorchNG.transform` semantically, deriving the unmixing composition from
+MLX's own `_forward` (its `W` is `(n_models, n, n)`, not torch's
+`(n, n, n_models)`), and the `.npz` layout embeds `config`/`extra` as
+JSON-encoded scalars alongside the 12 native param arrays -- no torch
+coupling, no pickle. The best-iterate safeguard (`keep_best`, row 3 above)
+followed in epic #278 Phase 2 (issue #288), a direct port of PyTorch's #51
+restore decision onto MLX's float32 trajectory. Outlier rejection
+(`do_reject`), the LLt-stash-backed `model_loglik`/`model_probability`
+accessors, the EEGLAB `write_amica_output` export, and the MIR/PMI
+diagnostics followed in epic #278 Phase 3 (issue #289) -- see their own
+sections below. Any genuinely unsupported parameter still fails loudly: it
+is simply absent from the constructor, rather than silently downgrading.
 
 One MLX failure mode used to be worse than loud — it was uncatchable. MLX
 0.32's CPU-stream `mx.linalg.inv` does not raise a Python exception on a
@@ -328,12 +341,14 @@ behavior rather than fixed (`test_merge_on_the_final_iteration_completes` in
 each of `tests/torch_tests/test_ng_sharing.py`,
 `tests/test_numpy_share_comps.py` and `tests/mlx_tests/test_mlx_sharing.py`).
 
-One interaction worth knowing: PyTorch's `keep_best` safeguard (row 3 above)
-is disabled whenever `share_comps` is on, precisely because a merge changes
-the parameter count mid-fit -- restoring an earlier snapshot would silently
-undo the merge. The same guard disables it under `do_reject`, whose good-sample
-set changes mid-fit for the analogous reason (ADR 0003; the single
-`track_best` condition covers both). So under sharing, every backend returns
+One interaction worth knowing: the `keep_best` safeguard (row 3 above,
+implemented on PyTorch and, since epic #278 Phase 2, MLX) is disabled
+whenever `share_comps` is on, precisely because a merge changes the parameter
+count mid-fit -- restoring an earlier snapshot would silently undo the merge.
+The same guard disables it under `do_reject`, whose good-sample set changes
+mid-fit for the analogous reason (ADR 0003; the single `track_best` condition
+covers both, on both PyTorch and, since epic #278 Phase 3, MLX). So under
+sharing, every backend returns
 the last iterate, and
 `final_ll_`/`self.ll[-1]` trailing a final-iteration merge is not a
 `keep_best` artifact; it happens the same way with `keep_best=False`.
@@ -367,21 +382,33 @@ normalized over the good set as it stood *before* that rejection
 (amica15.f90:2252) and zeroes the rejected samples' `modloglik`/`loglik`
 (amica15.f90:2231-2234), so the two sides stop counting the same samples and a
 small residual remains — 0.011 on the bundled sample for a pass that drops 68
-of 4096 samples, identical on both pamica backends, and of the same order in
-the binary itself. It scales with how much that one pass drops. Any later
-iteration re-normalizes over the shrunk set and the equality returns exactly.
-pamica reproduces this rather than papering over it, and pins both halves as
-behavior (`test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration`
-and `test_llt_invariant_returns_one_iteration_after_a_rejection`).
+of 4096 samples, identical on the two array (PyTorch/NumPy) backends, and of
+the same order in the binary itself. MLX shows the same magnitude of residual
+under an analogous config (epic #278 Phase 3, #289: ~0.011 measured on a
+one-model 4096-sample rejection pass), not an independently-fixed constant
+across all three backends' differing block schedules and configs, but the
+same reference-faithful mechanism producing residuals of the same order. It
+scales with how much that one pass drops. Any later iteration re-normalizes
+over the shrunk set and the equality returns exactly. pamica reproduces this
+rather than papering over it, and pins both halves as behavior
+(`test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration`
+and `test_llt_invariant_returns_one_iteration_after_a_rejection` in
+`pamica/tests/test_llt_stash.py`, plus the MLX-specific
+`test_llt_invariant_holds_for_a_default_fit`-adjacent tests in
+`pamica/tests/mlx_tests/test_mlx_llt_stash.py` and the reject-specific
+zero-sentinel pin in `pamica/tests/mlx_tests/test_mlx_export.py`).
 
 pamica adopted this deliberately (2026-08-23, issue #157). Between issues #155
 and #157 it instead recomputed `LLt` from the post-update parameters, which
 made the file self-consistent with the `W` beside it but *not* comparable with
 the binary's — and cost a full extra pass over the data at every write. Being
 byte-comparable with the reference is this project's definition of correct, so
-the reference's ordering won. The recompute is gone from both backends, which
-also removes ~77 ms per NumPy `writestep` checkpoint and one full E-step per
-PyTorch fit on the bundled 32-channel sample.
+the reference's ordering won. The recompute never existed on MLX in the first
+place: its LLt stash (epic #278 Phase 3, #289) was ported straight from the
+issue #157 design, so there was no earlier recompute to remove there. On the
+array backends the recompute's removal also cut ~77 ms per NumPy `writestep`
+checkpoint and one full E-step per PyTorch fit on the bundled 32-channel
+sample.
 
 The one place pamica has no reference to follow is its `keep_best` safeguard
 (row 3 above), which Fortran does not have. There the stashed `LLt` is rolled
@@ -392,7 +419,49 @@ Either way the rule is one sentence — **the exported `LLt` is the E-step that
 produced the exported `final_ll_`**.
 
 If you want the log-likelihood of the parameters actually written, compute it:
-`model.model_loglik(X)` on the PyTorch backend returns exactly that.
+`model.model_loglik(X)` on the PyTorch or MLX backend returns exactly that
+(the MLX accessor was ported in epic #278 Phase 3, #289 -- see
+`pamica/tests/mlx_tests/test_mlx_scoring.py`).
+
+## MLX's rejection statistic reads the LLt stash, not a second forward pass (issue #298)
+
+`do_reject` needs one thing `AMICATorchNG`'s LLt stash does not otherwise
+provide: the per-sample log-likelihood of the CURRENT good set, at the exact
+point in the loop the reject schedule fires. `AMICATorchNG` gets this with a
+dedicated `_sample_ll` call -- a second forward pass over the good set,
+separate from the E-step that already computed (and stashed) the same
+quantity moments earlier. Issue #298 tracks removing that redundant pass on
+PyTorch.
+
+The MLX backend (epic #278 Phase 3, #289) never had that redundancy to begin
+with: it reads the rejection statistic straight out of `_llt_ll` (indexed by
+`good_idx`), the same stash `write_amica_output`'s `LLt` file is built from --
+the NumPy backend's design (`numpy_impl/core.py`'s `_last_ll_samples`,
+likewise read from its own stash), applied to MLX ahead of PyTorch. This is a
+**design decision, not a numeric one**: the two statistics are mathematically
+identical (both are the E-step's own `logsumexp` per sample), so MLX and
+PyTorch reject the same samples from the same data/config/seed
+(`pamica/tests/test_mlx_reject_cross_backend.py::test_reject_same_sample_set_across_backends`
+pins this). The difference is purely which backend pays for a second pass over
+the good set and which does not -- a WORK divergence, matching the
+`do_choose_pdfs`-adjacent `drho_n`/lgamma-table WORK divergences already
+documented above, not a correctness one.
+
+## `mir_step`'s upfront PCA-reduction gate: MLX has none, and that is parity, not a gap
+
+`AMICATorchNG.fit(mir_step=...)` rejects an EXPLICIT `pcakeep`/`pcadb`
+request up front (before any preprocessing runs), but -- deliberately, as of
+issue #300 -- never an AUTOMATIC `mineig`/`mineig_rel`-detected reduction
+upfront: that case is only ever caught downstream, inside the first
+per-waypoint `mir()` call, by the geometry-based `_pca_reduced()` guard
+issue #300 introduced (`sphere.shape[0] != sphere.shape[1]`). `AMICAMLXNG`
+has no explicit `pcakeep`/`pcadb` constructor parameter at all (only
+automatic rank detection, same as every other MLX rank-reduction path), so
+there is nothing for an upfront gate to check regardless of when it would
+run -- MLX's `mir_step` validation is the bare `mir_step >= 0` check, and
+automatic reduction degrades to the same warned, all-`NaN` `mir_history_`
+waypoints on both backends. This is intentional torch-parity for the
+auto-detected case, not a knowability limitation of MLX's fit-loop timing.
 
 ## The block-size search picks a machine-dependent value (issue #232)
 
@@ -520,3 +589,57 @@ Practical notes:
   can appear on disk mid-fit. The final write replaces it — what is on disk when
   `fit` returns is the winner's state, which is a tested claim, not just a
   documented intention.
+
+## Unmapped Fortran keywords
+
+This page's own contract ("anything not on this page is intended to match the
+reference") only covers *behavior*. A Fortran keyword that pamica's parameter
+translator does not map at all is a separate, narrower question, and it has
+its own enumeration: `pamica/fortran_params.py`'s `FORTRAN_UNSUPPORTED_KEYS`
+lists every keyword the reference parser accepts that this project does not
+translate into a pamica constructor/`fit()` argument, with a one-line reason
+for each. That dict, not this page, is the exhaustive list.
+
+Most of those keywords are unmapped because the feature genuinely has no
+pamica equivalent (checkpoint warm-start, per-family EM freeze toggles,
+console/file-reporting cadence, ...). Three, though, are dead even in the
+reference binary itself — the same category as the `do_choose_pdfs` and
+`Spinv2` dead code documented above:
+
+- **`filter_length`, `dft_length`** — parsed, printed, and broadcast to every
+  MPI rank (`amica15.f90` `case('filter_length')`/`case('dft_length')`,
+  ~3263-3280), but no filter or DFT subroutine exists anywhere in
+  `amica15.f90`/`funmod2.f90` to consume either value. A pre-filtering
+  pipeline was apparently planned and never built.
+- **`decwindow`** — parsed into the header the same way, but its
+  `MPI_BCAST(decwindow, ...)` call is commented out (`amica15.f90:192`), so a
+  multi-process reference run never even shares the parsed value past rank 0;
+  every worker rank keeps the compiled-in default regardless of what the
+  parameter file said.
+- (Already documented above:) `do_choose_pdfs`'s `pdftype=1` auto-switcher is
+  declared but its moment buffers (`m2sum`/`m4sum`) are never accumulated, and
+  `share_comps`'s `Spinv2` similarity metric is declared but never allocated.
+
+One live (non-dead) divergence is worth recording explicitly rather than
+leaving it implicit in the unsupported-keys table: Fortran's `do_rho` can
+freeze the generalized-Gaussian shape parameter while keeping `pdftype=0` —
+an independent toggle, "use the GG family but do not adapt its shape this
+run." Every pamica backend instead hard-derives the freeze from `pdftype`
+itself: `AMICATorchNG`/`AMICAMLXNG` set `self.dorho = (pdftype == 0)`
+directly (so `pdftype=0` always updates rho, never frozen), and the legacy
+NumPy backend has no `pdftype` family switch at all — it always runs the
+GG update, the same effective always-on freeze-off behavior. So the
+combination Fortran supports (GG family, frozen shape) is unreachable on any
+current pamica backend. Restore-reference: none currently exposed; `do_rho`
+would need to become an independent constructor keyword to port this on
+demand.
+
+Two clusters of keywords are neither dead code nor "no pamica equivalent" —
+they are live Fortran features with a real gap, filed rather than silently
+carried:
+
+- **Lifecycle** (checkpoint warm-start `load_*`, `writestep`/`do_history`/
+  `histstep` periodic checkpointing on torch/MLX, per-family EM freeze
+  toggles, `fix_init`): issue #312.
+- **Diagnostics** (`write_nd`'s per-component gradient trajectory, the
+  per-iteration run log): issue #314.

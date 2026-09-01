@@ -68,6 +68,14 @@ changes across iterations and per-iteration LLs are not comparable.
   parameters from a diverged run, but entangles with issue #50's degenerate-fit
   contract; the safeguard is skipped for degenerate stops and left to #50.
 
+## Addendum (epic #278 Phase 2, issue #288)
+
+The safeguard now also governs `AMICAMLXNG`: same `keep_best` default, same
+`_KEEP_BEST_TOL`, and the same `share_comps`/`do_reject` exclusions (the
+latter joined in Phase 3, issue #289) -- see `pamica/mlx_impl/core.py`'s
+`_snapshot_params`/`_restore_params` and
+`pamica/tests/mlx_tests/test_mlx_keepbest.py`.
+
 ## Receipts
 
 - `pamica/torch_impl/amica_torch_ng.py` (`keep_best`, `_snapshot_params`/
