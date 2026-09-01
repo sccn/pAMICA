@@ -22,8 +22,9 @@ A backend may lack a behavior only when it *cannot* support it, and then:
 
 Existing legitimate example: MLX is float32-only because Apple GPUs have no
 float64 (epic #278's other MLX gaps -- `transform`/accessors/save-load
-(Phase 1, #287), `keep_best` (Phase 2, #288), and `do_reject`/LLt/MIR
-(Phase 3, #289) -- are all closed as of Phase 3, which completes the epic).
+(Phase 1, #287), `keep_best` (Phase 2, #288), `do_reject`/LLt/MIR
+(Phase 3, #289), and `variance_order` (the post-Phase-3 polish round,
+ahead of merge to `dev`) -- are all closed, which completes the epic).
 
 "I only had time for one" is not an exception.
 

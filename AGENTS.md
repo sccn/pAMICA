@@ -88,8 +88,11 @@ non-GG pdf families (#265, including the adaptive switcher; see `.context/issue-
 ported; source extraction (`transform` and the mixing/unmixing/`rho` accessors) and persistence
 (`state_dict`/`.npz` save-load) landed in epic #278 Phase 1 (#287); the best-iterate safeguard
 (`keep_best`) landed in Phase 2 (#288); outlier rejection, the LLt-stash-backed scoring accessors,
-the EEGLAB export, and MIR/PMI landed in Phase 3 (#289) -- epic #278 is complete; the remaining MLX
-gap vs the PyTorch backend is none, other than float32-only precision (Apple GPUs have no float64).
+the EEGLAB export, and MIR/PMI landed in Phase 3 (#289); `variance_order` (the EEGLAB
+back-projected-variance component order) landed in the epic's post-Phase-3 polish round, ahead of
+merge to `dev`, closing the one accessor gap Phase 3 left open -- epic #278 is complete; the
+remaining MLX gap vs the PyTorch backend is none, other than float32-only precision (Apple GPUs
+have no float64).
 
 ## Key Files
 - **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`)

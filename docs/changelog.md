@@ -32,7 +32,9 @@ Release notes are also published on the
   never read, so this is a documentation-equivalent surface fix, not a
   behavior change).
 - **MLX backend: outlier rejection, LLt stash, EEGLAB export, MIR/PMI**
-  (issue #289, epic #278 Phase 3 -- completes the epic). `AMICAMLXNG` gains:
+  (issue #289, epic #278 Phase 3 -- see the polish-round entry above for the
+  `variance_order` accessor gap this phase left open and the epic-completing
+  follow-up). `AMICAMLXNG` gains:
   the LLt stash (issue #157), filled per-block by the E-step (never a second
   forward pass) and rolled back on a `keep_best` restore; `do_reject`
   (issue #123's `good_idx` mechanism), with the rejection statistic read FROM
@@ -63,8 +65,8 @@ Release notes are also published on the
   restores it instead of returning the last iterate. Same name, default
   (`keep_best=True`) and semantics as the PyTorch backend, including the
   `share_comps` interaction (a merge changes the parameter count, so the
-  safeguard is inactive under sharing -- `do_reject` will join that exclusion
-  once it lands in Phase 3). `ll_history` is never rewritten; only
+  safeguard is inactive under sharing -- `do_reject` joined that exclusion
+  when it landed in Phase 3, see above). `ll_history` is never rewritten; only
   `final_ll_` and the twelve fitted-parameter arrays roll back. Persisted
   additively in `state_dict`'s config (no format_version bump -- a Phase-1-era
   payload without the key loads with the default).

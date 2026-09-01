@@ -17,7 +17,12 @@ persistence (``transform``, ``state_dict``/``.npz`` ``save``/``load``, issue
 #287), the best-iterate safeguard (``keep_best``, issue #288), outlier
 rejection (``do_reject``, issue #123's mechanism), the EEGLAB
 ``write_amica_output`` export, and the MIR/PMI diagnostics (issue #137) --
-epic #278 is complete as of Phase 3 (issue #289).
+epic #278 Phase 3 (issue #289). The EEGLAB back-projected-variance
+component order (``variance_order``) landed in the epic's post-Phase-3
+polish round, ahead of merge to ``dev``, closing the one accessor gap
+Phase 3 left open: every ``AMICATorchNG``-supported feature this backend
+can support (float32 GPU limits aside) is now ported, so epic #278 is
+complete.
 """
 
 from .core import PDFTYPE_NAMES, AMICAMLXNG
