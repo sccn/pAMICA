@@ -3948,11 +3948,32 @@ class AMICAMLXNG:
         # is the honest description of a model that never rejected anything
         # (the same fallback AMICATorchNG's _load_params uses for its own
         # #198-era restart_seeds_/restart_lls_/restart_stop_reasons_ keys).
-        self.numrej = int(extra.get("numrej", 0))
+        # Wrapped in the same named-malformed-state pattern every other
+        # field in this method uses (PR #318 review): a corrupted or
+        # hand-edited payload's numrej/good_idx previously reached raw
+        # int()/np.asarray() calls with no try/except, so a malformed value
+        # there raised an opaque bare TypeError/ValueError instead of the
+        # "malformed AMICAMLXNG state: ..." message this method promises
+        # for everything else.
+        try:
+            self.numrej = int(extra.get("numrej", 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"malformed AMICAMLXNG state: extra['numrej'] is not a "
+                f"valid integer ({exc})."
+            ) from exc
         good_idx = extra.get("good_idx")
-        self.good_idx = (
-            None if good_idx is None else mx.array(np.asarray(good_idx, dtype=np.int64))
-        )
+        if good_idx is None:
+            self.good_idx = None
+        else:
+            try:
+                good_idx_arr = np.asarray(good_idx, dtype=np.int64)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"malformed AMICAMLXNG state: extra['good_idx'] could "
+                    f"not be converted to an integer index array ({exc})."
+                ) from exc
+            self.good_idx = mx.array(good_idx_arr)
 
     def save(self, filepath: str) -> None:
         """Persist the fitted model to ``filepath`` as a single ``.npz``

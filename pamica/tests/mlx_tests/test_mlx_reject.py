@@ -401,6 +401,31 @@ def test_missing_core_extra_key_still_raises(real_data):
         AMICAMLXNG.from_state_dict(state)
 
 
+def test_malformed_numrej_raises_named_error(real_data):
+    """PR #318 review: a corrupted/hand-edited numrej used to reach a raw
+    int() call with no try/except -- a malformed value raised an opaque
+    bare TypeError/ValueError instead of the "malformed AMICAMLXNG state:
+    ..." pattern every other field in _load_params uses."""
+    m = _model(seed=1, do_reject=True, rejsig=2.0, rejstart=2, rejint=3, maxrej=2)
+    m.fit(real_data, max_iter=10, verbose=False)
+    state = m.state_dict()
+    state["extra"]["numrej"] = "not-a-number"
+    with pytest.raises(ValueError, match="malformed AMICAMLXNG state.*numrej"):
+        AMICAMLXNG.from_state_dict(state)
+
+
+def test_malformed_good_idx_raises_named_error(real_data):
+    """Same as above for good_idx: a payload that cannot be converted to an
+    integer index array must raise the named malformed-state error, not a
+    bare numpy exception."""
+    m = _model(seed=1, do_reject=True, rejsig=2.0, rejstart=2, rejint=3, maxrej=2)
+    m.fit(real_data, max_iter=10, verbose=False)
+    state = m.state_dict()
+    state["extra"]["good_idx"] = [{"not": "an index"}, "also-not-an-index"]
+    with pytest.raises(ValueError, match="malformed AMICAMLXNG state.*good_idx"):
+        AMICAMLXNG.from_state_dict(state)
+
+
 # --- _reject_outliers unit tests (sanctioned direct-call pattern, mirroring
 # test_numpy_reject.py's test_rejection_nonfinite_ll_raises_instability_error)
 # ---------------------------------------------------------------------------
