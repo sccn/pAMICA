@@ -155,6 +155,24 @@ def test_mir_step_negative_raises(real_data):
         m.fit(real_data, max_iter=3, verbose=False, mir_step=-1)
 
 
+def test_max_iter_zero_raises(real_data):
+    """PR #318 review: max_iter=0 used to run the EM loop zero times and
+    "complete" with stop_reason="max_iter" (not a degenerate marker) and
+    final_ll_=NaN -- an untrained model that state_dict()/
+    write_amica_output() would then accept, since neither checks "did an
+    E-step ever actually run". Rejected up front instead, alongside the
+    same-style X.ndim/mir_step checks; the model is never touched (self.A
+    stays None), so the existing "requires a fitted model" guard is a
+    second line of defense for any caller that only catches a narrower
+    exception type."""
+    m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED, block_size=BLOCK)
+    with pytest.raises(ValueError, match="max_iter"):
+        m.fit(real_data, max_iter=0, verbose=False)
+    assert m.A is None
+    with pytest.raises(RuntimeError, match="requires a fitted model"):
+        m.state_dict()
+
+
 def test_mir_step_zero_matches_omitted_argument(real_data):
     """mir_step=0 (explicit) must leave fit() behaviour byte-for-byte
     identical to not passing mir_step at all."""

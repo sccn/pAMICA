@@ -830,6 +830,20 @@ def test_mir_step_negative_raises(real_data):
         )
 
 
+def test_max_iter_zero_raises(real_data):
+    """PR #318 review: max_iter=0 used to run the EM loop zero times and
+    "complete" with stop_reason="max_iter" (not a degenerate marker) and
+    final_ll_=NaN -- an untrained model that state_dict()/
+    write_amica_output() would then accept, since neither checks "did an
+    E-step ever actually run". Rejected up front instead, alongside the
+    same-style X.ndim/mir_step checks."""
+    model = AMICA(n_models=1, n_mix=3, device="cpu", verbose=False)
+    with pytest.raises(ValueError, match="max_iter"):
+        model.fit(real_data[:, :4096], max_iter=0, block_size=1024, seed=42)
+    assert model.model_ is None or model.model_.A is None
+    assert not model.is_fitted_
+
+
 def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, caplog):
     """A diagnostic must never destroy a decomposition.
 

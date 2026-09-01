@@ -2387,6 +2387,15 @@ class AMICATorchNG:
             )
         if mir_step < 0:
             raise ValueError(f"mir_step must be >= 0, got {mir_step}")
+        if max_iter < 1:
+            # PR #318 review: max_iter=0 used to run the loop zero times and
+            # complete "successfully" with stop_reason="max_iter" (not a
+            # _DEGENERATE_STOP_REASONS marker) and final_ll_=NaN -- an
+            # untrained model that every state_dict()/write_amica_output()
+            # degenerate-fit guard then accepted, since none of them check
+            # "did an E-step ever actually run", only "did stop_reason end
+            # up degenerate". Reject up front instead.
+            raise ValueError(f"max_iter must be >= 1, got {max_iter}")
         if mir_step > 0 and self._pca_reduction_requested():
             raise ValueError(
                 "mir_step > 0 is incompatible with PCA reduction "
