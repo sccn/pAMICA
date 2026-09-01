@@ -74,7 +74,13 @@ def test_transform_requires_fitted_model():
 
 @pytest.mark.parametrize(
     "accessor",
-    ["get_mixing_matrix", "get_unmixing_matrix", "get_sensor_mixing_matrix", "get_rho"],
+    [
+        "get_mixing_matrix",
+        "get_unmixing_matrix",
+        "get_sensor_mixing_matrix",
+        "get_rho",
+        "variance_order",
+    ],
 )
 def test_accessors_require_fitted_model(accessor):
     m = AMICAMLXNG(n_channels=NW, n_mix=NMIX)
@@ -91,7 +97,13 @@ def test_transform_rejects_invalid_model_idx(bad_idx):
 
 @pytest.mark.parametrize(
     "accessor",
-    ["get_mixing_matrix", "get_unmixing_matrix", "get_sensor_mixing_matrix", "get_rho"],
+    [
+        "get_mixing_matrix",
+        "get_unmixing_matrix",
+        "get_sensor_mixing_matrix",
+        "get_rho",
+        "variance_order",
+    ],
 )
 def test_accessors_reject_invalid_model_idx(accessor):
     m = _fitted_model(n_models=1)
@@ -123,6 +135,25 @@ def test_accessor_shapes():
         assert m.get_unmixing_matrix(h).shape == (NW, NW)
         assert m.get_sensor_mixing_matrix(h).shape == (NW, NW)  # full rank here
         assert m.get_rho(h).shape == (NMIX, NW)
+
+
+def test_variance_order_is_a_permutation_with_matching_svar():
+    """``variance_order`` returns each source index exactly once, in
+    descending back-projected-variance order, with ``return_svar`` reporting
+    those same variances already sorted to match (issue #92)."""
+    m = _fitted_model(n_models=2, max_iter=5)
+    for h in range(2):
+        # Tuple-unpacked so both names are the ndarray element, not the
+        # `np.ndarray | tuple` union the bare call below returns (ty).
+        order, svar = m.variance_order(h, return_svar=True)
+        assert order.shape == (NW,)
+        assert sorted(order.tolist()) == list(range(NW))  # a permutation
+        assert svar.shape == (NW,)
+        # Descending: svar[order] as reported, so it must already be sorted.
+        assert np.all(np.diff(svar) <= 0)
+
+        order_only = m.variance_order(h)
+        assert np.array_equal(order, order_only)
 
 
 def test_get_mixing_and_unmixing_are_inverses():

@@ -1,5 +1,6 @@
 """``transform`` and the mixing/unmixing accessors: MLX (float32) vs PyTorch
-(float64) agreement (issue #287, epic #278 Phase 1).
+(float64) agreement (issue #287, epic #278 Phase 1; ``variance_order`` added
+in the epic's post-Phase-3 polish round, issue #92).
 
 Cross-backend by design, so this lives in ``pamica/tests/`` rather than
 ``pamica/tests/mlx_tests/`` (``.rules/backend_parity.md``): the same split as
@@ -203,6 +204,50 @@ def test_accessors_match_float64_torch_twin():
         rho_ng = ng.get_rho(h)
         err = _relerr(rho_mlx.astype(np.float64), rho_ng)
         assert err < 1e-4, f"model {h}: get_rho differs by {err:.3e}"
+
+
+def test_variance_order_matches_float64_twin():
+    """``variance_order`` (issue #92, epic #278 polish round) agrees with the
+    float64 twin on the actual ORDER, not just close variance values.
+
+    A near-tie between two sources' back-projected variance would make the
+    order genuinely ambiguous between float32 MLX and float64 torch even
+    though both computed the quantity correctly -- that risk is checked for,
+    not silently assumed away: the assertion below requires every consecutive
+    gap in the twin's own (float64) descending-sorted variances to clear
+    1e-3 relative, well above the ~1e-4 to 1e-3 float32-vs-float64
+    disagreement measured for ``get_mixing_matrix``/``get_rho`` above, so an
+    order mismatch here is a real regression rather than a coin flip on a
+    near-tied pair. A short (5-iteration) fit was tried first and rejected
+    for this reason -- its minimum gap was ~2e-4, inside the float32 noise
+    band -- so this test runs the fit longer (30 iterations) specifically to
+    reach a spectrum with real separation (measured minimum gap ~0.47%,
+    comfortably above the bound below); a shorter/noisier config is exactly
+    the kind of near-tie this assertion exists to catch and reject rather
+    than let the order check pass by luck. If a future data/config change
+    shrinks the gap back down, this assertion is designed to fail loudly (not
+    the order check) so the weaker config gets replaced rather than the order
+    check getting silently loosened. Multi-model, so ``model_idx`` routing is
+    exercised.
+    """
+    model = _fit_model(n_models=2, max_iter=30)
+    ng = _torch_twin(model)
+
+    for h in range(2):
+        order_mlx, svar_mlx = model.variance_order(h, return_svar=True)
+        order_ng, svar_ng = ng.variance_order(h, return_svar=True)
+
+        gaps = -np.diff(svar_ng) / np.maximum(svar_ng[:-1], svar_ng.max() * 1e-6)
+        assert gaps.min() > 1e-3, (
+            f"model {h}: variance gaps too tight ({gaps.min():.2e}) for an "
+            "order comparison to be meaningful on this fit/config"
+        )
+
+        assert np.array_equal(order_mlx, order_ng), (
+            f"model {h}: variance_order disagrees: {order_mlx} vs {order_ng}"
+        )
+        err = _relerr(svar_mlx.astype(np.float64), svar_ng)
+        assert err < 1e-3, f"model {h}: variance_order svar differs by {err:.3e}"
 
 
 def test_sensor_mixing_matrix_matches_twin_on_rank_reduced_fit():

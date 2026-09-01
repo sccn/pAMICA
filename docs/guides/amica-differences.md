@@ -16,7 +16,7 @@ that is not listed, that is a bug worth
 | 2 | Zero numerical rank | `numeigs = 0`, continues | `ValueError` naming cause and fix | fitting a zero-dimensional model is not a recoverable state | — (no reason to want it) |
 | 3 | Returned iterate | last EM iterate | highest-likelihood iterate (`keep_best`) | the lrate schedule is non-monotone; late Newton overshoots cut LL variance 12.7x → 2.0x | `keep_best=False` |
 | 4 | Newton | on (`do_newton=1`) | off | isolates the algorithm from initialization for parity work | `do_newton=True` |
-| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | PyTorch refuses `transform`/`get_*`/`save`; NumPy reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk) | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50 and #240) |
+| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | the `AMICA` wrapper refuses `transform`/`get_*`/`save` (the raw `AMICATorchNG` backend has no such guard of its own — tracked as issue #306); NumPy reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk) | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50 and #240) |
 | 6 | Precision | float64 | float64 (float32 on Apple GPUs) | Apple GPUs have no float64; float32 agrees to ~7 significant digits, not bit-parity | `dtype=torch.float64` |
 | 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
 | 8 | Columns merged away by `share_comps` | updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided) | a fit must not end holding NaN parameters, mask or no mask; the columns are dead either way | — (see issues #60, #240) |
@@ -589,3 +589,57 @@ Practical notes:
   can appear on disk mid-fit. The final write replaces it — what is on disk when
   `fit` returns is the winner's state, which is a tested claim, not just a
   documented intention.
+
+## Unmapped Fortran keywords
+
+This page's own contract ("anything not on this page is intended to match the
+reference") only covers *behavior*. A Fortran keyword that pamica's parameter
+translator does not map at all is a separate, narrower question, and it has
+its own enumeration: `pamica/fortran_params.py`'s `FORTRAN_UNSUPPORTED_KEYS`
+lists every keyword the reference parser accepts that this project does not
+translate into a pamica constructor/`fit()` argument, with a one-line reason
+for each. That dict, not this page, is the exhaustive list.
+
+Most of those keywords are unmapped because the feature genuinely has no
+pamica equivalent (checkpoint warm-start, per-family EM freeze toggles,
+console/file-reporting cadence, ...). Three, though, are dead even in the
+reference binary itself — the same category as the `do_choose_pdfs` and
+`Spinv2` dead code documented above:
+
+- **`filter_length`, `dft_length`** — parsed, printed, and broadcast to every
+  MPI rank (`amica15.f90` `case('filter_length')`/`case('dft_length')`,
+  ~3263-3280), but no filter or DFT subroutine exists anywhere in
+  `amica15.f90`/`funmod2.f90` to consume either value. A pre-filtering
+  pipeline was apparently planned and never built.
+- **`decwindow`** — parsed into the header the same way, but its
+  `MPI_BCAST(decwindow, ...)` call is commented out (`amica15.f90:192`), so a
+  multi-process reference run never even shares the parsed value past rank 0;
+  every worker rank keeps the compiled-in default regardless of what the
+  parameter file said.
+- (Already documented above:) `do_choose_pdfs`'s `pdftype=1` auto-switcher is
+  declared but its moment buffers (`m2sum`/`m4sum`) are never accumulated, and
+  `share_comps`'s `Spinv2` similarity metric is declared but never allocated.
+
+One live (non-dead) divergence is worth recording explicitly rather than
+leaving it implicit in the unsupported-keys table: Fortran's `do_rho` can
+freeze the generalized-Gaussian shape parameter while keeping `pdftype=0` —
+an independent toggle, "use the GG family but do not adapt its shape this
+run." Every pamica backend instead hard-derives the freeze from `pdftype`
+itself: `AMICATorchNG`/`AMICAMLXNG` set `self.dorho = (pdftype == 0)`
+directly (so `pdftype=0` always updates rho, never frozen), and the legacy
+NumPy backend has no `pdftype` family switch at all — it always runs the
+GG update, the same effective always-on freeze-off behavior. So the
+combination Fortran supports (GG family, frozen shape) is unreachable on any
+current pamica backend. Restore-reference: none currently exposed; `do_rho`
+would need to become an independent constructor keyword to port this on
+demand.
+
+Two clusters of keywords are neither dead code nor "no pamica equivalent" —
+they are live Fortran features with a real gap, filed rather than silently
+carried:
+
+- **Lifecycle** (checkpoint warm-start `load_*`, `writestep`/`do_history`/
+  `histstep` periodic checkpointing on torch/MLX, per-family EM freeze
+  toggles, `fix_init`): issue #312.
+- **Diagnostics** (`write_nd`'s per-component gradient trajectory, the
+  per-iteration run log): issue #314.

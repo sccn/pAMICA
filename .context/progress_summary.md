@@ -71,13 +71,17 @@ what remains as of the v0.1.0 preparation.
 - UV is the canonical environment (`pyproject.toml` + `uv.lock`); the legacy conda env is retired.
 - CI is live and green on `main`: ruff lint/format, pytest (excluding slow/Fortran-binary parity),
   and a build + clean-env import matrix on Python 3.12 and 3.13. Typos check green.
-- Validation harness (`validate_implementations.py`) runs both backends and matches components via
-  the Hungarian algorithm, on real sample EEG plus the Fortran binary (`amica15mac`).
+- Validation harness (`validate_implementations.py`) runs the PyTorch (NG) backend against the
+  Fortran binary (`amica15mac`) and matches components via the Hungarian algorithm, on real sample
+  EEG; it does not exercise the NumPy or MLX backends. NumPy-vs-Fortran parity lives in pytest
+  (`test_sample_data_numpy_vs_fortran`), MLX validation in `mlx_tests/` plus the cross-backend
+  suites (extending the harness itself is tracked as issue #315).
 
 ## Remaining before / around v0.1.0
 
-- **Performance benchmark:** the "runtime within 2-3x of Fortran" success criterion has never been
-  measured. Needs a repeatable NG-vs-Fortran benchmark across CPU/CUDA/MPS.
-- **Test hardening:** no single-channel / single-sample edge tests, no numerical-stability
-  regression tests (mincond / minlog / maxdble / mineig bounds); `AMICA.save`/`load` and
-  `plot_components` remain untested (issue #15).
+- **Performance benchmark:** DONE. The "runtime within 2-3x of Fortran" success criterion has been
+  measured and met/exceeded: CUDA float64 ~4.5x over a 16-thread CPU, MLX ~7x on Apple Silicon
+  (#77/#84; see `AGENTS.md`'s Performance section).
+- **Test hardening:** `AMICA.save`/`load` and `plot_components` coverage landed (issue #15,
+  closed). Single-channel / single-sample edge tests and numerical-stability regression tests
+  (mincond / minlog / maxdble / mineig bounds) remain open, not tracked under #15.

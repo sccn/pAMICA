@@ -31,9 +31,11 @@ and the best-iterate safeguard (``keep_best``) is implemented (epic #278
 Phase 2, issue #288). Outlier rejection (``do_reject``), the LLt stash
 (``model_loglik``/``model_probability`` and the ``write_amica_output`` EEGLAB
 export), and the MIR/PMI diagnostics (``mir``/``pmi``, ``fit(mir_step=...)``
-waypoints) are implemented (epic #278 Phase 3, issue #289), which closes
-epic #278: every AMICATorchNG-supported feature this backend can support
-(float32 GPU limits aside) is now ported.
+waypoints) are implemented (epic #278 Phase 3, issue #289). The EEGLAB
+back-projected-variance component order (``variance_order``) landed in the
+epic's post-Phase-3 polish round, ahead of merge to ``dev``, closing the one
+accessor gap Phase 3 left open: every AMICATorchNG-supported feature this
+backend can support (float32 GPU limits aside) is now ported.
 
 Newton (issue #264) runs entirely in float32 on the GPU stream: the curvature
 accumulators ride the existing E-step locals, and the direction is Fortran's
@@ -95,7 +97,7 @@ from typing import List, Optional, Sequence, Tuple
 # it statically even when installed; scope the suppression to this one import.
 import mlx.core as mx  # ty: ignore[unresolved-import]
 import numpy as np
-from scipy.special import digamma, gammaln
+from scipy.special import digamma, gamma, gammaln
 
 from .. import blocktune
 from .. import restarts
@@ -3041,6 +3043,82 @@ class AMICAMLXNG:
             )
         idx = self.comp_list[:, model_idx]
         return np.array(self.rho[:, idx])
+
+    # ------------------------------------------------------------------
+    # EEGLAB drop-in output (issue #92; epic #278 polish port of
+    # AMICATorchNG.variance_order, torch_impl/core.py:3223-3283)
+    # ------------------------------------------------------------------
+    def variance_order(
+        self, model_idx: int = 0, return_svar: bool = False
+    ) -> np.ndarray | tuple:
+        """EEGLAB back-projected-variance component order (IC1 = highest
+        variance) (port of ``AMICATorchNG.variance_order``, torch_impl/
+        core.py:3223-3283).
+
+        Returns the source indices sorted by descending back-projected
+        variance, the ordering EEGLAB's ``loadmodout15.m`` applies on load
+        (so ``order[0]`` is IC1). The de-sphered sensor-space mixing column
+        ``a_i = pinv(W S)[:, i]`` contributes ``||a_i||^2 * sum_k alpha_ki
+        (mu_ki^2 + r_ki / sbeta_ki^2)`` with ``r_ki = gamma(3/rho_ki)/
+        gamma(1/rho_ki)`` (the source's mixture variance), matching
+        ``loadmodout15`` exactly. Non-mutating: the stored parameters keep
+        their fit order; this only reports the display order.
+
+        The parameters are pulled off the GPU with ``np.array(...)`` and the
+        ordering arithmetic (the gamma ratio, the sphere pseudo-inverse) runs
+        host-side in float64 via NumPy/SciPy -- matching what
+        ``AMICATorchNG.variance_order`` computes in at its default
+        ``dtype=torch.float64`` -- so the only float32 step is
+        the fitted parameters themselves, not how the order is computed from
+        them.
+
+        Parameters
+        ----------
+        model_idx : int, default=0
+            Which model's components to order.
+        return_svar : bool, default=False
+            If True, also return the per-source variance sorted to ``order``.
+
+        Returns
+        -------
+        order : np.ndarray of int, shape (n_sources,)
+            Source indices, highest back-projected variance first.
+        svar : np.ndarray, optional
+            Present only when ``return_svar``; the sorted variances.
+        """
+        if (
+            self.comp_list is None
+            or self.alpha is None
+            or self.mu is None
+            or self.beta is None
+            or self.rho is None
+            or self.W is None
+            or self.sphere is None
+        ):
+            raise RuntimeError(
+                "AMICAMLXNG.variance_order() requires a fitted model; call fit() first."
+            )
+        self._check_model_idx(model_idx)
+        cl = self.comp_list[:, model_idx]
+        alpha = np.array(self.alpha[:, cl], dtype=np.float64)
+        mu = np.array(self.mu[:, cl], dtype=np.float64)
+        sbeta = np.array(self.beta[:, cl], dtype=np.float64)
+        rho = np.array(self.rho[:, cl], dtype=np.float64)
+        # source mixture variance (sum over the mixture components); unused
+        # mixtures carry alpha == 0 and drop out, matching loadmodout15.
+        ratio = gamma(3.0 / rho) / gamma(1.0 / rho)
+        mix_var = (alpha * (mu**2 + ratio / sbeta**2)).sum(axis=0)
+        # de-sphered sensor-space mixing: A = pinv(W_fort @ S), columns = maps.
+        # MLX's W is model-major ((n_models, n, n)), so the per-model slice is
+        # W[model_idx] rather than torch's W[:, :, model_idx].
+        w_fort = np.array(self.W[model_idx].T, dtype=np.float64)
+        sphere = np.array(self.sphere, dtype=np.float64)
+        a_sensor = np.linalg.pinv(w_fort @ sphere)
+        svar = mix_var * (a_sensor**2).sum(axis=0)
+        order = np.argsort(-svar)
+        if return_svar:
+            return order, svar[order]
+        return order
 
     # ------------------------------------------------------------------
     # MIR/PMI diagnostics (issue #137; epic #278 Phase 3/#289 port of
