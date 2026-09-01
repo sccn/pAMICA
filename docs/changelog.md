@@ -5,6 +5,26 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **MLX backend: outlier rejection, LLt stash, EEGLAB export, MIR/PMI**
+  (issue #289, epic #278 Phase 3 -- completes the epic). `AMICAMLXNG` gains:
+  the LLt stash (issue #157), filled per-block by the E-step (never a second
+  forward pass) and rolled back on a `keep_best` restore; `do_reject`
+  (issue #123's `good_idx` mechanism), with the rejection statistic read FROM
+  the stash rather than a second forward pass -- the NumPy backend's design,
+  pre-empting `AMICATorchNG`'s open follow-up to drop its own extra
+  `_sample_ll` pass (issue #298); `model_loglik`/`model_probability`
+  (issue #141); `write_amica_output` (issue #92), a thin adapter over the
+  shared `numpy_impl.load.write_amicaout` with MLX's `W` transposed from
+  `(n_models, n, n)` to the writer's `(nw, nw, num_models)` contract; and
+  `mir`/`pmi` plus `fit(mir_step=...)` waypoints (issue #137), including the
+  #300 fitted-geometry PCA guard. `do_reject`/rejection state (`numrej`/
+  `good_idx`) persists additively in `state_dict`'s `extra` (`extra.get`
+  fallback for pre-Phase-3 payloads); `mir_history_` stays out of both the
+  `keep_best` snapshot and `state_dict` (a diagnostic trajectory, not a
+  fitted parameter). A default fit (`do_reject` off, `mir_step=0`) is
+  unaffected, verified bit-identical to the epic tip before this phase.
+  Cross-backend agreement (same real data/config, MLX vs PyTorch reject the
+  same sample set) is the evidence for the stash-based design decision.
 - **MLX backend: `keep_best` best-iterate safeguard** (issue #288, epic #278
   Phase 2). `AMICAMLXNG` gained the #51 best-iterate restore: `fit` now tracks
   the highest-log-likelihood iterate and, if the run ends more than

@@ -28,9 +28,12 @@ preconditioner (``do_newton``, issue #264), component sharing
 ``get_rho`` accessors) and persistence (``state_dict``/``from_state_dict`` and
 ``.npz`` ``save``/``load``) are implemented (epic #278 Phase 1, issue #287),
 and the best-iterate safeguard (``keep_best``) is implemented (epic #278
-Phase 2, issue #288). Outlier rejection (``do_reject``) and the LLt stash/MIR
-diagnostic are simply absent (no such parameter/method) -- epic #278 Phase 3,
-issue #289.
+Phase 2, issue #288). Outlier rejection (``do_reject``), the LLt stash
+(``model_loglik``/``model_probability`` and the ``write_amica_output`` EEGLAB
+export), and the MIR/PMI diagnostics (``mir``/``pmi``, ``fit(mir_step=...)``
+waypoints) are implemented (epic #278 Phase 3, issue #289), which closes
+epic #278: every AMICATorchNG-supported feature this backend can support
+(float32 GPU limits aside) is now ported.
 
 Newton (issue #264) runs entirely in float32 on the GPU stream: the curvature
 accumulators ride the existing E-step locals, and the direction is Fortran's

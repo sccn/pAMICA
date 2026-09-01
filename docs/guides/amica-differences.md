@@ -129,15 +129,15 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | Newton | yes | yes | yes (float32) | yes |
 | PDF families | all five | GG only | all five (float32) | all five |
 | Component sharing | yes | yes | yes | yes |
-| Outlier rejection | yes | yes | no | yes |
+| Outlier rejection | yes | yes | yes | yes |
 | Precision | f64/f32 | f64 | f32 only | f64 |
 | Rank detection | yes | yes | yes | yes (absolute floor) |
 | `min_dll` stop | yes | yes | yes | yes |
 | `min_nd` stop / gradient norm | yes | yes (as `min_grad_norm`) | yes | yes |
 | `keep_best` best-iterate restore | yes | no | yes | n/a |
 | `n_restarts` best-of-N restarts | yes | yes | yes | n/a |
-| MIR diagnostic | yes | no | no | n/a |
-| Persistence | `state_dict` | EEGLAB `amicaout` | `state_dict`/`.npz` `save`-`load` | EEGLAB `amicaout` |
+| MIR diagnostic | yes | no | yes | n/a |
+| Persistence | `state_dict` + EEGLAB `amicaout` export | EEGLAB `amicaout` | `state_dict`/`.npz` `save`-`load` + EEGLAB `amicaout` export | EEGLAB `amicaout` |
 | Fortran `input.param` reader | yes (`AMICA.from_params_file`, #132) | no (`params_file` is JSON-only) | no | native |
 
 The NumPy row's "GG only" corrects an earlier version of this table, which
@@ -156,10 +156,12 @@ MLX's own `_forward` (its `W` is `(n_models, n, n)`, not torch's
 JSON-encoded scalars alongside the 12 native param arrays -- no torch
 coupling, no pickle. The best-iterate safeguard (`keep_best`, row 3 above)
 followed in epic #278 Phase 2 (issue #288), a direct port of PyTorch's #51
-restore decision onto MLX's float32 trajectory. Remaining MLX limitations
-still fail loudly: outlier rejection (`do_reject`) and every other
-unsupported parameter are simply absent from the constructor, rather than
-silently downgrading.
+restore decision onto MLX's float32 trajectory. Outlier rejection
+(`do_reject`), the LLt-stash-backed `model_loglik`/`model_probability`
+accessors, the EEGLAB `write_amica_output` export, and the MIR/PMI
+diagnostics followed in epic #278 Phase 3 (issue #289) -- see their own
+sections below. Any genuinely unsupported parameter still fails loudly: it
+is simply absent from the constructor, rather than silently downgrading.
 
 One MLX failure mode used to be worse than loud — it was uncatchable. MLX
 0.32's CPU-stream `mx.linalg.inv` does not raise a Python exception on a
@@ -343,11 +345,10 @@ One interaction worth knowing: the `keep_best` safeguard (row 3 above,
 implemented on PyTorch and, since epic #278 Phase 2, MLX) is disabled
 whenever `share_comps` is on, precisely because a merge changes the parameter
 count mid-fit -- restoring an earlier snapshot would silently undo the merge.
-On PyTorch the same guard disables it under `do_reject`, whose good-sample
-set changes mid-fit for the analogous reason (ADR 0003; the single
-`track_best` condition covers both) -- MLX has no `do_reject` yet (epic #278
-Phase 3), so its `track_best` condition only excludes `share_comps` for now.
-So under sharing, every backend returns
+The same guard disables it under `do_reject`, whose good-sample set changes
+mid-fit for the analogous reason (ADR 0003; the single `track_best` condition
+covers both, on both PyTorch and, since epic #278 Phase 3, MLX). So under
+sharing, every backend returns
 the last iterate, and
 `final_ll_`/`self.ll[-1]` trailing a final-iteration merge is not a
 `keep_best` artifact; it happens the same way with `keep_best=False`.
@@ -381,21 +382,33 @@ normalized over the good set as it stood *before* that rejection
 (amica15.f90:2252) and zeroes the rejected samples' `modloglik`/`loglik`
 (amica15.f90:2231-2234), so the two sides stop counting the same samples and a
 small residual remains — 0.011 on the bundled sample for a pass that drops 68
-of 4096 samples, identical on both pamica backends, and of the same order in
-the binary itself. It scales with how much that one pass drops. Any later
-iteration re-normalizes over the shrunk set and the equality returns exactly.
-pamica reproduces this rather than papering over it, and pins both halves as
-behavior (`test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration`
-and `test_llt_invariant_returns_one_iteration_after_a_rejection`).
+of 4096 samples, identical on the two array (PyTorch/NumPy) backends, and of
+the same order in the binary itself. MLX shows the same magnitude of residual
+under an analogous config (epic #278 Phase 3, #289: ~0.011 measured on a
+one-model 4096-sample rejection pass), not an independently-fixed constant
+across all three backends' differing block schedules and configs, but the
+same reference-faithful mechanism producing residuals of the same order. It
+scales with how much that one pass drops. Any later iteration re-normalizes
+over the shrunk set and the equality returns exactly. pamica reproduces this
+rather than papering over it, and pins both halves as behavior
+(`test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration`
+and `test_llt_invariant_returns_one_iteration_after_a_rejection` in
+`pamica/tests/test_llt_stash.py`, plus the MLX-specific
+`test_llt_invariant_holds_for_a_default_fit`-adjacent tests in
+`pamica/tests/mlx_tests/test_mlx_llt_stash.py` and the reject-specific
+zero-sentinel pin in `pamica/tests/mlx_tests/test_mlx_export.py`).
 
 pamica adopted this deliberately (2026-08-23, issue #157). Between issues #155
 and #157 it instead recomputed `LLt` from the post-update parameters, which
 made the file self-consistent with the `W` beside it but *not* comparable with
 the binary's — and cost a full extra pass over the data at every write. Being
 byte-comparable with the reference is this project's definition of correct, so
-the reference's ordering won. The recompute is gone from both backends, which
-also removes ~77 ms per NumPy `writestep` checkpoint and one full E-step per
-PyTorch fit on the bundled 32-channel sample.
+the reference's ordering won. The recompute never existed on MLX in the first
+place: its LLt stash (epic #278 Phase 3, #289) was ported straight from the
+issue #157 design, so there was no earlier recompute to remove there. On the
+array backends the recompute's removal also cut ~77 ms per NumPy `writestep`
+checkpoint and one full E-step per PyTorch fit on the bundled 32-channel
+sample.
 
 The one place pamica has no reference to follow is its `keep_best` safeguard
 (row 3 above), which Fortran does not have. There the stashed `LLt` is rolled
@@ -406,7 +419,33 @@ Either way the rule is one sentence — **the exported `LLt` is the E-step that
 produced the exported `final_ll_`**.
 
 If you want the log-likelihood of the parameters actually written, compute it:
-`model.model_loglik(X)` on the PyTorch backend returns exactly that.
+`model.model_loglik(X)` on the PyTorch or MLX backend returns exactly that
+(the MLX accessor was ported in epic #278 Phase 3, #289 -- see
+`pamica/tests/mlx_tests/test_mlx_scoring.py`).
+
+## MLX's rejection statistic reads the LLt stash, not a second forward pass (issue #298)
+
+`do_reject` needs one thing `AMICATorchNG`'s LLt stash does not otherwise
+provide: the per-sample log-likelihood of the CURRENT good set, at the exact
+point in the loop the reject schedule fires. `AMICATorchNG` gets this with a
+dedicated `_sample_ll` call -- a second forward pass over the good set,
+separate from the E-step that already computed (and stashed) the same
+quantity moments earlier. Issue #298 tracks removing that redundant pass on
+PyTorch.
+
+The MLX backend (epic #278 Phase 3, #289) never had that redundancy to begin
+with: it reads the rejection statistic straight out of `_llt_ll` (indexed by
+`good_idx`), the same stash `write_amica_output`'s `LLt` file is built from --
+the NumPy backend's design (`numpy_impl/core.py`'s `_last_ll_samples`,
+likewise read from its own stash), applied to MLX ahead of PyTorch. This is a
+**design decision, not a numeric one**: the two statistics are mathematically
+identical (both are the E-step's own `logsumexp` per sample), so MLX and
+PyTorch reject the same samples from the same data/config/seed
+(`pamica/tests/test_mlx_reject_cross_backend.py::test_reject_same_sample_set_across_backends`
+pins this). The difference is purely which backend pays for a second pass over
+the good set and which does not -- a WORK divergence, matching the
+`do_choose_pdfs`-adjacent `drho_n`/lgamma-table WORK divergences already
+documented above, not a correctness one.
 
 ## The block-size search picks a machine-dependent value (issue #232)
 
