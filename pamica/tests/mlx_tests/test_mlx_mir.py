@@ -371,3 +371,42 @@ def test_mir_history_empty_after_state_dict_round_trip(real_data):
     assert "mir_history_" not in state["extra"]
     restored = AMICAMLXNG.from_state_dict(state)
     assert restored.mir_history_ == []
+
+
+def test_mir_history_survives_best_of_n_restarts_winner_not_last(real_data):
+    """mir_history_ is in _RESTART_STATE_ATTRS, so it must round-trip
+    through the restart snapshot/restore exactly like every other fit-path
+    state -- mirrors test_mlx_reject.py's
+    test_do_reject_survives_best_of_n_restarts_winner_not_last, with
+    mir_step set so waypoints actually populate (mir_step=0 would make this
+    vacuous: an empty list trivially "matches" an empty list).
+
+    Reuses test_mlx_restarts.py's SEEDS = [54, 50, 42] (measured there to
+    have the winner strictly first); confirmed empirically to still
+    produce winner index 0 (not the last restart) with mir_step=1 on this
+    data -- mir() is read-only (never mutates fitted parameters), so it
+    cannot itself change which seed wins.
+    """
+    seeds = [54, 50, 42]
+    kwargs: dict = dict(n_channels=NW, n_mix=NMIX)
+
+    solo_fits = []
+    for seed in seeds:
+        solo = AMICAMLXNG(seed=seed, **kwargs)
+        solo.fit(real_data, max_iter=5, verbose=False, mir_step=1)
+        solo_fits.append(solo)
+
+    best_of_n = AMICAMLXNG(seed=0, n_restarts=len(seeds), restart_seeds=seeds, **kwargs)
+    best_of_n.fit(real_data, max_iter=5, verbose=False, mir_step=1)
+
+    winner = max(range(len(seeds)), key=lambda i: solo_fits[i].final_ll_)
+    assert winner != len(seeds) - 1, (
+        "test setup: the winning seed must not be the last restart, or the "
+        "restore path (_apply_restart_state) goes untested"
+    )
+    assert best_of_n.seed == seeds[winner]
+
+    winning_solo = solo_fits[winner]
+    assert winning_solo.mir_history_, "test setup: mir_step recorded nothing"
+    assert best_of_n.mir_history_ == winning_solo.mir_history_
+    assert best_of_n.final_ll_ == winning_solo.final_ll_
