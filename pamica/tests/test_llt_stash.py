@@ -458,14 +458,24 @@ def test_numpy_checkpoint_runs_no_forward_pass(real_data, tmp_path, monkeypatch)
     assert (tmp_path / "out" / "LLt").exists()
 
 
-def test_llt_is_omitted_when_no_estep_ran(real_data, tmp_path):
-    """A model that never completed an E-step writes no LLt, rather than an
-    all-zero one that ``load_rej`` would read as "every sample rejected"."""
+def test_llt_stash_is_none_before_any_estep_ran():
+    """The LLt stash starts unset and stays unset until an E-step actually
+    runs, rather than an all-zero one that ``load_rej`` would read as "every
+    sample rejected".
+
+    Previously exercised via ``fit(max_iter=0)`` ("a model that never
+    completed an E-step") followed by a ``write_amica_output`` call proving
+    no ``LLt`` file was written. PR #318 review item 5 made ``max_iter=0``
+    an upfront ``ValueError`` (``max_iter must be >= 1``) rather than a
+    completed zero-iteration fit, so that path is no longer reachable
+    through :meth:`fit`; the construction-time invariant checked here still
+    holds. The write-path behavior on a model actually left with no stash
+    (but otherwise fitted) is covered separately by
+    ``test_amica_ng_wrapper.py``'s
+    ``test_from_state_dict_write_amica_output_omits_llt``, whose
+    ``state_dict`` round trip drops the stash on an otherwise-usable
+    model."""
     m = AMICATorchNG(
         n_channels=NW, n_models=1, n_mix=3, seed=42, device="cpu", block_size=_BLOCK
     )
-    m.fit(real_data, max_iter=0, verbose=False)
     assert m._llt_lht is None and m._llt_lt is None
-    m.write_amica_output(tmp_path / "amicaout")
-    assert not (tmp_path / "amicaout" / "LLt").exists()
-    assert (tmp_path / "amicaout" / "W").exists()

@@ -128,12 +128,22 @@ def test_stashed_llt_is_one_m_step_behind_the_written_parameters(real_data):
     assert np.abs(m8.model_loglik(real_data) - m8._llt_lht).max() > 1e-3
 
 
-def test_llt_is_omitted_when_no_estep_ran(real_data):
-    """A model that never completed an E-step writes no LLt, rather than an
-    all-zero one that ``load_rej`` would misread as "every sample
-    rejected"."""
+def test_llt_stash_is_none_before_any_estep_ran():
+    """The LLt stash starts unset and stays unset until an E-step actually
+    runs, rather than an all-zero one that ``load_rej`` would misread as
+    "every sample rejected".
+
+    Previously exercised via ``fit(max_iter=0)`` ("a model that never
+    completed an E-step"), but PR #318 review item 5 made ``max_iter=0`` an
+    upfront ``ValueError`` (``max_iter must be >= 1``) rather than a
+    completed zero-iteration fit, so that path is no longer reachable
+    through :meth:`fit`. The construction-time invariant checked here still
+    holds; ``write_amica_output``'s behavior on a model actually left with
+    no stash (but otherwise fitted) is covered separately by
+    ``test_from_state_dict_model_warns_and_omits_llt`` (in
+    ``test_mlx_export.py``), whose ``state_dict`` round trip drops the
+    stash on an otherwise-usable model."""
     m = _model(n_models=1, seed=42)
-    m.fit(real_data, max_iter=0, verbose=False)
     assert m._llt_lht is None and m._llt_lt is None
 
 
