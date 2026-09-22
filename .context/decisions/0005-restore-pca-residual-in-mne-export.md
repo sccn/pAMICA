@@ -35,7 +35,7 @@ and stores it as `pca_components_` (`n_channels x n_channels`) and `pca_explaine
 The retained rows are exactly the basis the export always used.
 For a reduced sphere, the residual rows are an orthonormal basis of the sphere's null space (from a full SVD),
 rotated to the eigenvectors of the fit data's population covariance restricted to that subspace and ordered by descending variance.
-The covariance is accumulated over column blocks, so no copy of the data is made and no time series is stored.
+The covariance is accumulated over column blocks, so no full-size copy of the data is made and no time series is stored.
 `to_mne_ica` exports the full basis and leaves `n_pca_components` at `None`,
 so MNE's `apply` restores the residual by default, as MNE's own ICA does.
 The reference (rank-reduced) reconstruction is MNE's existing knob, `apply(..., n_pca_components=ica.n_components_)`;
