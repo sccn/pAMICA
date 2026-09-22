@@ -81,7 +81,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from tqdm import tqdm
 from .. import blocktune
 from .. import restarts
-from ..rank import MINEIG, MINEIG_REL, numerical_rank
+from ..rank import MINEIG, MINEIG_REL, numerical_rank, validate_pca_reduction
 from .utils import (
     gammaln,
     identify_shared_components,
@@ -170,6 +170,14 @@ class AMICA:
             pamica extension: Fortran has no search over seeds, and it is
             unrelated to ``maxrestarts``/``restartiter``, its recovery path
             after an early non-finite likelihood. See :mod:`pamica.restarts`.
+
+            ``pcakeep`` (None) and ``pcadb`` (None) carry AMICATorchNG's
+            names, defaults, validation and semantics (issue #323): explicit
+            PCA reduction capped by the detected numerical rank. ``pcakeep``
+            must be an integer >= 1 and ``pcadb`` a finite number > 0, or the
+            constructor raises ``ValueError``; when both are set ``pcakeep``
+            takes precedence and ``pcadb`` is ignored, as in the reference
+            (which parses ``pcadb`` but never uses it). See :mod:`pamica.rank`.
         """
         # Store progress bar settings
         self.use_tqdm = use_tqdm
@@ -273,6 +281,10 @@ class AMICA:
         self.do_approx_sphere = params.get("do_approx_sphere", True)
         self.pcakeep = params.get("pcakeep")
         self.pcadb = params.get("pcadb")
+        # Explicit PCA reduction, validated by the policy shared with the
+        # PyTorch and MLX backends (pamica/rank.py, issue #323): a bad value
+        # fails here rather than as a silently mis-sized or degenerate fit.
+        validate_pca_reduction(self.pcakeep, self.pcadb)
         # Numerical-rank floors (issue #223); see pamica/rank.py and ADR 0004.
         self.mineig = params.get("mineig", MINEIG)
         self.mineig_rel = params.get("mineig_rel", MINEIG_REL)

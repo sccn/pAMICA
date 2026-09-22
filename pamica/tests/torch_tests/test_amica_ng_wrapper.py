@@ -957,6 +957,27 @@ def test_mir_step_raises_under_pca_reduction_up_front(real_data):
         )
 
 
+def test_bundled_input_param_passes_the_mir_step_gate(real_data):
+    """Issue #323 regression: the bundled ``input.param`` sets ``pcakeep 32``
+    (and ``pcadb 30``, ignored because ``pcakeep`` takes precedence) for the
+    32-channel sample, which reduces nothing. The upfront ``mir_step`` gate
+    used to treat any explicit ``pcakeep`` as a reduction request and refuse
+    the reference's own configuration. A gate test, not a convergence test.
+    """
+    param_file = SAMPLE_DIR / "input.param"
+    if not param_file.exists():
+        pytest.skip("bundled input.param missing")
+    model = AMICA.from_params_file(str(param_file), device="cpu", verbose=False)
+    model.fit(real_data, max_iter=2, mir_step=1)
+
+    ng = model.model_
+    assert ng is not None
+    assert ng.pcakeep == NW and ng.pcadb == 30.0
+    assert ng.n_channels == ng.n_channels_in == NW
+    assert [row[0] for row in model.mir_history_] == [0, 1]
+    assert all(math.isfinite(row[1]) for row in model.mir_history_)
+
+
 def test_mir_raises_under_auto_detected_rank_reduction(real_data):
     """Issue #283 regression: rank reduction from AUTOMATIC ``mineig_rel``
     numerical-rank detection (no explicit ``pcakeep``/``pcadb``) must trip the
