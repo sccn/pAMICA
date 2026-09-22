@@ -167,7 +167,9 @@ def test_sample_data_scikit(tmp_path):
     # Initialize and fit AMICA model using scikit-learn style API.
     # Override outdir (the params file defaults to the relative './amicaout/')
     # so this test does not write stray output into the repo root.
-    model = AMICA.from_json_file(sample_params_file, outdir=str(tmp_path / "amicaout"))
+    model = AMICA.from_params_file(
+        sample_params_file, outdir=str(tmp_path / "amicaout")
+    )
     model.fit()
 
     # Compare weights
@@ -282,7 +284,9 @@ def test_sample_data_light(tmp_path):
     # Initialize AMICA model with reduced iterations. Override outdir (the
     # params file defaults to the relative './amicaout/') so this test does
     # not write stray output into the repo root.
-    model = AMICA.from_json_file(sample_params_file, outdir=str(tmp_path / "amicaout"))
+    model = AMICA.from_params_file(
+        sample_params_file, outdir=str(tmp_path / "amicaout")
+    )
     model.max_iter = 50  # Override max_iter for quick testing
 
     # Fit the model
