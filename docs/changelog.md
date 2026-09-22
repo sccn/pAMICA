@@ -5,6 +5,28 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Raw backend accessors now guard against degenerate fits and bad input shape** (issue #306, epic #324 Phase 5).
+  **Behavior change:**
+  `AMICATorchNG`, `AMICAMLXNG` and the legacy NumPy `AMICA` backend's fitted-output accessors
+  (`transform`, `get_mixing_matrix`, `get_unmixing_matrix`, `get_sensor_mixing_matrix`, `get_rho`,
+  `variance_order`, `model_loglik`, `model_probability`, `mir` and `pmi` on torch/MLX;
+  `transform`, `get_weights` and `get_sensor_mixing_matrix` on NumPy)
+  now raise `RuntimeError` when called on a fit the backend itself classified as degenerate,
+  or when a fitted parameter holds a non-finite value,
+  instead of silently returning NaN-tainted output.
+  The accessors that take data (`transform`, `model_loglik`, `model_probability`, `mir` and `pmi`)
+  now also validate that the input is a 2D array with the model's fitted input channel count,
+  raising the same named `ValueError` that `fit()` already raises for the identical mistake,
+  instead of a raw matmul/broadcast error.
+  `model_probability` also now tells apart a NaN log-likelihood (numerical corruption)
+  from every model underflowing to `-inf` (an extreme outlier), where it previously reported both the same way.
+  `AMICATorchNG.from_state_dict` and `AMICAMLXNG.from_state_dict`
+  now raise `ValueError` naming the payload as the culprit when the saved config does not match the constructor,
+  such as a missing or unexpected key,
+  chaining the original `TypeError` instead of letting it propagate bare.
+  This closes the gap the `AMICA` wrapper's own degenerate-fit guard (issue #50) never covered:
+  a caller using a raw backend directly now gets the same protection.
+  See `docs/guides/amica-differences.md` row 5.
 - **`AMICAICA.apply` restores the PCA residual of rank-reduced fits** (issue #322, epic #324).
   **Behavior change for `pcakeep`/`pcadb` and rank-deficient fits:**
   `AMICAICA.fit` now computes the full orthonormal PCA basis once
