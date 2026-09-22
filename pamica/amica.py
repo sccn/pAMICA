@@ -824,9 +824,16 @@ class AMICA:
         otherwise) rather than trusting the extension -- a compact JSON file
         saved with a ``.param`` extension must still parse as JSON, not be
         silently misread as garbled Fortran text (issue #132 review item 3).
-        See :func:`pamica.fortran_params.read_fortran_param_file` for the
-        Fortran-side key-mapping table and the deliberately-unmapped keys it
-        warns about rather than silently drops.
+        Both formats are read through :func:`pamica.fortran_params.
+        read_params_file` (issue #304), which also applies pamica's JSON
+        schema's own alias spellings (``min_grad_norm``/``max_decs``/
+        ``share_int``/...) to the canonical/constructor names -- so a
+        ``sample_params.json`` fit now applies its ``max_decs``/
+        ``min_grad_norm``/``share_int`` settings, which it silently did not
+        before this. See that function and
+        :func:`pamica.fortran_params.read_fortran_param_file` for the
+        Fortran-side key-mapping table and the deliberately-unmapped keys
+        they warn about rather than silently drop.
 
         The full translated dict (beyond the ``n_models``/``n_mix`` used to
         size the instance here) is stashed on the returned instance and
@@ -845,16 +852,9 @@ class AMICA:
         amica : AMICA
             Configured AMICA instance
         """
-        import json
+        from .fortran_params import read_params_file
 
-        path = Path(params_file)
-        text = path.read_text()
-        if text.lstrip().startswith(("{", "[")):
-            params = json.loads(text)
-        else:
-            from .fortran_params import read_fortran_param_file
-
-            params = read_fortran_param_file(path)
+        params = read_params_file(Path(params_file))
 
         # Extract relevant parameters
         n_models = params.get("num_models", 1)
