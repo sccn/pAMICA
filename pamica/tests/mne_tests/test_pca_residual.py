@@ -262,6 +262,12 @@ def test_n_pca_components_restores_the_reference_reconstruction(raw, fitted_keep
     reduced = ica.apply(raw.copy(), n_pca_components=ica.n_components_)
     before = _reference_ica(fitted_keep).apply(raw.copy())
     np.testing.assert_array_equal(reduced.get_data(), before.get_data())
+    # MNE's persistent form of the same knob, set on a copy of the cached export.
+    stored = ica.copy()
+    stored.n_pca_components = stored.n_components_
+    np.testing.assert_array_equal(
+        stored.apply(raw.copy()).get_data(), before.get_data()
+    )
     # Independent oracle: projection onto the retained subspace, around the mean.
     x = _data(raw, fitted_keep)
     pw = fitted_keep.pre_whitener_
