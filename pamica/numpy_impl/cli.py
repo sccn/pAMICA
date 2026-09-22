@@ -4,7 +4,7 @@ Command-line interface for AMICA (Adaptive Mixture ICA).
 
 This module provides a command-line interface for running the AMICA algorithm.
 It handles:
-1. Parameter loading from JSON configuration files
+1. Parameter loading from a JSON or Fortran-format (``input.param``) file
 2. Data loading from binary files
 3. Model initialization and training
 4. Result saving
@@ -12,12 +12,15 @@ It handles:
 Example usage:
     python -m pamica.numpy_impl.cli params.json  --outdir results --seed 42  # Use -m flag to run as module
 
-The parameter file should be in JSON format and must include:
+The parameter file may be pamica's own JSON schema or the literal Fortran
+``input.param`` text format, auto-detected by content the same way
+``AMICA(params_file=...)`` itself does (:func:`pamica.fortran_params.
+read_params_file`, issue #304). Either way it must include:
 - files: List of binary data files to process
 - data_dim: Number of channels/dimensions
 - field_dim: Number of samples per channel for each file
 
-Optional parameters can be included in the JSON file:
+Optional parameters can be included in the file:
 - num_models: Number of models (default: 1)
 - num_mix: Number of mixture components (default: 3)
 - max_iter: Maximum iterations (default: 2000)
@@ -25,13 +28,12 @@ And many others as documented in the AMICA class.
 """
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from .core import AMICA
+from .core import AMICA, _read_numpy_keyed_params
 from .data import load_multiple_files
 
 
@@ -43,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     -------
     args : argparse.Namespace
         Parsed command line arguments with the following attributes:
-        - paramfile: Path to JSON parameter file
+        - paramfile: Path to a JSON or Fortran-format (input.param) parameter file
         - outdir: Output directory for results (default: 'output')
         - seed: Random seed for reproducibility (optional)
         - verbose: Flag for detailed per-line progress output (disables tqdm progress bar)
@@ -51,7 +53,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AMICA: Adaptive Mixture ICA")
 
     # Required arguments
-    parser.add_argument("paramfile", help="Parameter file in JSON format")
+    parser.add_argument(
+        "paramfile",
+        help="Parameter file (pamica JSON schema or Fortran input.param text)",
+    )
 
     # Optional arguments
     parser.add_argument(
@@ -71,10 +76,19 @@ def load_params(
     paramfile: str, default_paramfile: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Load and validate AMICA parameters from JSON configuration file.
+    Load and validate AMICA parameters from a params file.
 
     The function loads default parameters from default_paramfile (if provided),
-    then updates them with user-provided parameters from paramfile.
+    then updates them with user-provided parameters from paramfile. Both are
+    read through :func:`pamica.numpy_impl.core._read_numpy_keyed_params`
+    (the same helper ``AMICA(params_file=...)`` itself uses, issue #304), so
+    either a pamica JSON-schema file or the literal Fortran ``input.param``
+    text format works here -- not just JSON, as before -- and the returned
+    keys are already mapped to this backend's own spellings (no separate
+    key-mapping table duplicated in this module). ``files`` is returned
+    exactly as the params file spells it, still relative to the current
+    working directory: this function performs no path resolution, matching
+    the reference Fortran binary's own semantics.
 
     Required parameters in paramfile are:
     - files: List of data files to process
@@ -84,26 +98,22 @@ def load_params(
     Parameters
     ----------
     paramfile : str
-        Path to JSON parameter file with user settings
+        Path to a JSON or Fortran-format parameter file with user settings.
     default_paramfile : str, optional
-        Path to JSON file with default parameters
+        Path to a JSON or Fortran-format file with default parameters.
 
     Returns
     -------
     params : dict
-        Dictionary of parameters
+        Dictionary of parameters.
     """
-    # Load default parameters if provided
-    if default_paramfile:
-        with open(default_paramfile) as f:
-            params = json.load(f)
-    else:
-        params = {}
+    # Load default parameters if provided.
+    params = (
+        dict(_read_numpy_keyed_params(default_paramfile)) if default_paramfile else {}
+    )
 
-    # Update with user parameters
-    with open(paramfile) as f:
-        user_params = json.load(f)
-        params.update(user_params)
+    # Update with user parameters.
+    params.update(_read_numpy_keyed_params(paramfile))
 
     # Required parameters
     required = {"files", "data_dim", "field_dim"}

@@ -66,5 +66,5 @@
     "use_min_dll": true,
     "use_grad_norm": true,
     
-    "pdftype": 1
+    "pdftype": 0
 }

@@ -143,13 +143,30 @@ The `AMICA` and `AMICAICA` wrappers do not construct it yet (epic #324 Phase 4, 
 | `n_restarts` best-of-N restarts | yes | yes | yes | n/a |
 | Mutual Information Reduction (MIR) diagnostic | yes | no | yes | n/a |
 | Persistence | `state_dict` + EEGLAB `amicaout` export | EEGLAB `amicaout` | `state_dict`/`.npz` `save`-`load` + EEGLAB `amicaout` export | EEGLAB `amicaout` |
-| Fortran `input.param` reader | yes (`AMICA.from_params_file`, #132) | no (`params_file` is JSON-only) | no | native |
+| Fortran `input.param` reader | yes (`AMICA.from_params_file`, #132) | yes (`AMICA_NumPy(params_file=...)` / `from_params_file`, #304) | via `AMICA(backend="mlx")` (epic #324 Phase 4) | native |
 
-The NumPy row's "GG only" corrects an earlier version of this table, which
-listed "all five": `AMICA_NumPy._compute_log_pdf` (its fit-path density
-function) has no `pdtype` parameter at all, so the legacy backend never
-implemented the non-GG families the PyTorch and MLX backends carry (issue
-#265).
+The NumPy row's "GG only" (generalized Gaussian, GG) corrects an earlier
+version of this table, which listed "all five": `AMICA_NumPy._compute_log_pdf`
+(its fit-path density function) has no `pdtype` parameter at all, so the
+legacy backend never implemented the non-GG families the PyTorch and MLX
+backends carry (issue #265).
+Issue #304 made this an enforced contract rather than a silent gap:
+`AMICA_NumPy(pdftype=...)` with anything other than `0` now raises
+`NotImplementedError` at construction (the `.rules/backend_parity.md`
+narrow exception).
+The bundled `numpy_impl/params.json`'s default `pdftype` changed `1` -> `0`
+to match; it was never read by the fit path, so this was a dormant
+divergence, not a behavior change to any actual fit.
+
+The NumPy row's params-file reader (`params_file=...` / `from_params_file`,
+renamed from `from_json_file`) now accepts the same two formats as the
+PyTorch wrapper -- pamica's JSON schema and the literal Fortran
+`input.param` text, content-sniffed -- through the same shared
+`pamica.fortran_params.read_params_file` (issue #304).
+Previously `params_file` was JSON-only and a Fortran text file raised a raw
+`json.JSONDecodeError`; the NumPy CLI accepts both formats the same way now
+too, through the same underlying helper, instead of its own separate
+`json.load`.
 
 `transform` and the `get_mixing_matrix`/`get_unmixing_matrix`/
 `get_sensor_mixing_matrix`/`get_rho` accessors, plus `state_dict`/

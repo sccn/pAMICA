@@ -20,7 +20,7 @@ pamica/
 │   └── ...
 ├── blocktune.py             # Shared block-size auto-tuner policy (#232, all backends)
 ├── restarts.py              # Shared best-of-N restart policy (#198, all backends)
-├── fortran_params.py        # Fortran input.param reader for AMICA.from_params_file (#132)
+├── fortran_params.py        # Shared params-file reader (JSON + Fortran input.param, #132/#304) for AMICA.from_params_file, AMICA_NumPy and the NumPy CLI
 ├── amica17.f90, funmod2.f90 # Fortran reference source (read-only, for parity)
 ├── sample_data/             # Sample EEG data + Fortran binary (amica15mac)
 └── tests/                   # Tests, incl. tests/torch_tests/ (vs-Fortran parity)

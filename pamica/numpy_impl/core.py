@@ -6,6 +6,18 @@ This module implements the Adaptive Mixture Independent Component Analysis (AMIC
 algorithm, which performs blind source separation using a mixture of adaptive
 independent component analyzers.
 
+Source-density family scope (issue #304, the ``.rules/backend_parity.md``
+narrow exception): this backend implements only the generalized-Gaussian
+source density (``pdftype=0``) -- ``_compute_log_pdf``, the fit-path density
+function, has no ``pdftype`` parameter and always runs the GG update.
+``AMICA(pdftype=...)`` with anything other than ``0`` raises
+``NotImplementedError`` at construction rather than silently ignoring the
+setting. The extended-Infomax adaptive switcher (``pdftype=1``), Gaussian
+(``pdftype=2``), logistic (``pdftype=3``) and sub-Gaussian cosh+
+(``pdftype=4``) families are implemented on the PyTorch (``AMICATorchNG``,
+via the :class:`~pamica.amica.AMICA` wrapper) and MLX (``AMICAMLXNG``)
+backends instead.
+
 Key Features
 -----------
 * Multiple Source Models: Can learn different mixing models for different parts of the data
@@ -74,13 +86,13 @@ import numpy as np
 from scipy import linalg
 from scipy.special import digamma
 import logging
-import json
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from tqdm import tqdm
 from .. import blocktune
 from .. import restarts
+from ..fortran_params import read_params_file
 from ..rank import (
     MINEIG,
     MINEIG_REL,
@@ -94,30 +106,134 @@ from .utils import (
     get_unmixing_matrices,
 )
 
+logger = logging.getLogger(__name__)
+
+# Data-location keys: not AMICA hyperparameters, so they are excluded from
+# load_default_params()'s return value. AMICA.__init__ reads files/data_dim/
+# field_dim off the same parsed dict separately (see _config_files/
+# _config_data_dim/_config_field_dim below); num_samples has no NumPy-backend
+# consumer at all (fit() derives sample count from the loaded data itself).
+_DATA_LOCATION_KEYS = frozenset({"files", "num_samples", "data_dim", "field_dim"})
+
+# Canonical pamica key (read_params_file's output spelling, issue #304) ->
+# this backend's own constructor/attribute spelling, for the three settings
+# where they differ. maxrej/num_mix need no entry here: this backend already
+# spells them the same as the canonical name (see fortran_params.py's
+# FORTRAN_TO_PAMICA_KEY rename table and its JSON_ALIAS_TO_CANONICAL).
+_CANONICAL_TO_NUMPY_KEY = {
+    "min_nd": "min_grad_norm",
+    "maxdecs": "max_decs",
+    "share_iter": "share_int",
+}
+
+# Every params-file key this constructor actually reads (via params.get(...)
+# below, or files/data_dim/field_dim via the raw parsed dict), keyed by this
+# backend's own spelling. Built explicitly from those call sites rather than
+# guessed, so a key can only be "consumed" here if the constructor truly uses
+# it (see the unconsumed-key warning in __init__). num_samples is
+# deliberately absent: see _DATA_LOCATION_KEYS.
+_CONSUMED_KEYS = frozenset(
+    {
+        "num_models",
+        "num_mix",
+        "max_iter",
+        "do_newton",
+        "newt_start",
+        "newt_ramp",
+        "newtrate",
+        "do_reject",
+        "rejsig",
+        "rejstart",
+        "rejint",
+        "maxrej",
+        "num_comps",
+        "lrate",
+        "minlrate",
+        "lratefact",
+        "rho0",
+        "minrho",
+        "maxrho",
+        "rholrate",
+        "rholratefact",
+        "invsigmax",
+        "invsigmin",
+        "do_history",
+        "histstep",
+        "do_opt_block",
+        "block_size",
+        "blk_min",
+        "blk_max",
+        "blk_step",
+        "share_comps",
+        "comp_thresh",
+        "share_start",
+        "share_int",
+        "doscaling",
+        "scalestep",
+        "do_sphere",
+        "do_mean",
+        "do_approx_sphere",
+        "pcakeep",
+        "pcadb",
+        "mineig",
+        "mineig_rel",
+        "writestep",
+        "max_decs",
+        "maxincs",
+        "restartiter",
+        "maxrestarts",
+        "min_dll",
+        "min_grad_norm",
+        "use_min_dll",
+        "use_grad_norm",
+        "pdftype",
+        "outdir",
+        "seed",
+        "n_restarts",
+        "restart_seeds",
+        # Data-location metadata, read from the same parsed dict via
+        # _config_files/_config_data_dim/_config_field_dim (fit()'s no-data
+        # path), not via params.get().
+        "files",
+        "data_dim",
+        "field_dim",
+    }
+)
+
+
+def _read_numpy_keyed_params(params_file: Optional[Union[str, Path]]) -> Dict:
+    """Parse a params file and map its canonical keys to this backend's own
+    spellings (``_CANONICAL_TO_NUMPY_KEY``), without stripping anything.
+
+    Reads through :func:`pamica.fortran_params.read_params_file` (issue
+    #304), so both pamica's JSON schema and the literal Fortran
+    ``input.param`` text format are accepted, for both the bundled default
+    params.json (``params_file=None``) and a user-supplied file.
+    """
+    if params_file is None:
+        params_file = Path(__file__).parent / "params.json"
+    canonical = read_params_file(params_file)
+    return {_CANONICAL_TO_NUMPY_KEY.get(k, k): v for k, v in canonical.items()}
+
 
 def load_default_params(params_file: Optional[Union[str, Path]] = None) -> Dict:
     """
-    Load default parameters from JSON file.
+    Load default parameters from a params file.
 
     Parameters
     ----------
     params_file : str, optional
-        Path to JSON parameter file. If None, uses default params.json
+        Path to a JSON or Fortran-format (``input.param``) parameter file
+        (issue #304). If None, uses the bundled default params.json.
 
     Returns
     -------
     params : dict
-        Dictionary of default parameters
+        Dictionary of default parameters, keyed by this backend's own
+        spellings, excluding data-location keys (see ``_DATA_LOCATION_KEYS``).
     """
-    if params_file is None:
-        params_file = Path(__file__).parent / "params.json"
-
-    with open(params_file) as f:
-        params = json.load(f)
-
-    # Remove data-specific parameters
-    data_params = {"files", "num_samples", "data_dim", "field_dim"}
-    return {k: v for k, v in params.items() if k not in data_params}
+    params = _read_numpy_keyed_params(params_file)
+    return {k: v for k, v in params.items() if k not in _DATA_LOCATION_KEYS}
 
 
 class AMICA:
@@ -146,7 +262,8 @@ class AMICA:
         Parameters
         ----------
         params_file : str, optional
-            Path to JSON parameter file with default values
+            Path to a JSON or Fortran-format (``input.param``) parameter
+            file with default values (issue #304).
         use_tqdm : bool, default=True
             Whether to use tqdm progress bar (False will use per-line printing)
         verbose : bool, default=False
@@ -190,8 +307,27 @@ class AMICA:
         # Store progress bar settings
         self.use_tqdm = use_tqdm
         self.verbose = verbose
-        # Load default parameters
-        params = load_default_params(params_file)
+        # Load default parameters (issue #304: both the bundled default and a
+        # user-supplied params_file are read through the same translator, so
+        # a literal Fortran input.param works here too, not just JSON). Kept
+        # unstripped (raw_params) so the data-location keys below can be read
+        # off the same parse instead of a second file read.
+        raw_params = _read_numpy_keyed_params(params_file)
+        params = {k: v for k, v in raw_params.items() if k not in _DATA_LOCATION_KEYS}
+
+        # A params-file setting this backend does not consume is silently
+        # dropped nowhere else in this constructor, so name it here rather
+        # than letting it vanish (issue #304). Checked before the **kwargs
+        # override below: kwargs are explicit Python-level arguments, not
+        # file settings, so they are not subject to this warning.
+        unconsumed = sorted(set(raw_params) - _CONSUMED_KEYS)
+        if unconsumed:
+            logger.warning(
+                "AMICA (NumPy): %d parameter-file setting(s) have no "
+                "NumPy-backend equivalent and are not applied: %s",
+                len(unconsumed),
+                unconsumed,
+            )
 
         # Override with any provided parameters
         params.update(kwargs)
@@ -325,22 +461,34 @@ class AMICA:
         self.min_grad_norm = params.get("min_grad_norm", 1e-7)
         self.use_min_dll = params.get("use_min_dll", True)
         self.use_grad_norm = params.get("use_grad_norm", True)
-        # Inert: never read after assignment (this backend always runs the GG
-        # update; _compute_log_pdf takes no pdftype). Aligned to 0 to match
-        # the torch/MLX constructor default, for surface consistency only.
+        # This backend implements only the generalized-Gaussian source
+        # density (pdftype 0): _compute_log_pdf takes no pdftype and always
+        # runs the GG update, so a non-zero pdftype would silently configure
+        # nothing (issue #304; the narrow-exception rule in
+        # .rules/backend_parity.md). pdftype 1 (extended-Infomax adaptive
+        # switcher), 2 (Gaussian), 3 (logistic) and 4 (sub-Gaussian cosh+) are
+        # available on AMICA/AMICATorchNG and AMICAMLXNG instead of silently
+        # doing nothing here.
         self.pdftype = params.get("pdftype", 0)
+        if self.pdftype != 0:
+            raise NotImplementedError(
+                "AMICA_NumPy implements only the generalized-Gaussian source "
+                f"density (pdftype=0); got pdftype={self.pdftype}. pdftype "
+                "1 (extended-Infomax adaptive switcher), 2 (Gaussian), 3 "
+                "(logistic) and 4 (sub-Gaussian cosh+) are available on "
+                "AMICA (AMICATorchNG) and AMICAMLXNG."
+            )
         self.outdir = Path(params.get("outdir", "output"))
 
         # Data-source config (used by fit() when called without explicit
-        # data). load_default_params() strips 'files'/'data_dim'/'field_dim'
-        # from `params` (they are data-specific, not hyperparameters), so
-        # read them directly from the raw params_file JSON instead.
+        # data), read off the same parsed dict as the hyperparameters above
+        # (issue #304: no second file read) -- files/data_dim/field_dim are
+        # data-specific, not hyperparameters, so load_default_params()/the
+        # _DATA_LOCATION_KEYS filter above strips them from `params`.
         self._config_files = None
         self._config_data_dim = None
         self._config_field_dim = None
         if params_file is not None:
-            with open(params_file) as f:
-                raw_params = json.load(f)
             self._config_files = raw_params.get("files")
             self._config_data_dim = raw_params.get("data_dim")
             self._config_field_dim = raw_params.get("field_dim")
@@ -489,11 +637,15 @@ class AMICA:
         self.logger.propagate = False
 
     @classmethod
-    def from_json_file(cls, params_file: str, **kwargs) -> "AMICA":
+    def from_params_file(cls, params_file: str, **kwargs) -> "AMICA":
         """
-        Construct an AMICA model from a JSON parameter file.
+        Construct an AMICA model from a parameter file.
 
-        Equivalent to ``AMICA(params_file=params_file, **kwargs)``. If the
+        Equivalent to ``AMICA(params_file=params_file, **kwargs)``. Accepts
+        both pamica's own JSON schema and the literal Fortran ``input.param``
+        text format, auto-detected from the file's content (issue #304; see
+        :func:`pamica.fortran_params.read_params_file`) -- matches the
+        PyTorch wrapper's :meth:`~pamica.amica.AMICA.from_params_file`. If the
         parameter file defines ``files``/``data_dim``/``field_dim``, a
         subsequent call to :meth:`fit` with no arguments will load the data
         described there (see :meth:`fit`).
@@ -501,7 +653,7 @@ class AMICA:
         Parameters
         ----------
         params_file : str
-            Path to JSON parameter file.
+            Path to a JSON or Fortran-format parameter file.
         **kwargs
             Additional overrides passed through to the constructor.
 
@@ -592,7 +744,7 @@ class AMICA:
         data : ndarray of shape (n_channels, n_samples), optional
             The input data to fit the model to. If omitted, the data is
             loaded from the ``files``/``data_dim``/``field_dim`` parameters
-            supplied via ``params_file`` (see :meth:`from_json_file`).
+            supplied via ``params_file`` (see :meth:`from_params_file`).
 
         Returns
         -------
