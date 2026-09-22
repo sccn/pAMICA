@@ -102,6 +102,27 @@ class TestNumpyFromBothParamsFormats:
         assert np.isfinite(model.ll[-1])
 
 
+class TestNumpyKwargsOverrideFile:
+    """Explicit kwargs win over params-file defaults (mirrors the PyTorch
+    wrapper's ``TestFitAppliesFileDefaults.test_explicit_kwargs_win_over_
+    file_defaults`` in ``test_fortran_params.py``): ``params.update(kwargs)``
+    in ``__init__`` applies the file's dict first and then overwrites it with
+    whatever the caller passed explicitly."""
+
+    def test_explicit_kwargs_win_over_file_defaults(self, tmp_path):
+        model = AMICA(
+            params_file=str(PARAM_FILE),
+            min_grad_norm=5e-5,
+            max_decs=7,
+            share_int=42,
+            use_tqdm=False,
+            outdir=str(tmp_path / "out"),
+        )
+        assert model.min_grad_norm == 5e-5  # kwarg wins over input.param's 1e-7
+        assert model.max_decs == 7  # kwarg wins over input.param's 3
+        assert model.share_int == 42  # kwarg wins over input.param's 100
+
+
 class TestNumpyPdftypeGuard:
     """Gate 4: pdftype 1-4 raise NotImplementedError; pdftype 0 constructs."""
 

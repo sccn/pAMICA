@@ -175,6 +175,17 @@ def test_mapping_tables_partition_every_known_fortran_key():
     assert accepted == mapped | unsupported
 
 
+def test_table_sizes_match_the_documented_counts():
+    """Pins the module docstring's/docs' "60 keys covering 59 distinct
+    pamica-side names" and "29 keywords" figures, so a future move between
+    FORTRAN_TO_PAMICA_KEY and FORTRAN_UNSUPPORTED_KEYS (like writestep/
+    do_history/histstep's issue #304 move) forces those counts to be
+    revisited rather than silently going stale."""
+    assert len(FORTRAN_TO_PAMICA_KEY) == 60
+    assert len(set(FORTRAN_TO_PAMICA_KEY.values())) == 59
+    assert len(FORTRAN_UNSUPPORTED_KEYS) == 29
+
+
 def test_missing_source_disables_unrecognized_filtering(tmp_path, monkeypatch):
     """Without the reference source, every keyword in the file is treated as
     Fortran-accepted (mirrors validate_implementations.fortran_accepted_keys);
@@ -405,14 +416,28 @@ class TestFitAppliesFileDefaults:
         assert "data_dim" in warnings
         assert "files" in warnings
 
+    def test_checkpoint_settings_warn_not_applied(self, real_data, caplog):
+        """writestep/do_history/histstep are translated (issue #304) because
+        the legacy NumPy backend supports them, but AMICATorchNG has no
+        matching constructor keyword (issue #312), so fitting from
+        input.param -- which sets all three -- must still name them in the
+        "not applied" warning rather than silently dropping them."""
+        model = AMICA.from_params_file(str(PARAM_FILE), verbose=False)
+        with caplog.at_level(logging.WARNING, logger="pamica.amica"):
+            model.fit(real_data[:, :4096], max_iter=1, seed=0)
+        warnings = "\n".join(r.message for r in caplog.records)
+        assert "writestep" in warnings
+        assert "do_history" in warnings
+        assert "histstep" in warnings
+
     def test_json_alias_settings_now_reach_the_backend(self, real_data, caplog):
         """Issue #304 behavior change: sample_params.json's own alias
         spellings (max_decs/min_grad_norm/share_int) are translated to the
         canonical/constructor names (maxdecs/min_nd/share_iter) by
         read_params_file, so they now reach AMICATorchNG -- previously they
         matched neither a named fit() parameter nor an AMICATorchNG keyword
-        under their raw JSON spelling, and silently landed in the "not
-        applied" warning instead."""
+        under their raw JSON spelling, so they were only named in the "not
+        applied" warning rather than actually applied."""
         model = AMICA.from_params_file(str(JSON_FILE), verbose=False)
         with caplog.at_level(logging.WARNING, logger="pamica.amica"):
             model.fit(real_data[:, :4096], max_iter=3, seed=0)
