@@ -22,11 +22,13 @@ that is not listed, that is a bug worth
 | 8 | Columns merged away by `share_comps` | updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided) | a fit must not end holding NaN parameters, mask or no mask; the columns are dead either way | — (see issues #60, #240) |
 | 9 | Block-size search | on (`do_opt_block=1`), sweeps 128–1024, **aborts** if a candidate cannot allocate | off; sweeps 4096–32768; a candidate that cannot allocate is skipped and the fit continues | the choice is timing-based and therefore machine-dependent, which a parity run cannot have; Fortran's range sits far below where any pamica backend peaks; and running out of memory is a reason to use a smaller block, not to stop | `do_opt_block=True` (but pin `block_size` for a bit-for-bit comparison) |
 | 10 | Restarts across seeds | none (its `maxrestarts` only *recovers* from an early NaN) | available as `n_restarts`, **off by default** (`n_restarts=1`) | the weakest under-determined components are init-basin sensitive, so best-of-N buys robustness; but a default that ran N fits would change every result and cost N times as long | `n_restarts=1` (the default) |
-| 11 | `pcadb` | parsed (amica15.f90:3459-3461), never used | unset by default; when set alone, keeps the dimensions within `pcadb` dB of the largest eigenvalue; ignored when `pcakeep` is also set | a dB cut is a scale-free way to drop low-variance directions; letting `pcakeep` win preserves what a reference `input.param` that sets both (both bundled files do) means to the binary | leave `pcadb` unset (the default), or set `pcakeep` |
+| 11 | Reconstruction after rank reduction (`AMICAICA.apply`) | output has no representation of the discarded principal component analysis (PCA) subspace (sphere rows past `numeigs` are zero), so any back-projection drops it | the MNE export carries the full PCA basis, so `apply` restores the residual | MNE's own `ICA` does; the residual was never part of the independent component analysis (ICA) decomposition, so it is not ICA's to remove | `apply(..., n_pca_components=ica.n_components_)` |
+| 12 | `pcadb` | parsed (amica15.f90:3459-3461), never used | unset by default; when set alone, keeps the dimensions within `pcadb` dB of the largest eigenvalue; ignored when `pcakeep` is also set | a dB cut is a scale-free way to drop low-variance directions; letting `pcakeep` win preserves what a reference `input.param` that sets both (both bundled files do) means to the binary | leave `pcadb` unset (the default), or set `pcakeep` |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
 row 3 with ADR 0003; row 5 with issue #50; row 8 with issues #60 and #240;
-row 9 with issue #232; row 10 with issue #198; row 11 with issue #323.
+row 9 with issue #232; row 10 with issue #198; row 11 with issue #322 (ADR 0005);
+row 12 with issue #323.
 
 Two `share_comps` details are pamica's own because the reference cannot decide
 them: the A-freeze window after a merge is anchored on `share_start` (the literal
@@ -36,7 +38,7 @@ backends reject up front), and the merge similarity metric has no bit-exact
 oracle at all — the reference's `Spinv2` is declared but never allocated, so its
 own reassignment is unrunnable.
 
-## 1. Relative rank threshold (the one changed default)
+## 1. Relative rank threshold
 
 The reference decides how many dimensions are real with an absolute floor on covariance
 eigenvalues:
@@ -120,6 +122,63 @@ rescale exactly (verified — the two spheres' ratio is one constant to ~1e-15).
 
 Using the array API (`pamica.AMICA`) directly, scale by channel type yourself before
 fitting; there is no `info` from which to infer types.
+
+## `AMICAICA.apply` restores the PCA residual (issue #322)
+
+A rank-reduced fit models only the retained PCA subspace,
+whether the reduction comes from an explicit `pcakeep`/`pcadb` or from automatic rank detection on Maxwell-filtered, average-referenced or interpolated data.
+The rest of the data, the PCA residual, is never part of the decomposition.
+This is row 11 of the table above, and it goes beyond what the reference does.
+
+**What the reference does.**
+Fortran keeps `numeigs = min(pcakeep, count(eigs > mineig))` dimensions (amica15.f90:413 and 466) and sizes the model to them (`nw = numeigs`, amica15.f90:563).
+In the default `do_approx_sphere` path its written sphere `S` is `nx x nx`, but the rows past `numeigs` are zero (amica15.f90:501-508),
+and `W`/`A` are `nw x nw`.
+Its output therefore has no representation of the residual,
+so a back-projection through the `nchan x nw` inverse of that output (as EEGLAB's `icawinv` is built) can only reconstruct the retained subspace,
+dropping the residual without notice.
+That is an inference from the shape of the output; EEGLAB itself is not part of this repository.
+pamica's own EEGLAB export (`write_amica_output`) pads a reduced sphere with zero rows the same way, and is unchanged.
+
+**What pamica does.**
+`AMICAICA.fit` stores the full orthonormal PCA basis as `pca_components_` (`n_channels x n_channels`) and `pca_explained_variance_`,
+computed once from the fitted sphere and the fit data.
+The first `n_components_` rows are the retained subspace, exactly as before.
+The remaining rows span the residual, ordered by descending variance, and their variances are the covariance eigenvalues the reduction discarded.
+`to_mne_ica` exports the full basis, and MNE's `ICA.apply` keeps rows past `n_components_` as residual PCA components
+(its default `n_pca_components=None` keeps them all).
+So `apply` with nothing excluded returns the input, and excluding a component removes that component's back-projection and nothing else.
+On the bundled 32-channel EEG with `pcakeep=20`, `apply` with nothing excluded used to lose 8.0% of the signal (relative error 0.080);
+it now reproduces the input to 1.3e-15.
+
+**Why.**
+It is MNE's own ICA default: `mne.preprocessing.ICA.fit` stores the full PCA, so its `apply` restores the residual,
+and an AMICA decomposition handed to MNE should behave like any other.
+More fundamentally, the residual was never part of the decomposition, so it is not ICA's to remove.
+Excluding an artifact component should not also delete every dimension the model never saw, which can carry signal of interest.
+
+**What does not change.**
+Sources, component maps, the unmixing matrix, `n_components_` and the log-likelihood are the same as before; only reconstruction changes.
+`get_sources` still equals `AMICA.transform`, and a full-rank fit, which has no residual, exports bit-identically.
+The backends and their persisted state are untouched.
+
+**How to restore the reference behavior.**
+Pass MNE's own `n_pca_components` to keep only the retained subspace:
+
+```python
+from pamica.mne_compat import AMICAICA
+
+ica = AMICAICA().fit(raw, pcakeep=20)
+clean = ica.apply(raw.copy(), exclude=[0])  # residual restored (default)
+ref = ica.apply(raw.copy(), exclude=[0], n_pca_components=ica.n_components_)  # reference
+
+mne_ica = ica.to_mne_ica().copy()
+mne_ica.n_pca_components = mne_ica.n_components_  # the same, persisted by mne_ica.save()
+```
+
+A float `n_pca_components` selects rows by cumulative explained variance, following MNE's own rule, so it can keep part of the residual;
+MNE rejects a fraction that would select fewer rows than `n_components_`.
+The decision and the alternatives considered are recorded in ADR 0005.
 
 ## Backend differences
 
@@ -471,12 +530,12 @@ documented above, not a correctness one.
 
 ## Explicit dimensionality reduction: `pcakeep` and `pcadb` (issue #323)
 
-All three array backends take `pcakeep` and `pcadb`, the explicit principal component analysis (PCA) reduction,
+All three array backends take `pcakeep` and `pcadb`, the explicit PCA reduction,
 with the same names, defaults (`None`), validation and precedence, decided once in `pamica/rank.py`.
 `pcakeep` keeps that many principal dimensions and is the reference's own keyword:
 `numeigs = min(pcakeep, count(eigs > mineig))` (amica15.f90:413, 466),
 so a value at or above the channel count keeps every dimension the data have.
-`pcadb` is a pamica extension (row 11 above):
+`pcadb` is a pamica extension (row 12 above):
 the reference parses it (amica15.f90:3459-3461) but never reads it again, so the binary never reduces by it,
 while pamica keeps the dimensions whose covariance eigenvalue lies within `pcadb` dB of the largest.
 

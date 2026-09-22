@@ -5,6 +5,20 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **`AMICAICA.apply` restores the PCA residual of rank-reduced fits** (issue #322, epic #324).
+  **Behavior change for `pcakeep`/`pcadb` and rank-deficient fits:**
+  `AMICAICA.fit` now computes the full orthonormal PCA basis once
+  (`pca_components_`, `n_channels x n_channels`, with `pca_explained_variance_`),
+  and `to_mne_ica` exports all of it,
+  so MNE's `ICA.apply` keeps the rows past `n_components_` as residual PCA components, as MNE's own ICA does.
+  `apply` with nothing excluded now returns the input, and excluding a component removes only that component.
+  Before, the subspace the reduction discarded was silently dropped
+  (relative error 0.080 on the bundled EEG with `pcakeep=20`, now 1.3e-15).
+  This goes beyond the Fortran reference, whose output has no representation of that residual;
+  pass `n_pca_components=ica.n_components_` to `apply` for the reference's rank-reduced reconstruction.
+  Sources, component maps and the log-likelihood are unchanged, and full-rank fits export bit-identically.
+  `to_mne_ica` logs the residual's dimension and the opt-out at INFO.
+  Recorded in ADR 0005 and `docs/guides/amica-differences.md`.
 - **MLX backend: explicit `pcakeep`/`pcadb`** (issue #323, epic #324 Phase 1).
   `AMICAMLXNG` gained `pcakeep` and `pcadb` with `AMICATorchNG`'s names, defaults (`None`), position, validation and precedence.
   They go through the shared `pamica.rank` policy, so all three array backends keep the same rank and build the same sphere
@@ -212,7 +226,7 @@ external tester (#221).
   a NumPy `writestep` checkpoint drops from 78 ms to 0.8 ms on the bundled
   32-channel sample, and a PyTorch fit no longer spends an extra E-step (12.8
   ms, about half an EM iteration) computing `LLt` even when nothing is written.
-  **Behaviour change:** pamica now inherits Fortran's one-M-step staleness. The
+  **Behavior change:** pamica now inherits Fortran's one-M-step staleness. The
   written `LLt` is the E-step of the parameters as they stood *before* the
   M-step whose `W`/`A` sit beside it, so it satisfies the reference's own
   invariant `Lt.sum()/(n_good*nw) == LL[-1]` -- which the committed reference
@@ -462,7 +476,7 @@ external tester (#221).
   the just-updated `gm`. The weights cancel analytically for a disjoint
   `comp_list`, so single-model fits stay byte-for-byte identical and default
   multi-model fits are unaffected except at float32-ULP scale (the two `gm`
-  snapshots genuinely differ, so the cancelling division rounds differently;
+  snapshots genuinely differ, so the canceling division rounds differently;
   measured at most 2.98e-8 in `dAk` on the bundled sample). A fit that shares
   components moves its shared columns differently (by ~1e-2 in `A`) and now
   matches the PyTorch backend to float32 precision.
@@ -770,7 +784,7 @@ the `loadmodout` byte-order fix.
   1.7e-15 relative on the bundled sample EEG (#134).
 - `pairwise_mi` and `block_diagonal_order` (`pamica.metrics`): the pairwise
   mutual-information matrix between fitted sources, plus a greedy
-  nearest-neighbour-chain ordering that clusters dependent components near the
+  nearest-neighbor-chain ordering that clusters dependent components near the
   diagonal. A clean-room reimplementation: the reference (`minfojp.m` in
   postAmicaUtility) is GPL-2.0-or-later and pamica is BSD-3-Clause, so its
   source was never read. Agrees with that reference at r=0.9887 on identical
@@ -841,7 +855,7 @@ Validation-methodology and correctness fixes since 0.1.0.
   return type, `load_eeglab_data` dtype annotation) (#118).
 - JOSS draft-PDF build workflow, `.zenodo.json` with ROR-based citation
   metadata, and an MLX backend API reference page (#110, #105, #107).
-- Corrected a stale float32-speedup claim and added a funding acknowledgement
+- Corrected a stale float32-speedup claim and added a funding acknowledgment
   (#114).
 
 ## 0.1.0
