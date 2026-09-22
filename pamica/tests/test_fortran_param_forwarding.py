@@ -71,6 +71,32 @@ def test_aliased_names_are_translated(tmp_path):
     assert got["numrej"] == "7"
 
 
+def test_canonical_names_are_also_translated(tmp_path):
+    """Issue #304: ``_FORTRAN_ALIASES`` now also accepts pamica's canonical
+    key spellings (``maxdecs``/``min_nd``), not just the JSON-schema aliases
+    the test above covers -- ``load_sample_data`` hands ``params`` through
+    already canonical-keyed (see the end-to-end test below)."""
+    got = _written(tmp_path, {"maxdecs": 4, "min_nd": 0.0001})
+    assert got["max_decs"] == "4"
+    assert got["min_grad_norm"] == "0.0001"
+
+
+def test_load_sample_data_writes_fortran_spellings_end_to_end(tmp_path):
+    """The production call sequence: ``load_sample_data()`` (canonical-keyed
+    via ``read_params_file``, issue #304) feeding straight into
+    ``write_fortran_param_file``, exactly as ``run_fortran_amica`` does. The
+    written file must carry Fortran's own spellings, never the canonical
+    ones ``write_fortran_param_file`` translated them from."""
+    from validate_implementations import load_sample_data
+
+    _, params = load_sample_data()
+    got = _written(tmp_path, params)
+    for fortran_key in ("max_decs", "min_grad_norm", "share_iter", "numrej"):
+        assert fortran_key in got
+    for canonical_key in ("maxdecs", "min_nd", "share_int", "maxrej"):
+        assert canonical_key not in got
+
+
 def test_keys_absent_from_the_template_are_appended(tmp_path):
     """The binary accepts more keywords than the shipped template lists."""
     assert "do_approx_sphere" not in TEMPLATE.read_text()

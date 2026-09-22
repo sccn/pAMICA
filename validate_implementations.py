@@ -18,7 +18,11 @@ import argparse
 from typing import Dict, Tuple, Optional
 
 from pamica import AMICA
-from pamica.fortran_params import PAMICA_KEY_TO_FORTRAN_KEY, read_params_file
+from pamica.fortran_params import (
+    JSON_ALIAS_TO_CANONICAL,
+    PAMICA_KEY_TO_FORTRAN_KEY,
+    read_params_file,
+)
 from pamica.torch_impl import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
 
@@ -89,14 +93,20 @@ def load_sample_data() -> Tuple[np.ndarray, Dict]:
 
 
 # params.json/pamica-canonical spellings that differ from the Fortran keyword
-# of the same setting. Derived from fortran_params.PAMICA_KEY_TO_FORTRAN_KEY
-# (issue #304's single source of truth for pamica-key -> Fortran-keyword,
-# itself the inverse of FORTRAN_TO_PAMICA_KEY's renames), plus share_int:
-# JSON-schema-only, not a pamica canonical key, so it needs its own entry
-# (Fortran's own spelling for it, share_iter, already matches the canonical
-# name and so carries no PAMICA_KEY_TO_FORTRAN_KEY entry either).
-_FORTRAN_ALIASES = dict(PAMICA_KEY_TO_FORTRAN_KEY)
-_FORTRAN_ALIASES["share_int"] = "share_iter"
+# of the same setting, keyed both ways so write_fortran_param_file accepts
+# either spelling with no hand-maintained entry (issue #304): the canonical
+# ("pamica-key") entries come straight from PAMICA_KEY_TO_FORTRAN_KEY (the
+# single source of truth for pamica-key -> Fortran-keyword, itself the
+# inverse of FORTRAN_TO_PAMICA_KEY's renames); the JSON-schema-keyed entries
+# (e.g. "share_int") are composed by chaining each JSON_ALIAS_TO_CANONICAL
+# alias through the same table (JSON alias -> canonical -> Fortran keyword;
+# a canonical that PAMICA_KEY_TO_FORTRAN_KEY has no rename for, like
+# share_iter, falls back to its own spelling, which already matches Fortran).
+_FORTRAN_ALIASES = {
+    json_alias: PAMICA_KEY_TO_FORTRAN_KEY.get(canonical, canonical)
+    for json_alias, canonical in JSON_ALIAS_TO_CANONICAL.items()
+}
+_FORTRAN_ALIASES.update(PAMICA_KEY_TO_FORTRAN_KEY)
 
 # params.json keys that configure the Python side only, so having no Fortran
 # keyword is expected rather than a dropped setting.
