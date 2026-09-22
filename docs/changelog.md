@@ -5,6 +5,20 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **`AMICAICA.apply` restores the PCA residual of rank-reduced fits** (issue #322, epic #324).
+  **Behavior change for `pcakeep`/`pcadb` and rank-deficient fits:**
+  `AMICAICA.fit` now computes the full orthonormal PCA basis once
+  (`pca_components_`, `n_channels x n_channels`, with `pca_explained_variance_`),
+  and `to_mne_ica` exports all of it,
+  so MNE's `ICA.apply` keeps the rows past `n_components_` as residual PCA components, as MNE's own ICA does.
+  `apply` with nothing excluded now returns the input, and excluding a component removes only that component.
+  Before, the subspace the reduction discarded was silently dropped
+  (relative error 0.080 on the bundled EEG with `pcakeep=20`, now 1.3e-15).
+  This goes beyond the Fortran reference, whose output has no representation of that residual;
+  pass `n_pca_components=ica.n_components_` to `apply` for the reference's rank-reduced reconstruction.
+  Sources, component maps and the log-likelihood are unchanged, and full-rank fits export bit-identically.
+  `to_mne_ica` logs the residual's dimension and the opt-out at INFO.
+  Recorded in ADR 0005 and `docs/guides/amica-differences.md`.
 - **Epic #278 polish round: audit-driven fixes ahead of merge to `dev`.**
   `AMICAMLXNG` gained `variance_order` (issue #92), the EEGLAB
   back-projected-variance component order, closing the one accessor gap the
