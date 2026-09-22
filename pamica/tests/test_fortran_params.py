@@ -533,7 +533,7 @@ class TestReadParamsFile:
         dest.write_text(json.dumps({"kurt_start": 3, "pdftype": 1}))
         assert read_params_file(dest) == {"kurt_start": 3, "pdftype": 1}
 
-    def test_unparseable_non_json_text_raises(self, tmp_path):
+    def test_unparsable_non_json_text_raises(self, tmp_path):
         """Content that starts with neither ``{``/``[`` nor a valid Fortran
         ``key value`` line falls through to the Fortran reader, which raises
         rather than silently returning all defaults."""
