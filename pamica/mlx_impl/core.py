@@ -3602,10 +3602,11 @@ class AMICAMLXNG:
 
         Raises if the model is unfitted or degenerate (a fit that ended on a
         non-finite log-likelihood): a NaN model must not be written silently.
-        This backend has no scikit-learn-style wrapper in front of it (unlike
-        :class:`~pamica.AMICA`, which already refuses this via its own
-        usability gate for the PyTorch backend), so the guard has to live
-        here -- mirrors :meth:`state_dict`'s two-layer guard (stop_reason
+        The scikit-learn-style :class:`~pamica.AMICA` wrapper
+        (``backend="mlx"``, issue #313) already refuses this via its own
+        usability gate, but a caller using :class:`AMICAMLXNG` directly has
+        no such gate in front of this method, so the guard lives here too --
+        mirrors :meth:`state_dict`'s two-layer guard (stop_reason
         refusal, then a defense-in-depth isfinite sweep over the parameter
         arrays) so the same protection applies to a direct
         ``write_amica_output`` call (PR #311 review).
