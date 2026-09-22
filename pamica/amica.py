@@ -829,8 +829,10 @@ class AMICA:
         schema's own alias spellings (``min_grad_norm``/``max_decs``/
         ``share_int``/...) to the canonical/constructor names -- so a
         ``sample_params.json`` fit now applies its ``max_decs``/
-        ``min_grad_norm``/``share_int`` settings, which it silently did not
-        before this. See that function and
+        ``min_grad_norm``/``share_int`` settings, which previously matched
+        neither a named ``fit()`` parameter nor an ``AMICATorchNG`` keyword
+        under their raw JSON spelling and were only named in the "not
+        applied" warning rather than applied. See that function and
         :func:`pamica.fortran_params.read_fortran_param_file` for the
         Fortran-side key-mapping table and the deliberately-unmapped keys
         they warn about rather than silently drop.

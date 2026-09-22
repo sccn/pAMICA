@@ -50,12 +50,13 @@ which is not itself a constructor keyword (the constructor takes ``n_mix``);
 the instance at construction time (unchanged pre-existing behavior), so
 those two keys are consumed *before* the rest of the dict ever reaches
 ``fit()``'s per-call-default merge. ``share_iter`` is **not** renamed here --
-it already matches ``AMICATorchNG.share_iter`` exactly. This is a deliberate
-divergence from ``sample_params.json``, whose own schema spells the same
-setting ``share_int`` (and, along with its ``max_decs``/``min_grad_norm``
-keys, does not match the constructor either -- a pre-existing gap in that
-JSON file, out of scope here, that ``AMICA.fit``'s per-call-default merge
-now surfaces as a "not applied" warning when fitting from it).
+it already matches ``AMICATorchNG.share_iter`` exactly, so this table has no
+entry for it. ``sample_params.json``'s own JSON schema instead spells the
+same setting ``share_int``; ``read_params_file``'s ``JSON_ALIAS_TO_CANONICAL``
+table (below) is what maps that JSON-schema spelling -- and the JSON
+schema's ``max_decs``/``min_grad_norm`` spellings for the two renamed
+settings above -- to the canonical names on the way in, not this
+Fortran-keyword table.
 
 Every other translated key keeps its Fortran spelling.
 

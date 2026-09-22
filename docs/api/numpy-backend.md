@@ -9,9 +9,11 @@ backend's `good_idx` sample-dropping mechanism (issue #123).
 (renamed from `from_json_file`, issue #304) accept both pamica's JSON schema and
 the literal Fortran `input.param` text format, content-sniffed the same way as the
 PyTorch wrapper's `AMICA.from_params_file` -- see
-[Parameter files](../guides/validation.md#parameter-files). Settings the file
-carries that this backend does not consume are named in one `logger.warning`
-rather than silently dropped.
+[Parameter files](../guides/validation.md#parameter-files).
+The NumPy CLI (`python -m pamica.numpy_impl.cli`) accepts both formats too, through
+the same shared reader.
+Settings the file carries that this backend does not consume are named in one
+`logger.warning` rather than silently dropped.
 
 This backend implements only the generalized-Gaussian source density
 (`pdftype=0`); `AMICA_NumPy(pdftype=...)` with any other value raises

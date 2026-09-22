@@ -256,7 +256,8 @@ class AMICA:
         Parameters
         ----------
         params_file : str, optional
-            Path to JSON parameter file with default values
+            Path to a JSON or Fortran-format (``input.param``) parameter
+            file with default values (issue #304).
         use_tqdm : bool, default=True
             Whether to use tqdm progress bar (False will use per-line printing)
         verbose : bool, default=False
