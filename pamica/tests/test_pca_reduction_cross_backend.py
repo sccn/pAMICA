@@ -447,6 +447,23 @@ def test_mlx_payload_without_the_keys_loads_with_defaults(real_data):
     np.testing.assert_array_equal(np.array(loaded.sphere), np.array(m.sphere))
 
 
+def test_torch_payload_without_the_keys_loads_with_defaults(real_data):
+    """The torch twin of the MLX test above: the keys were always in torch's
+    config, but a hand-built or trimmed payload without them must still load
+    with the constructor defaults and keep its reduced sphere."""
+    m = _torch(pcakeep=PCAKEEP)
+    m.fit(real_data, max_iter=2, verbose=False)
+    state = m.state_dict()
+    del state["config"]["pcakeep"]
+    del state["config"]["pcadb"]
+    loaded = AMICATorchNG.from_state_dict(state, device="cpu")
+
+    assert loaded.pcakeep is None and loaded.pcadb is None
+    assert loaded.n_channels == PCAKEEP and loaded.n_channels_in == NW
+    assert loaded.sphere is not None and m.sphere is not None
+    torch.testing.assert_close(loaded.sphere, m.sphere, rtol=0.0, atol=0.0)
+
+
 def test_torch_save_load_round_trips_numpy_scalar_request(real_data, tmp_path):
     """AMICA.load reads with torch.load(weights_only=True), which refuses numpy
     scalars; state_dict persists the validated request as plain int/float."""
@@ -603,3 +620,31 @@ def test_reloaded_reduced_model_transforms_and_refits(real_data, tmp_path, backe
     loaded.fit(X, max_iter=2, verbose=False)
     assert (loaded.n_channels, loaded.n_channels_in) == (PCAKEEP, NW)
     assert loaded.final_ll_ is not None and math.isfinite(loaded.final_ll_)
+
+
+# --- a request reassigned after construction is caught at fit time ----------
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(("name", "value"), [("pcakeep", -3), ("pcadb", -5.0)])
+def test_reassigned_request_is_caught_at_fit_time(
+    real_data, tmp_path, backend, name, value
+):
+    """The constructors validate, but the attributes are public; the fit-time
+    re-check in numerical_rank catches a bad value set afterwards."""
+    m = _new(backend, tmp_path)
+    setattr(m, name, value)
+    with pytest.raises(ValueError, match=f"{name} must be None"):
+        _fit(backend, m, real_data[:, :4096])
+
+
+@pytest.mark.parametrize("backend", ["torch", "mlx"])
+@pytest.mark.parametrize(("name", "value"), [("pcakeep", "20"), ("pcadb", -5.0)])
+def test_reassigned_request_is_caught_by_the_mir_step_gate(
+    real_data, backend, name, value
+):
+    """With mir_step > 0 the upfront gate reads the request before
+    numerical_rank does, so it validates too: a reassigned string raises the
+    validator's ValueError, not a TypeError from comparing it."""
+    m = _backend(backend)
+    setattr(m, name, value)
+    with pytest.raises(ValueError, match=f"{name} must be None"):
+        m.fit(real_data[:, :4096], max_iter=2, verbose=False, mir_step=1)

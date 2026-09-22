@@ -127,6 +127,8 @@ def test_defaults_match_the_documented_constants() -> None:
         (np.int64(5), None),  # numpy integers are numbers.Integral
         (None, 3.0),
         (None, 30),  # an int is a real number of dB
+        (None, np.float32(3.0)),  # numpy floats are numbers.Real
+        (None, np.float64(30.0)),
         (32, 30.0),  # both bundled param files set both
     ],
 )
@@ -134,7 +136,9 @@ def test_validator_accepts(pcakeep, pcadb) -> None:
     validate_pca_reduction(pcakeep, pcadb)
 
 
-@pytest.mark.parametrize("pcakeep", [True, False, 0, -3, 2.7, "20"])
+@pytest.mark.parametrize(
+    "pcakeep", [True, False, np.bool_(True), np.bool_(False), 0, -3, 2.7, "20"]
+)
 def test_validator_rejects_pcakeep(pcakeep) -> None:
     """``True``/``False`` are ints to Python but never a dimension count;
     ``-3`` used to slice from the end (29 of 32 kept) and ``2.7`` to truncate."""
@@ -143,7 +147,9 @@ def test_validator_rejects_pcakeep(pcakeep) -> None:
     assert repr(pcakeep) in str(info.value)
 
 
-@pytest.mark.parametrize("pcadb", [0, -5, math.nan, math.inf, True])
+@pytest.mark.parametrize(
+    "pcadb", [0, -5, math.nan, math.inf, True, False, np.bool_(True), np.bool_(False)]
+)
 def test_validator_rejects_pcadb(pcadb) -> None:
     with pytest.raises(ValueError, match="pcadb") as info:
         validate_pca_reduction(None, pcadb)
