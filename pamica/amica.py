@@ -131,6 +131,80 @@ def _ctor_params(backend_cls: type) -> frozenset:
     )
 
 
+# AMICA.save's payload version (issue #313). Version 2 records the backend
+# in wrapper["backend"]; version 1 (written before backend selection) is still
+# read, and holds a torch state dict by construction.
+_SAVE_FORMAT_VERSION = 2
+_LOADABLE_FORMAT_VERSIONS = (1, 2)
+
+
+def _weights_only_safe(value, path: str):
+    """``value`` as something ``torch.load(weights_only=True)`` reads back.
+
+    Tensors and plain Python primitives pass through, dicts/lists/tuples are
+    checked element by element, and numpy scalars (which the ``weights_only``
+    unpickler refuses) become the equivalent Python number. Anything else
+    raises ``TypeError`` naming where it sits in the state, so :meth:`AMICA.save`
+    fails loudly instead of writing a file :meth:`AMICA.load` cannot open.
+    """
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (bool, int, float, str, torch.Tensor)):
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _weights_only_safe(item, f"{path}[{key!r}]")
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return type(value)(
+            _weights_only_safe(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        )
+    raise TypeError(
+        f"AMICA.save cannot write {path} = {value!r} ({type(value).__name__}): "
+        "AMICA.load reads with torch.load(weights_only=True), which accepts "
+        "only tensors and plain Python primitives."
+    )
+
+
+def _state_to_payload(state: dict) -> dict:
+    """A backend ``state_dict`` in the form :meth:`AMICA.save` writes.
+
+    AMICAMLXNG's params are numpy arrays, which the ``weights_only``
+    unpickler refuses, so each becomes a CPU tensor of the same dtype (int64,
+    int32, bool and float32 all map exactly); :func:`_mlx_state_from_payload`
+    turns them back. AMICATorchNG's params are tensors already. Everything
+    else goes through :func:`_weights_only_safe`.
+    """
+    payload = {}
+    for key, value in state.items():
+        if key == "params":
+            payload[key] = {
+                name: torch.from_numpy(np.array(array))
+                if isinstance(array, np.ndarray)
+                else _weights_only_safe(array, f"state['params'][{name!r}]")
+                for name, array in value.items()
+            }
+        else:
+            payload[key] = _weights_only_safe(value, f"state[{key!r}]")
+    return payload
+
+
+def _mlx_state_from_payload(state: dict, filepath: str) -> dict:
+    """Invert :func:`_state_to_payload` for an AMICAMLXNG state: the params
+    back to numpy arrays of their original dtype."""
+    params = {}
+    for name, tensor in state["params"].items():
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(
+                f"malformed AMICA save file {filepath!r}: MLX param {name!r} is "
+                f"a {type(tensor).__name__}, not a tensor."
+            )
+        params[name] = tensor.numpy()
+    return {**state, "params": params}
+
+
 class AMICA:
     """
     Adaptive Mixture ICA over pamica's natural-gradient EM backends.
@@ -975,29 +1049,46 @@ class AMICA:
         """
         Save the fitted model to ``filepath`` via ``torch.save``.
 
-        Persists the underlying :class:`AMICATorchNG` state (config + fitted
-        tensors) plus the wrapper's own configuration, so :meth:`load` can
-        fully reconstruct a transform-ready model. Everything written is a
-        tensor or plain Python primitive (see
-        :meth:`AMICATorchNG.state_dict`), so it reloads with
-        ``weights_only=True``.
+        Persists the backend's ``state_dict`` (config, fitted arrays and fit
+        record) plus the wrapper's own configuration, including which backend
+        built the model, so :meth:`load` can fully reconstruct a
+        transform-ready model of either backend. Everything written is a
+        tensor or a plain Python primitive, so the file reloads with
+        ``torch.load(weights_only=True)``: an MLX model's numpy arrays are
+        stored as CPU tensors of the same dtype, and numpy scalars in the
+        config or fit record (a ``seed=np.int64(...)``, say) as the equivalent
+        Python numbers.
+
+        The file is ``format_version`` 2 (issue #313), which records the
+        backend; :meth:`load` still reads version 1 files, written before
+        backend selection existed.
 
         Parameters
         ----------
         filepath : str
             Destination path (a ``.pt`` file by convention).
+
+        Raises
+        ------
+        TypeError
+            If the backend's state holds a value that ``weights_only`` loading
+            could not read back (anything but a tensor, an array or a plain
+            Python primitive), rather than writing a file :meth:`load` cannot
+            open.
         """
         self._check_usable("save")
         assert self.model_ is not None
 
+        backend = "torch" if isinstance(self.model_, AMICATorchNG) else "mlx"
         payload = {
-            "format_version": 1,
+            "format_version": _SAVE_FORMAT_VERSION,
             "wrapper": {
                 "n_models": self.n_models,
                 "n_mix": self.n_mix,
                 "verbose": self.verbose,
+                "backend": backend,
             },
-            "backend": self.model_.state_dict(),
+            "backend": _state_to_payload(self.model_.state_dict()),
         }
         torch.save(payload, filepath)
 
@@ -1008,25 +1099,40 @@ class AMICA:
         """
         Load a fitted model saved by :meth:`save`.
 
+        The file records which backend built the model (``format_version``
+        2), and the model comes back on that backend. A ``format_version`` 1
+        file, written before backend selection existed (issue #313), holds a
+        PyTorch model by construction and still loads.
+
         Parameters
         ----------
         filepath : str
             Path to a file written by :meth:`save`.
         device : str or torch.device, optional
-            Device to place the restored model on. With ``None`` (auto), the
-            same MPS/float64 fallback as :meth:`fit` applies so a float64
-            parity model never lands on MPS.
+            Device to place a restored PyTorch model on. With ``None`` (auto),
+            the same MPS/float64 fallback as :meth:`fit` applies so a float64
+            parity model never lands on MPS. An MLX model always loads onto
+            MLX's default device, so it must stay ``None`` for one.
 
         Returns
         -------
         amica : AMICA
             A fitted model ready for :meth:`transform` / :meth:`get_mixing_matrix`.
+
+        Raises
+        ------
+        ValueError
+            If the file's ``format_version`` is not 1 or 2, a section is
+            missing, or ``device`` is set for an MLX model.
+        ImportError
+            If the file holds an MLX model and MLX is not installed.
         """
         payload = torch.load(filepath, weights_only=True)
         version = payload.get("format_version")
-        if version != 1:
+        if version not in _LOADABLE_FORMAT_VERSIONS:
             raise ValueError(
-                f"unsupported AMICA save format_version: {version!r} (expected 1)"
+                f"unsupported AMICA save format_version: {version!r} (expected "
+                f"one of {list(_LOADABLE_FORMAT_VERSIONS)})"
             )
         for key in ("wrapper", "backend"):
             if key not in payload:
@@ -1037,40 +1143,51 @@ class AMICA:
                 )
 
         wrapper = payload["wrapper"]
+        # Version 1 predates backend selection: the wrapper could only build
+        # AMICATorchNG then, so every version 1 file is a torch payload.
+        backend = "torch" if version == 1 else wrapper.get("backend")
+        if backend not in _BACKENDS:
+            raise ValueError(
+                f"malformed AMICA save file {filepath!r}: wrapper['backend'] is "
+                f"{backend!r}, expected one of {list(_BACKENDS)} "
+                f"(format_version={version})."
+            )
+        if backend == "mlx":
+            if device is not None:
+                raise ValueError(
+                    f"{filepath!r} holds an MLX-backend model, which always "
+                    f"loads onto MLX's default device; device={device!r} "
+                    "applies only to PyTorch-backend models, so pass "
+                    "device=None."
+                )
+            if importlib.util.find_spec("mlx") is None:
+                raise ImportError(
+                    f"{filepath!r} holds an MLX-backend model (backend='mlx'), "
+                    f"but MLX is not installed; {_MLX_INSTALL_HINT}."
+                )
+
         model = cls(
             n_models=wrapper["n_models"],
             n_mix=wrapper["n_mix"],
             device=device,
             verbose=wrapper["verbose"],
+            backend=backend,
         )
-
-        # Resolve the device using the persisted backend dtype so the same
-        # MPS/float64 fallback as fit() applies to an auto-selected device.
-        ng_dtype = getattr(torch, payload["backend"]["config"]["dtype"])
-        resolved_device = model._select_device(ng_dtype)
-        model.model_ = AMICATorchNG.from_state_dict(
-            payload["backend"], device=resolved_device
-        )
-        model.ll_history_ = model.model_.ll_history
-        model.final_ll_ = model.model_.final_ll_
-        # mir_history_ is not persisted in state_dict() (a diagnostic
-        # trajectory, not a fitted parameter), so a loaded model's is always
-        # empty; expose it anyway for attribute-surface consistency with
-        # ll_history_.
-        model.mir_history_ = model.model_.mir_history_
-        # Restart records ARE persisted by state_dict (issue #198), so a loaded
-        # best-of-N model can still say how its parameters were chosen; a model
-        # saved before #198 simply has none.
-        model.restart_seeds_ = model.model_.restart_seeds_
-        model.restart_lls_ = model.model_.restart_lls_
-        model.restart_stop_reasons_ = model.model_.restart_stop_reasons_
-        # state_dict() refuses to serialize a degenerate model, so a loaded model
-        # is always usable; carry its stop_reason through for inspection anyway.
-        model.stop_reason_ = model.model_.stop_reason
-        model.converged_ = (
-            model.stop_reason_ not in AMICATorchNG._DEGENERATE_STOP_REASONS
-        )
-        model.is_fitted_ = model.converged_
+        state = payload["backend"]
+        if backend == "torch":
+            # Resolve the device using the persisted backend dtype so the same
+            # MPS/float64 fallback as fit() applies to an auto-selected device.
+            ng_dtype = getattr(torch, state["config"]["dtype"])
+            resolved_device = model._select_device(ng_dtype)
+            model.model_ = AMICATorchNG.from_state_dict(state, device=resolved_device)
+        else:
+            model.model_ = _mlx_backend_class().from_state_dict(
+                _mlx_state_from_payload(state, filepath)
+            )
+        # state_dict() refuses to serialize a degenerate model, so a loaded
+        # model is always usable; its stop_reason is carried through for
+        # inspection anyway.
+        model._mirror_backend()
         return model
 
     @classmethod

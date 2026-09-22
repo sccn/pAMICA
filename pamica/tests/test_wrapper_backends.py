@@ -355,3 +355,161 @@ def test_mir_step_gate_through_the_mlx_wrapper(X):
     model.fit(X, max_iter=2, seed=SEED, pcakeep=NW, mir_step=1)
     assert [row[0] for row in model.mir_history_] == [0, 1]
     assert all(np.isfinite(row[1]) for row in model.mir_history_)
+
+
+# --- save/load: format_version 2 records the backend -----------------------------
+def _float32_tol(reference: np.ndarray) -> float:
+    """Normwise float32 tolerance: a few units of float32 rounding (2**-24
+    relative) on the largest entry."""
+    return 8 * 2.0**-24 * float(np.abs(reference).max())
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_save_load_round_trip(fitted, X, backend, tmp_path):
+    """fit -> transform -> save -> load -> transform, bit for bit on both
+    backends: the loaded parameters are the saved ones exactly, and each
+    backend's transform is deterministic on the same parameters."""
+    model = fitted(backend)
+    path = tmp_path / f"{backend}.pt"
+    model.save(str(path))
+
+    payload = torch.load(path, weights_only=True)
+    assert payload["format_version"] == 2
+    assert payload["wrapper"]["backend"] == backend
+    assert all(
+        isinstance(t, torch.Tensor) for t in payload["backend"]["params"].values()
+    )
+
+    loaded = AMICA.load(str(path))
+    assert loaded.backend == backend
+    assert type(loaded.model_) is _backend_class(backend)
+    assert loaded.is_fitted_ is True and loaded.converged_ is True
+    assert loaded.stop_reason_ == model.stop_reason_
+    assert loaded.final_ll_ == model.final_ll_
+    assert loaded.ll_history_ == model.ll_history_
+    assert loaded.restart_seeds_ == model.restart_seeds_
+    assert loaded.restart_lls_ == model.restart_lls_
+    assert loaded.restart_stop_reasons_ == model.restart_stop_reasons_
+    np.testing.assert_array_equal(loaded.transform(X), model.transform(X))
+    for name in (
+        "get_mixing_matrix",
+        "get_unmixing_matrix",
+        "get_mean",
+        "get_model_center",
+    ):
+        np.testing.assert_array_equal(
+            getattr(loaded, name)(), getattr(model, name)(), err_msg=name
+        )
+    if backend == "torch":
+        np.testing.assert_array_equal(loaded.get_sphere(), model.get_sphere())
+    else:
+        # Only MLX's float32 sphere is persisted: a reloaded model's float64
+        # host copy is that sphere upcast, not the fit's float64 original.
+        mlx_sphere = np.array(model.model_.sphere, dtype=np.float64)
+        np.testing.assert_array_equal(loaded.get_sphere(), mlx_sphere)
+        original = model.get_sphere()
+        assert np.abs(loaded.get_sphere() - original).max() <= _float32_tol(original)
+
+
+def test_mlx_params_round_trip_with_their_dtypes(fitted, tmp_path):
+    """Every MLX param comes back with its original dtype and values
+    (float32, and the integer comp_list/pdtype)."""
+    model = fitted("mlx")
+    path = tmp_path / "mlx.pt"
+    model.save(str(path))
+    loaded = AMICA.load(str(path))
+    assert model.model_ is not None and loaded.model_ is not None
+    before = model.model_.state_dict()
+    after = loaded.model_.state_dict()
+    assert {a.dtype for a in before["params"].values()} >= {
+        np.dtype(np.float32),
+        np.dtype(np.int64),
+        np.dtype(np.int32),
+    }
+    for name, array in before["params"].items():
+        assert after["params"][name].dtype == array.dtype, name
+        np.testing.assert_array_equal(after["params"][name], array, err_msg=name)
+    assert after["config"] == before["config"]
+    assert after["extra"] == before["extra"]
+
+
+def test_mlx_bool_array_survives_the_payload_conversion(fitted, tmp_path):
+    """No MLX param is boolean today; this pins the conversion for one anyway,
+    using MLX's own real boolean mask (comp_used), through a real
+    torch.save/torch.load(weights_only=True) round trip."""
+    from pamica.amica import _mlx_state_from_payload, _state_to_payload
+
+    b = fitted("mlx").model_
+    state = b.state_dict()
+    comp_used = np.array(b.comp_used)
+    assert comp_used.dtype == np.bool_
+    state["params"]["comp_used"] = comp_used
+    path = tmp_path / "state.pt"
+    torch.save(_state_to_payload(state), path)
+    restored = _mlx_state_from_payload(torch.load(path, weights_only=True), str(path))
+    for name, array in state["params"].items():
+        assert restored["params"][name].dtype == array.dtype, name
+        np.testing.assert_array_equal(restored["params"][name], array, err_msg=name)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_numpy_scalar_settings_save_and_load(X, backend, tmp_path):
+    """A numpy-integer seed lands in the backend's config and fit record,
+    which the weights_only unpickler refuses; save stores it as a Python int
+    so the file loads."""
+    model = _wrapper(backend)
+    model.fit(X[:, :4096], max_iter=2, seed=np.int64(SEED))
+    path = tmp_path / "np_seed.pt"
+    model.save(str(path))
+    loaded = AMICA.load(str(path))
+    assert loaded.model_ is not None
+    assert loaded.model_.seed == SEED and type(loaded.model_.seed) is int
+    assert loaded.restart_seeds_ == [SEED]
+    np.testing.assert_array_equal(loaded.transform(X), model.transform(X))
+
+
+def test_v1_payload_loads_as_a_torch_model(X, tmp_path):
+    model = AMICA(device="cpu", verbose=False)
+    model.fit(X[:, :4096], max_iter=2, seed=SEED)
+    path = tmp_path / "v1.pt"
+    torch.save(_v1_payload(model), path)
+    assert AMICA.load(str(path), device="cpu").backend == "torch"
+
+
+def test_v2_payload_without_a_backend_is_malformed(fitted, tmp_path):
+    path = tmp_path / "model.pt"
+    fitted("torch").save(str(path))
+    payload = torch.load(path, weights_only=True)
+    del payload["wrapper"]["backend"]
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match=r"malformed.*wrapper\['backend'\] is None"):
+        AMICA.load(str(path))
+
+
+def test_unknown_format_version_names_the_readable_ones(fitted, tmp_path):
+    path = tmp_path / "model.pt"
+    fitted("torch").save(str(path))
+    payload = torch.load(path, weights_only=True)
+    payload["format_version"] = 3
+    torch.save(payload, path)
+    with pytest.raises(
+        ValueError, match=r"format_version: 3 \(expected one of \[1, 2\]\)"
+    ):
+        AMICA.load(str(path))
+
+
+def test_mlx_payload_with_a_device_raises(fitted, tmp_path):
+    path = tmp_path / "mlx.pt"
+    fitted("mlx").save(str(path))
+    with pytest.raises(ValueError, match="holds an MLX-backend model.*device=None"):
+        AMICA.load(str(path), device="cpu")
+
+
+def test_mlx_payload_without_mlx_names_the_backend(fitted, tmp_path, monkeypatch):
+    """Written on a machine with MLX, opened on one without (the
+    ``sys.modules`` marker, as in the construction test above)."""
+    path = tmp_path / "mlx.pt"
+    fitted("mlx").save(str(path))
+    monkeypatch.setitem(sys.modules, "mlx", None)
+    with pytest.raises(ImportError, match="holds an MLX-backend model.*not installed"):
+        AMICA.load(str(path))
