@@ -15,12 +15,25 @@ than being reimplemented per backend, so the backends cannot drift apart
 Only the *decision* is shared. Each backend builds its own sphering matrix in its
 own array library, because the PyTorch path is bit-exact against Fortran and must
 not be routed through a different eigensolver.
+
+The explicit PCA-reduction request (``pcakeep``/``pcadb``) is part of the same
+decision, so its validation and its "is a reduction requested?" predicate live
+here too (issue #323): every backend constructor calls
+:func:`validate_pca_reduction`, :func:`numerical_rank` re-checks at fit time, and
+the upfront ``mir_step`` gates ask :func:`pca_reduction_requested`. ``pcadb`` is
+a pamica extension: the reference parses it (amica15.f90:3459-3461) but never
+reads it again, so only ``pcakeep`` enters its ``numeigs``.
 """
 
+import logging
+import math
+import numbers
 from typing import Optional
 
 import numpy as np
 import numpy.typing as npt
+
+logger = logging.getLogger(__name__)
 
 # Fortran's absolute covariance-eigenvalue floor (amica15_header.f90:66).
 MINEIG = 1e-15
@@ -29,6 +42,104 @@ MINEIG = 1e-15
 # default, unlike Fortran, which has no relative option; see ADR 0004 and
 # ``docs/guides/amica-differences.md``.
 MINEIG_REL = 1e-12
+
+
+def validate_pca_reduction(
+    pcakeep: Optional[int],
+    pcadb: Optional[float],
+    *,
+    log_precedence: bool = True,
+) -> None:
+    """Reject an explicit PCA-reduction request that cannot mean anything.
+
+    Called by every backend constructor, so a bad value fails before any data
+    is touched, and again by :func:`numerical_rank`, which catches an
+    attribute reassigned after construction.
+
+    Parameters
+    ----------
+    pcakeep : int, optional
+        Number of principal dimensions to keep. Must be ``None`` or an integer
+        (``numbers.Integral``, so numpy integers qualify) of at least 1.
+        ``bool`` is rejected although it subclasses ``int``, and a float is
+        rejected rather than truncated. Unvalidated, ``pcakeep=-3`` sliced from
+        the end and fitted 29 of 32 dimensions, ``pcakeep=2.7`` silently kept
+        2, and ``pcakeep=0`` built an empty model that ended in ``nan_ll``.
+    pcadb : float, optional
+        Keep the dimensions whose eigenvalue lies within ``pcadb`` dB of the
+        largest. Must be ``None`` or a finite real number (``numbers.Real``,
+        ``bool`` rejected) greater than 0; ``pcadb <= 0`` kept nothing and
+        ended in ``nan_ll``.
+    log_precedence : bool, default=True
+        Emit the INFO note below when both are set. The constructors keep the
+        default, so the note appears once per model; the fit-time re-check in
+        :func:`numerical_rank` passes ``False`` so a fit does not repeat it.
+
+    Raises
+    ------
+    ValueError
+        Naming the parameter and the offending value.
+
+    Notes
+    -----
+    Setting both is allowed: ``pcakeep`` takes precedence and ``pcadb`` is
+    ignored, the order :func:`numerical_rank` applies them in. This matches
+    the reference, which parses ``pcadb`` (amica15.f90:3459-3461) but never
+    uses it, so a Fortran ``input.param`` that sets both (as both bundled
+    parameter files do) means its ``pcakeep``. One INFO line records it.
+    """
+    if pcakeep is not None and (
+        isinstance(pcakeep, bool)
+        or not isinstance(pcakeep, numbers.Integral)
+        or pcakeep < 1
+    ):
+        raise ValueError(f"pcakeep must be None or an integer >= 1, got {pcakeep!r}")
+    if pcadb is not None and (
+        isinstance(pcadb, bool)
+        or not isinstance(pcadb, numbers.Real)
+        or not math.isfinite(pcadb)
+        or pcadb <= 0
+    ):
+        raise ValueError(
+            f"pcadb must be None or a finite real number > 0, got {pcadb!r}"
+        )
+    if log_precedence and pcakeep is not None and pcadb is not None:
+        logger.info(
+            "pcakeep=%d and pcadb=%g are both set; pcadb is ignored because "
+            "pcakeep takes precedence (as in the reference, which parses pcadb "
+            "but never uses it).",
+            pcakeep,
+            pcadb,
+        )
+
+
+def pca_reduction_requested(
+    pcakeep: Optional[int], pcadb: Optional[float], n_channels: int
+) -> bool:
+    """Whether an explicit ``pcakeep``/``pcadb`` asks to fit fewer than
+    ``n_channels`` dimensions.
+
+    Config-only: it runs before any eigenvalue exists, for the upfront
+    ``mir_step`` gates, so it answers what the *request* implies, not what
+    the fit will find. ``pcakeep >= n_channels`` is not a request (the
+    reference's ``min(pcakeep, ...)`` keeps every dimension the data have,
+    e.g. the bundled ``input.param``'s ``pcakeep 32`` on 32 channels); any
+    ``pcadb`` is one, because whether it cuts anything depends on the
+    eigenvalues; and ``pcakeep`` wins when both are set, as in
+    :func:`numerical_rank`. Rank reduction from automatic detection
+    (``mineig``/``mineig_rel``) is not a request and cannot be known here;
+    the backends catch it once the fitted sphere exists.
+
+    Parameters
+    ----------
+    pcakeep, pcadb : int, float, optional
+        As :func:`validate_pca_reduction`.
+    n_channels : int
+        Channel count of the data being fitted.
+    """
+    if pcakeep is not None:
+        return pcakeep < n_channels
+    return pcadb is not None
 
 
 def numerical_rank(
@@ -56,7 +167,9 @@ def numerical_rank(
         reproduce Fortran's absolute-only behavior exactly.
     pcakeep, pcadb : int or float, optional
         Explicit PCA reduction, capped by the detected rank
-        (Fortran ``min(pcakeep, ...)``).
+        (Fortran ``min(pcakeep, ...)``). Validated first by
+        :func:`validate_pca_reduction`; ``pcakeep`` takes precedence and
+        ``pcadb`` is ignored when both are set.
 
     Returns
     -------
@@ -66,10 +179,15 @@ def numerical_rank(
     Raises
     ------
     ValueError
-        If no eigenvalue clears the threshold, so there is nothing to
-        decompose. Fortran would compute ``numeigs = 0`` and carry on into
-        undefined behavior.
+        If ``pcakeep``/``pcadb`` is invalid (see
+        :func:`validate_pca_reduction`), or if no eigenvalue clears the
+        threshold, so there is nothing to decompose. Fortran would compute
+        ``numeigs = 0`` and carry on into undefined behavior.
     """
+    # The fit-time choke point every backend passes through, so a pcakeep or
+    # pcadb reassigned after construction cannot slip past the constructors'
+    # checks. Silent on precedence: the constructor already logged it.
+    validate_pca_reduction(pcakeep, pcadb, log_precedence=False)
     ev = np.asarray(evals, dtype=np.float64)
     if ev.ndim != 1 or ev.size == 0:
         raise ValueError(
