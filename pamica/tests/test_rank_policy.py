@@ -21,6 +21,7 @@ import pytest
 from pamica.rank import (
     MINEIG,
     MINEIG_REL,
+    log_ignored_pca_request,
     numerical_rank,
     pca_reduction_requested,
     validate_pca_reduction,
@@ -158,32 +159,80 @@ def test_validator_rejects_either_parameter_when_both_are_set() -> None:
         validate_pca_reduction(0, 30.0)
 
 
-def test_validator_logs_the_precedence_once(caplog) -> None:
-    with caplog.at_level(logging.INFO, logger="pamica.rank"):
+def test_validator_never_logs(caplog) -> None:
+    """Validation only, so the fit-time re-checks cannot repeat the
+    constructor's notes."""
+    with caplog.at_level(logging.DEBUG, logger="pamica.rank"):
         validate_pca_reduction(32, 30.0)
         validate_pca_reduction(20, None)
-        validate_pca_reduction(None, 30.0)
-    notes = [r for r in caplog.records if "takes precedence" in r.getMessage()]
-    assert len(notes) == 1
-    assert notes[0].levelno == logging.INFO
-    assert "pcadb is ignored" in notes[0].getMessage()
+    assert not caplog.records
+
+
+def test_ignored_request_logs_the_precedence_once(caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="pamica.rank"):
+        log_ignored_pca_request(32, 30.0, True)
+        log_ignored_pca_request(20, None, True)
+        log_ignored_pca_request(None, 30.0, True)
+        log_ignored_pca_request(None, None, True)
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.INFO
+    assert "pcadb is ignored" in caplog.records[0].getMessage()
 
 
 @pytest.mark.parametrize(
-    ("pcakeep", "pcadb", "n_channels", "expected"),
+    ("pcakeep", "pcadb"), [(20, None), (None, 30.0), (20, 30.0), (np.int64(20), None)]
+)
+def test_ignored_request_warns_once_without_sphering(caplog, pcakeep, pcadb) -> None:
+    """Without sphering nothing is reduced (the reference's no-sphere branch
+    sets numeigs = nx, amica15.f90:527): one WARNING, and no precedence note,
+    since pcadb's precedence is moot when neither is used."""
+    with caplog.at_level(logging.INFO, logger="pamica.rank"):
+        log_ignored_pca_request(pcakeep, pcadb, False)
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.levelno == logging.WARNING
+    assert "do_sphere=False" in record.getMessage()
+
+
+def test_nothing_to_ignore_without_a_request(caplog) -> None:
+    with caplog.at_level(logging.DEBUG, logger="pamica.rank"):
+        log_ignored_pca_request(None, None, False)
+    assert not caplog.records
+
+
+@pytest.mark.parametrize(
+    ("pcakeep", "pcadb", "n_channels", "do_sphere", "expected"),
     [
-        (None, None, 32, False),
-        (20, None, 32, True),
-        (31, None, 32, True),
-        (32, None, 32, False),  # the bundled input.param: nothing is reduced
-        (64, None, 32, False),
-        (None, 30.0, 32, True),  # unknowable before the eigenvalues exist
-        (32, 30.0, 32, False),  # pcakeep wins, as in numerical_rank
-        (20, 30.0, 32, True),
+        (None, None, 32, True, False),
+        (20, None, 32, True, True),
+        (31, None, 32, True, True),
+        (32, None, 32, True, False),  # the bundled input.param: nothing is reduced
+        (64, None, 32, True, False),
+        (None, 30.0, 32, True, True),  # unknowable before the eigenvalues exist
+        (32, 30.0, 32, True, False),  # pcakeep wins, as in numerical_rank
+        (20, 30.0, 32, True, True),
+        # Without sphering no backend reduces (amica15.f90:527: numeigs = nx).
+        (20, None, 32, False, False),
+        (None, 30.0, 32, False, False),
+        (20, 30.0, 32, False, False),
+        (None, None, 32, False, False),
     ],
 )
-def test_reduction_predicate_truth_table(pcakeep, pcadb, n_channels, expected):
-    assert pca_reduction_requested(pcakeep, pcadb, n_channels) is expected
+def test_reduction_predicate_truth_table(
+    pcakeep, pcadb, n_channels, do_sphere, expected
+):
+    assert pca_reduction_requested(pcakeep, pcadb, n_channels, do_sphere) is expected
+
+
+@pytest.mark.parametrize(
+    ("pcakeep", "pcadb", "name"),
+    [(-3, None, "pcakeep"), ("20", None, "pcakeep"), (None, -5.0, "pcadb")],
+)
+def test_reduction_predicate_validates_first(pcakeep, pcadb, name) -> None:
+    """The gate runs at fit time, so a reassigned attribute must raise the
+    validator's ValueError there, not a TypeError from comparing a string."""
+    with pytest.raises(ValueError, match=name):
+        pca_reduction_requested(pcakeep, pcadb, 32, True)
 
 
 @pytest.mark.parametrize(

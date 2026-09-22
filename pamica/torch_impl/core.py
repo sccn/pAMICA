@@ -60,6 +60,7 @@ from ..metrics import pairwise_mi
 from ..rank import (
     MINEIG,
     MINEIG_REL,
+    log_ignored_pca_request,
     numerical_rank,
     pca_reduction_requested,
     validate_pca_reduction,
@@ -526,8 +527,10 @@ class AMICATorchNG:
         ``pcakeep`` must be an integer >= 1 and ``pcadb`` a finite number > 0;
         anything else raises ``ValueError`` at construction. When both are set,
         ``pcakeep`` takes precedence and ``pcadb`` is ignored (one INFO log
-        line), as in the reference. ``None`` (the default) for both leaves only
-        automatic rank detection. See :mod:`pamica.rank`.
+        line), as in the reference. Both are ignored, with one WARNING, when
+        ``do_sphere=False``: reduction happens only while sphering, as in the
+        reference. ``None`` (the default) for both leaves only automatic rank
+        detection. See :mod:`pamica.rank`.
     mineig : float, default=1e-15
         Absolute floor on data-covariance eigenvalues used to detect the
         numerical rank (Fortran ``mineig``, amica15.f90:413 and
@@ -786,8 +789,10 @@ class AMICATorchNG:
         self.do_approx_sphere = do_approx_sphere
         # Explicit PCA reduction, validated by the policy shared with the NumPy
         # and MLX backends (pamica/rank.py, issue #323) so a bad value fails
-        # here rather than as a silently wrongly sized or nan_ll fit.
+        # here rather than as a silently wrongly sized or nan_ll fit; then one
+        # log line for any part of it a fit will ignore.
         validate_pca_reduction(pcakeep, pcadb)
+        log_ignored_pca_request(pcakeep, pcadb, do_sphere)
         self.pcakeep = pcakeep
         self.pcadb = pcadb
 
@@ -2330,8 +2335,9 @@ class AMICATorchNG:
             before it, so the two are one update apart (issue #161).
             Incompatible with PCA reduction, same as :meth:`mir` itself. This
             upfront gate only sees an explicit reduction request: ``pcakeep <
-            n_channels`` or any ``pcadb`` (``pcakeep >= n_channels`` keeps
-            every dimension, so it is not one; issue #323). The sphere for THIS
+            n_channels`` or any ``pcadb`` while sphering (``pcakeep >=
+            n_channels`` keeps every dimension, and ``do_sphere=False`` never
+            reduces, so neither is one; issue #323). The sphere for THIS
             fit does not exist yet, so automatic ``mineig``/``mineig_rel`` rank
             reduction cannot be checked here; that case is instead caught once
             the sphere exists, inside the per-waypoint :meth:`mir` call below,
@@ -3028,7 +3034,8 @@ class AMICATorchNG:
         ``self.n_channels``, which :meth:`_preprocess` shrinks to the kept rank.
         ``pcakeep >= n_channels`` is not a request (it keeps every dimension);
         any ``pcadb`` is, since whether it cuts anything depends on the
-        eigenvalues; ``pcakeep`` wins when both are set.
+        eigenvalues; ``pcakeep`` wins when both are set; and with
+        ``do_sphere=False`` nothing is, since no reduction happens then.
 
         Config-only, not geometry: used solely by :meth:`_fit_once`'s upfront
         ``mir_step`` gate, which runs BEFORE :meth:`_preprocess` builds this
@@ -3037,7 +3044,9 @@ class AMICATorchNG:
         knowable. Use :meth:`_pca_reduced` instead wherever a fitted sphere
         already exists (issue #283).
         """
-        return pca_reduction_requested(self.pcakeep, self.pcadb, n_channels)
+        return pca_reduction_requested(
+            self.pcakeep, self.pcadb, n_channels, self.do_sphere
+        )
 
     def _pca_reduced(self) -> bool:
         """Whether the fitted sphere is rank-reduced (non-square).

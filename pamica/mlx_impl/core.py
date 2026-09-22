@@ -109,6 +109,7 @@ from ..numpy_impl.utils import identify_shared_components
 from ..rank import (
     MINEIG,
     MINEIG_REL,
+    log_ignored_pca_request,
     numerical_rank,
     pca_reduction_requested,
     validate_pca_reduction,
@@ -544,6 +545,10 @@ class AMICAMLXNG:
         set, ``pcakeep`` takes precedence and ``pcadb`` is ignored (one INFO
         log line), as in the reference.
 
+    Both are ignored, with one WARNING, when ``do_sphere=False``: reduction
+    happens only while sphering, as in the reference (``numeigs = nx`` in its
+    no-sphere branch, amica15.f90:527).
+
     With both ``None`` (the default) only automatic ``mineig``/``mineig_rel``
     rank detection sizes the model, exactly as before #323. A reduced fit has
     a non-square ``(n_channels, n_channels_in)`` sphere; map its components
@@ -760,8 +765,10 @@ class AMICAMLXNG:
         self.do_approx_sphere = do_approx_sphere
         # Explicit PCA reduction (issue #323), validated by the policy shared
         # with the PyTorch and NumPy backends (pamica/rank.py) so a bad value
-        # fails here, before any data is touched, exactly as it does there.
+        # fails here, before any data is touched, exactly as it does there;
+        # then one log line for any part of it a fit will ignore.
         validate_pca_reduction(pcakeep, pcadb)
+        log_ignored_pca_request(pcakeep, pcadb, do_sphere)
         self.pcakeep = pcakeep
         self.pcadb = pcadb
         # Numerical-rank floors (issue #223); see pamica/rank.py and ADR 0004.
@@ -2466,8 +2473,9 @@ class AMICAMLXNG:
         Incompatible with PCA reduction, same as :meth:`mir` itself, and
         gated exactly as ``AMICATorchNG._fit_once`` gates it (issue #323):
         an explicit reduction request, ``pcakeep < n_channels`` or any
-        ``pcadb`` (``pcakeep >= n_channels`` keeps every dimension, so it is
-        not one), raises ``ValueError`` up front, before :meth:`_preprocess`
+        ``pcadb`` while sphering (``pcakeep >= n_channels`` keeps every
+        dimension, and ``do_sphere=False`` never reduces, so neither is one),
+        raises ``ValueError`` up front, before :meth:`_preprocess`
         runs, so a bad explicit config fails without paying for any
         preprocessing. AUTOMATIC ``mineig``/``mineig_rel`` reduction is not a
         request, and is caught the same way on both backends: downstream,
@@ -3297,7 +3305,9 @@ class AMICAMLXNG:
         so AUTOMATIC ``mineig``/``mineig_rel`` reduction is not knowable here.
         Use :meth:`_pca_reduced` wherever a fitted sphere already exists.
         """
-        return pca_reduction_requested(self.pcakeep, self.pcadb, n_channels)
+        return pca_reduction_requested(
+            self.pcakeep, self.pcadb, n_channels, self.do_sphere
+        )
 
     def _pca_reduced(self) -> bool:
         """Whether the fitted sphere is rank-reduced (non-square) -- the #300

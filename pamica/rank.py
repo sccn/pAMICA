@@ -19,10 +19,11 @@ not be routed through a different eigensolver.
 The explicit PCA-reduction request (``pcakeep``/``pcadb``) is part of the same
 decision, so its validation and its "is a reduction requested?" predicate live
 here too (issue #323): every backend constructor calls
-:func:`validate_pca_reduction`, :func:`numerical_rank` re-checks at fit time, and
-the upfront ``mir_step`` gates ask :func:`pca_reduction_requested`. ``pcadb`` is
-a pamica extension: the reference parses it (amica15.f90:3459-3461) but never
-reads it again, so only ``pcakeep`` enters its ``numeigs``.
+:func:`validate_pca_reduction` and :func:`log_ignored_pca_request`,
+:func:`numerical_rank` re-checks at fit time, and the upfront ``mir_step`` gates
+ask :func:`pca_reduction_requested`. ``pcadb`` is a pamica extension: the
+reference parses it (amica15.f90:3459-3461) but never reads it again, so only
+``pcakeep`` enters its ``numeigs``.
 """
 
 import logging
@@ -44,36 +45,30 @@ MINEIG = 1e-15
 MINEIG_REL = 1e-12
 
 
-def validate_pca_reduction(
-    pcakeep: Optional[int],
-    pcadb: Optional[float],
-    *,
-    log_precedence: bool = True,
-) -> None:
+def validate_pca_reduction(pcakeep: Optional[int], pcadb: Optional[float]) -> None:
     """Reject an explicit PCA-reduction request that cannot mean anything.
 
     Called by every backend constructor, so a bad value fails before any data
-    is touched, and again by :func:`numerical_rank`, which catches an
-    attribute reassigned after construction.
+    is touched, and again at fit time by :func:`numerical_rank` and
+    :func:`pca_reduction_requested`, which catch an attribute reassigned after
+    construction. Validation only: it never logs, so the fit-time re-checks
+    stay silent (the constructors log through :func:`log_ignored_pca_request`).
 
     Parameters
     ----------
     pcakeep : int, optional
         Number of principal dimensions to keep. Must be ``None`` or an integer
         (``numbers.Integral``, so numpy integers qualify) of at least 1.
-        ``bool`` is rejected although it subclasses ``int``, and a float is
-        rejected rather than truncated. Unvalidated, ``pcakeep=-3`` sliced from
-        the end and fitted 29 of 32 dimensions, ``pcakeep=2.7`` silently kept
-        2, and ``pcakeep=0`` built an empty model that ended in ``nan_ll``.
+        ``bool`` and ``numpy.bool_`` are rejected (``bool`` subclasses
+        ``int``), and a float is rejected rather than truncated. Unvalidated,
+        ``pcakeep=-3`` sliced from the end and fitted 29 of 32 dimensions,
+        ``pcakeep=2.7`` silently kept 2, and ``pcakeep=0`` built an empty model
+        that ended in ``nan_ll``.
     pcadb : float, optional
         Keep the dimensions whose eigenvalue lies within ``pcadb`` dB of the
-        largest. Must be ``None`` or a finite real number (``numbers.Real``,
-        ``bool`` rejected) greater than 0; ``pcadb <= 0`` kept nothing and
-        ended in ``nan_ll``.
-    log_precedence : bool, default=True
-        Emit the INFO note below when both are set. The constructors keep the
-        default, so the note appears once per model; the fit-time re-check in
-        :func:`numerical_rank` passes ``False`` so a fit does not repeat it.
+        largest. Must be ``None`` or a finite real number (``numbers.Real``, so
+        numpy floats qualify; ``bool`` and ``numpy.bool_`` rejected) greater
+        than 0; ``pcadb <= 0`` kept nothing and ended in ``nan_ll``.
 
     Raises
     ------
@@ -86,7 +81,7 @@ def validate_pca_reduction(
     ignored, the order :func:`numerical_rank` applies them in. This matches
     the reference, which parses ``pcadb`` (amica15.f90:3459-3461) but never
     uses it, so a Fortran ``input.param`` that sets both (as both bundled
-    parameter files do) means its ``pcakeep``. One INFO line records it.
+    parameter files do) means its ``pcakeep``.
     """
     if pcakeep is not None and (
         isinstance(pcakeep, bool)
@@ -103,7 +98,43 @@ def validate_pca_reduction(
         raise ValueError(
             f"pcadb must be None or a finite real number > 0, got {pcadb!r}"
         )
-    if log_precedence and pcakeep is not None and pcadb is not None:
+
+
+def log_ignored_pca_request(
+    pcakeep: Optional[int], pcadb: Optional[float], do_sphere: bool
+) -> None:
+    """Log the part of a valid ``pcakeep``/``pcadb`` request that a fit will
+    ignore. Called once by every backend constructor, after
+    :func:`validate_pca_reduction`, so each note appears once per model.
+
+    * ``do_sphere=False``: one WARNING that both are ignored. Reduction only
+      happens while sphering, as in the reference, whose no-sphere branch keeps
+      every dimension (``numeigs = nx``, amica15.f90:527).
+    * Otherwise, both set: one INFO line that ``pcadb`` is ignored because
+      ``pcakeep`` takes precedence (see :func:`validate_pca_reduction`).
+
+    Parameters
+    ----------
+    pcakeep, pcadb : int, float, optional
+        The validated request.
+    do_sphere : bool
+        The backend's ``do_sphere`` setting.
+    """
+    requested = [
+        f"{name}={value!r}"
+        for name, value in (("pcakeep", pcakeep), ("pcadb", pcadb))
+        if value is not None
+    ]
+    if not requested:
+        return
+    if not do_sphere:
+        logger.warning(
+            "%s ignored because do_sphere=False: PCA reduction happens only "
+            "while sphering, as in the reference, which keeps every dimension "
+            "when it does not sphere (numeigs = nx, amica15.f90:527).",
+            " and ".join(requested),
+        )
+    elif pcakeep is not None and pcadb is not None:
         logger.info(
             "pcakeep=%d and pcadb=%g are both set; pcadb is ignored because "
             "pcakeep takes precedence (as in the reference, which parses pcadb "
@@ -114,7 +145,10 @@ def validate_pca_reduction(
 
 
 def pca_reduction_requested(
-    pcakeep: Optional[int], pcadb: Optional[float], n_channels: int
+    pcakeep: Optional[int],
+    pcadb: Optional[float],
+    n_channels: int,
+    do_sphere: bool,
 ) -> bool:
     """Whether an explicit ``pcakeep``/``pcadb`` asks to fit fewer than
     ``n_channels`` dimensions.
@@ -126,9 +160,13 @@ def pca_reduction_requested(
     e.g. the bundled ``input.param``'s ``pcakeep 32`` on 32 channels); any
     ``pcadb`` is one, because whether it cuts anything depends on the
     eigenvalues; and ``pcakeep`` wins when both are set, as in
-    :func:`numerical_rank`. Rank reduction from automatic detection
-    (``mineig``/``mineig_rel``) is not a request and cannot be known here;
-    the backends catch it once the fitted sphere exists.
+    :func:`numerical_rank`. Without sphering nothing is a request, because no
+    backend reduces then (see :func:`log_ignored_pca_request`). Rank reduction
+    from automatic detection (``mineig``/``mineig_rel``) is not a request and
+    cannot be known here; the backends catch it once the fitted sphere exists.
+
+    Validates first, so a ``pcakeep``/``pcadb`` reassigned after construction
+    raises the validator's ``ValueError`` here rather than a ``TypeError``.
 
     Parameters
     ----------
@@ -136,7 +174,12 @@ def pca_reduction_requested(
         As :func:`validate_pca_reduction`.
     n_channels : int
         Channel count of the data being fitted.
+    do_sphere : bool
+        The backend's ``do_sphere`` setting.
     """
+    validate_pca_reduction(pcakeep, pcadb)
+    if not do_sphere:
+        return False
     if pcakeep is not None:
         return pcakeep < n_channels
     return pcadb is not None
@@ -186,8 +229,8 @@ def numerical_rank(
     """
     # The fit-time choke point every backend passes through, so a pcakeep or
     # pcadb reassigned after construction cannot slip past the constructors'
-    # checks. Silent on precedence: the constructor already logged it.
-    validate_pca_reduction(pcakeep, pcadb, log_precedence=False)
+    # checks. Validation only: the constructor already logged any notes.
+    validate_pca_reduction(pcakeep, pcadb)
     ev = np.asarray(evals, dtype=np.float64)
     if ev.ndim != 1 or ev.size == 0:
         raise ValueError(

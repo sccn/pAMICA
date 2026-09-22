@@ -254,6 +254,39 @@ def test_precedence_is_logged_once_per_model(real_data, tmp_path, caplog, backen
     assert len(notes) == 1, [r.getMessage() for r in notes]
 
 
+@pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
+def test_do_sphere_false_ignores_the_request_with_one_warning(
+    real_data, tmp_path, caplog, backend
+):
+    """No backend reduces without sphering (the reference's no-sphere branch
+    keeps every dimension, numeigs = nx at amica15.f90:527), so pcakeep=20 is
+    ignored: the fit is full width, and the constructor says so exactly once."""
+    X = real_data[:, :4096]
+    kwargs = {"pcakeep": PCAKEEP, "do_sphere": False}
+    with caplog.at_level(logging.INFO, logger="pamica.rank"):
+        if backend == "torch":
+            m = _torch(**kwargs)
+            m.fit(X, max_iter=1, verbose=False)
+            assert m.sphere is not None
+            n, sphere = m.n_channels, m.sphere.cpu().numpy()
+        elif backend == "numpy":
+            m = _numpy(tmp_path, max_iter=1, **kwargs)
+            m.fit(X)
+            n, sphere = m.data_dim, np.asarray(m.sphere)
+        else:
+            m = _mlx(**kwargs)
+            m.fit(X, max_iter=1, verbose=False)
+            n, sphere = m.n_channels, np.array(m.sphere)
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "do_sphere=False" in r.getMessage()
+    ]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert n == NW
+    np.testing.assert_array_equal(sphere, np.eye(NW))
+
+
 # --- (d): an invalid request fails at construction on every backend ----------
 INVALID = [
     ({"pcakeep": -3}, "pcakeep"),
@@ -296,6 +329,9 @@ NOT_REDUCING = [
     {"pcakeep": NW},
     {"pcakeep": 2 * NW},
     {"pcakeep": NW, "pcadb": BUNDLED_PCADB},  # the bundled input.param
+    # Without sphering nothing is reduced, so neither is a request.
+    {"pcakeep": PCAKEEP, "do_sphere": False},
+    {"pcadb": PCADB, "do_sphere": False},
 ]
 
 
@@ -315,11 +351,10 @@ def test_mir_step_rejects_a_reduction_request_up_front(real_data, backend, kwarg
 
 @pytest.mark.parametrize("backend", ["torch", "mlx"])
 @pytest.mark.parametrize("kwargs", NOT_REDUCING)
-def test_mir_step_accepts_pcakeep_at_or_above_the_channel_count(
-    real_data, backend, kwargs
-):
-    """pcakeep >= n_channels keeps every dimension (Fortran's min()), so it is
-    not a reduction request; the pre-#323 torch gate refused it anyway."""
+def test_mir_step_accepts_a_request_that_reduces_nothing(real_data, backend, kwargs):
+    """pcakeep >= n_channels keeps every dimension (Fortran's min()), and
+    do_sphere=False reduces nothing at all, so neither is a reduction request;
+    the pre-#323 torch gate refused both anyway."""
     m = _backend(backend, **kwargs)
     m.fit(real_data[:, :4096], max_iter=2, verbose=False, mir_step=1)
     assert m.n_channels == m.n_channels_in == NW

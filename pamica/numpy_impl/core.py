@@ -81,7 +81,13 @@ from typing import Dict, List, Optional, Tuple, Union
 from tqdm import tqdm
 from .. import blocktune
 from .. import restarts
-from ..rank import MINEIG, MINEIG_REL, numerical_rank, validate_pca_reduction
+from ..rank import (
+    MINEIG,
+    MINEIG_REL,
+    log_ignored_pca_request,
+    numerical_rank,
+    validate_pca_reduction,
+)
 from .utils import (
     gammaln,
     identify_shared_components,
@@ -177,7 +183,9 @@ class AMICA:
             must be an integer >= 1 and ``pcadb`` a finite number > 0, or the
             constructor raises ``ValueError``; when both are set ``pcakeep``
             takes precedence and ``pcadb`` is ignored, as in the reference
-            (which parses ``pcadb`` but never uses it). See :mod:`pamica.rank`.
+            (which parses ``pcadb`` but never uses it). Both are ignored, with
+            one WARNING, when ``do_sphere`` is False, as in the reference. See
+            :mod:`pamica.rank`.
         """
         # Store progress bar settings
         self.use_tqdm = use_tqdm
@@ -283,8 +291,10 @@ class AMICA:
         self.pcadb = params.get("pcadb")
         # Explicit PCA reduction, validated by the policy shared with the
         # PyTorch and MLX backends (pamica/rank.py, issue #323): a bad value
-        # fails here rather than as a silently wrongly sized or degenerate fit.
+        # fails here rather than as a silently wrongly sized or degenerate fit;
+        # then one log line for any part of it a fit will ignore.
         validate_pca_reduction(self.pcakeep, self.pcadb)
+        log_ignored_pca_request(self.pcakeep, self.pcadb, self.do_sphere)
         # Numerical-rank floors (issue #223); see pamica/rank.py and ADR 0004.
         self.mineig = params.get("mineig", MINEIG)
         self.mineig_rel = params.get("mineig_rel", MINEIG_REL)
