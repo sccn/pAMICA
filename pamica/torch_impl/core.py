@@ -786,7 +786,7 @@ class AMICATorchNG:
         self.do_approx_sphere = do_approx_sphere
         # Explicit PCA reduction, validated by the policy shared with the NumPy
         # and MLX backends (pamica/rank.py, issue #323) so a bad value fails
-        # here rather than as a silently mis-sized or nan_ll fit.
+        # here rather than as a silently wrongly sized or nan_ll fit.
         validate_pca_reduction(pcakeep, pcadb)
         self.pcakeep = pcakeep
         self.pcadb = pcadb

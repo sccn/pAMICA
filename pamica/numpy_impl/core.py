@@ -283,7 +283,7 @@ class AMICA:
         self.pcadb = params.get("pcadb")
         # Explicit PCA reduction, validated by the policy shared with the
         # PyTorch and MLX backends (pamica/rank.py, issue #323): a bad value
-        # fails here rather than as a silently mis-sized or degenerate fit.
+        # fails here rather than as a silently wrongly sized or degenerate fit.
         validate_pca_reduction(self.pcakeep, self.pcadb)
         # Numerical-rank floors (issue #223); see pamica/rank.py and ADR 0004.
         self.mineig = params.get("mineig", MINEIG)
