@@ -194,6 +194,11 @@ def _state_to_payload(state: dict) -> dict:
 def _mlx_state_from_payload(state: dict, filepath: str) -> dict:
     """Invert :func:`_state_to_payload` for an AMICAMLXNG state: the params
     back to numpy arrays of their original dtype."""
+    if not isinstance(state.get("params"), dict):
+        raise ValueError(
+            f"malformed AMICA save file {filepath!r}: the MLX state has no "
+            "'params' section; the file may be truncated or corrupted."
+        )
     params = {}
     for name, tensor in state["params"].items():
         if not isinstance(tensor, torch.Tensor):

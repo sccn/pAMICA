@@ -602,3 +602,19 @@ def test_wrapper_accessors_agree_across_backends(fitted):
         for model in (t, m)
         for a in (model.get_sphere(), model.get_mean(), model.get_model_center())
     )
+
+
+@pytest.mark.parametrize("damage", ["missing_params", "non_tensor_param"])
+def test_malformed_mlx_payload_raises_a_named_error(fitted, tmp_path, damage):
+    path = tmp_path / "mlx.pt"
+    fitted("mlx").save(str(path))
+    payload = torch.load(path, weights_only=True)
+    if damage == "missing_params":
+        del payload["backend"]["params"]
+        expected = "no 'params' section"
+    else:
+        payload["backend"]["params"]["A"] = [1.0, 2.0]
+        expected = "MLX param 'A' is a list, not a tensor"
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match=f"malformed AMICA save file.*{expected}"):
+        AMICA.load(str(path))
