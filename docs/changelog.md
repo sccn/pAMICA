@@ -6,22 +6,42 @@ Release notes are also published on the
 ## Unreleased
 
 - **MLX backend: explicit `pcakeep`/`pcadb`** (issue #323, epic #324 Phase 1).
-  `AMICAMLXNG` gained `pcakeep` and `pcadb` with `AMICATorchNG`'s names, defaults (`None`), position, validation and precedence,
-  applied through the shared `pamica.rank` policy, so all three array backends keep the same rank and build the same sphere
+  `AMICAMLXNG` gained `pcakeep` and `pcadb` with `AMICATorchNG`'s names, defaults (`None`), position, validation and precedence.
+  They go through the shared `pamica.rank` policy, so all three array backends keep the same rank and build the same sphere
   (cross-backend test on the bundled sample: torch vs NumPy sphere within 1e-10 relative, MLX within float32 rounding).
   `fit(mir_step > 0)` gained the same upfront reduction gate and message as the PyTorch backend.
-  Both parameters persist additively in `state_dict()["config"]`; a payload written before this change loads with `None`, and there is no `format_version` bump.
+  Both parameters persist additively in `state_dict()["config"]`:
+  a payload written before this change loads with `None`, and there is no `format_version` bump.
 - **Behavior change: invalid `pcakeep`/`pcadb` now raise `ValueError` at construction on every backend.**
-  `pcakeep` must be an integer of at least 1 (a `bool` or a float is rejected) and `pcadb` a finite number greater than 0.
+  `pcakeep` must be an integer of at least 1 (a `bool` or a float is rejected) and `pcadb` a finite number greater than 0;
+  a value assigned to the attribute after construction fails at fit time.
   The PyTorch and NumPy backends used to accept these silently:
   `pcakeep=-3` sliced from the end and fitted 29 of 32 sources on the bundled sample, `pcakeep=2.7` truncated to 2,
   and `pcakeep=0` or `pcadb <= 0` ran to a degenerate `nan_ll` fit.
-  Setting both stays valid: `pcakeep` takes precedence and `pcadb` is ignored (one INFO log line), as in the reference, which parses `pcadb` but never uses it.
-  `state_dict` now stores both as plain `int`/`float`, so a numpy-scalar request survives `AMICA.save`/`load` (whose `weights_only` load refuses numpy scalars).
+  Because construction validates, a saved PyTorch model whose config carries such a value
+  (only possible before this change) now fails to load with the same `ValueError`.
+  Setting both stays valid: `pcakeep` takes precedence and `pcadb` is ignored (one INFO log line),
+  as in the reference, which parses `pcadb` but never uses it.
+  `state_dict` now stores both as plain `int`/`float`,
+  so a numpy-scalar request survives `AMICA.save`/`load` (whose `weights_only` load refuses numpy scalars).
+- **Behavior change: `pcakeep`/`pcadb` with `do_sphere=False` are ignored with one warning.**
+  No backend reduces without sphering, as in the reference, which keeps every dimension there (amica15.f90:527).
+  The request used to be dropped silently, and the PyTorch `mir_step` gate still refused it.
+  Every backend now logs one WARNING at construction, and the gate no longer counts it as a reduction request.
 - **Behavior change: `mir_step` no longer rejects `pcakeep >= n_channels`.**
-  The PyTorch backend's upfront gate refused any explicit `pcakeep`, including the bundled `input.param`'s `pcakeep 32` on the 32-channel sample, which reduces nothing;
+  The PyTorch backend's upfront gate refused any explicit `pcakeep`,
+  including the bundled `input.param`'s `pcakeep 32` on the 32-channel sample, which reduces nothing;
   `AMICA.from_params_file("input.param").fit(X, mir_step=1)` raised.
-  The gate now rejects only a real request (`pcakeep` below the channel count, or any `pcadb`), identically on the PyTorch and MLX backends.
+  The gate now rejects only a real request (`pcakeep` below the channel count, or any `pcadb`, while sphering),
+  identically on the PyTorch and MLX backends.
+- **Fix: refits and best-of-N restarts after a rank reduction** (PyTorch and MLX backends).
+  A rank reduction, explicit or automatic (`mineig`/`mineig_rel`, for example on Maxwell-filtered MEG),
+  shrinks the model's `n_channels` to the kept rank, and the next fit validated its data against that shrunk count.
+  A second `fit()` on the same instance, and the second restart of any `n_restarts > 1` fit,
+  raised `ValueError: X has 32 channels, model expects 20`, which ended the whole multi-restart fit.
+  Every fit now starts from the constructor's input channel count,
+  including a fit on a model reloaded from `state_dict`/`save`.
+  The NumPy backend was not affected.
 - **Epic #278 polish round: audit-driven fixes ahead of merge to `dev`.**
   `AMICAMLXNG` gained `variance_order` (issue #92), the EEGLAB
   back-projected-variance component order, closing the one accessor gap the
