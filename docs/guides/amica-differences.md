@@ -132,8 +132,10 @@ This is row 11 of the table above, and it goes beyond what the reference does.
 Fortran keeps `numeigs = min(pcakeep, count(eigs > mineig))` dimensions (amica15.f90:413 and 466) and sizes the model to them (`nw = numeigs`, amica15.f90:563).
 In the default `do_approx_sphere` path its written sphere `S` is `nx x nx`, but the rows past `numeigs` are zero (amica15.f90:501-508),
 and `W`/`A` are `nw x nw`.
-Its output therefore has no representation of the residual.
-Any back-projection from it, EEGLAB's through the `nchan x nw` `icawinv` included, reconstructs only the retained subspace and drops the residual without notice.
+Its output therefore has no representation of the residual,
+so a back-projection through the `nchan x nw` inverse of that output (as EEGLAB's `icawinv` is built) can only reconstruct the retained subspace,
+dropping the residual without notice.
+That is an inference from the shape of the output; EEGLAB itself is not part of this repository.
 pamica's own EEGLAB export (`write_amica_output`) pads a reduced sphere with zero rows the same way, and is unchanged.
 
 **What pamica does.**

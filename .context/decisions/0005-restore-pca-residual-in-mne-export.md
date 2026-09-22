@@ -18,8 +18,9 @@ The Fortran reference behaves the same way.
 It keeps `numeigs = min(pcakeep, count(eigs > mineig))` dimensions (amica15.f90:413 and 466) and sizes the model to them (`nw = numeigs`, amica15.f90:563).
 In the default `do_approx_sphere` path the written sphere `S` is `nx x nx`, but its rows past `numeigs` are zero (amica15.f90:501-508),
 and `W`/`A` are `nw x nw`.
-The reference output therefore has no representation of the discarded subspace:
-any back-projection from it, EEGLAB's through the `nchan x nw` `icawinv` included, reconstructs only the retained subspace.
+The reference output therefore has no representation of the discarded subspace,
+so a back-projection through the `nchan x nw` inverse of that output (as EEGLAB's `icawinv` is built) can only reconstruct the retained subspace.
+That is an inference from the shape of the output; EEGLAB itself is not part of this repository.
 pamica's own EEGLAB export pads a reduced sphere with zero rows the same way (`numpy_impl/load.py`, `write_amicaout`).
 
 MNE-Python already has a mechanism for this.
