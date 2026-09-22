@@ -247,6 +247,19 @@ class AMICAICA:
     pre_whitener_ : np.ndarray of shape (n_channels, 1)
         Per-channel-type scaling applied before fitting, following MNE's own ICA
         convention (one ``std`` per channel type, applied as ``X / pre_whitener_``).
+    pca_components_ : np.ndarray of shape (n_channels, n_channels)
+        The full orthonormal PCA basis of the fit, in pre-whitened channel
+        space, computed once at fit time and exported as the MNE ICA's
+        ``pca_components_``. The first ``n_components_`` rows span the
+        subspace AMICA modeled. For a rank-reduced fit the remaining rows span
+        the PCA residual that reduction discarded, which MNE's ``apply``
+        restores by default (issue #322); a full-rank fit has no such rows.
+        Shared by every model of a multi-model fit (one sphere per fit).
+    pca_explained_variance_ : np.ndarray of shape (n_channels,)
+        Variance of the pre-whitened fit data along each row of
+        ``pca_components_``, in descending order: the retained rows carry the
+        largest covariance eigenvalues and the residual rows the ones the
+        reduction discarded (clipped at 0 against round-off).
     reject_by_annotation_ : bool
         Whether the last ``Raw`` fit dropped ``bad_*``-annotated samples
         (issue #251). Always ``False`` for an ``Epochs`` fit.
@@ -284,10 +297,23 @@ class AMICAICA:
 
     Rank-deficient input -- Maxwell-filtered MEG, average referencing, channel
     interpolation, or an explicit ``pcakeep``/``pcadb`` -- is supported. The sphere
-    is then ``(n_kept, n_channels)`` and has no eigendecomposition, so the export
-    takes its right singular vectors instead; MNE represents the result natively,
-    since ``pca_components_`` is ``(n_components, n_channels)``. ``n_components_``
+    is then ``(n_kept, n_channels)`` and has no eigendecomposition, so the
+    retained basis is its right singular vectors instead. ``n_components_``
     reports the retained rank.
+
+    The discarded PCA subspace (the residual) is never part of the
+    decomposition, and the export keeps it: ``pca_components_`` holds the full
+    ``(n_channels, n_channels)`` basis, retained rows first, and MNE's
+    ``ICA.apply`` keeps rows past ``n_components_`` as residual PCA components.
+    So :meth:`apply` restores the residual by default, as MNE's own ICA does,
+    and excluding a component removes only that component (issue #322). **This
+    goes beyond the Fortran reference**, whose output has no representation of
+    the residual (the written sphere's rows past ``numeigs`` are zero), so any
+    back-projection from it drops the residual. Sources, component maps and the
+    log-likelihood are unchanged; only reconstruction differs. For the
+    reference's rank-reduced reconstruction pass MNE's own
+    ``n_pca_components=ica.n_components_`` to :meth:`apply`. See
+    ``docs/guides/amica-differences.md`` and ADR 0005.
     """
 
     def __init__(
@@ -356,7 +382,12 @@ class AMICAICA:
             Forwarded to :meth:`AMICA.fit` (e.g. ``max_iter``, ``lrate``,
             ``do_newton``) and the backend constructor (e.g. ``block_size``).
             ``pcakeep``/``pcadb`` (PCA reduction) are supported: the export
-            builds ``pca_components_`` from the reduced sphere (issue #225).
+            builds the retained basis from the reduced sphere (issue #225),
+            and ``fit`` also computes the basis of the discarded residual
+            from the fit data's covariance, so :meth:`apply` restores it by
+            default (issue #322; ``n_pca_components=ica.n_components_``
+            gives the reference's rank-reduced reconstruction). See
+            ``pca_components_``.
 
         Returns
         -------
@@ -507,6 +538,17 @@ class AMICAICA:
         subsequent :meth:`apply`/:meth:`get_sources` calls for that model until
         the next :meth:`fit`.
 
+        The export carries the full ``(n_channels, n_channels)`` PCA basis
+        computed at fit time (see ``pca_components_``), with ``n_components_``
+        the retained rank and ``n_pca_components`` left at ``None``. For a
+        rank-reduced fit the rows past ``n_components_`` span the discarded
+        PCA residual, which MNE keeps as residual PCA components, so the
+        exported ICA's ``apply`` restores it by default (issue #322). This goes
+        beyond the Fortran reference, whose output has no representation of
+        the residual; ``apply(..., n_pca_components=ica.n_components_)`` gives
+        the reference's rank-reduced reconstruction. When a residual is
+        exported, its dimension and that opt-out are logged at INFO.
+
         Parameters
         ----------
         model_idx : int, default=0
@@ -626,6 +668,17 @@ class AMICAICA:
         through to MNE's ``ICA.apply``. Pass ``exclude=[...]`` (or set it on the
         exported ICA) to drop components; with no exclusions this reconstructs
         the input.
+
+        For a rank-reduced fit (``pcakeep``/``pcadb`` or automatic rank
+        detection) the PCA residual, the subspace the reduction discarded and
+        AMICA never modeled, is **restored by default**: excluding a component
+        removes that component's back-projection and nothing else, as with
+        MNE's own ICA (issue #322). This differs from the Fortran reference,
+        whose back-projection reconstructs only the retained subspace. To get
+        that rank-reduced reconstruction, pass
+        ``n_pca_components=ica.n_components_``; a float ``n_pca_components``
+        keeps residual rows by cumulative explained variance, following MNE.
+        A full-rank fit has no residual, so the option changes nothing there.
         """
         return self.to_mne_ica(model_idx).apply(inst, *args, **kwargs)
 
