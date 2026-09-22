@@ -275,8 +275,8 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
 # --- the #300 fitted-geometry PCA guard -------------------------------------
 def test_mir_raises_under_auto_detected_rank_reduction(real_data):
     """Rank reduction from AUTOMATIC mineig/mineig_rel numerical-rank
-    detection (no explicit pcakeep/pcadb -- this backend has none) must
-    trip the documented ValueError, not an opaque LinAlgError. Real EEG
+    detection (no explicit pcakeep/pcadb requested) must trip the
+    documented ValueError, not an opaque LinAlgError. Real EEG
     projected onto a rank-16 subspace via SVD, matching
     test_amica_ng_wrapper.py::test_mir_raises_under_auto_detected_rank_reduction."""
     x = real_data - real_data.mean(axis=1, keepdims=True)
@@ -305,8 +305,9 @@ def test_mir_step_on_rank_reduced_data_completes_with_one_warned_nan_waypoint(
 ):
     """No upfront mir_step gate exists for AUTOMATIC rank reduction on
     EITHER backend (see amica-differences.md's "mir_step's upfront
-    PCA-reduction gate" section -- this is intentional torch-parity, not a
-    gap): fit(mir_step=N) on rank-reduced real data must still complete.
+    PCA-reduction gate" section; the gate sees only an explicit
+    pcakeep/pcadb request, identically on both): fit(mir_step=N) on
+    rank-reduced real data must still complete.
     The PCA-reduction ValueError is a geometry fact of this fit -- it will
     fire identically on EVERY scheduled waypoint for as long as the fit
     runs -- so PR #318's flood fix means only the FIRST scheduled waypoint

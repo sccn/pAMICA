@@ -57,7 +57,14 @@ from .. import blocktune
 from .. import restarts
 from ..metrics import mir as mir_metric
 from ..metrics import pairwise_mi
-from ..rank import MINEIG, MINEIG_REL, numerical_rank
+from ..rank import (
+    MINEIG,
+    MINEIG_REL,
+    log_ignored_pca_request,
+    numerical_rank,
+    pca_reduction_requested,
+    validate_pca_reduction,
+)
 from .utils import setup_device
 
 logger = logging.getLogger(__name__)
@@ -511,10 +518,19 @@ class AMICATorchNG:
     do_mean, do_sphere, do_approx_sphere : bool
         Preprocessing options, matching ``pamica.AMICA._preprocess_data``.
     pcakeep, pcadb : int, float, optional
-        PCA dimensionality-reduction options (rarely used; see
-        ``pamica.AMICA._preprocess_data``). Both are capped by the detected
-        numerical rank (``mineig``), matching Fortran's
-        ``numeigs = min(pcakeep, count(eigs > mineig))``.
+        Explicit PCA dimensionality reduction. ``pcakeep`` keeps that many
+        principal dimensions (Fortran ``pcakeep``); ``pcadb`` keeps those whose
+        covariance eigenvalue lies within ``pcadb`` dB of the largest (a pamica
+        extension: the reference parses ``pcadb`` but never uses it). Both are
+        capped by the detected numerical rank (``mineig``/``mineig_rel``),
+        matching Fortran's ``numeigs = min(pcakeep, count(eigs > mineig))``.
+        ``pcakeep`` must be an integer >= 1 and ``pcadb`` a finite number > 0;
+        anything else raises ``ValueError`` at construction. When both are set,
+        ``pcakeep`` takes precedence and ``pcadb`` is ignored (one INFO log
+        line), as in the reference. Both are ignored, with one WARNING, when
+        ``do_sphere=False``: reduction happens only while sphering, as in the
+        reference. ``None`` (the default) for both leaves only automatic rank
+        detection. See :mod:`pamica.rank`.
     mineig : float, default=1e-15
         Absolute floor on data-covariance eigenvalues used to detect the
         numerical rank (Fortran ``mineig``, amica15.f90:413 and
@@ -627,6 +643,11 @@ class AMICATorchNG:
         dtype: torch.dtype = torch.float64,
     ):
         self.n_channels = n_channels
+        # The input channel count, kept apart from n_channels, which
+        # _preprocess shrinks to the kept rank on any rank reduction. fit()
+        # validates X against this and resets n_channels/n_comps from it, so a
+        # refit or a later restart starts from the constructor's geometry.
+        self._n_input_channels = n_channels
         self.n_models = n_models
         self.n_mix = n_mix
         self.n_comps = n_channels * n_models
@@ -771,6 +792,12 @@ class AMICATorchNG:
         self.do_mean = do_mean
         self.do_sphere = do_sphere
         self.do_approx_sphere = do_approx_sphere
+        # Explicit PCA reduction, validated by the policy shared with the NumPy
+        # and MLX backends (pamica/rank.py, issue #323) so a bad value fails
+        # here rather than as a silently wrongly sized or nan_ll fit; then one
+        # log line for any part of it a fit will ignore.
+        validate_pca_reduction(pcakeep, pcadb)
+        log_ignored_pca_request(pcakeep, pcadb, do_sphere)
         self.pcakeep = pcakeep
         self.pcadb = pcadb
 
@@ -2312,12 +2339,15 @@ class AMICATorchNG:
             while ``ll_history[i]`` is the likelihood of the parameters
             before it, so the two are one update apart (issue #161).
             Incompatible with PCA reduction, same as :meth:`mir` itself. This
-            upfront gate only sees explicit ``pcakeep``/``pcadb`` (the sphere
-            for THIS fit does not exist yet, so automatic ``mineig``/
-            ``mineig_rel`` rank reduction cannot be checked here); that case is
-            instead caught once the sphere exists, inside the per-waypoint
-            :meth:`mir` call below, whose ``ValueError`` is already caught and
-            logged rather than propagated (issue #283).
+            upfront gate only sees an explicit reduction request: ``pcakeep <
+            n_channels`` or any ``pcadb`` while sphering (``pcakeep >=
+            n_channels`` keeps every dimension, and ``do_sphere=False`` never
+            reduces, so neither is one; issue #323). The sphere for THIS
+            fit does not exist yet, so automatic ``mineig``/``mineig_rel`` rank
+            reduction cannot be checked here; that case is instead caught once
+            the sphere exists, inside the per-waypoint :meth:`mir` call below,
+            whose ``ValueError`` is already caught and logged rather than
+            propagated (issue #283).
 
         Returns
         -------
@@ -2381,9 +2411,9 @@ class AMICATorchNG:
             raise ValueError(
                 f"X must be a 2D array (n_channels, n_samples), got shape {X.shape}"
             )
-        if X.shape[0] != self.n_channels:
+        if X.shape[0] != self._n_input_channels:
             raise ValueError(
-                f"X has {X.shape[0]} channels, model expects {self.n_channels}"
+                f"X has {X.shape[0]} channels, model expects {self._n_input_channels}"
             )
         if mir_step < 0:
             raise ValueError(f"mir_step must be >= 0, got {mir_step}")
@@ -2396,13 +2426,20 @@ class AMICATorchNG:
             # "did an E-step ever actually run", only "did stop_reason end
             # up degenerate". Reject up front instead.
             raise ValueError(f"max_iter must be >= 1, got {max_iter}")
-        if mir_step > 0 and self._pca_reduction_requested():
+        if mir_step > 0 and self._pca_reduction_requested(X.shape[0]):
             raise ValueError(
                 "mir_step > 0 is incompatible with PCA reduction "
                 "(pcakeep/pcadb): the sphere is rank-deficient, so MIR's "
                 "log-Jacobian term is undefined. Rejected up front rather "
                 "than failing mid-fit at the first waypoint."
             )
+
+        # Size every fit from the input geometry. _preprocess shrinks
+        # n_channels/n_comps to the kept rank, so without this a refit, or the
+        # second of n_restarts, would start from the previous fit's rank.
+        # A no-op for full-rank data, whose sizes never change.
+        self.n_channels = self._n_input_channels
+        self.n_comps = self.n_channels * self.n_models
 
         X_t = self._preprocess(X)
         n_total = X_t.shape[1]
@@ -2961,10 +2998,13 @@ class AMICATorchNG:
 
         Differs from ``n_channels`` only when rank reduction shrank the model to
         the detected numerical rank (issue #223); equal to it for full-rank data
-        and before :meth:`fit`. Derived rather than stored, so it cannot drift
-        from the sphere it describes.
+        and before :meth:`fit`. Read off the sphere whenever one exists, so it
+        cannot drift from the sphere it describes; before the first fit it is
+        the constructor's channel count, the width :meth:`fit` accepts.
         """
-        return self.n_channels if self.sphere is None else int(self.sphere.shape[1])
+        if self.sphere is None:
+            return self._n_input_channels
+        return int(self.sphere.shape[1])
 
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space.
@@ -3000,9 +3040,17 @@ class AMICATorchNG:
         self._check_model_idx(model_idx)
         return self.W[:, :, model_idx].T.cpu().numpy()
 
-    def _pca_reduction_requested(self) -> bool:
-        """Whether an explicit PCA-reduction parameter (``pcakeep``/``pcadb``)
-        was passed to the constructor.
+    def _pca_reduction_requested(self, n_channels: int) -> bool:
+        """Whether the explicit ``pcakeep``/``pcadb`` asks to fit fewer than
+        ``n_channels`` dimensions (the shared predicate,
+        :func:`pamica.rank.pca_reduction_requested`, issue #323).
+
+        ``n_channels`` is the channel count of the data being fitted, not
+        ``self.n_channels``, which :meth:`_preprocess` shrinks to the kept rank.
+        ``pcakeep >= n_channels`` is not a request (it keeps every dimension);
+        any ``pcadb`` is, since whether it cuts anything depends on the
+        eigenvalues; ``pcakeep`` wins when both are set; and with
+        ``do_sphere=False`` nothing is, since no reduction happens then.
 
         Config-only, not geometry: used solely by :meth:`_fit_once`'s upfront
         ``mir_step`` gate, which runs BEFORE :meth:`_preprocess` builds this
@@ -3011,7 +3059,9 @@ class AMICATorchNG:
         knowable. Use :meth:`_pca_reduced` instead wherever a fitted sphere
         already exists (issue #283).
         """
-        return self.pcakeep is not None or self.pcadb is not None
+        return pca_reduction_requested(
+            self.pcakeep, self.pcadb, n_channels, self.do_sphere
+        )
 
     def _pca_reduced(self) -> bool:
         """Whether the fitted sphere is rank-reduced (non-square).
@@ -3600,8 +3650,11 @@ class AMICATorchNG:
             "do_mean": self.do_mean,
             "do_sphere": self.do_sphere,
             "do_approx_sphere": self.do_approx_sphere,
-            "pcakeep": self.pcakeep,
-            "pcadb": self.pcadb,
+            # Plain int/float: the validator accepts numpy scalars (np.int64),
+            # which torch.load(weights_only=True) refuses to unpickle (issue
+            # #323). Same cast as AMICAMLXNG.state_dict, whose JSON needs it.
+            "pcakeep": None if self.pcakeep is None else int(self.pcakeep),
+            "pcadb": None if self.pcadb is None else float(self.pcadb),
             "mineig": self.mineig,
             "mineig_rel": self.mineig_rel,
             "seed": self.seed,
@@ -3726,6 +3779,11 @@ class AMICATorchNG:
                 setattr(self, name, tensor.to(self.device, self.dtype))
         # sphere was just replaced, so any cached back-map describes the old one.
         self._sphere_pinv = None
+        # config's n_channels is the fitted (possibly reduced) rank, so the
+        # constructor above set the input count to it; the restored sphere's
+        # width is the true input count, which a refit validates X against.
+        assert self.sphere is not None  # just set by the loop above
+        self._n_input_channels = int(self.sphere.shape[1])
 
         extra = state["extra"]
         self.sldet = extra["sldet"]
