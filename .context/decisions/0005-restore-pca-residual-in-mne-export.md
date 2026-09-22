@@ -6,10 +6,10 @@
 
 ## Context
 
-A rank-reduced fit, from an explicit `pcakeep`/`pcadb` or from automatic numerical-rank detection, models only the retained PCA subspace.
+A rank-reduced fit, from an explicit `pcakeep`/`pcadb` or from automatic numerical-rank detection, models only the retained principal component analysis (PCA) subspace.
 The rest of the data, the PCA residual, is never part of the decomposition.
-Issue #322, filed by an external tester working on Maxwell-filtered MEG, reported that `AMICAICA.apply` silently drops that residual.
-`to_mne_ica` exported only the retained rows of the PCA basis, so on the bundled 32-channel EEG with `pcakeep=20`,
+Issue #322, filed by an external tester working on Maxwell-filtered magnetoencephalography (MEG), reported that `AMICAICA.apply` silently drops that residual.
+`to_mne_ica` exported only the retained rows of the PCA basis, so on the bundled 32-channel electroencephalography (EEG) recording with `pcakeep=20`,
 `apply` with nothing excluded returned the input with a relative error of 0.080.
 The 12 discarded dimensions can carry signal of interest,
 and a user who excludes one artifact component does not expect every dimension outside the model to disappear with it.
@@ -33,11 +33,11 @@ MNE's own `ICA.fit` stores the full PCA, so its default `apply` restores the res
 `AMICAICA.fit` computes the full orthonormal PCA basis once, after the backend fit succeeds and before publishing state,
 and stores it as `pca_components_` (`n_channels x n_channels`) and `pca_explained_variance_` (`n_channels`).
 The retained rows are exactly the basis the export always used.
-For a reduced sphere, the residual rows are an orthonormal basis of the sphere's null space (from a full SVD),
+For a reduced sphere, the residual rows are an orthonormal basis of the sphere's null space (from a full singular value decomposition),
 rotated to the eigenvectors of the fit data's population covariance restricted to that subspace and ordered by descending variance.
 The covariance is accumulated over column blocks, so no full-size copy of the data is made and no time series is stored.
 `to_mne_ica` exports the full basis and leaves `n_pca_components` at `None`,
-so MNE's `apply` restores the residual by default, as MNE's own ICA does.
+so MNE's `apply` restores the residual by default, as MNE's own independent component analysis (ICA) does.
 The reference (rank-reduced) reconstruction is MNE's existing knob, `apply(..., n_pca_components=ica.n_components_)`;
 no new keyword is added.
 
