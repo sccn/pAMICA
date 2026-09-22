@@ -16,13 +16,15 @@ density family, GG shape, component sharing -- stays inspectable via
 :meth:`AMICAICA.get_pdftype` / :meth:`get_rho` / :meth:`shared_components`
 (issue #142), and the separation-quality metrics :meth:`AMICAICA.mir` /
 :meth:`pmi` run directly on an MNE object (issue #143). Rank-deficient input is supported: the model is sized to the
-numerical rank and exported through MNE's native ``pca_components_`` (issue #225).
+numerical rank and exported through MNE's native ``pca_components_`` (issue #225),
+together with the discarded PCA residual, so ``apply`` restores it (issue #322).
 ``bad_*`` annotations are respected like MNE's own ICA (issue #251):
 :meth:`AMICAICA.fit` omits annotated samples by default (recorded in
 ``good_sample_mask_``), and the scoring methods evaluate the passed instance's
 good samples, keeping per-sample outputs timeline-aligned via ``NaN`` columns.
 """
 
+import logging
 from typing import Optional, Union
 
 import numpy as np
@@ -38,6 +40,99 @@ from ..amica import AMICA
 from ..torch_impl import PDFTYPE_NAMES
 
 __all__ = ["AMICAICA", "PDFTYPE_NAMES"]
+
+logger = logging.getLogger(__name__)
+
+# Columns per block when accumulating the fit covariance for the PCA residual
+# (issue #322). Bounds the transient to (n_channels, _COV_BLOCK) float64, about
+# 20 MB at 306 channels, however long the recording is.
+_COV_BLOCK = 8192
+
+
+def _population_covariance(X: np.ndarray, block: int = _COV_BLOCK) -> np.ndarray:
+    """Population covariance (divide by ``N``) of the rows of ``X``.
+
+    Matches the backend's sphering covariance (centered by the data mean,
+    ``torch.cov(..., correction=0)``). Accumulated in two passes over column
+    blocks, the mean and then the centered blocks, so no full-size centered
+    copy of ``X`` is ever made: only the ``(n_channels, n_channels)``
+    accumulator persists, which keeps long 306-channel MEG recordings cheap.
+    """
+    n_ch, n = X.shape
+    mean = np.zeros(n_ch, dtype=np.float64)
+    for start in range(0, n, block):
+        mean += X[:, start : start + block].sum(axis=1)
+    mean /= n
+    cov = np.zeros((n_ch, n_ch), dtype=np.float64)
+    for start in range(0, n, block):
+        centered = X[:, start : start + block] - mean[:, None]
+        cov += centered @ centered.T
+    return cov / n
+
+
+def _pca_basis(sphere: np.ndarray, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Full orthonormal PCA basis of a fit: retained rows, then the residual.
+
+    ``sphere`` is the fitted ``(n_kept, n_channels)`` sphere as a float64 array
+    and ``X`` the ``(n_channels, n_samples)`` data it was fitted on (after the
+    channel-type pre-whitener). Plain NumPy on those two arrays, so any backend
+    that exposes its sphere can feed it.
+
+    The first ``n_kept`` rows are the retained PCA subspace, the basis the
+    export has always used (issue #225): the eigenbasis of a square symmetric
+    sphere, or the right singular vectors of a reduced one, ordered by
+    descending explained variance. For a reduced sphere the remaining
+    ``n_channels - n_kept`` rows span its null space, the subspace rank
+    reduction discarded (issue #322). They come from a full SVD of the sphere,
+    rotated to the eigenvectors of the fit data's population covariance
+    restricted to that subspace, so they too are ordered by descending
+    variance, and their variances are the discarded covariance eigenvalues
+    (clipped at 0 against round-off). The covariance is only computed when
+    there is a residual, so a full-rank fit never touches ``X``.
+
+    Returns
+    -------
+    pca_components : np.ndarray of shape (n_channels, n_channels)
+        Orthonormal rows.
+    pca_explained_variance : np.ndarray of shape (n_channels,)
+        Variance of the fit data along each row.
+    """
+    n_kept, n_in = sphere.shape
+    if n_kept == n_in:
+        # Orthonormal eigenbasis of the symmetric-ZCA sphere
+        # (sphere = V diag(1/sqrt(cov_eval)) V.T). eigh gives ascending
+        # sphere-eigenvalues (= 1/sqrt(cov_eval)); reorder to descending
+        # explained variance so pca_components_ matches MNE's PCA convention.
+        sphere_evals, evecs = np.linalg.eigh(sphere)
+        cov_evals = 1.0 / sphere_evals**2
+        order = np.argsort(cov_evals)[::-1]
+        v = evecs[:, order]
+        return v.T, cov_evals[order]
+
+    # Rank-reduced fit (issue #223): the sphere is (n_kept, n_in), so it has no
+    # eigendecomposition. Its right singular vectors give the same thing eigh
+    # gives in the square case -- an orthonormal basis of the retained
+    # subspace -- and MNE models this natively, since pca_components_ rows
+    # beyond n_components_ are residual PCA components.
+    _, svals, vt = np.linalg.svd(sphere, full_matrices=False)
+    # Singular values of the sphere are 1/sqrt(cov eigenvalue); descending
+    # explained variance is therefore ascending singular value.
+    order = np.argsort(svals)
+    retained = vt[order]
+    cov_evals = 1.0 / svals[order] ** 2
+
+    # The residual (issue #322): the sphere's null space, which the fit never
+    # modeled. Rotate it to the eigenvectors of the fit covariance restricted
+    # to that subspace, so its rows carry meaningful descending variances for
+    # MNE's explained-variance selection (a float n_pca_components).
+    _, _, vt_full = np.linalg.svd(sphere, full_matrices=True)
+    null = vt_full[n_kept:].T  # (n_in, n_in - n_kept), orthonormal columns
+    res_cov = null.T @ _population_covariance(X) @ null
+    res_evals, rot = np.linalg.eigh(res_cov)
+    res_order = np.argsort(res_evals)[::-1]
+    residual = (null @ rot[:, res_order]).T
+    res_evals = np.clip(res_evals[res_order], 0.0, None)
+    return np.vstack([retained, residual]), np.concatenate([cov_evals, res_evals])
 
 
 def _compute_pre_whitener(data: np.ndarray, info) -> np.ndarray:
@@ -152,6 +247,19 @@ class AMICAICA:
     pre_whitener_ : np.ndarray of shape (n_channels, 1)
         Per-channel-type scaling applied before fitting, following MNE's own ICA
         convention (one ``std`` per channel type, applied as ``X / pre_whitener_``).
+    pca_components_ : np.ndarray of shape (n_channels, n_channels)
+        The full orthonormal PCA basis of the fit, in pre-whitened channel
+        space, computed once at fit time and exported as the MNE ICA's
+        ``pca_components_``. The first ``n_components_`` rows span the
+        subspace AMICA modeled. For a rank-reduced fit the remaining rows span
+        the PCA residual that reduction discarded, which MNE's ``apply``
+        restores by default (issue #322); a full-rank fit has no such rows.
+        Shared by every model of a multi-model fit (one sphere per fit).
+    pca_explained_variance_ : np.ndarray of shape (n_channels,)
+        Variance of the pre-whitened fit data along each row of
+        ``pca_components_``, in descending order: the retained rows carry the
+        largest covariance eigenvalues and the residual rows the ones the
+        reduction discarded (clipped at 0 against round-off).
     reject_by_annotation_ : bool
         Whether the last ``Raw`` fit dropped ``bad_*``-annotated samples
         (issue #251). Always ``False`` for an ``Epochs`` fit.
@@ -172,8 +280,8 @@ class AMICAICA:
     Model ``h``'s AMICA transform is ``S = W_fort @ (sphere @ (X - mean) - c_h)``,
     where ``c_h`` is that model's data-space center (identically zero for a
     single model, since the ``c`` update is gated to ``n_models > 1``). MNE
-    computes sources as
-    ``S = unmixing_matrix_ @ pca_components_ @ (X / pre_whitener_ - pca_mean_)``.
+    computes sources as ``S = unmixing_matrix_ @ pca_components_[:n_components_]
+    @ (X / pre_whitener_ - pca_mean_)``.
     ``X`` is scaled by channel type before fitting, exactly as MNE's own ICA does,
     so the two pipelines agree; AMICA's sphering absorbs a global rescale, so this
     changes nothing for single-channel-type data. Writing the symmetric-ZCA ``sphere`` as
@@ -189,10 +297,23 @@ class AMICAICA:
 
     Rank-deficient input -- Maxwell-filtered MEG, average referencing, channel
     interpolation, or an explicit ``pcakeep``/``pcadb`` -- is supported. The sphere
-    is then ``(n_kept, n_channels)`` and has no eigendecomposition, so the export
-    takes its right singular vectors instead; MNE represents the result natively,
-    since ``pca_components_`` is ``(n_components, n_channels)``. ``n_components_``
+    is then ``(n_kept, n_channels)`` and has no eigendecomposition, so the
+    retained basis is its right singular vectors instead. ``n_components_``
     reports the retained rank.
+
+    The discarded PCA subspace (the residual) is never part of the
+    decomposition, and the export keeps it: ``pca_components_`` holds the full
+    ``(n_channels, n_channels)`` basis, retained rows first, and MNE's
+    ``ICA.apply`` keeps rows past ``n_components_`` as residual PCA components.
+    So :meth:`apply` restores the residual by default, as MNE's own ICA does,
+    and excluding a component removes only that component (issue #322). **This
+    goes beyond the Fortran reference**, whose output has no representation of
+    the residual (the written sphere's rows past ``numeigs`` are zero), so any
+    back-projection from it drops the residual. Sources, component maps and the
+    log-likelihood are unchanged; only reconstruction differs. For the
+    reference's rank-reduced reconstruction pass MNE's own
+    ``n_pca_components=ica.n_components_`` to :meth:`apply`. See
+    ``docs/guides/amica-differences.md`` and ADR 0005.
     """
 
     def __init__(
@@ -214,6 +335,8 @@ class AMICAICA:
         self.ch_names_: Optional[list] = None
         self.n_components_: Optional[int] = None
         self.pre_whitener_: Optional[np.ndarray] = None
+        self.pca_components_: Optional[np.ndarray] = None
+        self.pca_explained_variance_: Optional[np.ndarray] = None
         self.reject_by_annotation_: bool = False
         self.good_sample_mask_: Optional[np.ndarray] = None
         self.converged_: bool = False
@@ -259,7 +382,12 @@ class AMICAICA:
             Forwarded to :meth:`AMICA.fit` (e.g. ``max_iter``, ``lrate``,
             ``do_newton``) and the backend constructor (e.g. ``block_size``).
             ``pcakeep``/``pcadb`` (PCA reduction) are supported: the export
-            builds ``pca_components_`` from the reduced sphere (issue #225).
+            builds the retained basis from the reduced sphere (issue #225),
+            and ``fit`` also computes the basis of the discarded residual
+            from the fit data's covariance, so :meth:`apply` restores it by
+            default (issue #322; ``n_pca_components=ica.n_components_``
+            gives the reference's rank-reduced reconstruction). See
+            ``pca_components_``.
 
         Returns
         -------
@@ -353,6 +481,20 @@ class AMICAICA:
         )
         amica.fit(X, **fit_kwargs)
 
+        # The full PCA basis (retained rows, then the residual a rank-reduced
+        # fit discarded), computed once here from the fitted sphere and the fit
+        # data so nothing is recomputed from data at apply time (issue #322).
+        # The sphere does not depend on the model, so one basis serves every
+        # per-model export.
+        backend = amica.model_
+        if backend is None or backend.sphere is None:
+            raise RuntimeError(
+                "AMICAICA.fit: the backend returned without a fitted sphere, so "
+                "the PCA basis cannot be built."
+            )
+        sphere = np.asarray(backend.sphere.cpu().numpy(), dtype=np.float64)
+        pca_components, pca_explained_variance = _pca_basis(sphere, X)
+
         # Publish to self only after every fallible step above succeeds, so a
         # failed (re)fit leaves the previously fitted state intact rather than a
         # mix of the old model and the new attempt's metadata (mirrors the
@@ -360,14 +502,15 @@ class AMICAICA:
         self.info_ = picked.info
         self.ch_names_ = ch_names
         self.pre_whitener_ = pre_whitener
+        self.pca_components_ = pca_components
+        self.pca_explained_variance_ = pca_explained_variance
         self.good_sample_mask_ = good_sample_mask
         self.reject_by_annotation_ = bool(reject_by_annotation) if is_raw else False
         # The fitted model dimension, which is the input channel count unless
         # rank reduction shrank it (issue #223). MNE represents this natively:
-        # pca_components_ is (n_components, n_channels).
-        self.n_components_ = (
-            amica.model_.n_channels if amica.model_ is not None else X.shape[0]
-        )
+        # the first n_components_ rows of pca_components_ are the ICA subspace
+        # and any further rows are residual PCA components (issue #322).
+        self.n_components_ = backend.n_channels
         self._n_samples = X.shape[1]
         self._fit_kind = fit_kind
         self.amica_ = amica
@@ -395,6 +538,17 @@ class AMICAICA:
         subsequent :meth:`apply`/:meth:`get_sources` calls for that model until
         the next :meth:`fit`.
 
+        The export carries the full ``(n_channels, n_channels)`` PCA basis
+        computed at fit time (see ``pca_components_``), with ``n_components_``
+        the retained rank and ``n_pca_components`` left at ``None``. For a
+        rank-reduced fit the rows past ``n_components_`` span the discarded
+        PCA residual, which MNE keeps as residual PCA components, so the
+        exported ICA's ``apply`` restores it by default (issue #322). This goes
+        beyond the Fortran reference, whose output has no representation of
+        the residual; ``apply(..., n_pca_components=ica.n_components_)`` gives
+        the reference's rank-reduced reconstruction. When a residual is
+        exported, its dimension and that opt-out are logged at INFO.
+
         Parameters
         ----------
         model_idx : int, default=0
@@ -410,7 +564,13 @@ class AMICAICA:
             return self._mne_ica_cache[model_idx]
 
         amica = self.amica_
-        if amica is None or amica.model_ is None or self.ch_names_ is None:
+        if (
+            amica is None
+            or amica.model_ is None
+            or self.ch_names_ is None
+            or self.pca_components_ is None
+            or self.pca_explained_variance_ is None
+        ):
             raise RuntimeError(
                 "AMICAICA: internal state is inconsistent; refit before to_mne_ica()."
             )
@@ -422,42 +582,28 @@ class AMICAICA:
             )
 
         mean = backend.mean.cpu().numpy().ravel()
-        sphere = backend.sphere.cpu().numpy()
+        sphere = np.asarray(backend.sphere.cpu().numpy(), dtype=np.float64)
         w_fort = amica.get_unmixing_matrix(model_idx=model_idx)
         c = backend.c.cpu().numpy()[:, model_idx]  # per-model center (sphered space)
-        n_ch, n_in = sphere.shape
+        n_ch = sphere.shape[0]
 
-        if n_ch == n_in:
-            # Orthonormal eigenbasis of the symmetric-ZCA sphere
-            # (sphere = V diag(1/sqrt(cov_eval)) V.T). eigh gives ascending
-            # sphere-eigenvalues (= 1/sqrt(cov_eval)); reorder to descending
-            # explained variance so pca_components_ matches MNE's PCA convention.
-            sphere_evals, evecs = np.linalg.eigh(sphere)
-            cov_evals = 1.0 / sphere_evals**2
-            order = np.argsort(cov_evals)[::-1]
-            v = evecs[:, order]
-            cov_evals = cov_evals[order]
-        else:
-            # Rank-reduced fit (issue #223): the sphere is (n_kept, n_in), so it
-            # has no eigendecomposition. Its right singular vectors give the same
-            # thing eigh gives in the square case -- an orthonormal basis of the
-            # retained subspace -- and MNE models this natively, since
-            # pca_components_ is (n_components, n_channels).
-            _, svals, vt = np.linalg.svd(sphere, full_matrices=False)
-            # Singular values of the sphere are 1/sqrt(cov eigenvalue); descending
-            # explained variance is therefore ascending singular value.
-            order = np.argsort(svals)
-            v = vt[order].T
-            cov_evals = 1.0 / svals[order] ** 2
-
-        pca_components = v.T
+        # The full PCA basis was computed once at fit time (see _pca_basis): the
+        # first n_ch rows span the ICA subspace, and any rows after them are the
+        # residual a rank-reduced fit discarded. MNE keeps those as residual PCA
+        # components in apply (n_pca_components=None keeps every row), which is
+        # what restores the residual (issue #322).
+        pca_components = self.pca_components_.copy()
+        cov_evals = self.pca_explained_variance_.copy()
+        n_residual = pca_components.shape[0] - n_ch
+        v = self.pca_components_[:n_ch].T  # retained basis, as columns
         unmixing = w_fort @ sphere @ v
         # Fold the per-model center c (in sphered space) into pca_mean via the
         # data-space offset pinv(sphere) @ c, so MNE's (X - pca_mean) reproduces
         # AMICA's W(sphere(X - mean) - c). c is identically zero for a single
         # model, leaving pca_mean == mean bit-for-bit. pinv rather than solve: the
         # sphere is non-square under rank reduction, and for a square sphere the
-        # two agree to round-off.
+        # two agree to round-off. pinv(sphere) @ c lies in the sphere's row
+        # space, so the fold never reaches the residual rows.
         pca_mean = mean + np.linalg.pinv(sphere) @ c if np.any(c) else mean
 
         ica = _MNEICA(
@@ -487,6 +633,19 @@ class AMICAICA:
         ica._update_ica_names()
         ica.current_fit = self._fit_kind
 
+        if n_residual:
+            logger.info(
+                "AMICAICA.to_mne_ica: exporting %d ICA components plus a "
+                "%d-dimensional PCA residual (the subspace rank reduction "
+                "discarded before fitting). ICA.apply restores the residual by "
+                "default, which goes beyond the Fortran reference; pass "
+                "n_pca_components=%d (ica.n_components_) to apply for the "
+                "reference's rank-reduced reconstruction (issue #322).",
+                n_ch,
+                n_residual,
+                n_ch,
+            )
+
         self._mne_ica_cache[model_idx] = ica
         return ica
 
@@ -509,6 +668,17 @@ class AMICAICA:
         through to MNE's ``ICA.apply``. Pass ``exclude=[...]`` (or set it on the
         exported ICA) to drop components; with no exclusions this reconstructs
         the input.
+
+        For a rank-reduced fit (``pcakeep``/``pcadb`` or automatic rank
+        detection) the PCA residual, the subspace the reduction discarded and
+        AMICA never modeled, is **restored by default**: excluding a component
+        removes that component's back-projection and nothing else, as with
+        MNE's own ICA (issue #322). This differs from the Fortran reference,
+        whose back-projection reconstructs only the retained subspace. To get
+        that rank-reduced reconstruction, pass
+        ``n_pca_components=ica.n_components_``; a float ``n_pca_components``
+        keeps residual rows by cumulative explained variance, following MNE.
+        A full-rank fit has no residual, so the option changes nothing there.
         """
         return self.to_mne_ica(model_idx).apply(inst, *args, **kwargs)
 

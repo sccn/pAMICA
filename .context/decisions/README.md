@@ -26,3 +26,7 @@ Add new entries here as you create ADRs:
 
 - ADR 0000 - template (do not edit)
 - ADR 0001 - [Rewrite the PyTorch backend as a natural-gradient EM port, not Adam+autograd](0001-torch-backend-natural-gradient-em.md) (accepted)
+- ADR 0002 - [Adaptive-PDF selection via the amica15 density families](0002-adaptive-pdf-families.md) (accepted)
+- ADR 0003 - [Return the best-log-likelihood iterate from AMICATorchNG.fit](0003-best-iterate-safeguard.md) (accepted)
+- ADR 0004 - [Rank-deficient input handling and a relative eigenvalue floor](0004-rank-deficient-input-handling.md) (accepted)
+- ADR 0005 - [Restore the PCA residual in the MNE export](0005-restore-pca-residual-in-mne-export.md) (accepted)
