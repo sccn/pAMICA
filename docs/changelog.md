@@ -5,6 +5,46 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 3 of epic #324: shared params-file reader for every backend (issue
+  #304).** `pamica/fortran_params.py` gains `read_params_file`, the single
+  params-file entry point every backend now uses: it content-sniffs JSON vs.
+  the literal Fortran `input.param` text and returns pamica's canonical keys
+  either way. A JSON file's own alias spellings (`min_grad_norm`, `max_decs`,
+  `numrej`, `num_mix_comps`, `share_int`) are translated to the
+  canonical/constructor names via one table, `JSON_ALIAS_TO_CANONICAL`; a
+  file carrying both an alias and its canonical key raises `ValueError`
+  naming both. `writestep`/`do_history`/`histstep` moved from
+  `FORTRAN_UNSUPPORTED_KEYS` to translated (identity) keys -- the legacy
+  NumPy backend already implements periodic on-disk checkpointing under
+  these names, and the reader now translates what any backend supports
+  rather than only what its one production caller (the PyTorch wrapper) did;
+  torch/MLX have no matching mechanism yet (issue #312).
+  - **Behavior change:** `AMICA.from_params_file` now applies
+    `sample_params.json`'s own `max_decs`/`min_grad_norm`/`share_int`
+    settings (as `maxdecs`/`min_nd`/`share_iter`) instead of silently
+    dropping them into the "not applied" warning -- their raw JSON spelling
+    previously matched neither a named `fit()` parameter nor an
+    `AMICATorchNG` keyword.
+  - **Behavior change (legacy NumPy backend):** `AMICA_NumPy(params_file=...)`
+    now accepts the literal Fortran `input.param` text format, not just
+    JSON -- previously a non-JSON file raised a raw `json.JSONDecodeError`.
+    A params-file setting this backend does not consume is now named in one
+    `logger.warning` instead of silently vanishing.
+  - **Breaking change (legacy NumPy backend):** `AMICA_NumPy.from_json_file`
+    is renamed to `from_params_file` (matching the PyTorch wrapper's
+    classmethod name, and now accepting both formats), with no alias left
+    behind.
+  - **Breaking change (legacy NumPy backend):** `AMICA_NumPy(pdftype=...)`
+    with anything other than `0` now raises `NotImplementedError` at
+    construction -- this backend implements only the generalized-Gaussian
+    source density, and previously silently ignored the setting (`pdftype`
+    is read but never consulted by the fit path). `numpy_impl/params.json`'s
+    bundled default `pdftype` changed `1` -> `0` to match; since the value
+    was never read, no previously-passing fit's numerics change.
+  - `validate_implementations.py`'s own JSON-schema-to-Fortran-keyword alias
+    table (`_FORTRAN_ALIASES`) and its `max_decs` special case are now
+    derived from the shared reader (`fortran_params.PAMICA_KEY_TO_FORTRAN_KEY`)
+    instead of duplicating the knowledge.
 - **Epic #278 polish round: audit-driven fixes ahead of merge to `dev`.**
   `AMICAMLXNG` gained `variance_order` (issue #92), the EEGLAB
   back-projected-variance component order, closing the one accessor gap the

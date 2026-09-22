@@ -566,34 +566,58 @@ model = AMICA.from_params_file("sample_data/input.param")   # Fortran text forma
 model = AMICA.from_params_file("sample_data/sample_params.json")  # JSON, as before
 ```
 
-The translation lives in `pamica/fortran_params.py` (`read_fortran_param_file`), which parses
-Fortran's whitespace-separated `key value` lines (`#` full-line comments, plus a deliberately
-permissive inline `" #..."` trailing comment; ints/floats/strings, including Fortran's `d`/`D`
-double-precision exponent marker; `0`/`1` boolean flags using Fortran's own `k == 1` semantics)
-into a dict targeting pamica's actual Python call surface: `AMICA.fit`'s named parameters
-(`max_iter`, `lrate`, `do_mean`, `do_sphere`, `do_newton`) and `AMICATorchNG` constructor
-keywords. It was built by reading every `case('...')` arm of `amica15.f90`'s parameter parser
-(~amica15.f90:3100-3700) against `AMICATorchNG`'s constructor and `validate_implementations.py`'s
-`_NG_PARAMS`/`_HANDLED_KEYS`. `AMICA.from_params_file` (which sniffs `.param` vs `.json` content
-rather than trusting the file extension) stashes the translated dict on the returned instance, and
+Every backend reads through one function now (issue #304): `pamica.fortran_params.read_params_file`
+is the single params-file entry point, used by `AMICA.from_params_file` above and by
+`AMICA_NumPy(params_file=...)` / `AMICA_NumPy.from_params_file` (the legacy backend's `params_file`
+used to accept only JSON, raising a raw `json.JSONDecodeError` on a Fortran text file). It
+content-sniffs the same way (JSON if the file starts with `{`/`[`, Fortran text otherwise -- a
+JSON top level that is not an object raises `ValueError`) and returns pamica's canonical keys
+either way. A JSON file's own keys pass through one alias table, `JSON_ALIAS_TO_CANONICAL`:
+pamica's JSON schema (`sample_params.json`, `numpy_impl/params.json`) spells five settings
+differently from the canonical/constructor name --
+
+| JSON schema key   | canonical pamica key | Note                                          |
+| ------------------ | --------------------- | ---------------------------------------------- |
+| `min_grad_norm`    | `min_nd`              | same rename Fortran's own keyword needs        |
+| `max_decs`         | `maxdecs`             | same rename Fortran's own keyword needs        |
+| `numrej`           | `maxrej`              | same rename Fortran's own keyword needs        |
+| `num_mix_comps`    | `num_mix`             | same rename Fortran's own keyword needs        |
+| `share_int`        | `share_iter`          | JSON-schema-only; Fortran's own spelling already matches |
+
+-- and a file carrying both a setting's alias and its canonical key (e.g. both `max_decs` and
+`maxdecs`) raises `ValueError` naming both rather than picking one silently. Applying this table
+is itself a behavior change for the PyTorch wrapper: `sample_params.json`'s own `max_decs`/
+`min_grad_norm`/`share_int` settings previously matched neither a named `fit()` parameter nor an
+`AMICATorchNG` keyword under their raw JSON spelling, and silently landed in the "not applied"
+warning; fitting from that file now applies them.
+
+The Fortran-text branch (`read_fortran_param_file`) parses Fortran's whitespace-separated
+`key value` lines (`#` full-line comments, plus a deliberately permissive inline `" #..."`
+trailing comment; ints/floats/strings, including Fortran's `d`/`D` double-precision exponent
+marker; `0`/`1` boolean flags using Fortran's own `k == 1` semantics) into a dict targeting
+pamica's actual Python call surface: `AMICA.fit`'s named parameters (`max_iter`, `lrate`,
+`do_mean`, `do_sphere`, `do_newton`) and `AMICATorchNG` constructor keywords. It was built by
+reading every `case('...')` arm of `amica15.f90`'s parameter parser (~amica15.f90:3100-3700)
+against `AMICATorchNG`'s constructor and `validate_implementations.py`'s `_NG_PARAMS`/
+`_HANDLED_KEYS`. `AMICA.from_params_file` stashes the translated dict on the returned instance, and
 `fit()` applies it as **per-call defaults**: an argument passed explicitly to `fit()` always wins
 over the file's value, whether that argument is one of the five named parameters above or an
 `AMICATorchNG` keyword passed through `**kwargs` (e.g. `block_size`, `rho0`, `newt_start`).
 
-89 Fortran keywords are recognized; 57 (56 distinct pamica-side names) are translated and 32 are
+89 Fortran keywords are recognized; 60 (59 distinct pamica-side names) are translated and 29 are
 deliberately unsupported (checkpoint warm-start, per-family EM freeze toggles, FIR/DFT
-pre-filtering, console/output-file reporting, ...) --
+pre-filtering, console reporting, ...) --
 a keyword this reader drops always fires a `logger.warning` naming it, whether that is because
 it is a real Fortran keyword pamica has no equivalent for, or because it is not a Fortran keyword
 this reader recognizes at all (the bundled `sample_data/input.param` template itself carries three
 such stale entries -- `field_blocksize`, `doPCA`, `load_W` -- that predate this parser and are not
 `case('...')` arms in `amica15.f90` either, so the reference binary already ignores them too). A
 malformed line (a keyword with no value, or a non-empty file where not one keyword is recognized
-by the reference parser at all -- e.g. a JSON file mistakenly handed to this reader) raises
-`ValueError` rather than being dropped or defaulted silently. Data-location metadata the file
-carries (`files`, `outdir`, `data_dim`, `field_dim`, ...) matches no `fit()`/`AMICATorchNG`
-parameter by design; `fit()` names these in a single warning as "not applied" rather than
-forwarding or silently dropping them.
+by the reference parser at all -- e.g. a JSON file mistakenly handed to `read_fortran_param_file`
+directly) raises `ValueError` rather than being dropped or defaulted silently. Data-location
+metadata the file carries (`files`, `outdir`, `data_dim`, `field_dim`, ...) matches no
+`fit()`/`AMICATorchNG` parameter by design; `fit()` names these in a single warning as
+"not applied" rather than forwarding or silently dropping them.
 
 Only three keywords are renamed, because Fortran spells them differently from the pamica-side
 (constructor) name:
@@ -617,5 +641,22 @@ names and Fortran's arithmetic stepping, so a file carrying them is applied rath
 about and dropped. pamica's *defaults* for the three bounds differ (Fortran's 128-1024 is far
 below where any pamica backend peaks), but a file that sets them is honored as written.
 
+`writestep`, `do_history` and `histstep` moved the same way with issue #304: the reader translates
+what *any* pamica backend can honor, not just the one a given call targets, and each consumer
+warns about what *it* cannot apply. The legacy NumPy backend is the one backend that implements
+periodic on-disk checkpointing under these exact names today (`numpy_impl/core.py`'s fit loop and
+`_write_history`); torch/MLX have no matching mechanism yet (issue #312), so `AMICA.fit` names
+these three in its own "not applied" warning instead of silently dropping them.
+
 Every other translated keyword keeps its Fortran spelling; see `FORTRAN_TO_PAMICA_KEY` and
 `FORTRAN_UNSUPPORTED_KEYS` in `pamica/fortran_params.py` for the full tables.
+
+The legacy NumPy backend reads through the same `read_params_file` (`AMICA_NumPy(params_file=...)`
+or the `from_params_file` classmethod -- renamed from `from_json_file`, since it now accepts both
+formats), mapping the canonical keys above to its own attribute spellings (`min_nd` ->
+`min_grad_norm`, `maxdecs` -> `max_decs`, `share_iter` -> `share_int`; `maxrej`/`num_mix` need no
+translation, already matching). A params-file setting this backend does not consume (e.g.
+`kurt_start`/`num_kurt`/`kurt_int`, the adaptive-pdf schedule it has no family switch for) is named
+in a single `logger.warning` rather than silently dropped. `AMICA_NumPy(pdftype=...)` with anything
+other than `0` -- the only source-density family this backend implements -- raises
+`NotImplementedError` at construction (see the backend-differences table above).
