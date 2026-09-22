@@ -3069,6 +3069,8 @@ class AMICAMLXNG:
                 "AMICAMLXNG.transform() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("transform")
+        self._check_input_shape(X)
         X_arr = mx.array(np.ascontiguousarray(X).astype(np.float32))
         X_t = self.sphere @ (X_arr - self.mean)
         S = self.W[model_idx].T @ (X_t - self.c[:, model_idx : model_idx + 1])
@@ -3090,6 +3092,48 @@ class AMICAMLXNG:
             raise ValueError(
                 f"model_idx={model_idx} out of range for a {self.n_models}-model "
                 f"fit (valid: 0..{self.n_models - 1})."
+            )
+
+    def _check_usable(self, action: str) -> None:
+        """Refuse to serve output from a degenerate fit (issue #306; port of
+        ``AMICATorchNG._check_usable``).
+
+        Callers first check their own unfitted marker(s) and raise the
+        existing ``requires a fitted model`` ``RuntimeError`` (unchanged);
+        this assumes a fit has actually run and adds the two layers
+        :meth:`state_dict`/:meth:`write_amica_output` already use beyond
+        that: the ``stop_reason`` gate, then a defense-in-depth isfinite
+        sweep over the same :attr:`_PARAM_ARRAYS` set. Mirrors the
+        :class:`~pamica.AMICA` wrapper's ``_check_usable`` (issue #50) for
+        callers using this backend directly.
+        """
+        if self.stop_reason in self._DEGENERATE_STOP_REASONS:
+            raise RuntimeError(
+                f"Refusing to {action}: fit ended degenerate (stop_reason="
+                f"{self.stop_reason!r}), so the model holds non-finite "
+                f"parameters and would produce NaN output. Lower lrate, "
+                f"disable Newton, or check data conditioning, then refit."
+            )
+        nonfinite = [
+            name
+            for name in self._PARAM_ARRAYS
+            if not bool(mx.all(mx.isfinite(getattr(self, name))).item())
+        ]
+        if nonfinite:
+            raise RuntimeError(
+                f"Refusing to {action}: parameters {nonfinite} hold "
+                f"non-finite values (stop_reason={self.stop_reason!r})."
+            )
+
+    def _check_input_shape(self, X: np.ndarray) -> None:
+        """Validate a data array against the fitted input channel count,
+        mirroring :meth:`fit`'s own ``X`` validation (issue #306; port of
+        ``AMICATorchNG._check_input_shape``)."""
+        if X.ndim != 2:
+            raise ValueError(f"X must be 2D (n_channels, n_samples), got {X.shape}")
+        if X.shape[0] != self.n_channels_in:
+            raise ValueError(
+                f"X has {X.shape[0]} channels, model expects {self.n_channels_in}"
             )
 
     def get_pdftype(self, model_idx: int = 0) -> np.ndarray:
@@ -3134,6 +3178,7 @@ class AMICAMLXNG:
                 "fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the mixing matrix")
         return np.array(self.A[:, self.comp_list[:, model_idx]].T)
 
     @property
@@ -3171,6 +3216,7 @@ class AMICAMLXNG:
                 "model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the sensor mixing matrix")
         A = np.array(self.A[:, self.comp_list[:, model_idx]].T, dtype=np.float64)
         return self._pinv_sphere() @ A
 
@@ -3185,6 +3231,7 @@ class AMICAMLXNG:
                 "call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the unmixing matrix")
         return np.array(self.W[model_idx].T)
 
     def get_rho(self, model_idx: int = 0) -> np.ndarray:
@@ -3206,15 +3253,12 @@ class AMICAMLXNG:
                 "AMICAMLXNG.get_rho() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
-        # Defense-in-depth, matching state_dict()'s isfinite sweep: a
-        # degenerate multi-model fit can leave one model's rho non-finite
-        # without the aggregate LL tripping nan_ll. Refuse rather than return
-        # a silent NaN.
-        if not bool(mx.all(mx.isfinite(self.rho)).item()):
-            raise RuntimeError(
-                "AMICAMLXNG.get_rho(): rho holds non-finite values (a "
-                "degenerate fit); inspect stop_reason and refit."
-            )
+        # Folded into the shared guard (issue #306): a degenerate multi-model
+        # fit can leave one model's rho non-finite without the aggregate LL
+        # tripping a _DEGENERATE_STOP_REASONS marker, which _check_usable's
+        # defense-in-depth isfinite sweep over _PARAM_ARRAYS (rho included)
+        # still catches. Refuse rather than return a silent NaN.
+        self._check_usable("get rho")
         idx = self.comp_list[:, model_idx]
         return np.array(self.rho[:, idx])
 
@@ -3272,6 +3316,7 @@ class AMICAMLXNG:
                 "AMICAMLXNG.variance_order() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("compute the variance order")
         cl = self.comp_list[:, model_idx]
         alpha = np.array(self.alpha[:, cl], dtype=np.float64)
         mu = np.array(self.mu[:, cl], dtype=np.float64)
@@ -3374,6 +3419,8 @@ class AMICAMLXNG:
                 "AMICAMLXNG.mir() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("compute MIR")
+        self._check_input_shape(X)
         if self._pca_reduced():
             raise ValueError(
                 "mir() is incompatible with PCA reduction: the fitted "
@@ -3411,7 +3458,11 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted (via :meth:`transform`).
+            If the model is unfitted, or the fit ended degenerate (issue
+            #306), both via :meth:`transform`.
+        ValueError
+            If ``X`` is not a 2D array of the fitted input channel count
+            (via :meth:`transform`).
         """
         return pairwise_mi(self.transform(X, model_idx=model_idx), nbins)
 
@@ -3450,14 +3501,18 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted.
+            If the model is unfitted, or the fit ended degenerate (issue
+            #306).
         ValueError
-            If ``X`` contains non-finite (NaN/Inf) values.
+            If ``X`` is not a 2D array of the fitted input channel count, or
+            contains non-finite (NaN/Inf) values.
         """
         if self.sphere is None or self.mean is None or self.W is None:
             raise RuntimeError(
                 "AMICAMLXNG.model_loglik() requires a fitted model; call fit() first."
             )
+        self._check_usable("compute the model log-likelihood")
+        self._check_input_shape(X)
         X = np.ascontiguousarray(X)
         if not np.isfinite(X).all():
             bad = np.flatnonzero(~np.isfinite(X).all(axis=1))
@@ -3495,15 +3550,36 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted.
+            If the model is unfitted, or the fit ended degenerate (issue
+            #306).
         ValueError
-            If ``X`` is non-finite, or if every model underflows to ``-inf``
+            If ``X`` is not a 2D array of the fitted input channel count, if
+            ``X`` is non-finite, if every model underflows to ``-inf``
             log-likelihood at some sample (the posterior is undefined
-            there).
+            there), or if a log-likelihood is NaN (numerical corruption,
+            distinct from the ``-inf`` underflow case above).
         """
+        if self.sphere is None or self.mean is None or self.W is None:
+            raise RuntimeError(
+                "AMICAMLXNG.model_probability() requires a fitted model; "
+                "call fit() first."
+            )
+        self._check_usable("compute the model probability")
         Lht = self.model_loglik(X)
         col_max = Lht.max(axis=0, keepdims=True)
         if not np.isfinite(col_max).all():
+            # NaN and -inf are different failure modes and must not share a
+            # message: -inf is every model underflowing at a real sample (an
+            # extreme outlier), while NaN is numerical corruption. isfinite
+            # alone conflates them (PR #311 review scope extension, issue
+            # #306).
+            nan_mask = np.isnan(col_max)
+            if nan_mask.any():
+                raise ValueError(
+                    f"AMICAMLXNG.model_probability(): {int(nan_mask.sum())} "
+                    "sample(s) have a NaN log-likelihood (numerical "
+                    "corruption), so the posterior is undefined there."
+                )
             n_bad = int((~np.isfinite(col_max)).sum())
             raise ValueError(
                 f"AMICAMLXNG.model_probability(): every model has -inf "
@@ -3884,7 +3960,21 @@ class AMICAMLXNG:
                     f"(format_version={version}); the payload may be truncated."
                 )
         config = dict(state["config"])
-        obj = cls(**config)
+        # A missing/unexpected key in a malformed or foreign-version payload
+        # surfaces as a bare TypeError from the constructor call; every other
+        # validation step in this method already names the payload as the
+        # culprit with a ValueError, so wrap this one the same way instead of
+        # letting a mismatched-keyword TypeError propagate unexplained
+        # (issue #306; :meth:`load`'s .npz path delegates to this method, so
+        # it is covered too).
+        try:
+            obj = cls(**config)
+        except TypeError as exc:
+            raise ValueError(
+                f"malformed AMICAMLXNG state: config does not match the "
+                f"AMICAMLXNG constructor ({exc}); the payload may be "
+                "truncated or from an incompatible version."
+            ) from exc
         obj._load_params(state)
         return obj
 
