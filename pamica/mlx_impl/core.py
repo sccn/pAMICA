@@ -34,7 +34,9 @@ export), and the MIR/PMI diagnostics (``mir``/``pmi``, ``fit(mir_step=...)``
 waypoints) are implemented (epic #278 Phase 3, issue #289). The EEGLAB
 back-projected-variance component order (``variance_order``) landed in the
 epic's post-Phase-3 polish round, ahead of merge to ``dev``, closing the one
-accessor gap Phase 3 left open: every AMICATorchNG-supported feature this
+accessor gap Phase 3 left open. Explicit PCA reduction (``pcakeep``/``pcadb``,
+with AMICATorchNG's validation, precedence and upfront ``mir_step`` gate) joined
+in epic #324 Phase 1 (issue #323), so every AMICATorchNG-supported feature this
 backend can support (float32 GPU limits aside) is now ported.
 
 Newton (issue #264) runs entirely in float32 on the GPU stream: the curvature
@@ -104,7 +106,13 @@ from .. import restarts
 from ..metrics import mir as mir_metric
 from ..metrics import pairwise_mi
 from ..numpy_impl.utils import identify_shared_components
-from ..rank import MINEIG, MINEIG_REL, numerical_rank
+from ..rank import (
+    MINEIG,
+    MINEIG_REL,
+    numerical_rank,
+    pca_reduction_requested,
+    validate_pca_reduction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -516,6 +524,32 @@ class AMICAMLXNG:
         the merge; issue #269) and under ``do_reject`` (the good-sample set,
         and so the LL normalization, changes across iterations, so
         per-iteration LLs are not comparable), matching AMICATorchNG.
+
+    The explicit PCA-reduction parameters (issue #323) likewise carry
+    AMICATorchNG's names, defaults, validation and semantics. The validation
+    and the precedence rule are the shared :mod:`pamica.rank` policy, so the
+    three array backends cannot disagree on them:
+
+    ``pcakeep`` (None)
+        Keep this many principal dimensions (Fortran ``pcakeep``). Must be an
+        integer >= 1, or the constructor raises ``ValueError``. Capped by the
+        detected numerical rank, matching Fortran's ``numeigs = min(pcakeep,
+        count(eigs > mineig))`` (amica15.f90:413), so ``pcakeep >=
+        n_channels`` keeps every dimension the data have.
+    ``pcadb`` (None)
+        Keep the dimensions whose covariance eigenvalue lies within ``pcadb``
+        dB of the largest. Must be a finite number > 0, or the constructor
+        raises ``ValueError``. A pamica extension: the reference parses
+        ``pcadb`` (amica15.f90:3459-3461) but never uses it. When both are
+        set, ``pcakeep`` takes precedence and ``pcadb`` is ignored (one INFO
+        log line), as in the reference.
+
+    With both ``None`` (the default) only automatic ``mineig``/``mineig_rel``
+    rank detection sizes the model, exactly as before #323. A reduced fit has
+    a non-square ``(n_channels, n_channels_in)`` sphere; map its components
+    back to the input channels with :meth:`get_sensor_mixing_matrix`.
+    ``fit(mir_step > 0)`` rejects an explicit reduction request up front, as
+    AMICATorchNG does (see :meth:`_fit_once`).
     """
 
     def __init__(
@@ -566,6 +600,8 @@ class AMICAMLXNG:
         do_mean: bool = True,
         do_sphere: bool = True,
         do_approx_sphere: bool = True,
+        pcakeep: Optional[int] = None,
+        pcadb: Optional[float] = None,
         mineig: float = MINEIG,
         mineig_rel: Optional[float] = MINEIG_REL,
         seed: Optional[int] = None,
@@ -722,6 +758,12 @@ class AMICAMLXNG:
         self.do_mean = do_mean
         self.do_sphere = do_sphere
         self.do_approx_sphere = do_approx_sphere
+        # Explicit PCA reduction (issue #323), validated by the policy shared
+        # with the PyTorch and NumPy backends (pamica/rank.py) so a bad value
+        # fails here, before any data is touched, exactly as it does there.
+        validate_pca_reduction(pcakeep, pcadb)
+        self.pcakeep = pcakeep
+        self.pcadb = pcadb
         # Numerical-rank floors (issue #223); see pamica/rank.py and ADR 0004.
         self.mineig = mineig
         self.mineig_rel = mineig_rel
@@ -890,11 +932,16 @@ class AMICAMLXNG:
             order = np.argsort(evals)[::-1]
             evals = evals[order]
             evecs = evecs[:, order]
-            # Numerical rank, decided by the policy shared with the PyTorch and
-            # NumPy backends (pamica/rank.py, issue #223) so the three cannot
-            # disagree. Fortran: numeigs = min(pcakeep, count(eigs > mineig)).
+            # Numerical rank plus explicit PCA reduction, decided by the policy
+            # shared with the PyTorch and NumPy backends (pamica/rank.py,
+            # issues #223/#323) so the three cannot disagree. Fortran:
+            # numeigs = min(pcakeep, count(eigs > mineig)).
             n_comp = numerical_rank(
-                evals, mineig=self.mineig, mineig_rel=self.mineig_rel
+                evals,
+                mineig=self.mineig,
+                mineig_rel=self.mineig_rel,
+                pcakeep=self.pcakeep,
+                pcadb=self.pcadb,
             )
             evals = evals[:n_comp]
             V = evecs[:, :n_comp]
@@ -2416,26 +2463,18 @@ class AMICAMLXNG:
         ``ll_history``: entry ``i`` is computed after iteration ``i``'s
         parameter update, while ``ll_history[i]`` is the likelihood of the
         parameters before it, so the two are one update apart (issue #161).
-        There is no upfront PCA-reduction ``ValueError`` gate here, but this
-        is NOT a knowability limitation -- the fitted sphere's shape is
-        known immediately after :meth:`_preprocess` runs, a few lines below
-        this docstring, well before the iteration loop (let alone the first
-        waypoint) starts. It is PARITY with ``AMICATorchNG``'s own deliberate
-        scope: that backend's upfront gate (``_pca_reduction_requested()``)
-        only ever fires for an EXPLICIT ``pcakeep``/``pcadb`` request --
-        checked before ``_preprocess`` runs at all, purely so a bad explicit
-        config fails fast without paying for any preprocessing work -- and
-        never for AUTOMATIC ``mineig``/``mineig_rel``-detected reduction,
-        which torch itself only catches downstream, per-waypoint, inside its
-        own :meth:`mir` call (issue #283's fix targeted exactly that
-        automatic-detection gap, not the upfront-vs-downstream split, which
-        issue #300 chose to keep). This backend has no explicit
-        ``pcakeep``/``pcadb`` parameter at all, so there is nothing for an
-        upfront gate to check regardless of preprocessing order -- the
-        automatic-reduction case is caught the same way on both backends:
-        downstream, per-waypoint, inside :meth:`mir`'s own :meth:`_pca_reduced`
-        guard, whose ``ValueError`` is caught and logged here rather than
-        propagated.
+        Incompatible with PCA reduction, same as :meth:`mir` itself, and
+        gated exactly as ``AMICATorchNG._fit_once`` gates it (issue #323):
+        an explicit reduction request, ``pcakeep < n_channels`` or any
+        ``pcadb`` (``pcakeep >= n_channels`` keeps every dimension, so it is
+        not one), raises ``ValueError`` up front, before :meth:`_preprocess`
+        runs, so a bad explicit config fails without paying for any
+        preprocessing. AUTOMATIC ``mineig``/``mineig_rel`` reduction is not a
+        request, and is caught the same way on both backends: downstream,
+        per-waypoint, inside :meth:`mir`'s own :meth:`_pca_reduced` guard,
+        whose ``ValueError`` is caught and logged here rather than propagated
+        (issue #283; issue #300 chose to keep that upfront-vs-downstream
+        split).
         """
         if X.ndim != 2:
             raise ValueError(f"X must be 2D (n_channels, n_samples), got {X.shape}")
@@ -2454,6 +2493,16 @@ class AMICAMLXNG:
             # "did an E-step ever actually run", only "did stop_reason end
             # up degenerate". Reject up front instead.
             raise ValueError(f"max_iter must be >= 1, got {max_iter}")
+        # Same gate and message as AMICATorchNG._fit_once (issue #323). It
+        # sees only the explicit request; automatic reduction is caught per
+        # waypoint by mir()'s fitted-geometry guard below.
+        if mir_step > 0 and self._pca_reduction_requested(X.shape[0]):
+            raise ValueError(
+                "mir_step > 0 is incompatible with PCA reduction "
+                "(pcakeep/pcadb): the sphere is rank-deficient, so MIR's "
+                "log-Jacobian term is undefined. Rejected up front rather "
+                "than failing mid-fit at the first waypoint."
+            )
 
         X_t = self._preprocess(X)
         n_total = X_t.shape[1]
@@ -3234,19 +3283,33 @@ class AMICAMLXNG:
     # MIR/PMI diagnostics (issue #137; epic #278 Phase 3/#289 port of
     # AMICATorchNG.mir/pmi, torch_impl/core.py:2929-3036)
     # ------------------------------------------------------------------
+    def _pca_reduction_requested(self, n_channels: int) -> bool:
+        """Whether the explicit ``pcakeep``/``pcadb`` asks to fit fewer than
+        ``n_channels`` dimensions (port of
+        ``AMICATorchNG._pca_reduction_requested``, torch_impl/core.py:3022-3040;
+        both delegate to :func:`pamica.rank.pca_reduction_requested`, issue
+        #323).
+
+        ``n_channels`` is the channel count of the data being fitted, not
+        ``self.n_channels``, which :meth:`_preprocess` shrinks to the kept
+        rank. Config-only, not geometry: used solely by :meth:`_fit_once`'s
+        upfront ``mir_step`` gate, which runs before this fit's sphere exists,
+        so AUTOMATIC ``mineig``/``mineig_rel`` reduction is not knowable here.
+        Use :meth:`_pca_reduced` wherever a fitted sphere already exists.
+        """
+        return pca_reduction_requested(self.pcakeep, self.pcadb, n_channels)
+
     def _pca_reduced(self) -> bool:
         """Whether the fitted sphere is rank-reduced (non-square) -- the #300
         fitted-geometry guard (port of ``AMICATorchNG._pca_reduced``,
-        torch_impl/core.py:2942-2956).
+        torch_impl/core.py:3042-3056).
 
-        Derived from the fitted geometry -- ``sphere.shape[0] !=
-        sphere.shape[1]`` -- so it also catches rank reduction from
-        AUTOMATIC numerical-rank detection (``mineig``/``mineig_rel``), not
-        just an explicit reduction request. Unlike ``AMICATorchNG``, this
-        backend has no explicit ``pcakeep``/``pcadb`` constructor parameter
-        (only automatic ``mineig``/``mineig_rel`` reduction), so there is no
-        separate config-only ``_pca_reduction_requested()`` check to make
-        redundant here: this geometry check is the only PCA guard MIR needs.
+        Derived from the fitted geometry (``sphere.shape[0] !=
+        sphere.shape[1]``), so it catches rank reduction from an explicit
+        ``pcakeep``/``pcadb`` and from AUTOMATIC numerical-rank detection
+        (``mineig``/``mineig_rel``) alike. The config-only
+        :meth:`_pca_reduction_requested` complements it for the upfront
+        ``mir_step`` gate, which runs before this fit's sphere exists.
         ``False`` before :meth:`fit` (``sphere`` is ``None``) and for a
         full-rank fit.
         """
@@ -3286,8 +3349,8 @@ class AMICAMLXNG:
             If the model is unfitted.
         ValueError
             If the fitted sphere is rank-reduced (non-square): whether from
-            automatic ``mineig``/``mineig_rel`` numerical-rank detection (the
-            only source of reduction on this backend), the sphere is
+            explicit ``pcakeep``/``pcadb`` or from automatic ``mineig``/
+            ``mineig_rel`` numerical-rank detection, the sphere is
             rank-deficient, so MIR's log-Jacobian term is undefined
             (issue #283/#300).
         """
@@ -3300,10 +3363,10 @@ class AMICAMLXNG:
             raise ValueError(
                 "mir() is incompatible with PCA reduction: the fitted "
                 f"sphere is rank-deficient ({self.n_channels} of "
-                f"{self.n_channels_in} channels kept) from automatic "
-                "mineig/mineig_rel numerical-rank detection, so MIR's "
-                "log-Jacobian term is undefined for the resulting "
-                "non-square/non-invertible unmixing."
+                f"{self.n_channels_in} channels kept), whether from explicit "
+                "pcakeep/pcadb or automatic mineig/mineig_rel numerical-rank "
+                "detection, so MIR's log-Jacobian term is undefined for the "
+                "resulting non-square/non-invertible unmixing."
             )
         unmixing = np.array(self.W[model_idx].T @ self.sphere)
         return mir_metric(unmixing, X, nbins)
@@ -3722,6 +3785,14 @@ class AMICAMLXNG:
             "do_mean": self.do_mean,
             "do_sphere": self.do_sphere,
             "do_approx_sphere": self.do_approx_sphere,
+            # Explicit PCA reduction (issue #323). Additive, like keep_best
+            # below: a payload written before #323 lacks both keys, and
+            # cls(**config) then falls back to the constructor defaults (None),
+            # which is what that fit ran with, so no format_version bump. Cast
+            # to plain int/float because save() JSON-encodes config and the
+            # validator accepts numpy scalars (np.int64), which json cannot.
+            "pcakeep": None if self.pcakeep is None else int(self.pcakeep),
+            "pcadb": None if self.pcadb is None else float(self.pcadb),
             "mineig": self.mineig,
             "mineig_rel": self.mineig_rel,
             "seed": self.seed,
