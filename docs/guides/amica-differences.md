@@ -36,7 +36,7 @@ backends reject up front), and the merge similarity metric has no bit-exact
 oracle at all — the reference's `Spinv2` is declared but never allocated, so its
 own reassignment is unrunnable.
 
-## 1. Relative rank threshold (the one changed default)
+## 1. Relative rank threshold
 
 The reference decides how many dimensions are real with an absolute floor on covariance
 eigenvalues:
