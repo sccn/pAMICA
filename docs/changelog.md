@@ -5,6 +5,36 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 4 of epic #324: backend selection in `AMICA` and `AMICAICA` (issue #313).**
+  `AMICA` and `AMICAICA` gain a `backend` parameter:
+  `"torch"` (the default, `AMICATorchNG`, float64 Fortran parity) or `"mlx"` (`AMICAMLXNG`, Apple GPU, float32 only).
+  Every wrapper feature now runs on MLX:
+  `fit` with any backend keyword (including `pcakeep`, which closes #323's remaining item), `from_params_file(..., backend="mlx")` (#304's MLX path),
+  the #50 degenerate-fit contract, `save`/`load`, the EEGLAB export and the MNE path.
+  An unknown backend raises `ValueError`, `backend="mlx"` without MLX installed raises `ImportError` at construction,
+  and `device` or a `dtype` fit keyword with `backend="mlx"` raises `ValueError`, since MLX runs only on its default device in float32.
+  `import pamica` still never imports MLX.
+  - The keywords `fit` takes from `**kwargs` and from a params file are derived from the selected backend class's own signature,
+    and the "not applied" warning names that class.
+    A keyword the selected backend does not take now raises `TypeError` from `AMICA.fit` itself, naming the backend,
+    instead of from the backend constructor.
+  - The degenerate-fit contract uses each backend class's own `_DEGENERATE_STOP_REASONS`,
+    so an MLX fit that stops on `nan_params` is refused like a PyTorch `nan_ll` fit.
+  - **Save format version 2:** `AMICA.save` records the backend in `wrapper["backend"]`,
+    and `AMICA.load` restores the model on that backend.
+    An MLX model's numpy arrays are stored as CPU tensors of the same dtype, so the file still loads with `torch.load(weights_only=True)`.
+    Version 1 files, written before this change, still load (always as PyTorch models).
+    Loading an MLX file needs MLX installed and `device=None`.
+  - **Fix:** a numpy scalar in the backend's config or fit record (for example `fit(X, seed=np.int64(42))`) is now saved as the equivalent Python number.
+    `AMICA.save` used to write such a file, which `AMICA.load` then refused (the `weights_only` unpickler rejects numpy scalars).
+    Any other value that loading could not read back now raises `TypeError` at save time.
+  - **New accessors:** `get_sphere()`, `get_mean()` and `get_model_center(model_idx)` on `AMICATorchNG`, `AMICAMLXNG` and `AMICA`,
+    with the same names and shapes on both backends and float64 arrays from both.
+    `AMICA` also gains `get_sensor_mixing_matrix()`, which both backends already had.
+  - `AMICAICA` reads the fitted mean, sphere and centers through those accessors, with no backend-specific array calls.
+    An MLX export is float32-consistent (sources agree with the MLX `transform` to 2e-7 relative on the bundled sample),
+    while `apply` with nothing excluded still returns the input to float64 round-off (1.4e-15 with `pcakeep=20`).
+    A degenerate `AMICAICA` fit now leaves `pca_components_`/`pca_explained_variance_` as `None`; it was never exportable.
 - **`AMICAICA.apply` restores the PCA residual of rank-reduced fits** (issue #322, epic #324).
   **Behavior change for `pcakeep`/`pcadb` and rank-deficient fits:**
   `AMICAICA.fit` now computes the full orthonormal PCA basis once

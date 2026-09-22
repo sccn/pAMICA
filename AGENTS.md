@@ -3,12 +3,12 @@
 ## Project Context
 **Purpose:** Python implementation of AMICA (Adaptive Mixture Independent Component Analysis) that reproduces the results of the reference Fortran binary. Targets EEG/EMG source separation with GPU/MPS/CPU support.
 **Tech Stack:** Python 3.12+, PyTorch (primary backend, MPS/CUDA/CPU), NumPy/SciPy (legacy backend), matplotlib. Reference implementation is Fortran (`amica17.f90`, `funmod2.f90`).
-**Architecture:** The scikit-learn-style `AMICA` interface wraps `AMICATorchNG` (`torch_impl/core.py`), the natural-gradient EM port that reaches Fortran parity (Newton, exact-EM mixture updates, symmetric-ZCA sphere, Jacobian LL). This is the single PyTorch backend: the earlier Adam/autograd backends (`AMICATorch`, `AMICATorchV2`) and their mixture/optimizer/PDF helper modules were removed in issue #32 as superseded. The legacy NumPy implementation (`numpy_impl/core.py`, retained as `AMICA_NumPy`) carries the same parity fixes plus baralpha and outlier rejection (`do_reject`, ported from the PyTorch backend's `good_idx` mechanism in issue #123). Correctness is defined by parity with the Fortran binary, validated by `validate_implementations.py`.
+**Architecture:** The scikit-learn-style `AMICA` interface wraps `AMICATorchNG` (`torch_impl/core.py`) by default, or `AMICAMLXNG` (`mlx_impl/core.py`) with `backend="mlx"` (#313); `AMICATorchNG` is the natural-gradient EM port that reaches Fortran parity (Newton, exact-EM mixture updates, symmetric-ZCA sphere, Jacobian LL). This is the single PyTorch backend: the earlier Adam/autograd backends (`AMICATorch`, `AMICATorchV2`) and their mixture/optimizer/PDF helper modules were removed in issue #32 as superseded. The legacy NumPy implementation (`numpy_impl/core.py`, retained as `AMICA_NumPy`) carries the same parity fixes plus baralpha and outlier rejection (`do_reject`, ported from the PyTorch backend's `good_idx` mechanism in issue #123). Correctness is defined by parity with the Fortran binary, validated by `validate_implementations.py`.
 
 ## Architecture Map
 ```
 pamica/
-├── amica.py                 # Main scikit-learn-style AMICA interface (wraps AMICATorchNG)
+├── amica.py                 # Main scikit-learn-style AMICA interface (wraps AMICATorchNG, or AMICAMLXNG with backend="mlx")
 ├── __init__.py              # Exposes AMICA (PyTorch), AMICA_NumPy (legacy), numpy_impl, torch_impl
 ├── torch_impl/              # PyTorch backend
 │   ├── core.py              #   Natural-gradient EM port (AMICATorchNG); Fortran-parity, primary backend
@@ -95,7 +95,8 @@ remaining MLX gap vs the PyTorch backend is none, other than float32-only precis
 have no float64).
 
 ## Key Files
-- **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`)
+- **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`, or `AMICAMLXNG` with
+  `backend="mlx"`, #313; `AMICAICA` in `pamica/mne_compat/core.py` takes the same `backend`)
 - **PyTorch backend:** `pamica/torch_impl/core.py` (`AMICATorchNG`, natural-gradient EM,
   Fortran-parity; ADR `.context/decisions/0001-torch-backend-natural-gradient-em.md`). This is the
   only PyTorch backend; the basic `AMICATorch`/`AMICATorchV2` paths were removed in #32.
@@ -107,6 +108,10 @@ have no float64).
 - PyTorch backend with GPU/MPS/CPU support; the `AMICATorchNG` natural-gradient EM backend now
   matches the Fortran reference (LL ~ -3.40, component correlation ~0.997) with Newton enabled
   and positive-definite (issue #24).
+- `AMICA(backend="mlx")` and `AMICAICA(backend="mlx")` (epic #324 Phase 4, #313) run the MLX backend end to
+  end: fit, `from_params_file`, `pcakeep`, the #50 degenerate-fit contract, `.pt` save/load (wrapper
+  `format_version` 2 records the backend; version 1 still loads as torch), EEGLAB export and MNE `apply`.
+  `device`/`dtype` are torch-only; the default stays `"torch"`.
 - `validate_implementations.py` runs the PyTorch (NG) backend against the Fortran binary and matches
   components via the Hungarian algorithm; it does not exercise the NumPy or MLX backends. NumPy-vs-
   Fortran parity lives in pytest (`test_sample_data_numpy_vs_fortran`), and MLX validation lives in

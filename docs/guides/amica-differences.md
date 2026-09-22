@@ -185,7 +185,9 @@ The decision and the alternatives considered are recorded in ADR 0005.
 Separate from reference divergences, this table compares the backends.
 The raw MLX backend (`AMICAMLXNG`) has the PyTorch backend's full feature surface except precision:
 it is float32-only, because Apple GPUs have no float64.
-The `AMICA` and `AMICAICA` wrappers do not construct it yet (epic #324 Phase 4, issue #313).
+The `AMICA` and `AMICAICA` wrappers construct it with `backend="mlx"` (epic #324 Phase 4, issue #313),
+so the params-file reader, the degenerate-fit contract, `.pt` `save`/`load`, the EEGLAB export and the MNE path all run on it
+(see [Selecting a backend](backends.md#selecting-a-backend)).
 
 | Feature | PyTorch | NumPy | MLX | Native Fortran |
 |---|---|---|---|---|
@@ -202,7 +204,7 @@ The `AMICA` and `AMICAICA` wrappers do not construct it yet (epic #324 Phase 4, 
 | `n_restarts` best-of-N restarts | yes | yes | yes | n/a |
 | Mutual Information Reduction (MIR) diagnostic | yes | no | yes | n/a |
 | Persistence | `state_dict` + EEGLAB `amicaout` export | EEGLAB `amicaout` | `state_dict`/`.npz` `save`-`load` + EEGLAB `amicaout` export | EEGLAB `amicaout` |
-| Fortran `input.param` reader | yes (`AMICA.from_params_file`, #132) | yes (`AMICA_NumPy(params_file=...)` / `from_params_file`, #304) | via `AMICA(backend="mlx")` (epic #324 Phase 4) | native |
+| Fortran `input.param` reader | yes (`AMICA.from_params_file`, #132) | yes (`AMICA_NumPy(params_file=...)` / `from_params_file`, #304) | yes (`AMICA.from_params_file(..., backend="mlx")`) | native |
 
 The NumPy row's "GG only" (generalized Gaussian, GG) corrects an earlier
 version of this table, which listed "all five": `AMICA_NumPy._compute_log_pdf`

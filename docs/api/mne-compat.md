@@ -38,6 +38,36 @@ non-finite input, supports principal component analysis (PCA) reduction
 and a degenerate (diverged) fit is refused by the consumer methods rather than
 emitting NaNs.
 
+## Choosing the backend
+
+`AMICAICA` fits through [`AMICA`](amica.md), so it takes the same `backend` parameter:
+the PyTorch backend by default, or the Apple-GPU MLX backend with `backend="mlx"` (issue #313).
+Everything on this page works on both.
+
+```python
+# raw: 32 average-referenced EEG channels, so rank 31
+ica = AMICAICA(backend="mlx", random_state=42).fit(raw, picks="eeg", pcakeep=31)
+clean = ica.apply(raw.copy(), exclude=[0])
+```
+
+As with `AMICA`, `device` (and a `dtype` fit keyword) apply to the PyTorch backend only and raise `ValueError` with `backend="mlx"`,
+and `backend="mlx"` without MLX installed raises `ImportError`.
+
+The export reads the fitted mean, sphere and per-model centers through the backend-agnostic float64 accessors
+`AMICA.get_mean()`, `get_sphere()` and `get_model_center()`, so both backends take the same code path.
+Precision follows the backend:
+
+- A PyTorch fit (float64 by default) exports at float64 parity.
+- An MLX fit computes in float32, so its unmixing matrix, mean and centers carry float32 rounding
+  and the export is float32-consistent rather than float64-parity.
+  `get_sources` agrees with `ica.amica_.transform` (which runs in float32) to float32 tolerance
+  (measured 2e-7 relative on the bundled sample),
+  and excluding a component changes the data by that component's back-projection to the same tolerance.
+- Reconstruction does not depend on the backend's precision.
+  MNE's mixing is the float64 pseudo-inverse of the exported unmixing and the PCA basis is orthonormal,
+  so `apply` with nothing excluded returns the input to float64 round-off on either backend
+  (measured 1.4e-15 for an MLX fit with `pcakeep=20`), residual included.
+
 ## Interoperating with `mne.preprocessing.ICA`
 
 `to_mne_ica()` returns a fully-populated
