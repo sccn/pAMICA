@@ -471,3 +471,135 @@ def test_torch_save_load_round_trips_numpy_scalar_request(real_data, tmp_path):
     torch.testing.assert_close(
         loaded.model_.sphere, model.model_.sphere, rtol=0.0, atol=0.0
     )
+
+
+# --- refits and restarts start from the input geometry -----------------------
+# _preprocess shrinks n_channels to the kept rank. torch and MLX used to
+# validate the next fit's X against that shrunk count, so a refit, or the
+# second of n_restarts (which _fit_restarts deliberately does not catch), died
+# with "X has 32 channels, model expects 20". NumPy re-derives its sizes from
+# the data on every fit and is the always-on control.
+AUTO_RANK = 20
+BACKENDS = ["torch", "numpy", "mlx"]
+
+
+@pytest.fixture(scope="module")
+def rank_deficient(real_data) -> np.ndarray:
+    """The real sample projected onto its leading 20 principal directions (the
+    construction of test_rank_policy.py's fixture), so automatic mineig_rel
+    detection reduces it to rank 20 with no explicit request."""
+    x = real_data - real_data.mean(axis=1, keepdims=True)
+    U = np.linalg.svd(x, full_matrices=False)[0][:, :AUTO_RANK]
+    return U @ (U.T @ x)
+
+
+def _reduction(real_data, rank_deficient, reduction: str):
+    if reduction == "pcakeep":
+        return real_data, {"pcakeep": PCAKEEP}
+    return rank_deficient, {}
+
+
+def _new(backend: str, tmp: Path, **kwargs):
+    if backend == "torch":
+        return _torch(**kwargs)
+    if backend == "numpy":
+        return _numpy(tmp, **kwargs)
+    return _mlx(**kwargs)
+
+
+def _fit(backend: str, m, X: np.ndarray) -> None:
+    if backend == "numpy":
+        m.fit(X)  # max_iter is a constructor argument there (2, see _numpy)
+    else:
+        m.fit(X, max_iter=2, verbose=False)
+
+
+def _geometry(backend: str, m) -> Tuple[int, int]:
+    if backend == "numpy":
+        return m.data_dim, m.data_dim_in
+    return m.n_channels, m.n_channels_in
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("reduction", ["pcakeep", "automatic"])
+def test_refit_after_a_rank_reduction(
+    real_data, rank_deficient, tmp_path, backend, reduction
+):
+    """A second fit on the same instance starts from the constructor's
+    geometry, so it reduces to the same rank; on torch and MLX, which
+    re-initialize every parameter per fit, it also reproduces the first fit.
+    NumPy's refit warm-starts from the fitted A (_initialize_parameters keeps
+    a non-None A), so only its geometry is compared."""
+    X, kwargs = _reduction(real_data, rank_deficient, reduction)
+    if backend == "mlx":
+        _mlx_core()
+    m = _new(backend, tmp_path, **kwargs)
+    _fit(backend, m, X)
+    assert _geometry(backend, m) == (PCAKEEP, NW)
+    first_ll = None if backend == "numpy" else list(m.ll_history)
+
+    _fit(backend, m, X)
+    assert _geometry(backend, m) == (PCAKEEP, NW)
+    if first_ll is not None:
+        assert list(m.ll_history) == first_ll
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("reduction", ["pcakeep", "automatic"])
+def test_restarts_survive_a_rank_reduction(
+    real_data, rank_deficient, tmp_path, backend, reduction
+):
+    X, kwargs = _reduction(real_data, rank_deficient, reduction)
+    if backend == "mlx":
+        _mlx_core()
+    seeds = [SEED, SEED + 1]
+    m = _new(backend, tmp_path, n_restarts=2, restart_seeds=seeds, **kwargs)
+    _fit(backend, m, X)
+    assert _geometry(backend, m) == (PCAKEEP, NW)
+    assert m.restart_seeds_ == seeds
+    assert len(m.restart_lls_) == 2
+    assert all(math.isfinite(ll) for ll in m.restart_lls_), m.restart_stop_reasons_
+
+
+@pytest.mark.parametrize("backend", ["torch", "mlx"])
+def test_channel_check_names_the_input_count(real_data, backend):
+    """Before and after a reduced fit the model accepts, and names, the input
+    width; the shrunk rank is never mistaken for it (a 20-channel X used to be
+    accepted by a model fitted to 32 channels and reduced to 20)."""
+    m = _backend(backend, pcakeep=PCAKEEP)
+    assert m.n_channels_in == NW
+    m.fit(real_data, max_iter=1, verbose=False)
+    assert (m.n_channels, m.n_channels_in) == (PCAKEEP, NW)
+    with pytest.raises(
+        ValueError, match=f"X has {PCAKEEP} channels, model expects {NW}"
+    ):
+        m.fit(real_data[:PCAKEEP], max_iter=1, verbose=False)
+
+
+@pytest.mark.parametrize("backend", ["torch", "mlx"])
+def test_reloaded_reduced_model_transforms_and_refits(real_data, tmp_path, backend):
+    """The input count is derived from the restored sphere's width, since
+    config's n_channels is the fitted rank. NumPy is not covered: it persists
+    an EEGLAB amicaout directory, not a model state it can load and refit."""
+    X = real_data
+    if backend == "torch":
+        m = _torch(pcakeep=PCAKEEP)
+        m.fit(X, max_iter=2, verbose=False)
+        path = tmp_path / "state.pt"
+        torch.save(m.state_dict(), path)
+        loaded = AMICATorchNG.from_state_dict(
+            torch.load(path, weights_only=True), device="cpu"
+        )
+    else:
+        mlx_core = _mlx_core()
+        m = _mlx(pcakeep=PCAKEEP)
+        m.fit(X, max_iter=2, verbose=False)
+        path = tmp_path / "model.npz"
+        m.save(str(path))
+        loaded = mlx_core.AMICAMLXNG.load(str(path))
+
+    assert (loaded.n_channels, loaded.n_channels_in) == (PCAKEEP, NW)
+    np.testing.assert_array_equal(loaded.transform(X), m.transform(X))
+    loaded.fit(X, max_iter=2, verbose=False)
+    assert (loaded.n_channels, loaded.n_channels_in) == (PCAKEEP, NW)
+    assert loaded.final_ll_ is not None and math.isfinite(loaded.final_ll_)

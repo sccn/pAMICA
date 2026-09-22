@@ -615,6 +615,10 @@ class AMICAMLXNG:
         keep_best: bool = True,
     ):
         self.n_channels = n_channels
+        # The input channel count, kept apart from n_channels, which
+        # _preprocess shrinks to the kept rank on any rank reduction; same
+        # role as AMICATorchNG._n_input_channels (see _fit_once).
+        self._n_input_channels = n_channels
         self.n_models = n_models  # multi-model (#81) + component sharing (#263)
         self.n_mix = n_mix
         self.n_comps = n_channels * n_models
@@ -2486,9 +2490,9 @@ class AMICAMLXNG:
         """
         if X.ndim != 2:
             raise ValueError(f"X must be 2D (n_channels, n_samples), got {X.shape}")
-        if X.shape[0] != self.n_channels:
+        if X.shape[0] != self._n_input_channels:
             raise ValueError(
-                f"X has {X.shape[0]} channels, model expects {self.n_channels}"
+                f"X has {X.shape[0]} channels, model expects {self._n_input_channels}"
             )
         if mir_step < 0:
             raise ValueError(f"mir_step must be >= 0, got {mir_step}")
@@ -2511,6 +2515,13 @@ class AMICAMLXNG:
                 "log-Jacobian term is undefined. Rejected up front rather "
                 "than failing mid-fit at the first waypoint."
             )
+
+        # Size every fit from the input geometry, as AMICATorchNG._fit_once
+        # does. _preprocess shrinks n_channels/n_comps to the kept rank, so
+        # without this a refit, or the second of n_restarts, would start from
+        # the previous fit's rank. A no-op for full-rank data.
+        self.n_channels = self._n_input_channels
+        self.n_comps = self.n_channels * self.n_models
 
         X_t = self._preprocess(X)
         n_total = X_t.shape[1]
@@ -3132,17 +3143,20 @@ class AMICAMLXNG:
     @property
     def n_channels_in(self) -> int:
         """Input channel count, i.e. the width of the sphere (issue #287 port
-        of ``AMICATorchNG.n_channels_in``, torch_impl/core.py:2958-2967).
+        of ``AMICATorchNG.n_channels_in``).
 
         Differs from ``n_channels`` only when rank reduction shrank the model
         to the detected numerical rank (issue #223); equal to it for
         full-rank data and before :meth:`fit`/:meth:`from_state_dict`.
-        Derived from the sphere (rather than stored) so it cannot drift from
-        the sphere it describes -- including on a reloaded rank-reduced
-        model, whose ``sphere`` width is exactly this value (see
-        :meth:`_load_params`'s shape guard).
+        Read off the sphere whenever one exists, so it cannot drift from the
+        sphere it describes, including on a reloaded rank-reduced model,
+        whose ``sphere`` width is exactly this value (see
+        :meth:`_load_params`'s shape guard). Before the first fit it is the
+        constructor's channel count, the width :meth:`fit` accepts.
         """
-        return self.n_channels if self.sphere is None else int(self.sphere.shape[1])
+        if self.sphere is None:
+            return self._n_input_channels
+        return int(self.sphere.shape[1])
 
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space (issue #287 port of
@@ -3918,6 +3932,10 @@ class AMICAMLXNG:
                 f"(n_channels, n_channels_in) with n_channels={n}"
             )
         n_channels_in = sphere_shape[1]
+        # config's n_channels is the fitted (possibly reduced) rank, so the
+        # constructor set the input count to it; the restored sphere's width
+        # is the true input count, which a refit validates X against.
+        self._n_input_channels = int(n_channels_in)
         expected_shapes = {
             "A": (n, ncomp),
             "W": (m, n, n),

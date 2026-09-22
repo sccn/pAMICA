@@ -643,6 +643,11 @@ class AMICATorchNG:
         dtype: torch.dtype = torch.float64,
     ):
         self.n_channels = n_channels
+        # The input channel count, kept apart from n_channels, which
+        # _preprocess shrinks to the kept rank on any rank reduction. fit()
+        # validates X against this and resets n_channels/n_comps from it, so a
+        # refit or a later restart starts from the constructor's geometry.
+        self._n_input_channels = n_channels
         self.n_models = n_models
         self.n_mix = n_mix
         self.n_comps = n_channels * n_models
@@ -2406,9 +2411,9 @@ class AMICATorchNG:
             raise ValueError(
                 f"X must be a 2D array (n_channels, n_samples), got shape {X.shape}"
             )
-        if X.shape[0] != self.n_channels:
+        if X.shape[0] != self._n_input_channels:
             raise ValueError(
-                f"X has {X.shape[0]} channels, model expects {self.n_channels}"
+                f"X has {X.shape[0]} channels, model expects {self._n_input_channels}"
             )
         if mir_step < 0:
             raise ValueError(f"mir_step must be >= 0, got {mir_step}")
@@ -2428,6 +2433,13 @@ class AMICATorchNG:
                 "log-Jacobian term is undefined. Rejected up front rather "
                 "than failing mid-fit at the first waypoint."
             )
+
+        # Size every fit from the input geometry. _preprocess shrinks
+        # n_channels/n_comps to the kept rank, so without this a refit, or the
+        # second of n_restarts, would start from the previous fit's rank.
+        # A no-op for full-rank data, whose sizes never change.
+        self.n_channels = self._n_input_channels
+        self.n_comps = self.n_channels * self.n_models
 
         X_t = self._preprocess(X)
         n_total = X_t.shape[1]
@@ -2986,10 +2998,13 @@ class AMICATorchNG:
 
         Differs from ``n_channels`` only when rank reduction shrank the model to
         the detected numerical rank (issue #223); equal to it for full-rank data
-        and before :meth:`fit`. Derived rather than stored, so it cannot drift
-        from the sphere it describes.
+        and before :meth:`fit`. Read off the sphere whenever one exists, so it
+        cannot drift from the sphere it describes; before the first fit it is
+        the constructor's channel count, the width :meth:`fit` accepts.
         """
-        return self.n_channels if self.sphere is None else int(self.sphere.shape[1])
+        if self.sphere is None:
+            return self._n_input_channels
+        return int(self.sphere.shape[1])
 
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space.
@@ -3764,6 +3779,11 @@ class AMICATorchNG:
                 setattr(self, name, tensor.to(self.device, self.dtype))
         # sphere was just replaced, so any cached back-map describes the old one.
         self._sphere_pinv = None
+        # config's n_channels is the fitted (possibly reduced) rank, so the
+        # constructor above set the input count to it; the restored sphere's
+        # width is the true input count, which a refit validates X against.
+        assert self.sphere is not None  # just set by the loop above
+        self._n_input_channels = int(self.sphere.shape[1])
 
         extra = state["extra"]
         self.sldet = extra["sldet"]
