@@ -23,6 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 mne = pytest.importorskip("mne")
 
@@ -182,12 +183,15 @@ def _back_projection(fitted, x_scaled, k, model_idx=0):
     return np.outer(a_k, s_k)
 
 
-def _assert_exclude_removes_only_component(fitted, inst, k, model_idx=0):
+def _assert_exclude_removes_only_component(
+    fitted, inst, k, model_idx=0, oracle_tol=REL_TOL
+):
     """``exclude=[k]`` subtracts exactly component ``k``'s back-projection.
 
-    The change is compared in original units against the backend oracle, and
-    its projection on the residual rows must vanish: excluding an ICA
-    component cannot touch the subspace ICA never modeled.
+    The change is compared in original units against the backend oracle (to
+    ``oracle_tol``, looser only for a float32 backend, whose oracle is itself
+    float32), and its projection on the residual rows must vanish: excluding
+    an ICA component cannot touch the subspace ICA never modeled.
     """
     ica = fitted.to_mne_ica(model_idx)
     x = _data(inst, fitted)
@@ -195,7 +199,7 @@ def _assert_exclude_removes_only_component(fitted, inst, k, model_idx=0):
     out = _data(ica.apply(inst.copy(), exclude=[k]), fitted)
     change = out - x
     expected = -pw * _back_projection(fitted, x / pw, k, model_idx)
-    assert _rel(change, expected) <= REL_TOL
+    assert _rel(change, expected) <= oracle_tol
     d = change / pw
     residual_rows = ica.pca_components_[ica.n_components_ :]
     assert np.linalg.norm(residual_rows @ d) <= REL_TOL * np.linalg.norm(d)
@@ -497,3 +501,69 @@ def test_pcadb_reduction_restores_the_residual(raw):
         rtol=1e-8,
     )
     _assert_exclude_removes_only_component(fitted, raw, 0)
+
+
+# --- float32 backend ---------------------------------------------------------
+F32_EPS = float(np.finfo(np.float32).eps)  # 1.19e-7
+
+
+@pytest.fixture(scope="module")
+def fitted_keep_f32(raw):
+    """A float32 backend fit with PCA reduction (the Apple-GPU precision).
+
+    The backend's sphere is float32; the wrapper casts it to float64 before
+    building the basis, so the exported basis is float64 although the fit is
+    not. A few iterations suffice: the basis depends only on the sphere.
+    """
+    return AMICAICA(random_state=SEED, device="cpu", verbose=False).fit(
+        raw, max_iter=5, pcakeep=N_KEEP, dtype=torch.float32
+    )
+
+
+def test_float32_fit_restores_the_residual(raw, fitted_keep_f32):
+    fitted = fitted_keep_f32
+    assert fitted.amica_.model_.sphere.dtype == torch.float32
+    ica = fitted.to_mne_ica()
+    p = ica.pca_components_
+    assert p.dtype == np.float64
+    np.testing.assert_allclose(p @ p.T, np.eye(32), rtol=0, atol=1e-12)
+    x = _data(raw, fitted)
+    # Reconstruction needs only an orthonormal basis and MNE's float64
+    # mixing = pinv(unmixing), so the float64 cast makes it exact to float64
+    # round-off even for a float32 fit (measured 1e-15), well inside any
+    # float32-consistent bound.
+    assert _rel(_data(ica.apply(raw.copy()), fitted), x) <= REL_TOL
+    # The backend transform runs in float32, so agreement with it is
+    # float32-limited: measured 1.9e-7 (1.6 eps), bound 100 eps.
+    s_mne = ica.get_sources(raw).get_data()
+    s_amica = fitted.amica_.transform(x / fitted.pre_whitener_)
+    assert _rel(s_mne, s_amica) <= 100 * F32_EPS
+    # Same float32 limit on the oracle; the residual part stays float64-exact.
+    _assert_exclude_removes_only_component(fitted, raw, 0, oracle_tol=100 * F32_EPS)
+
+
+def test_float32_retained_basis_matches_the_float32_sphere(fitted_keep_f32):
+    """The float64 cast moves the retained basis by float32 round-off only.
+
+    Before issue #322 a float32 fit exported the right singular vectors of
+    its float32 sphere computed in float32 (``_reference_export`` still does).
+    The export now computes them in float64 from the same float32 values: the
+    same subspace and order, with rows differing by 2.3e-8 (measured, about
+    0.2 eps). Singular vectors inherit the input's round-off amplified by
+    ``sigma_max`` over the singular-value gap, so the bound is a few float32
+    eps: 1e-6 (8.4 eps). The variances ``1 / sigma**2`` agree to 1.0e-7
+    relative (measured), bounded by 10 eps.
+    """
+    fitted = fitted_keep_f32
+    ref = _reference_export(fitted)
+    old = ref["pca_components_"]
+    assert old.dtype == np.float32
+    new = fitted.pca_components_[:N_KEEP]
+    # The sign of each singular vector is arbitrary; align before comparing.
+    signs = np.sign(np.sum(old * new, axis=1))[:, None]
+    assert np.abs(old * signs - new).max() <= 1e-6
+    np.testing.assert_allclose(
+        fitted.pca_explained_variance_[:N_KEEP],
+        ref["pca_explained_variance_"],
+        rtol=10 * F32_EPS,
+    )
