@@ -7,7 +7,6 @@ from the same initialization and random seed.
 """
 
 import numpy as np
-import json
 import os
 import re
 import subprocess
@@ -19,6 +18,7 @@ import argparse
 from typing import Dict, Tuple, Optional
 
 from pamica import AMICA
+from pamica.fortran_params import PAMICA_KEY_TO_FORTRAN_KEY, read_params_file
 from pamica.torch_impl import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
 
@@ -30,7 +30,11 @@ _NG_PARAMS = set(inspect.signature(AMICATorchNG).parameters) - {"n_channels"}
 # rather than forwarded as AMICATorchNG constructor kwargs. Any key that is
 # neither here nor an AMICATorchNG kwarg is a setting the NG backend cannot
 # honor; run_pytorch_amica warns about those so a parity comparison against the
-# Fortran run can't silently diverge.
+# Fortran run can't silently diverge. `max_decs` is not listed: load_sample_data
+# now reads params.json through read_params_file (issue #304), which already
+# renames it (and min_grad_norm/share_int) to the canonical maxdecs/min_nd/
+# share_iter spelling -- the same spelling _NG_PARAMS filters on -- so those
+# three land in ng_kwargs automatically instead of needing a special case here.
 _HANDLED_KEYS = {
     "files",
     "outdir",
@@ -40,7 +44,6 @@ _HANDLED_KEYS = {
     "num_mix",
     "num_comps",
     "max_iter",
-    "max_decs",
     "lrate",
     "do_mean",
     "do_sphere",
@@ -68,8 +71,12 @@ def load_sample_data() -> Tuple[np.ndarray, Dict]:
     if not data_file.exists():
         raise FileNotFoundError(f"Sample data not found at {data_file}")
 
-    with open(params_file, "r") as f:
-        params = json.load(f)
+    # Issue #304: read through the shared canonical reader rather than a raw
+    # json.load, so params.json's own alias spellings (min_grad_norm/max_decs/
+    # share_int) are translated to the canonical min_nd/maxdecs/share_iter
+    # names -- the same spelling _NG_PARAMS filters run_pytorch_amica's
+    # ng_kwargs on -- instead of silently landing in the "ignored" warning.
+    params = read_params_file(params_file)
 
     data = load_eeglab_data(
         str(data_file),
@@ -81,12 +88,15 @@ def load_sample_data() -> Tuple[np.ndarray, Dict]:
     return data, params
 
 
-# params.json spellings that differ from the Fortran keyword of the same setting.
-_FORTRAN_ALIASES = {
-    "num_mix": "num_mix_comps",
-    "share_int": "share_iter",
-    "maxrej": "numrej",
-}
+# params.json/pamica-canonical spellings that differ from the Fortran keyword
+# of the same setting. Derived from fortran_params.PAMICA_KEY_TO_FORTRAN_KEY
+# (issue #304's single source of truth for pamica-key -> Fortran-keyword,
+# itself the inverse of FORTRAN_TO_PAMICA_KEY's renames), plus share_int:
+# JSON-schema-only, not a pamica canonical key, so it needs its own entry
+# (Fortran's own spelling for it, share_iter, already matches the canonical
+# name and so carries no PAMICA_KEY_TO_FORTRAN_KEY entry either).
+_FORTRAN_ALIASES = dict(PAMICA_KEY_TO_FORTRAN_KEY)
+_FORTRAN_ALIASES["share_int"] = "share_iter"
 
 # params.json keys that configure the Python side only, so having no Fortran
 # keyword is expected rather than a dropped setting.
@@ -396,10 +406,12 @@ def run_pytorch_amica(
     # backend seeds init, builds the symmetric-ZCA sphere, and starts from an
     # identity-plus-small-perturbation mixing matrix internally, so no manual
     # parameter poking is needed (unlike the removed basic backend). AMICA.fit()
-    # handles device selection (and the MPS/float64 -> CPU fallback).
+    # handles device selection (and the MPS/float64 -> CPU fallback). `params`
+    # is already canonical-keyed (read_params_file, issue #304), so maxdecs/
+    # min_nd/share_iter land here via the plain _NG_PARAMS filter -- no
+    # special case needed for the json schema's max_decs/min_grad_norm/
+    # share_int spellings.
     ng_kwargs = {k: v for k, v in params.items() if k in _NG_PARAMS}
-    if "max_decs" in params:  # json name -> AMICATorchNG's `maxdecs`
-        ng_kwargs["maxdecs"] = params["max_decs"]
     # lrate/do_mean/do_sphere/do_newton/seed/device are passed explicitly to
     # AMICA()/fit(); drop them from **kwargs to avoid duplicate keyword args.
     for k in ("lrate", "do_mean", "do_sphere", "do_newton", "seed", "device"):
