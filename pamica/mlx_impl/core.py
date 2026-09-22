@@ -61,8 +61,8 @@ The GG shape parameter ``rho`` is frozen for every non-GG family
 (``self.dorho = pdftype == 0``, Fortran ``dorho=.false.``), which also gates
 the ``drho_n`` accumulation and the per-iteration lgamma-table refresh here.
 AMICATorchNG already gates its digamma pull behind the same ``self.dorho``
-flag (core.py:1664-1678), so that is not a divergence; its genuine dead work
-for a non-GG fit is the ``drho_n`` accumulation, which it computes
+flag (``AMICATorchNG._update_parameters``), so that is not a divergence; its genuine
+dead work for a non-GG fit is the ``drho_n`` accumulation, which it computes
 unconditionally in ``_get_block_updates`` (no ``dorho`` gate there), and the
 inline ``torch.lgamma(1+1/rho)`` term ``_log_pdf_only`` recomputes on every
 call to build the (dead, for non-GG) GG-fallthrough branch. This backend
@@ -118,8 +118,8 @@ from ..rank import (
 logger = logging.getLogger(__name__)
 
 # Human-readable names for the ``pdftype``/``pdtype`` source-density family
-# codes (issue #265, mirroring AMICATorchNG's PDFTYPE_NAMES, torch core.py:
-# 65-71 -- duplicated rather than imported so this module keeps no torch
+# codes (issue #265, mirroring ``pamica.torch_impl.core.PDFTYPE_NAMES`` --
+# duplicated rather than imported so this module keeps no torch
 # dependency). Exposed alongside the numeric codes so a fitted model's
 # per-source density family is inspectable (issue #142).
 PDFTYPE_NAMES = {
@@ -136,7 +136,7 @@ _LOG4 = math.log(4.0)  # logistic-family normalizer (amica15.f90:1346)
 # constants (amica15.f90:1333/1359/1371) so the log-density matches the reference
 # binary bit-for-bit: 2.506628274 = sqrt(2*pi) (Gaussian, pdtype 2); 4.132731354 /
 # 1.858073988 = the sub-/super-Gaussian cosh normalizers (pdtype 4 / 1). Ported
-# verbatim from AMICATorchNG (core.py:76-82, policy 1).
+# verbatim from the same-named ``pamica.torch_impl.core`` constants (policy 1).
 _LOG_SQRT_2PI = math.log(2.506628274)
 _LOG_NORM_COSH_SUB = math.log(4.132731354)
 _LOG_NORM_COSH_SUP = math.log(1.858073988)
@@ -188,10 +188,10 @@ _CPU = mx.cpu
 # this guard already makes rare in practice.
 _INV_COND_THRESHOLD = 1e12
 
-# Best-iterate safeguard (issue #51, ported from AMICATorchNG core.py:90-113 --
-# epic #278 Phase 2, issue #288). The lrate schedule is deliberately
-# non-monotone: it anneals only *after* an LL decrease, so a late Newton
-# fallback can overshoot and a run can end below a peak it already reached.
+# Best-iterate safeguard (issue #51, ported from
+# ``pamica.torch_impl.core._KEEP_BEST_TOL`` -- epic #278 Phase 2, issue #288). The lrate
+# schedule is deliberately non-monotone: it anneals only *after* an LL decrease, so a
+# late Newton fallback can overshoot and a run can end below a peak it already reached.
 # fit() therefore tracks the highest-LL iterate and restores it when the final
 # LL falls more than this tolerance below that peak. Units: mean
 # log-likelihood per sample-channel, the same normalized scale as
@@ -209,7 +209,7 @@ _KEEP_BEST_TOL = 1e-9
 
 def _logcosh(x: mx.array) -> mx.array:
     """Numerically stable ``log cosh(x) = |x| - log2 + log1p(exp(-2|x|))``
-    (AMICATorchNG ``_logcosh``, core.py:113-116). Naive ``mx.log(mx.cosh(x))``
+    (``pamica.torch_impl.core._logcosh``). Naive ``mx.log(mx.cosh(x))``
     overflows to inf in float32 by ``|x| == 90`` (measured crossover: finite at
     89.0, inf at 89.5; ``cosh`` itself overflows first) -- reachable, since
     ``beta`` clips at ``invsigmax=1000`` -- while this form stays within float32
@@ -220,8 +220,7 @@ def _logcosh(x: mx.array) -> mx.array:
 
 
 def _score(y: mx.array, rho: mx.array, pdtype: Optional[mx.array] = None) -> mx.array:
-    """Source-density score ``fp = -d(log pdf)/dy`` (AMICATorchNG ``_score``,
-    core.py:184-222).
+    """Source-density score ``fp = -d(log pdf)/dy`` (``pamica.torch_impl.core._score``).
 
     ``pdtype is None`` (the ``pdftype=0`` fast path): GG score only -- exactly
     the pre-#265 ``_score_gg`` body, so it adds ZERO extra graph nodes relative
@@ -263,7 +262,7 @@ def _log_pdf(
     pdtype: Optional[mx.array] = None,
 ) -> tuple[mx.array, Optional[mx.array]]:
     """GG log-density and ``|y|^rho``, extended with the fixed non-GG families
-    (AMICATorchNG ``_log_pdf_only``, core.py:225-267).
+    (``pamica.torch_impl.core._log_pdf_only``).
 
     ``pdtype is None`` (the ``pdftype=0`` fast path): byte-for-byte the
     pre-#265 ``_log_pdf_gg`` body -- ``lgamma_table = lgamma(1+1/rho)``
@@ -670,7 +669,7 @@ class AMICAMLXNG:
 
         # Outlier rejection (issue #123's AMICATorchNG mechanism, epic #278
         # Phase 3/#289), same names/defaults/validation as AMICATorchNG
-        # (torch_impl/core.py:593-597, 679-685; Fortran do_reject/rejsig/
+        # (``AMICATorchNG.__init__``; Fortran do_reject/rejsig/
         # rejstart/rejint/maxrej, amica15_header.f90). numrej/good_idx are set
         # up per fit in _fit_once (good_idx = None until then, matching the
         # do_reject=False no-op path).
@@ -697,7 +696,7 @@ class AMICAMLXNG:
         self.rholratefact = rholratefact
 
         # Source-density family selection (issue #265, porting AMICATorchNG's
-        # issue #26 -- see torch_impl/core.py:640-676 for the identical block).
+        # issue #26 -- see ``AMICATorchNG.__init__`` for the identical block).
         # Values match Fortran's per-source pdtype codes: 0 generalized Gaussian
         # (the default, GG-mixture with adaptive rho), 2 Gaussian mixture, 3
         # logistic (sech^2) mixture, 4 sub-Gaussian cosh+ (single component).
@@ -881,7 +880,7 @@ class AMICAMLXNG:
         # issue #155), STASHED as the training E-step computes it rather than
         # recomputed by a separate forward pass at write time (issue #157;
         # epic #278 Phase 3, issue #289 -- port of AMICATorchNG's identical
-        # mechanism, torch_impl/core.py:880-902). ``_llt_logv``/``_llt_ll``
+        # mechanism in ``AMICATorchNG.__init__``). ``_llt_logv``/``_llt_ll``
         # are the live per-fit buffers (Fortran's ``modloglik``/``loglik``),
         # zero-filled so a ``do_reject`` sample keeps Fortran's zero
         # sentinel. ``fit`` converts them into the compact numpy
@@ -937,7 +936,7 @@ class AMICAMLXNG:
         if self.do_sphere:
             # Population covariance (/N), matching Fortran's DSYRK scatter, not
             # numpy's default sample covariance (/(N-1)) -- the same choice, and
-            # the reasoning for it, at torch_impl/core.py:823-827.
+            # the reasoning for it, in ``AMICATorchNG._preprocess``.
             cov = np.cov(Xc, bias=True)
             evals, evecs = np.linalg.eigh(cov)
             order = np.argsort(evals)[::-1]
@@ -997,7 +996,7 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _initialize_parameters(self):
         """Initialize parameters with the *same* ``np.random.RandomState`` draw
-        order as AMICATorchNG/AMICA_NumPy (core.py:918-973), so a shared seed
+        order as ``AMICATorchNG._initialize_parameters``/AMICA_NumPy, so a shared seed
         gives a bit-identical (float32-cast) starting point."""
         rng = np.random.RandomState(self.seed)
         n, m, ncomp, nmix = self.n_channels, self.n_models, self.n_comps, self.n_mix
@@ -1033,7 +1032,7 @@ class AMICAMLXNG:
         self.c = mx.array(np.zeros((n, m), dtype=np.float32))
 
         # Per-source density-family codes, Fortran `pdtype = pdftype`
-        # (amica15.f90:611; AMICATorchNG core.py:960-963). In adaptive mode
+        # (amica15.f90:611; ``AMICATorchNG._initialize_parameters``). In adaptive mode
         # (pdftype==1) every source starts as the super-Gaussian code (1),
         # since self.pdftype IS 1 there -- no special-case fill needed.
         self.pdtype = mx.array(np.full((n, m), self.pdftype, dtype=np.int32))
@@ -1042,7 +1041,7 @@ class AMICAMLXNG:
         # Reset the mutable optimization state to the pristine constructor values
         # (lrate_cap, newtrate and rholrate are ratcheted down during fit, and
         # n_newton_fallbacks counts one fit), so a re-fit starts fresh --
-        # AMICATorchNG does the same at core.py:966-971/:1936.
+        # AMICATorchNG does the same in ``_initialize_parameters``/``_fit_once``.
         self.lrate = self.lrate0
         self.lrate_cap = self.lrate0
         self.newtrate = self.newtrate0
@@ -1197,7 +1196,7 @@ class AMICAMLXNG:
     def _pdtype_h(self, h: int) -> Optional[mx.array]:
         """Per-source density-family codes for model ``h``, shaped for
         broadcasting against ``(batch, n_channels, n_mix)`` arrays (AMICATorchNG
-        ``_pdtype_h``, core.py:984-993), or ``None`` on the default
+        ``_pdtype_h``), or ``None`` on the default
         ``pdftype=0`` (GG-only) fast path so the E-step stays bit-identical to
         the pre-#265 implementation (policy 2).
         """
@@ -1210,8 +1209,8 @@ class AMICAMLXNG:
     # E-step
     # ------------------------------------------------------------------
     def _forward(self, Xb: mx.array):
-        """E-step forward pass for one block, per model (AMICATorchNG._forward,
-        core.py:998-1071). ``Xb`` is ``(n_channels, batch)``. Returns ``logV``
+        """E-step forward pass for one block, per model (``AMICATorchNG._forward``).
+        ``Xb`` is ``(n_channels, batch)``. Returns ``logV``
         ``(batch, n_models)`` and per-model lists ``(b, z, y, az_rho)``. For
         n_models=1 (c=0, gm=1, comp_list=identity) this is numerically identical
         to the single-model path. Each model's ``az_rho`` entry is ``None`` when
@@ -1255,8 +1254,8 @@ class AMICAMLXNG:
         return logV, b_list, z_list, y_list, azrho_list
 
     def _get_block_updates(self, Xb: mx.array) -> dict:
-        """Exact-EM sufficient statistics for one block (AMICATorchNG.
-        _get_block_updates, core.py:1141-1283). Mixture stats are scattered into
+        """Exact-EM sufficient statistics for one block
+        (``AMICATorchNG._get_block_updates``). Mixture stats are scattered into
         their ``comp_list`` columns; ``dWtmp``/``dgm``/``dc_numer`` are
         per-model. For n_models=1 (v==1, identity comp_list) this reproduces the
         single-model accumulators exactly.
@@ -1287,7 +1286,7 @@ class AMICAMLXNG:
         # Per-sample total log-likelihood (Fortran ``P``/``loglik``,
         # amica15.f90:1402), kept as a vector rather than folded straight into
         # the scalar sum so the LLt stash can reuse it (issue #157, epic #278
-        # Phase 3/#289, porting AMICATorchNG core.py:1222-1227); ``block_ll``
+        # Phase 3/#289, porting ``AMICATorchNG._get_block_updates``); ``block_ll``
         # is the same summation as before, bit for bit.
         block_ll_samples = mx.logsumexp(logV, axis=1)
         block_ll = block_ll_samples.sum()
@@ -1330,8 +1329,8 @@ class AMICAMLXNG:
             dmu_n = dmu_n.at[:, idx].add(ufp.sum(0).T)
             # Phase A guard: float32 can round y to exactly 0 (fp(0)=0 => ufp=0),
             # so ufp/y is 0/0=NaN; where y==0, 0/1 contributes 0 (issue #75).
-            # torch's safe_y substitution (core.py:1231) is mirrored exactly for
-            # every family here, even though the true fp/y limit at y->0 is a
+            # torch's safe_y substitution (``_get_block_updates``) is mirrored exactly
+            # for every family here, even though the true fp/y limit at y->0 is a
             # finite nonzero constant for codes 2/3/1 (fp'(0): 1 Gaussian
             # (fp=y), 0.5 logistic (fp=tanh(y/2)), 2 super-Gaussian
             # (fp=y+tanh(y))) and 0 for code 4 (fp=y-tanh(y), whose Taylor
@@ -1401,10 +1400,9 @@ class AMICAMLXNG:
             Scatter each block's per-sample ``logV``/``ll_samples`` into the
             ``_llt_logv``/``_llt_ll`` buffers as it goes, so the LLt output
             never needs a second pass over the data (issue #157, epic #278
-            Phase 3/#289 -- port of AMICATorchNG._accumulate_blocks,
-            torch_impl/core.py:1339-1388). The scatter is itself just another
-            lazy MLX op (``self._llt_logv[rows] = logv``), so it joins the
-            same per-iteration graph ``fit`` already evaluates once -- no
+            Phase 3/#289 -- port of ``AMICATorchNG._accumulate_blocks``). The scatter is
+            itself just another lazy MLX op (``self._llt_logv[rows] = logv``), so it
+            joins the same per-iteration graph ``fit`` already evaluates once -- no
             extra sync is added here. Only the training loop sets this; the
             ``_tune_block_size`` probes leave the buffers untouched, so the
             tuner still leaves no state behind. The per-sample values are
@@ -1517,7 +1515,7 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _finalize_newton_stats(self, acc: dict):
         """Reduce the Newton block accumulators into ``(sigma2, lambda_, kappa)``
-        (AMICATorchNG._finalize_newton_stats, core.py:1307-1331; Fortran
+        (``AMICATorchNG._finalize_newton_stats``; Fortran
         amica15.f90:1666-1680).
 
         The Fortran ``baralpha``/``dkappa_denom``/``dlambda_denom``
@@ -1556,7 +1554,7 @@ class AMICAMLXNG:
 
     def _newton_direction(self, dA_h, sigma2_h, lambda_h, kappa_h):
         """Per-model Newton direction ``H`` from the natural gradient ``dA_h``
-        (AMICATorchNG._newton_direction, core.py:1333-1361).
+        (``AMICATorchNG._newton_direction``).
 
         Vectorized port of the per-source-pair 2x2 solve (Fortran
         amica15.f90:1718-1741):
@@ -1600,8 +1598,7 @@ class AMICAMLXNG:
 
     def _update_parameters(self, acc: dict, n_samples: int):
         """Exact-EM mixture updates + natural-gradient A-update, optionally
-        Newton-preconditioned (AMICATorchNG._update_parameters,
-        core.py:1363-1616)."""
+        Newton-preconditioned (``AMICATorchNG._update_parameters``)."""
         # Fortran builds dAk from the PREVIOUS iteration's model weights: gm is
         # not reassigned until update_params (amica15.f90:1788+), after the
         # dAk/zeta accumulation in accum_updates_and_likelihood (:1749-1761).
@@ -1618,10 +1615,10 @@ class AMICAMLXNG:
         tiny = float(np.finfo(np.float32).tiny)
 
         # Per-model data-space bias c[i,h] = sum_t v_h*x / sum_t v_h (Fortran
-        # update_c, core.py:1401-1423). Skipped for n_models=1 (v==1 => c is the
-        # zero data mean; the update would add a float-sum residual and break the
-        # #24 bit-exact single-model path). A dead model (dgm[h]==0) keeps its
-        # prior c rather than writing 0/0, and is surfaced (matching AMICATorchNG).
+        # update_c, as in ``AMICATorchNG._update_parameters``). Skipped for n_models=1
+        # (v==1 => c is the zero data mean; the update would add a float-sum residual
+        # and break the #24 bit-exact single-model path). A dead model (dgm[h]==0) keeps
+        # its prior c rather than writing 0/0, and is surfaced (matching AMICATorchNG).
         if self.n_models > 1:
             dgm = acc["dgm"]
             live = dgm > 0.0
@@ -1678,9 +1675,9 @@ class AMICAMLXNG:
         # GG shape update with the 1/psi(1+1/rho) digamma factor (Fortran
         # :2013-2014); digamma is computed host-side (MLX has none). A NaN here
         # (e.g. from an upstream mu/beta blow-up) is reset to rho0 and surfaced,
-        # matching AMICATorchNG (core.py:1671-1693), so it does not silently
+        # matching ``AMICATorchNG._update_parameters``, so it does not silently
         # poison the lgamma table and every subsequent E-step.
-        # Deliberate divergence from AMICATorchNG (core.py:1671-1675), which also
+        # Deliberate divergence from ``AMICATorchNG._update_parameters``, which also
         # skips the update when rho is pinned to a boundary (all 1.0 or all 2.0):
         # that early-exit needs a host sync on a (n_mix, n_comps) reduction over
         # rho every iteration. This backend does make a few scalar host syncs per
@@ -1715,10 +1712,10 @@ class AMICAMLXNG:
             )
 
         # Natural-gradient A-update. A is stored as Fortran's A^T, so the update
-        # is a LEFT-multiply by the transposed direction (core.py:1506-1514,
-        # #24 root cause). Each model's direction is scattered into its mixing
-        # columns as a gm-weighted average (Fortran dAk/zeta, core.py:1546-1561)
-        # using the PREVIOUS iteration's gm (gm_prev, see the snapshot above):
+        # is a LEFT-multiply by the transposed direction (as in
+        # ``AMICATorchNG._update_parameters``, #24 root cause). Each model's direction
+        # is scattered into its mixing columns as a gm-weighted average (Fortran
+        # dAk/zeta) using the PREVIOUS iteration's gm (gm_prev, see the snapshot above):
         # for the default disjoint comp_list every column has one contributor, so
         # gm cancels and n_models=1 is byte-for-byte the old `A - lrate*(dA.T@A)`;
         # a SHARED column (#263) takes Fortran's responsibility-weighted average,
@@ -1742,7 +1739,7 @@ class AMICAMLXNG:
         # always False with sharing off, so the default path is unchanged.
         # Newton only swaps out the per-model DIRECTION; the dAk/zeta scatter,
         # the gradient norm and the freeze structure below are untouched by it
-        # (AMICATorchNG core.py:1531-1545). A model whose curvature fails the
+        # (``AMICATorchNG._update_parameters``). A model whose curvature fails the
         # positive-definiteness guard falls back to its natural gradient for this
         # iteration, and -- as in Fortran -- ANY model falling back also sends
         # the lrate ramp to lrate_cap instead of newtrate.
@@ -1829,8 +1826,8 @@ class AMICAMLXNG:
             scale = mx.sqrt((self.A**2).sum(axis=0))  # (n_comps,)
             # A zero-norm (collapsed) column is left untouched, not rescaled:
             # safe_scale is 1 there, so A/beta are unchanged and mu*safe_scale
-            # keeps its prior value (matching AMICATorchNG's nonzero mask,
-            # core.py:1608-1614 -- using raw `scale` would zero mu instead).
+            # keeps its prior value (matching AMICATorchNG's nonzero mask in
+            # _update_parameters -- using raw `scale` would zero mu instead).
             safe_scale = mx.where(scale > 0, scale, mx.ones_like(scale))
             self.A = self.A / safe_scale
             self.mu = self.mu * safe_scale
@@ -1853,7 +1850,7 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _choose_pdfs(self, X: mx.array) -> None:
         """Extended-Infomax adaptive PDF switch (Fortran ``do_choose_pdfs``,
-        AMICATorchNG ``_choose_pdfs``, core.py:1790-1823).
+        ``AMICATorchNG._choose_pdfs``).
 
         Re-estimates each source's kurtosis from the current model activations
         and sets its density family to the super-Gaussian (code 1) or
@@ -1926,7 +1923,7 @@ class AMICAMLXNG:
 
     def _pdtype_from_kurtosis(self, kurt: np.ndarray, nsub: np.ndarray) -> np.ndarray:
         """Map per-source excess kurtosis to a density-family code (pure numpy;
-        AMICATorchNG ``_pdtype_from_kurtosis``, core.py:1825-1852).
+        ``AMICATorchNG._pdtype_from_kurtosis``).
 
         Super-Gaussian (positive kurtosis) -> code 1; sub-Gaussian -> code 4.
         Only sources with a meaningful signal switch: a dead model
@@ -1955,7 +1952,7 @@ class AMICAMLXNG:
 
     # ------------------------------------------------------------------
     # Best-iterate safeguard (issue #51, epic #278 Phase 2/#288; port of
-    # AMICATorchNG._snapshot_params/_restore_params, core.py:2025-2062)
+    # AMICATorchNG._snapshot_params/_restore_params)
     # ------------------------------------------------------------------
     def _snapshot_params(self) -> dict:
         """Snapshot the fitted state for the best-iterate safeguard (issue #51).
@@ -1973,7 +1970,7 @@ class AMICAMLXNG:
         fix this ports).
 
         Also captures the LLt stash (issue #157, epic #278 Phase 3/#289; port
-        of AMICATorchNG._snapshot_params, torch_impl/core.py:2025-2057).
+        of ``AMICATorchNG._snapshot_params``).
         ``fit`` snapshots immediately after the E-step that produced both the
         candidate ``best_ll`` and this iteration's ``_llt_logv``/``_llt_ll``,
         so a restore rolls the on-disk LLt back to the E-step of the restored
@@ -2255,7 +2252,7 @@ class AMICAMLXNG:
         Note that a merge synchronizes only the mixture parameters routed
         through ``comp_list`` (``mu``/``alpha``/``beta``/``rho``); the
         per-source density *family* code ``pdtype`` is a separate array and is
-        not synchronized (issue #265, matching AMICATorchNG core.py:2669-2673),
+        not synchronized (issue #265, matching ``AMICATorchNG.shared_components``),
         so under the adaptive switcher (``pdftype=1``) a shared pair can still
         report different :meth:`get_pdftype` codes.
 
@@ -2581,7 +2578,7 @@ class AMICAMLXNG:
             # keep_best defaults on, so a user enabling sharing/rejection
             # would otherwise silently lose the safeguard; surface it once.
             # do_reject checked first, matching AMICATorchNG's precedence
-            # exactly (torch_impl/core.py:2425) -- both can be true at once
+            # exactly (``AMICATorchNG._fit_once``) -- both can be true at once
             # (see test_mlx_reject.py's genuine-merge-plus-reject test), and
             # the two backends must report the same reason for the same
             # configuration.
@@ -2737,8 +2734,8 @@ class AMICAMLXNG:
                 # Name the offenders. Everything here is already materialized, so
                 # the per-tensor reads add no mid-graph sync -- this is the MLX
                 # stand-in for AMICATorchNG's inline mu/beta/alpha canary
-                # (torch_impl/core.py:1461-1474), which MLX cannot afford inside
-                # _update_parameters because it would sync the lazy graph.
+                # (in ``AMICATorchNG._update_parameters``), which MLX cannot afford
+                # inside _update_parameters because it would sync the lazy graph.
                 bad = [
                     name
                     for name, value in checked.items()
@@ -2754,7 +2751,7 @@ class AMICAMLXNG:
                 break
 
             # Extended-Infomax adaptive PDF switch (Fortran do_choose_pdfs,
-            # AMICATorchNG core.py:2030-2042). Runs on the
+            # ``AMICATorchNG._fit_once``). Runs on the
             # kurt_start/num_kurt/kurt_int schedule using the just-updated W;
             # the new per-source families take effect from the next E-step.
             # itf is the Fortran-style 1-indexed iteration. num_kurt=0 disables
@@ -2971,8 +2968,8 @@ class AMICAMLXNG:
             # Switching Newton on changes the step direction, so the decrease
             # counter accumulated during the natural-gradient phase no longer
             # describes the schedule now running: Fortran clears it on the
-            # switch-on iteration (amica15.f90:1099-1102, AMICATorchNG
-            # core.py:2218-2219).
+            # switch-on iteration (amica15.f90:1099-1102,
+            # ``AMICATorchNG._fit_once``).
             if self.do_newton and it == self.newt_start:
                 numdecs = 0
 
@@ -3051,7 +3048,7 @@ class AMICAMLXNG:
 
     def transform(self, X: np.ndarray, model_idx: int = 0) -> np.ndarray:
         """Apply the learned unmixing matrix to (new) data (issue #287, port of
-        ``AMICATorchNG.transform``, torch_impl/core.py:2928-2946).
+        ``AMICATorchNG.transform``).
 
         Sources are ``S = W[model_idx]^T @ (sphere @ (X - mean) - c[:,
         model_idx])`` (issue #24 transpose convention, issue #27 per-model
@@ -3082,7 +3079,7 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _check_model_idx(self, model_idx: int) -> None:
         """Validate a model index against the fitted ``n_models`` (AMICATorchNG
-        ``_check_model_idx``, core.py:2911-2926). Raises a clear ``ValueError``
+        ``_check_model_idx``). Raises a clear ``ValueError``
         (rejecting negatives, which MLX's negative indexing would otherwise turn
         into a silent wrong-model result) instead of an opaque array error."""
         if not isinstance(model_idx, (int, np.integer)):
@@ -3097,7 +3094,7 @@ class AMICAMLXNG:
 
     def get_pdftype(self, model_idx: int = 0) -> np.ndarray:
         """Per-source density-family code for model ``model_idx`` (AMICATorchNG
-        ``get_pdftype``, core.py:2609-2627).
+        ``get_pdftype``).
 
         One integer per source component (0-4; 0 generalized Gaussian, 1
         super-Gaussian cosh, 2 Gaussian, 3 logistic, 4 sub-Gaussian cosh). All
@@ -3130,8 +3127,7 @@ class AMICAMLXNG:
 
     def get_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """True mixing matrix ``A_fort`` = (stored A)^T (issue #24 convention;
-        issue #287 port of ``AMICATorchNG.get_mixing_matrix``, torch_impl/
-        core.py:2948-2956)."""
+        issue #287 port of ``AMICATorchNG.get_mixing_matrix``)."""
         if self.A is None or self.comp_list is None:
             raise RuntimeError(
                 "AMICAMLXNG.get_mixing_matrix() requires a fitted model; call "
@@ -3160,10 +3156,9 @@ class AMICAMLXNG:
 
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space (issue #287 port of
-        ``AMICATorchNG.get_sensor_mixing_matrix``, torch_impl/core.py:
-        2969-2991): ``pinv(sphere) @ A``, via :meth:`_pinv_sphere` -- the only
-        correct back-map when rank reduction has left the sphere non-square
-        (issue #223).
+        ``AMICATorchNG.get_sensor_mixing_matrix``): ``pinv(sphere) @ A``, via
+        :meth:`_pinv_sphere` -- the only correct back-map when rank reduction has left
+        the sphere non-square (issue #223).
         """
         if self.sphere is None:
             raise RuntimeError(
@@ -3181,10 +3176,9 @@ class AMICAMLXNG:
 
     def get_unmixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """True unmixing matrix ``W_fort`` = (stored W)^T (issue #24
-        convention; issue #287 port of ``AMICATorchNG.get_unmixing_matrix``,
-        torch_impl/core.py:2993-3001). MLX's ``W`` is model-major (``(n_models,
-        n, n)``), so the per-model slice is ``W[model_idx]`` rather than
-        torch's ``W[:, :, model_idx]``."""
+        convention; issue #287 port of ``AMICATorchNG.get_unmixing_matrix``). MLX's
+        ``W`` is model-major (``(n_models, n, n)``), so the per-model slice is
+        ``W[model_idx]`` rather than torch's ``W[:, :, model_idx]``."""
         if self.W is None:
             raise RuntimeError(
                 "AMICAMLXNG.get_unmixing_matrix() requires a fitted model; "
@@ -3195,8 +3189,7 @@ class AMICAMLXNG:
 
     def get_rho(self, model_idx: int = 0) -> np.ndarray:
         """Generalized-Gaussian shape parameter ``rho`` for model
-        ``model_idx`` (issue #287 port of ``AMICATorchNG.get_rho``, torch_impl/
-        core.py:3231-3259; issue #142).
+        ``model_idx`` (issue #287 port of ``AMICATorchNG.get_rho``; issue #142).
 
         One value per (mixture component, source): ``rho == 2`` is Gaussian-
         shaped, ``rho == 1`` Laplacian, ``rho < 1`` heavier-tailed. Only the
@@ -3227,14 +3220,13 @@ class AMICAMLXNG:
 
     # ------------------------------------------------------------------
     # EEGLAB drop-in output (issue #92; epic #278 polish port of
-    # AMICATorchNG.variance_order, torch_impl/core.py:3223-3283)
+    # AMICATorchNG.variance_order)
     # ------------------------------------------------------------------
     def variance_order(
         self, model_idx: int = 0, return_svar: bool = False
     ) -> np.ndarray | tuple:
         """EEGLAB back-projected-variance component order (IC1 = highest
-        variance) (port of ``AMICATorchNG.variance_order``, torch_impl/
-        core.py:3223-3283).
+        variance) (port of ``AMICATorchNG.variance_order``).
 
         Returns the source indices sorted by descending back-projected
         variance, the ordering EEGLAB's ``loadmodout15.m`` applies on load
@@ -3303,12 +3295,12 @@ class AMICAMLXNG:
 
     # ------------------------------------------------------------------
     # MIR/PMI diagnostics (issue #137; epic #278 Phase 3/#289 port of
-    # AMICATorchNG.mir/pmi, torch_impl/core.py:2929-3036)
+    # AMICATorchNG.mir/pmi)
     # ------------------------------------------------------------------
     def _pca_reduction_requested(self, n_channels: int) -> bool:
         """Whether the explicit ``pcakeep``/``pcadb`` asks to fit fewer than
         ``n_channels`` dimensions (port of
-        ``AMICATorchNG._pca_reduction_requested``, torch_impl/core.py:3022-3040;
+        ``AMICATorchNG._pca_reduction_requested``;
         both delegate to :func:`pamica.rank.pca_reduction_requested`, issue
         #323).
 
@@ -3325,8 +3317,7 @@ class AMICAMLXNG:
 
     def _pca_reduced(self) -> bool:
         """Whether the fitted sphere is rank-reduced (non-square) -- the #300
-        fitted-geometry guard (port of ``AMICATorchNG._pca_reduced``,
-        torch_impl/core.py:3042-3056).
+        fitted-geometry guard (port of ``AMICATorchNG._pca_reduced``).
 
         Derived from the fitted geometry (``sphere.shape[0] !=
         sphere.shape[1]``), so it catches rank reduction from an explicit
@@ -3426,8 +3417,7 @@ class AMICAMLXNG:
 
     # ------------------------------------------------------------------
     # Multi-model posterior (issue #141; epic #278 Phase 3/#289 port of
-    # AMICATorchNG.model_loglik/model_probability, torch_impl/core.py:
-    # 3041-3132)
+    # AMICATorchNG.model_loglik/model_probability)
     # ------------------------------------------------------------------
     def model_loglik(self, X: np.ndarray) -> np.ndarray:
         """Per-model, per-sample log-likelihood ``Lht`` on (new) data.
@@ -3526,7 +3516,7 @@ class AMICAMLXNG:
 
     # ------------------------------------------------------------------
     # EEGLAB export (issue #92; epic #278 Phase 3/#289 port of
-    # AMICATorchNG.write_amica_output, torch_impl/core.py:3359-3471)
+    # AMICATorchNG.write_amica_output)
     # ------------------------------------------------------------------
     def write_amica_output(self, outdir) -> None:
         """Write this fitted model as the Fortran/EEGLAB AMICA output
@@ -3659,7 +3649,7 @@ class AMICAMLXNG:
     # Persistence (issue #287)
     # ------------------------------------------------------------------
     # Full fitted-parameter snapshot -- the same 12-name set as AMICATorchNG's
-    # _PARAM_TENSORS (torch_impl/core.py:3484-3489): A/W/c/comp_list/mean/
+    # _PARAM_TENSORS: A/W/c/comp_list/mean/
     # sphere are what transform()/get_*matrix() read back; mu/alpha/beta/rho/
     # gm are the mixture-PDF EM state; pdtype is the per-source density-family
     # code (issue #265) -- a non-default pdftype model, or the adaptive
