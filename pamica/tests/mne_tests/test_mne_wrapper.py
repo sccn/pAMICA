@@ -282,10 +282,13 @@ def test_pca_reduction_is_supported(raw):
     assert fitted.amica_ is not None and fitted.ch_names_ is not None
     assert fitted.n_components_ == 10
     ica = fitted.to_mne_ica()
-    assert ica.pca_components_.shape == (10, len(fitted.ch_names_))
+    n_ch = len(fitted.ch_names_)
+    assert ica.n_components_ == 10
+    # The full PCA basis: 10 ICA-subspace rows, then the residual (issue #322).
+    assert ica.pca_components_.shape == (n_ch, n_ch)
     # Orthonormal rows are what make MNE's get_components/apply valid.
     np.testing.assert_allclose(
-        ica.pca_components_ @ ica.pca_components_.T, np.eye(10), atol=1e-10
+        ica.pca_components_ @ ica.pca_components_.T, np.eye(n_ch), atol=1e-10
     )
     s_mne = ica.get_sources(raw).get_data()
     s_amica = fitted.amica_.transform(_picked_data(raw, fitted))

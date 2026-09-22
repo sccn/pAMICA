@@ -164,9 +164,11 @@ def test_rank_deficient_fit_exports_and_roundtrips(rank_deficient_raw):
     assert fitted.n_components_ == 20
 
     ica = fitted.to_mne_ica()
-    assert ica.pca_components_.shape == (20, 32)
+    assert ica.n_components_ == 20
+    # 20 ICA-subspace rows, then the 12 residual PCA rows (issue #322).
+    assert ica.pca_components_.shape == (32, 32)
     np.testing.assert_allclose(
-        ica.pca_components_ @ ica.pca_components_.T, np.eye(20), atol=1e-10
+        ica.pca_components_ @ ica.pca_components_.T, np.eye(32), atol=1e-10
     )
     assert np.all(np.diff(ica.pca_explained_variance_) <= 0)
 
