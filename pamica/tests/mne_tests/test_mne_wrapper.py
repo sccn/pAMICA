@@ -319,10 +319,17 @@ def test_failed_refit_leaves_prior_state_intact(raw):
         raw, max_iter=MAX_ITER
     )
     before = ica.get_components()
+    assert ica.pca_components_ is not None
+    assert ica.pca_explained_variance_ is not None
+    pca_before = ica.pca_components_.copy()
+    variance_before = ica.pca_explained_variance_.copy()
     with pytest.raises(ValueError):  # stop past the end aborts before publishing
         ica.fit(raw, picks=raw.ch_names[:10], stop=raw.n_times + 1, max_iter=MAX_ITER)
     assert ica.n_components_ == before.shape[0]  # still the 32-channel fit
     np.testing.assert_array_equal(ica.get_components(), before)
+    # The fit-time PCA basis (issue #322) is published with the rest, or not at all.
+    np.testing.assert_array_equal(ica.pca_components_, pca_before)
+    np.testing.assert_array_equal(ica.pca_explained_variance_, variance_before)
 
 
 # --- multi-model (issue #141) ----------------------------------------------
