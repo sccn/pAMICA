@@ -3626,8 +3626,11 @@ class AMICATorchNG:
             "do_mean": self.do_mean,
             "do_sphere": self.do_sphere,
             "do_approx_sphere": self.do_approx_sphere,
-            "pcakeep": self.pcakeep,
-            "pcadb": self.pcadb,
+            # Plain int/float: the validator accepts numpy scalars (np.int64),
+            # which torch.load(weights_only=True) refuses to unpickle (issue
+            # #323). Same cast as AMICAMLXNG.state_dict, whose JSON needs it.
+            "pcakeep": None if self.pcakeep is None else int(self.pcakeep),
+            "pcadb": None if self.pcadb is None else float(self.pcadb),
             "mineig": self.mineig,
             "mineig_rel": self.mineig_rel,
             "seed": self.seed,
