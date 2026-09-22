@@ -19,9 +19,23 @@ best-iterate safeguard (`keep_best`) is implemented (epic #278 Phase 2, issue
 and the MIR/PMI diagnostics (`mir`/`pmi`, `fit(mir_step=...)` waypoints) are
 implemented (epic #278 Phase 3, issue #289). The `variance_order` accessor
 (the EEGLAB back-projected-variance component order) landed in the epic's
-post-Phase-3 polish round, ahead of merge to `dev` -- epic #278 is complete;
-there are no remaining gaps against the PyTorch backend other than
-float32-only precision (Apple GPUs have no float64).
+post-Phase-3 polish round, ahead of merge to `dev`, completing epic #278.
+
+Explicit PCA reduction followed in epic #324 Phase 1 (issue #323).
+`pcakeep` and `pcadb` carry the PyTorch backend's names, defaults, validation and precedence, all from the shared `pamica.rank` policy:
+both default to `None` (automatic `mineig`/`mineig_rel` rank detection only);
+`pcakeep` must be an integer of at least 1 and `pcadb` a finite number greater than 0, or the constructor raises `ValueError`;
+and when both are set `pcakeep` takes precedence and `pcadb` is ignored, as in the reference, which parses `pcadb` but never uses it.
+A reduced fit has a non-square `(n_channels, n_channels_in)` sphere, both parameters persist through `state_dict`/`save`,
+and `fit(mir_step > 0)` rejects an explicit reduction request up front, exactly as the PyTorch backend does
+(see [the differences guide](../guides/amica-differences.md#explicit-pca-reduction-pcakeep-and-pcadb-issue-323)).
+With it there are no remaining gaps against the PyTorch backend other than float32-only precision (Apple GPUs have no float64).
+
+```python
+model = AMICAMLXNG(n_channels=X.shape[0], pcakeep=X.shape[0] - 1)  # e.g. average reference
+model.fit(X)
+model.get_sensor_mixing_matrix()  # (n_channels_in, pcakeep) scalp maps
+```
 
 MLX is an optional dependency (Apple Silicon only), so it is imported separately
 and is not part of the default `import pamica` surface:

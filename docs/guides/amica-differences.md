@@ -22,10 +22,11 @@ that is not listed, that is a bug worth
 | 8 | Columns merged away by `share_comps` | updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided) | a fit must not end holding NaN parameters, mask or no mask; the columns are dead either way | — (see issues #60, #240) |
 | 9 | Block-size search | on (`do_opt_block=1`), sweeps 128–1024, **aborts** if a candidate cannot allocate | off; sweeps 4096–32768; a candidate that cannot allocate is skipped and the fit continues | the choice is timing-based and therefore machine-dependent, which a parity run cannot have; Fortran's range sits far below where any pamica backend peaks; and running out of memory is a reason to use a smaller block, not to stop | `do_opt_block=True` (but pin `block_size` for a bit-for-bit comparison) |
 | 10 | Restarts across seeds | none (its `maxrestarts` only *recovers* from an early NaN) | available as `n_restarts`, **off by default** (`n_restarts=1`) | the weakest under-determined components are init-basin sensitive, so best-of-N buys robustness; but a default that ran N fits would change every result and cost N times as long | `n_restarts=1` (the default) |
+| 11 | `pcadb` | parsed (amica15.f90:3459-3461), never used | unset by default; when set alone, keeps the dimensions within `pcadb` dB of the largest eigenvalue; ignored when `pcakeep` is also set | a dB cut is a scale-free way to drop low-variance directions; letting `pcakeep` win keeps a reference `input.param` that sets both (both bundled files do) meaning what it means to the binary | leave `pcadb` unset (the default), or set `pcakeep` |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
 row 3 with ADR 0003; row 5 with issue #50; row 8 with issues #60 and #240;
-row 9 with issue #232; row 10 with issue #198.
+row 9 with issue #232; row 10 with issue #198; row 11 with issue #323.
 
 Two `share_comps` details are pamica's own because the reference cannot decide
 them: the A-freeze window after a merge is anchored on `share_start` (the literal
@@ -132,6 +133,7 @@ Separate from reference divergences: the optional MLX backend is a subset.
 | Outlier rejection | yes | yes | yes | yes |
 | Precision | f64/f32 | f64 | f32 only | f64 |
 | Rank detection | yes | yes | yes | yes (absolute floor) |
+| Explicit `pcakeep`/`pcadb` | yes | yes | yes | `pcakeep` only; `pcadb` parsed but unused |
 | `min_dll` stop | yes | yes | yes | yes |
 | `min_nd` stop / gradient norm | yes | yes (as `min_grad_norm`) | yes | yes |
 | `keep_best` best-iterate restore | yes | no | yes | n/a |
@@ -447,21 +449,34 @@ the good set and which does not -- a WORK divergence, matching the
 `do_choose_pdfs`-adjacent `drho_n`/lgamma-table WORK divergences already
 documented above, not a correctness one.
 
-## `mir_step`'s upfront PCA-reduction gate: MLX has none, and that is parity, not a gap
+## Explicit PCA reduction: `pcakeep` and `pcadb` (issue #323)
 
-`AMICATorchNG.fit(mir_step=...)` rejects an EXPLICIT `pcakeep`/`pcadb`
-request up front (before any preprocessing runs), but -- deliberately, as of
-issue #300 -- never an AUTOMATIC `mineig`/`mineig_rel`-detected reduction
-upfront: that case is only ever caught downstream, inside the first
-per-waypoint `mir()` call, by the geometry-based `_pca_reduced()` guard
-issue #300 introduced (`sphere.shape[0] != sphere.shape[1]`). `AMICAMLXNG`
-has no explicit `pcakeep`/`pcadb` constructor parameter at all (only
-automatic rank detection, same as every other MLX rank-reduction path), so
-there is nothing for an upfront gate to check regardless of when it would
-run -- MLX's `mir_step` validation is the bare `mir_step >= 0` check, and
-automatic reduction degrades to the same warned, all-`NaN` `mir_history_`
-waypoints on both backends. This is intentional torch-parity for the
-auto-detected case, not a knowability limitation of MLX's fit-loop timing.
+All three array backends take `pcakeep` and `pcadb` with the same names, defaults (`None`), validation and precedence, decided once in `pamica/rank.py`.
+`pcakeep` keeps that many principal dimensions and is the reference's own keyword:
+`numeigs = min(pcakeep, count(eigs > mineig))` (amica15.f90:413, 466), so a value at or above the channel count keeps every dimension the data have.
+`pcadb` is a pamica extension (row 11 above):
+the reference parses it (amica15.f90:3459-3461) but never reads it again, so the binary never reduces by it,
+while pamica keeps the dimensions whose covariance eigenvalue lies within `pcadb` dB of the largest.
+
+When both are set, `pcakeep` takes precedence and `pcadb` is ignored, with one INFO log line saying so.
+That is what the reference does, and it matters in practice:
+both bundled parameter files set `pcakeep 32` and `pcadb 30`, and on the 32-channel sample `pcadb=30` alone would keep 26 dimensions where the binary keeps all 32.
+
+A value that cannot mean anything raises `ValueError` at construction on every backend:
+`pcakeep` must be an integer of at least 1 (not a `bool`, not a float), and `pcadb` a finite number greater than 0.
+Before #323 the PyTorch and NumPy backends accepted these silently:
+`pcakeep=-3` sliced from the end and fitted 29 of 32 dimensions, `pcakeep=2.7` fitted 2, and `pcakeep=0` or `pcadb <= 0` ran to a degenerate `nan_ll` fit.
+The reference has no such check; with `pcakeep <= 0` it sets `numeigs = min(pcakeep, ...) <= 0` and carries on, the situation row 2 describes.
+
+## `mir_step`'s upfront PCA-reduction gate
+
+MIR is undefined on a rank-reduced sphere, so `fit(mir_step > 0)` checks for PCA reduction in two places, identically on `AMICATorchNG` and `AMICAMLXNG`.
+An explicit reduction request, meaning `pcakeep` below the channel count or any `pcadb` (whether it cuts anything depends on eigenvalues that do not exist yet), is rejected up front with a `ValueError`, before any preprocessing runs.
+`pcakeep` at or above the channel count is not a request and passes.
+Before #323 the PyTorch gate rejected every explicit `pcakeep`, including the bundled `input.param`'s `pcakeep 32` on 32 channels, and MLX had no explicit reduction to gate.
+
+Automatic reduction (`mineig`/`mineig_rel` rank detection) cannot be known before the sphere exists, so it is caught per waypoint instead, by `mir()`'s geometry-based `_pca_reduced()` guard (issue #300):
+the first scheduled waypoint records a warned `NaN` entry in `mir_history_`, later waypoints are skipped, and the fit itself completes.
 
 ## The block-size search picks a machine-dependent value (issue #232)
 
