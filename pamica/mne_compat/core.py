@@ -280,8 +280,8 @@ class AMICAICA:
     Model ``h``'s AMICA transform is ``S = W_fort @ (sphere @ (X - mean) - c_h)``,
     where ``c_h`` is that model's data-space center (identically zero for a
     single model, since the ``c`` update is gated to ``n_models > 1``). MNE
-    computes sources as
-    ``S = unmixing_matrix_ @ pca_components_ @ (X / pre_whitener_ - pca_mean_)``.
+    computes sources as ``S = unmixing_matrix_ @ pca_components_[:n_components_]
+    @ (X / pre_whitener_ - pca_mean_)``.
     ``X`` is scaled by channel type before fitting, exactly as MNE's own ICA does,
     so the two pipelines agree; AMICA's sphering absorbs a global rescale, so this
     changes nothing for single-channel-type data. Writing the symmetric-ZCA ``sphere`` as
