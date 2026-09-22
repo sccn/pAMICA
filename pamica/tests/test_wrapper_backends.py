@@ -513,3 +513,92 @@ def test_mlx_payload_without_mlx_names_the_backend(fitted, tmp_path, monkeypatch
     monkeypatch.setitem(sys.modules, "mlx", None)
     with pytest.raises(ImportError, match="holds an MLX-backend model.*not installed"):
         AMICA.load(str(path))
+
+
+# --- EEGLAB export from an MLX fit --------------------------------------------------
+@pytest.mark.parametrize("pcakeep", [None, PCAKEEP])
+def test_mlx_eeglab_export_reloads_through_loadmodout(X, tmp_path, pcakeep):
+    """The wrapper's write_amica_output on an MLX fit is what EEGLAB reads:
+    shapes as loadmodout15 expects them (a reduced sphere padded to the
+    Fortran nx x nx record), the written sphere and mean exactly the model's,
+    and the reloaded sources and maps the live ones up to loadmodout's
+    variance order and per-component scale."""
+    from pamica.numpy_impl.load import loadmodout
+
+    model = _wrapper("mlx")
+    model.fit(X, max_iter=MAX_ITER, seed=SEED, pcakeep=pcakeep)
+    n = NW if pcakeep is None else pcakeep
+    outdir = tmp_path / "amicaout"
+    model.write_amica_output(str(outdir))
+    out = loadmodout(outdir)
+
+    assert (out.num_pcs, out.data_dim, out.num_models) == (n, NW, 1)
+    assert out.W.shape == (n, n, 1)
+    assert out.S.shape == (NW, NW)
+    assert out.A.shape == (NW, n, 1)
+    assert model.model_ is not None
+    np.testing.assert_array_equal(
+        out.S[:n], np.array(model.model_.sphere, dtype=np.float64)
+    )
+    np.testing.assert_array_equal(out.S[n:], 0.0)
+    np.testing.assert_array_equal(np.ravel(out.data_mean), model.get_mean())
+    np.testing.assert_array_equal(out.LL, model.ll_history_)
+
+    # loadmodout reorders by back-projected variance (origord) and rescales
+    # each component; within that, sources and sensor maps must be the live
+    # ones to float32 tolerance (measured 2.8e-7 / 9.4e-8 full rank).
+    order = np.asarray(out.origord).ravel()
+    assert sorted(order.tolist()) == list(range(n))
+    for loaded, live in (
+        (out.sources(X), model.transform(X).astype(np.float64)[order]),
+        (out.A[:, :, 0].T, model.get_sensor_mixing_matrix()[:, order].T),
+    ):
+        scale = (loaded * live).sum(axis=1) / (live**2).sum(axis=1)
+        residual = loaded - scale[:, None] * live
+        assert np.linalg.norm(residual) <= 1e-5 * np.linalg.norm(loaded)
+
+
+# --- torch and MLX through the wrapper agree ------------------------------------------
+@pytest.mark.parametrize("pcakeep", [None, PCAKEEP])
+def test_torch_and_mlx_wrappers_find_the_same_components(real_data, pcakeep):
+    """Same data, seed and configuration through AMICA(backend=...): the same
+    number of components, the same sources (Hungarian-matched |corr| at the
+    bar of test_pca_reduction_cross_backend.py, which this reuses), and the
+    same log-likelihood to MLX's float32 bar. Measured on the full sample, 10
+    iterations: min matched |corr| 0.99999996 full rank / 0.99999993 at
+    pcakeep=20, identity matching, LL difference 1.3e-6 / 4.8e-6."""
+    from pamica.tests.test_pca_reduction_cross_backend import _matched_abs_corr
+
+    kwargs = {} if pcakeep is None else {"pcakeep": pcakeep}
+    t = _wrapper("torch")
+    t.fit(real_data, max_iter=10, seed=SEED, **kwargs)
+    m = _wrapper("mlx")
+    m.fit(real_data, max_iter=10, seed=SEED, **kwargs)
+
+    n = NW if pcakeep is None else pcakeep
+    assert t.model_ is not None and m.model_ is not None
+    assert t.model_.n_channels == m.model_.n_channels == n
+    s_t, s_m = t.transform(real_data), m.transform(real_data)
+    assert s_t.shape == s_m.shape == (n, FIELD)
+    matched, cols = _matched_abs_corr(s_t, s_m)
+    assert matched.min() >= 0.999, f"min matched |corr| {matched.min():.6f}"
+    np.testing.assert_array_equal(cols, np.arange(n))  # same seed, same order
+    assert t.final_ll_ is not None and m.final_ll_ is not None
+    assert abs(t.final_ll_ - m.final_ll_) < 1e-2
+
+
+def test_wrapper_accessors_agree_across_backends(fitted):
+    """The wrapper's get_sphere/get_mean/get_model_center return the same
+    shapes on both backends and agree within float32 tolerance (the sphere
+    closer still: both are float64 computations of the same eigenproblem)."""
+    t, m = fitted("torch"), fitted("mlx")
+    np.testing.assert_allclose(m.get_sphere(), t.get_sphere(), rtol=1e-10, atol=1e-13)
+    t_mean = t.get_mean()
+    assert m.get_mean().shape == t_mean.shape == (NW,)
+    assert np.abs(m.get_mean() - t_mean).max() <= _float32_tol(t_mean)
+    np.testing.assert_array_equal(m.get_model_center(), t.get_model_center())
+    assert all(
+        a.dtype == np.float64
+        for model in (t, m)
+        for a in (model.get_sphere(), model.get_mean(), model.get_model_center())
+    )
