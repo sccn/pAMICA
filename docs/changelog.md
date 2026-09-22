@@ -148,7 +148,7 @@ external tester (#221).
   a NumPy `writestep` checkpoint drops from 78 ms to 0.8 ms on the bundled
   32-channel sample, and a PyTorch fit no longer spends an extra E-step (12.8
   ms, about half an EM iteration) computing `LLt` even when nothing is written.
-  **Behaviour change:** pamica now inherits Fortran's one-M-step staleness. The
+  **Behavior change:** pamica now inherits Fortran's one-M-step staleness. The
   written `LLt` is the E-step of the parameters as they stood *before* the
   M-step whose `W`/`A` sit beside it, so it satisfies the reference's own
   invariant `Lt.sum()/(n_good*nw) == LL[-1]` -- which the committed reference
@@ -398,7 +398,7 @@ external tester (#221).
   the just-updated `gm`. The weights cancel analytically for a disjoint
   `comp_list`, so single-model fits stay byte-for-byte identical and default
   multi-model fits are unaffected except at float32-ULP scale (the two `gm`
-  snapshots genuinely differ, so the cancelling division rounds differently;
+  snapshots genuinely differ, so the canceling division rounds differently;
   measured at most 2.98e-8 in `dAk` on the bundled sample). A fit that shares
   components moves its shared columns differently (by ~1e-2 in `A`) and now
   matches the PyTorch backend to float32 precision.
@@ -706,7 +706,7 @@ the `loadmodout` byte-order fix.
   1.7e-15 relative on the bundled sample EEG (#134).
 - `pairwise_mi` and `block_diagonal_order` (`pamica.metrics`): the pairwise
   mutual-information matrix between fitted sources, plus a greedy
-  nearest-neighbour-chain ordering that clusters dependent components near the
+  nearest-neighbor-chain ordering that clusters dependent components near the
   diagonal. A clean-room reimplementation: the reference (`minfojp.m` in
   postAmicaUtility) is GPL-2.0-or-later and pamica is BSD-3-Clause, so its
   source was never read. Agrees with that reference at r=0.9887 on identical
@@ -777,7 +777,7 @@ Validation-methodology and correctness fixes since 0.1.0.
   return type, `load_eeglab_data` dtype annotation) (#118).
 - JOSS draft-PDF build workflow, `.zenodo.json` with ROR-based citation
   metadata, and an MLX backend API reference page (#110, #105, #107).
-- Corrected a stale float32-speedup claim and added a funding acknowledgement
+- Corrected a stale float32-speedup claim and added a funding acknowledgment
   (#114).
 
 ## 0.1.0
