@@ -472,3 +472,28 @@ def test_average_reference_rank_reduction_reconstructs(raw):
     out = _data(fitted.apply(avg.copy()), fitted)
     assert _rel(out, x) <= REL_TOL
     _assert_exclude_removes_only_component(fitted, avg, 0)
+
+
+# --- the pcadb trigger -------------------------------------------------------
+def test_pcadb_reduction_restores_the_residual(raw):
+    """``pcadb`` keeps the eigenvalues within ``pcadb`` dB of the largest; at
+    30 dB that is 26 of the sample's 32 dimensions, leaving a 6-dimensional
+    residual (``pcadb=20`` would keep 11, ``pcadb=40`` all 32)."""
+    fitted = AMICAICA(random_state=SEED, device="cpu", verbose=False).fit(
+        raw, max_iter=MAX_ITER, pcadb=30
+    )
+    n_kept = 26
+    assert fitted.n_components_ == n_kept
+    assert fitted.pca_components_ is not None
+    assert fitted.pca_explained_variance_ is not None
+    assert fitted.pca_components_.shape == (32, 32)
+    x = _data(raw, fitted)
+    assert _rel(_data(fitted.apply(raw.copy()), fitted), x) <= REL_TOL
+    reduced = fitted.apply(raw.copy(), n_pca_components=n_kept)
+    assert _rel(_data(reduced, fitted), x) > 1e-3
+    np.testing.assert_allclose(
+        fitted.pca_explained_variance_[n_kept:],
+        _discarded_eigenvalues(x / fitted.pre_whitener_, n_kept),
+        rtol=1e-8,
+    )
+    _assert_exclude_removes_only_component(fitted, raw, 0)
