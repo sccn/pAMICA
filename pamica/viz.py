@@ -278,7 +278,7 @@ def plot_model_probability(
         # SMOOTHED LOG-LIKELIHOOD correlates at 0.9939 (1 s window) / 0.9836
         # (5 s), while the PROBABILITIES it becomes after the softmax below
         # correlate at 0.9886 / 0.9594. Both are recorded in
-        # `.context/issue-136/matlab_viz_verification.md`; an unlabelled 0.994
+        # `.context/issue-136/matlab_viz_verification.md`; an unlabeled 0.994
         # here previously read as a stale copy of the 0.9886 figure (#136).
         #
         # Known, accepted divergence: MATLAB additionally pins its first/last
