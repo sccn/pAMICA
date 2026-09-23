@@ -331,11 +331,10 @@ def test_sharing_reduces_unique_count_without_degrading_ll(real_data):
     count and does not materially degrade the log-likelihood.
 
     ``comp_thresh=0.99`` (five merges at iteration 8, one at 18): since issue
-    #334 the
-    metric compares the two models' true component maps, which are still
-    near-identical at iteration 8, so the earlier ``comp_thresh=0.9`` merged
-    most of them and the losing model's remaining components collapsed to a
-    non-finite log-likelihood."""
+    #334 the metric compares the two models' true component maps, which are
+    still near-identical at iteration 8, so the earlier ``comp_thresh=0.9``
+    merged most of them and the losing model's remaining components collapsed
+    to a non-finite log-likelihood."""
     x = real_data[:, :4096]
     common: dict[str, Any] = dict(
         n_channels=NW,
