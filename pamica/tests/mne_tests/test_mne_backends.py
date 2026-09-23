@@ -18,6 +18,7 @@ the construction checks run everywhere.
 
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 import numpy as np
 import pytest
@@ -276,3 +277,34 @@ def test_degenerate_fit_builds_no_basis_and_refuses_export(raw, backend):
     for owner in (ica.amica_, ica.amica_.model_):
         with pytest.raises(RuntimeError, match="degenerate"):
             owner.get_sphere()
+
+
+@pytest.mark.parametrize("stop", ["max_iter", "min_dll"])
+@pytest.mark.parametrize("backend", ["torch", "mlx"])
+def test_n_iter_counts_the_e_steps_that_ran(raw, backend, stop):
+    """The exported ``n_iter_`` is the number of iterations whose E-step ran:
+    ``iteration + 1``, which is also the length of ``ll_history``, whether the
+    fit ran to ``max_iter`` or stopped on a convergence check (which exits
+    before its iteration's update, issue #339). ``min_dll=1e-3`` with
+    ``maxincs=2`` stops a fit of this recording well inside 60 iterations."""
+    if backend == "mlx":
+        _require_mlx()
+    kwargs: Dict[str, Any] = {"max_iter": MAX_ITER}
+    if stop == "min_dll":
+        kwargs = {
+            "max_iter": 60,
+            "use_min_dll": True,
+            "min_dll": 1e-3,
+            "maxincs": 2,
+            "use_grad_norm": False,
+        }
+    ica = AMICAICA(random_state=SEED, verbose=False, backend=backend).fit(raw, **kwargs)
+    assert ica.amica_ is not None and ica.amica_.model_ is not None
+    model = ica.amica_.model_
+    assert model.stop_reason == stop, "setup: the fit ended another way"
+    exported = ica.to_mne_ica()
+    assert exported.n_iter_ == model.iteration + 1 == len(model.ll_history)
+    if stop == "max_iter":
+        assert exported.n_iter_ == MAX_ITER
+    else:
+        assert exported.n_iter_ < 60
