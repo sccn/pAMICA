@@ -14,7 +14,8 @@ Pinned here, cross-backend per ``.rules/backend_parity.md`` (PyTorch and NumPy
 always run; MLX checks skip individually without MLX or an Apple GPU):
 
 1. every configuration without a merge is byte-identical to the pre-change code
-   (the package at commit ``0930c0e`` is loaded from git): one, two and three
+   (the package at commit ``0930c0e`` is loaded from git, and started from the
+   live normalized initial ``A`` of issue #341): one, two and three
    models, ``doscaling`` and Newton on and off, every ``pdftype``,
    ``do_reject``, several blocks, a ``keep_best`` restore and best-of-two
    restarts, each on every backend that supports it; the old ``A`` maps onto
@@ -53,7 +54,10 @@ from scipy.special import logsumexp
 from pamica import AMICA_NumPy
 from pamica.component_layout import rows_from_legacy_columns
 from pamica.numpy_impl.utils import identify_shared_components
-from pamica.tests.pre_change import load_pre_change_package
+from pamica.tests.pre_change import (
+    load_pre_change_package,
+    with_normalized_initial_mixing,
+)
 from pamica.torch_impl.core import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
 
@@ -107,14 +111,20 @@ def _live(backend: str) -> Any:
 
 
 def _classes(backend: str, pre: Any) -> Tuple[Any, Any]:
-    """``(pre-change class, live class)`` for ``backend``."""
+    """``(pre-change class, live class)`` for ``backend``.
+
+    The pre-change class starts from the live normalized initial ``A`` (issue
+    #341, epic #324 Phase 12, which changed every trajectory through the
+    initialization alone), so the two sides differ by the layout alone.
+    """
     live = _live(backend)
     if backend == "torch":
-        return pre.torch_impl.core.AMICATorchNG, live
-    if backend == "numpy":
-        return pre.numpy_impl.core.AMICA, live
-    old = importlib.import_module(f"{pre.__name__}.mlx_impl.core").AMICAMLXNG
-    return old, live
+        old = pre.torch_impl.core.AMICATorchNG
+    elif backend == "numpy":
+        old = pre.numpy_impl.core.AMICA
+    else:
+        old = importlib.import_module(f"{pre.__name__}.mlx_impl.core").AMICAMLXNG
+    return with_normalized_initial_mixing(old), live
 
 
 def _np(value: Any) -> np.ndarray:

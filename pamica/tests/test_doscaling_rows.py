@@ -26,7 +26,8 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
    the reference;
 3. ``doscaling=False`` is byte-identical to the pre-fix code: the package at
    commit ``fb13d76`` is loaded from git and each backend fitted in the same
-   process, its ``A`` mapped onto the component rows issue #334 introduced;
+   process from the live normalized initial ``A`` (issue #341), its ``A``
+   mapped onto the component rows issue #334 introduced;
 4. ``scalestep``, a pamica extension the reference parses but never reads,
    counts iterations from 1, so its default of 1 is the reference's
    every-iteration rescale, and every constructor rejects a ``scalestep`` that
@@ -54,7 +55,10 @@ from scipy.special import logsumexp
 
 from pamica import AMICA_NumPy
 from pamica.component_layout import rows_from_legacy_columns
-from pamica.tests.pre_change import load_pre_change_package
+from pamica.tests.pre_change import (
+    load_pre_change_package,
+    with_normalized_initial_mixing,
+)
 from pamica.torch_impl.core import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
 
@@ -393,7 +397,11 @@ def test_a_zero_or_nan_norm_row_is_left_untouched(unscaled_state, backend, bad):
 # --- 3. doscaling=False is byte-identical to the pre-fix code ---------------
 # The epic #324 head this phase branched from: the last commit with the stored-
 # column rule. A later phase that deliberately changes the doscaling=False
-# trajectory moves this pin to its own base commit.
+# trajectory moves this pin to its own base commit. Issue #341 (Phase 12)
+# changed every trajectory through the initial A alone, so the pre-fix class
+# starts from the live normalized initial A instead
+# (``with_normalized_initial_mixing``): from the same start, everything else
+# the doscaling=False path does is still the pre-fix code's, bit for bit.
 _PRE_FIX_COMMIT = "fb13d76de145419da9c89db94438d60aafbff444"
 
 
@@ -408,11 +416,15 @@ def pre_fix(tmp_path_factory) -> Any:
 
 
 def _pre_fix_class(pre_fix: Any, backend: str) -> Any:
+    """The pre-fix class, starting from the live initial ``A`` (issue #341)."""
     if backend == "torch":
-        return pre_fix.torch_impl.core.AMICATorchNG
-    if backend == "numpy":
-        return pre_fix.numpy_impl.core.AMICA
-    return importlib.import_module(f"{pre_fix.__name__}.mlx_impl.core").AMICAMLXNG
+        cls = pre_fix.torch_impl.core.AMICATorchNG
+    elif backend == "numpy":
+        cls = pre_fix.numpy_impl.core.AMICA
+    else:
+        mlx_core = importlib.import_module(f"{pre_fix.__name__}.mlx_impl.core")
+        cls = mlx_core.AMICAMLXNG
+    return with_normalized_initial_mixing(cls)
 
 
 def _fit_unscaled(
@@ -461,7 +473,7 @@ def test_doscaling_off_is_byte_identical_to_the_pre_fix_code(
 ):
     """``doscaling=False`` never enters the rescale, so this fix must leave its
     trajectory and every fitted array bit for bit where the pre-fix code put
-    them, on every backend."""
+    them, on every backend, from the same initial ``A``."""
     new_cls: Any
     if backend == "mlx":
         new_cls = _mlx_core().AMICAMLXNG

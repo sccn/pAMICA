@@ -32,7 +32,9 @@ Before the fix the same comparisons were 1.4e-2 / 2.2e-1 (decreases),
 1.3e-2 / 1.4e-1 (ratchet) and 6.1e-3 / 1.9e-1 (A-freeze), hundreds to tens of
 thousands of times the floor; each test replays the pre-change PyTorch backend
 (through :mod:`pamica.tests.pre_change`) as a control that the bound
-discriminates.
+discriminates. The control starts from the same normalized initial ``A`` as the
+live backends (issue #341, which changed every trajectory through the
+initialization alone), so it differs from them by the iteration order alone.
 """
 
 from __future__ import annotations
@@ -250,7 +252,9 @@ def _run(name: str, X: np.ndarray, workdir: Path, max_iter: int, pre: Any) -> di
     n.fit(X)
     fits["numpy"] = ([float(v) for v in n.ll], n_a)
 
-    old = _torch(pre.torch_impl.core.AMICATorchNG, cfg)
+    from pamica.tests.pre_change import with_normalized_initial_mixing
+
+    old = _torch(with_normalized_initial_mixing(pre.torch_impl.core.AMICATorchNG), cfg)
     old_a = _with_history(old, lambda: reference_mixing(old.A.numpy()))
     old.fit(X, max_iter=max_iter, verbose=False)
     fits["pre-change"] = (list(old.ll_history), old_a)
