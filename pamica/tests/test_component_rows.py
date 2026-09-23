@@ -910,7 +910,13 @@ def merged_seed(real_data) -> Dict[str, Any]:
 
 
 def _seeded_run(
-    model: Any, backend: str, seed: Dict[str, Any], X: np.ndarray, k: int, rows: bool
+    model: Any,
+    backend: str,
+    seed: Dict[str, Any],
+    X: np.ndarray,
+    k: int,
+    rows: bool,
+    sphere: np.ndarray,
 ) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
     """Run ``k`` production iterations of ``model`` from the merged seed, in
     the reference's load order: ``get_unmixing_matrices`` runs on the DEFAULT
@@ -918,14 +924,21 @@ def _seeded_run(
     (amica15.f90:825-833), so the first E-step unmixes with the pre-merge
     blocks while indexing densities by the merged ``comp_list``. ``rows`` is
     False for a pre-change class, which gets the seed's ``A`` in its column
-    layout. Returns the per-iteration log-likelihood, each model's mixing
-    matrix (the reference's ``A(:, comp_list(:, h))``), ``mu`` and ``sbeta``."""
+    layout. The data are sphered with ``sphere``, the one input the reference
+    computes for itself (its ``load_sphere`` path is broken, see
+    ``native_oracle.py``); pass the reference's own ``S`` so both sides start
+    from the same bits. Returns the per-iteration log-likelihood, each model's
+    mixing matrix (the reference's ``A(:, comp_list(:, h))``), ``mu`` and
+    ``sbeta``."""
     A = seed["A"]
     if not rows:
         A = _column_state({"A": A, "comp_list": seed["default"]})["A"]
     lls: List[float] = []
     if backend == "torch":
-        X_t = model._preprocess(X)
+        model._preprocess(X)
+        model.sphere = torch.from_numpy(sphere.copy())
+        model._sphere_pinv = None
+        X_t = model.sphere @ (torch.from_numpy(X) - model.mean.reshape(-1, 1))
         model._initialize_parameters()
         model.A = torch.from_numpy(A.copy())
         for name in ("mu", "beta", "rho", "alpha", "gm"):
@@ -943,7 +956,7 @@ def _seeded_run(
     else:
         model.fit(X)  # sizes and preprocesses; the state is replaced below
         model.mean = seed["mean"].reshape(-1, 1).copy()
-        model.sphere = seed["sphere"].copy()
+        model.sphere = sphere.copy()
         model.data = model.sphere @ (X - model.mean)
         model._sphere_pinv = None
         model.A = A.copy()
@@ -1048,11 +1061,13 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
             writestep=10**6,
             **opt,
         )
+        # Both sides from the reference's own sphere (see _seeded_run).
+        S = ref.S
         runs = {
             "torch": _seeded_run(
-                torch_model(AMICATorchNG), "torch", seed, real_data, k, rows=True
+                torch_model(AMICATorchNG), "torch", seed, real_data, k, True, S
             ),
-            "numpy": _seeded_run(numpy_model, "numpy", seed, real_data, k, rows=True),
+            "numpy": _seeded_run(numpy_model, "numpy", seed, real_data, k, True, S),
         }
         for name, (ll, mixing, mu, sbeta) in runs.items():
             errs = {
@@ -1069,7 +1084,9 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
         # normalizer against the reference's single-precision one, the gap the
         # maxrho = 1.99 workaround hid.
         old344 = torch_model(pre344.torch_impl.core.AMICATorchNG)
-        ll, mixing, mu, sbeta = _seeded_run(old344, "torch", seed, real_data, k, True)
+        ll, mixing, mu, sbeta = _seeded_run(
+            old344, "torch", seed, real_data, k, True, S
+        )
         errs = {
             "A": _mixing_error(mixing, ref.A, seed["merged"]),
             "mu": np.abs(mu[:, used] - ref.mu[:, used]).max(),
@@ -1082,7 +1099,9 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
 
         if k == 3:
             old = torch_model(pre.torch_impl.core.AMICATorchNG)
-            ll_old, mixing, _, _ = _seeded_run(old, "torch", seed, real_data, k, False)
+            ll_old, mixing, _, _ = _seeded_run(
+                old, "torch", seed, real_data, k, False, S
+            )
             old_err = _mixing_error(mixing, ref.A, seed["merged"])
             print(
                 f"merged oracle doscaling={doscaling} column semantics k=3: "
