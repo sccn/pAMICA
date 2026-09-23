@@ -472,17 +472,17 @@ class AMICA:
         self.comp_thresh = params.get("comp_thresh", 0.99)
         self.share_start = params.get("share_start", 100)
         self.share_int = params.get("share_int", 100)
+        # The reference's A-freeze reads share_start/share_int whether or not
+        # share_comps is on (issue #345), so a share_int below 7, which would
+        # hold A for every iteration of every cycle, is rejected always, with
+        # AMICATorchNG's message (pamica.schedule.validate_share_iter).
+        schedule.validate_share_iter(self.share_int, "share_int")
         if self.share_comps:
             # Same validation (and the same reasons) as AMICATorchNG: the merge
-            # schedule is 1-indexed, and the post-merge A-freeze settle window is
-            # 6 iterations, so a share_int of 6 or less would hold A frozen for
-            # every iteration of every cycle -- a fit that silently never moves
-            # its mixing matrix again. comp_thresh is a cosine cutoff, so it is
+            # schedule is 1-indexed, and comp_thresh is a cosine cutoff, so it is
             # only meaningful in (0, 1]; at 0 every pair of columns merges.
             if self.share_start < 1:
                 raise ValueError(f"share_start must be >= 1, got {self.share_start}")
-            if self.share_int <= 6:
-                raise ValueError(f"share_int must be > 6, got {self.share_int}")
             if not 0.0 < self.comp_thresh <= 1.0:
                 raise ValueError(
                     f"comp_thresh must be in (0, 1], got {self.comp_thresh}"
@@ -2428,25 +2428,18 @@ class AMICA:
         self.beta = self.beta / scale
 
     def _a_frozen(self) -> bool:
-        """Whether the A-update (and its lrate ramp) is held this iteration.
+        """Whether the reference holds the A update (with its lrate ramp and
+        rho-rate reset) this iteration: once ``iter >= share_start``, every
+        iteration with ``mod(iter, share_int) <= 5``, counted from 1
+        (amica15.f90:1803, :func:`pamica.schedule.share_freeze`), exactly as
+        ``AMICATorchNG._a_frozen`` decides it.
 
-        A is frozen for the first 6 iterations of every ``share_int``-length
-        window once the Fortran-style iteration reaches ``share_start`` -- the
-        merge iteration and the 5 after it -- so the density parameters can
-        settle onto a freshly merged component before the mixing matrix moves
-        again (Fortran A-freeze, amica15.f90:1803). Identical mechanism, anchor
-        and duration as ``AMICATorchNG._a_frozen``; the window fires each cycle
-        whether or not that cycle's merge pass actually merged a pair, matching
-        both the reference and the PyTorch backend.
-
-        Gated behind ``share_comps`` and ``num_models >= 2`` (a model cannot
-        share a component with itself), so with sharing off -- the default --
-        this is always False and the validated trajectory is untouched. The
-        constructor rejects ``share_int <= 6``, so the window can never consume a
-        whole cycle and freeze A permanently.
+        The reference applies this whether or not ``share_comps`` is on and for
+        any number of models (issue #345), so this does too: with the defaults
+        ``share_start = share_int = 100``, every fit of 100 or more iterations
+        holds A on iterations 100-105, 200-205, and so on. The constructor
+        rejects ``share_int < 7``, since a shorter cycle would hold A for good.
         """
-        if not self.share_comps or self.num_models < 2:
-            return False
         return schedule.share_freeze(self.iter, self.share_start, self.share_int)
 
     def _optimize(self):

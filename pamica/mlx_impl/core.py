@@ -406,10 +406,15 @@ class AMICAMLXNG:
         comment (issue #269).
     ``share_start`` (100) / ``share_iter`` (100)
         Sharing schedule: first iteration to attempt merges (counted from 1)
-        and the interval between attempts. The A-update is held for the first
-        6 iterations of every cycle (whether or not a merge fired) so the
-        densities can settle; ``share_iter`` must be ``> 6`` so that window
-        never consumes the whole cycle, and ``share_start`` must be ``>= 1``.
+        and the interval between attempts. They also set the reference's
+        A-freeze, which applies to every fit, sharing on or off (issue #345):
+        from iteration ``share_start`` on, the update of ``A`` (with its lrate
+        ramp) is held on every iteration whose number, counted from 1, has a
+        remainder of 0 to 5 modulo ``share_iter`` (amica15.f90:1803), so with
+        the defaults on iterations 100-105, 200-205, and so on.
+        ``share_iter`` must be an integer >= 7, whether or not ``share_comps``
+        is on, or A would never move again; ``share_start`` must be ``>= 1``
+        when ``share_comps`` is on.
     ``comp_thresh`` (0.99)
         Cosine-similarity cutoff, in the de-sphered (sensor-space) metric, above
         which two components' mixing vectors are identified and merged. Must be
@@ -818,13 +823,13 @@ class AMICAMLXNG:
         self.share_start = share_start
         self.share_iter = share_iter
         self.comp_thresh = comp_thresh
+        # The A-freeze schedule reads share_start/share_iter whether or not
+        # share_comps is on (issue #345), so share_iter is validated always,
+        # with AMICATorchNG's message.
+        schedule.validate_share_iter(share_iter)
         if share_comps:
             if share_start < 1:
                 raise ValueError(f"share_start must be >= 1, got {share_start}")
-            if share_iter <= 6:
-                # The A-freeze settle window is 6 iterations; a smaller cycle
-                # would freeze A permanently (never leaving room to update it).
-                raise ValueError(f"share_iter must be > 6, got {share_iter}")
             if not 0.0 < comp_thresh <= 1.0:
                 raise ValueError(f"comp_thresh must be in (0, 1], got {comp_thresh}")
 
@@ -1727,12 +1732,11 @@ class AMICAMLXNG:
         # The direction/dAk/gradient-norm computation below runs
         # UNCONDITIONALLY, not gated on _a_frozen(): Fortran computes dAk and
         # ndtmpsum every iteration in accum_updates_and_likelihood
-        # (amica15.f90:1749-1761), strictly before the separate, share-freeze
-        # guarded update_A block (:1803) that steps A. Only the step itself --
-        # and the lrate ramp Fortran nests inside that same guarded block -- are
-        # conditional (issue #207: the grad-norm stop must see the true gradient
-        # magnitude every iteration, not only when A moves). _a_frozen() is
-        # always False with sharing off, so the default path is unchanged.
+        # (amica15.f90:1749-1761), strictly before the separate, freeze-guarded
+        # update_A block (:1803) that steps A. Only the step itself -- and the
+        # lrate ramp and rho-rate reset Fortran nests inside that same guarded
+        # block -- are conditional (issue #207: the grad-norm stop must see the
+        # true gradient magnitude every iteration, not only when A moves).
         # Newton only swaps out the per-model DIRECTION; the dAk/zeta scatter,
         # the gradient norm and the freeze are untouched by it
         # (``AMICATorchNG._update_parameters``). A model whose curvature fails the
@@ -2246,28 +2250,21 @@ class AMICAMLXNG:
     # Component sharing (issue #263; AMICATorchNG's #60 port)
     # ------------------------------------------------------------------
     def _a_frozen(self) -> bool:
-        """Whether the A-update (and its lrate ramp) is held this iteration.
+        """Whether the reference holds the A update (with its lrate ramp and
+        rho-rate reset) this iteration: once ``iter >= share_start``, every
+        iteration with ``mod(iter, share_iter) <= 5``, counted from 1
+        (amica15.f90:1803, :func:`pamica.schedule.share_freeze`;
+        ``AMICATorchNG._a_frozen``).
 
-        A is frozen for the first 6 iterations of every ``share_iter``-length
-        window once ``iter >= share_start`` -- the merge iteration and the 5
-        after it -- so the density parameters can settle onto any freshly merged
-        component before the mixing matrix moves again (Fortran A-freeze,
-        amica15.f90:1803). The window fires each cycle regardless of whether that
-        cycle's :meth:`_identify_shared_comps` actually merged a pair.
-
-        Anchored on ``share_start`` (:func:`pamica.schedule.share_freeze`, which
-        counts iterations from 1 like the reference) so it stays aligned with
-        the merge schedule for any ``share_start``; the literal Fortran formula
-        uses ``mod(iter, share_iter)`` (misaligned unless share_start is a
-        multiple of share_iter, and a permanent freeze for ``share_iter <= 6``),
-        but that path is dead in the reference (see :meth:`_identify_shared_comps`)
-        so there is no parity constraint -- the constructor requires
-        ``share_iter > 6`` so the window never consumes the whole cycle. Gated
-        behind ``share_comps`` and ``n_models >= 2``, so with sharing off it is
-        always False and the validated default trajectory is untouched.
+        The reference applies this whether or not ``share_comps`` is on and for
+        any number of models (issue #345), so this does too: with the defaults
+        ``share_start = share_iter = 100``, every fit of 100 or more iterations
+        holds A on iterations 100-105, 200-205, and so on. The reference's own
+        scan never merges (see :meth:`_identify_shared_comps`), so this
+        unconditional schedule is the only freeze it ever shows. The
+        constructor requires ``share_iter >= 7``, since a shorter cycle would
+        hold A for good (:func:`pamica.schedule.validate_share_iter`).
         """
-        if not self.share_comps or self.n_models < 2:
-            return False
         return schedule.share_freeze(self.iteration, self.share_start, self.share_iter)
 
     def _component_sensor_maps(self) -> np.ndarray:
