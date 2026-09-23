@@ -309,5 +309,36 @@ def load_results(indir: Union[str, Path], compressed: bool = False) -> dict:
             f"Incomplete AMICA output in {indir}: missing {sorted(missing)}. "
             "The directory may be from an interrupted or partial run."
         )
+    _check_mixing_inverts_unmixing(results, indir)
 
     return results
+
+
+# Largest |A_h @ W_h - I| accepted from a written directory. W is written as
+# the inverse of each model's block of A, so the residual is inversion
+# round-off: measured on 60-iteration fits of the sample EEG with 1-3 models, at
+# most 3.8e-7 for float32 MLX exports (sharing on or off) and 1.1e-15 for
+# float64, while a multi-model A written in the pre-#334 component-column
+# layout, read as component rows, gives 1.5.
+_A_W_RESIDUAL_TOL = 1e-3
+
+
+def _check_mixing_inverts_unmixing(results: dict, indir: Path) -> None:
+    """Refuse an ``A`` that is not the inverse of the ``W`` written beside it.
+
+    pamica before issue #334 wrote a multi-model ``A`` in its component-column
+    layout (C order), which reads back scrambled as component rows; a
+    single-model file is the same bytes in both layouts. Rather than hand the
+    viz helpers wrong sensor maps, fail with the remedy.
+    """
+    A, W, comp_list = results["A"], results["W"], results["comp_list"]
+    for h in range(comp_list.shape[1]):
+        residual = np.abs(A[comp_list[:, h], :] @ W[:, :, h] - np.eye(W.shape[0])).max()
+        if not residual <= _A_W_RESIDUAL_TOL:
+            raise ValueError(
+                f"The mixing matrix A in {indir} does not invert the unmixing W "
+                f"of model {h} (max |A_h W_h - I| = {residual:.3g}). A "
+                "multi-model directory written by pamica before issue #334 "
+                "stored A with components as columns; write it again from the "
+                "fitted (or saved and reloaded) model with this version."
+            )
