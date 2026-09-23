@@ -112,8 +112,8 @@ def _backend_class(backend: str) -> "type[AMICATorchNG] | type[AMICAMLXNG]":
 @functools.cache
 def _ctor_params(backend_cls: type) -> frozenset:
     """Constructor keywords ``fit()`` accepts from ``**kwargs`` and from a
-    parameter file, for one backend class (issue #132 review item 2, issue
-    #313).
+    parameter file, for one backend class (issue #132 review item 2,
+    issue #313).
 
     Derived from the class signature, so each backend gets exactly its own
     keywords: a file setting only AMICATorchNG accepts is applied to a torch
@@ -260,15 +260,18 @@ class AMICA:
         The underlying backend model
     is_fitted_ : bool
         Whether a *usable* model is available. ``fit`` sets this True only when
-        the fit converged normally; a degenerate fit (see ``converged_``) leaves
-        it False, and ``transform``/``get_mixing_matrix``/``get_unmixing_matrix``/
-        ``save`` refuse such a model (issue #50).
+        the fit ended on a non-degenerate stop (a convergence stop or
+        ``max_iter``); a degenerate fit (see ``converged_``) leaves it False,
+        and every output method (``transform``, the ``get_*`` accessors,
+        ``write_amica_output``, ``save``) refuses such a model (issue #50).
     converged_ : bool
         Whether the last ``fit`` ended on a usable stop rather than a degenerate
         one (``stop_reason_`` not in the backend's ``_DEGENERATE_STOP_REASONS``:
-        ``nan_ll``/``singular_ll``/``nan_direction``/``nan_params``). A
-        degenerate fit holds non-finite parameters, or stopped before applying
-        a non-finite step, and would produce NaN sources (issue #50).
+        ``nan_ll``/``singular_ll``/``nan_direction``/``nan_params``, or
+        ``restart_error`` under best-of-N restarts). A ``max_iter`` stop counts
+        as usable. A degenerate fit holds non-finite parameters, or stopped
+        before applying a non-finite step, and would produce NaN sources
+        (issue #50).
     stop_reason_ : str or None
         Why the last ``fit`` stopped (the backend ``stop_reason``):
         ``"max_iter"``, ``"lrate_floor"``, ``"grad_norm_floor"``, ``"min_dll"``,
@@ -282,8 +285,8 @@ class AMICA:
         ``singular_ll``), a non-finite update direction caught before it is
         applied (``nan_direction``), or non-finite parameters right after an
         update (``nan_params``); PyTorch and MLX use the same set (issue #339
-        review), and under best-of-N restarts a restart that raised has its
-        own degenerate marker. None of these checks short-
+        review), and under best-of-N restarts a restart that raised is
+        recorded as ``"restart_error"``, also degenerate. None of these checks short-
         circuits on an earlier one in the same iteration, so under the
         shipped ``use_grad_norm=True`` default ``"grad_norm"`` always takes
         precedence over ``"grad_norm_floor"`` when both would apply --
@@ -452,8 +455,8 @@ class AMICA:
             ``pcakeep``, ``use_min_dll``, ``min_dll``, ``maxincs``, ``use_grad_norm``,
             ``min_nd`` -- the issue #207 convergence stops, Fortran-faithful
             defaults ``True``/``1e-9``/``5``/``True``/``1e-7`` -- or
-            ``do_opt_block``/``blk_min``/``blk_max``/``blk_step``, the issue
-            #232 block-size search, off by default) -- the backend's tunables
+            ``do_opt_block``/``blk_min``/``blk_max``/``blk_step``, the
+            issue #232 block-size search, off by default) -- the backend's tunables
             are constructor arguments, not fit() kwargs. A keyword the
             selected backend's constructor does not take raises
             ``TypeError``.
@@ -467,14 +470,14 @@ class AMICA:
             that never heard of restarts.
 
             Rank-deficient input (Maxwell-filtered MEG, average-referenced or
-            interpolated EEG) is handled by ``mineig``/``mineig_rel`` (issue
-            #223): the model is sized to the detected numerical rank and
+            interpolated EEG) is handled by ``mineig``/``mineig_rel``
+            (issue #223): the model is sized to the detected numerical rank and
             :meth:`get_sensor_mixing_matrix` maps components back to input
             channels. ``mineig`` is an absolute eigenvalue floor and so
             unit-dependent; pass ``mineig_rel`` for data far from unit scale.
 
-            When the instance was built via :meth:`from_params_file` (issue
-            #132), any of the parameters above -- named or in ``**kwargs`` --
+            When the instance was built via :meth:`from_params_file`
+            (issue #132), any of the parameters above -- named or in ``**kwargs`` --
             left unset here falls back to that file's translated value instead
             of the hard-coded default; an explicitly passed argument always
             wins over the file. Settings the file carries that match neither a
@@ -637,8 +640,8 @@ class AMICA:
         routes expose the same surface. A degenerate stop (one of the backend
         class's own ``_DEGENERATE_STOP_REASONS``) holds non-finite parameters
         and would return NaN sources, so it is not a usable model:
-        ``is_fitted_`` stays False and the output methods refuse it (issue
-        #50), while ``stop_reason_``/``converged_`` stay set for inspection.
+        ``is_fitted_`` stays False and the output methods refuse it
+        (issue #50), while ``stop_reason_``/``converged_`` stay set for inspection.
         """
         backend = self.model_
         assert backend is not None
@@ -730,7 +733,11 @@ class AMICA:
 
     def get_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """
-        Get the mixing matrix A.
+        Get the mixing matrix A in the sphered space.
+
+        Column ``i`` is source ``i``'s mixing vector after sphering, the
+        reference's ``A(:, comp_list(:, h))``. For scalp maps in input-channel
+        space use :meth:`get_sensor_mixing_matrix`.
 
         Parameters
         ----------
@@ -740,7 +747,7 @@ class AMICA:
         Returns
         -------
         A : np.ndarray
-            Mixing matrix of shape (n_channels, n_sources)
+            Mixing matrix of shape (n_sources, n_sources)
         """
         self._check_usable("get the mixing matrix")
         assert self.model_ is not None
@@ -749,7 +756,12 @@ class AMICA:
 
     def get_unmixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """
-        Get the unmixing matrix W.
+        Get the unmixing matrix W, which acts on sphered data.
+
+        :meth:`transform` applies it after centering and sphering:
+        ``S = W @ (get_sphere() @ (X - mean[:, None]) - c[:, None])``, with
+        ``mean = get_mean()`` and ``c = get_model_center(model_idx)``, so
+        ``W @ get_sphere()`` is only the linear part of that map.
 
         Parameters
         ----------
@@ -759,7 +771,7 @@ class AMICA:
         Returns
         -------
         W : np.ndarray
-            Unmixing matrix of shape (n_sources, n_channels)
+            Unmixing matrix of shape (n_sources, n_sources)
         """
         self._check_usable("get the unmixing matrix")
         assert self.model_ is not None
@@ -882,8 +894,10 @@ class AMICA:
         """
         Mutual Information Reduction (issue #137) of the fitted unmixing on ``X``.
 
-        Composes the full raw-data-to-sources transform (unmixing @ sphere)
-        the documented way and delegates to :func:`pamica.metrics.mir`.
+        Composes the linear part of the raw-data-to-sources transform
+        (unmixing @ sphere) and delegates to :func:`pamica.metrics.mir`. MIR
+        is shift-invariant, so the mean and center that :meth:`transform`
+        subtracts do not change it.
 
         Parameters
         ----------
@@ -1054,8 +1068,8 @@ class AMICA:
 
         Delegates to the backend's ``shared_components`` (see
         :meth:`AMICATorchNG.shared_components`): one group of
-        ``(model_idx, source_idx)`` pairs per shared column; empty when nothing
-        is shared.
+        ``(model_idx, source_idx)`` pairs per shared component; empty when
+        nothing is shared.
         """
         self._check_usable("get the shared components")
         assert self.model_ is not None
@@ -1096,14 +1110,16 @@ class AMICA:
 
         Emits the raw binary files that EEGLAB's ``loadmodout15.m`` reads (``W``,
         ``S``, ``gm``, ``mean``, ``c``, ``alpha``, ``mu``, ``sbeta``, ``rho``,
-        ``comp_list``, ``LL``), so a pamica fit drops directly into an EEGLAB
-        workflow (``mod = loadmodout15(outdir)``). ``loadmodout15`` applies the
+        ``comp_list``, ``LL``), plus the sphered-space mixing matrix ``A``, so
+        a pamica fit drops directly into an EEGLAB workflow
+        (``mod = loadmodout15(outdir)``). ``loadmodout15`` applies the
         variance-ordering and normalization on load, so no manual re-ordering or
-        sign-flipping is needed. Single-model output is byte-compatible with the
-        Fortran reference (issue #92).
+        sign-flipping is needed. Every file is in the Fortran reference's
+        layout for any number of models, so single-model output is
+        byte-compatible with the reference (issue #92).
 
-        Also writes ``LLt`` (the per-sample/per-model log-likelihood, issue
-        #155) for a model that was just fit in this process, taken from the
+        Also writes ``LLt`` (the per-sample/per-model log-likelihood,
+        issue #155) for a model that was just fit in this process, taken from the
         E-step stash (issue #157); a model restored via :meth:`load` carries no
         stash, so ``LLt`` is omitted for it (a warning is logged). As in the
         reference, ``LLt`` is the E-step that produced ``final_ll_``: after a
@@ -1289,12 +1305,10 @@ class AMICA:
         Both formats are read through :func:`pamica.fortran_params.
         read_params_file` (issue #304), which also applies pamica's JSON
         schema's own alias spellings (``min_grad_norm``/``max_decs``/
-        ``share_int``/...) to the canonical/constructor names -- so a
-        ``sample_params.json`` fit now applies its ``max_decs``/
-        ``min_grad_norm``/``share_int`` settings, which previously matched
-        neither a named ``fit()`` parameter nor an ``AMICATorchNG`` keyword
-        under their raw JSON spelling and were only named in the "not
-        applied" warning rather than applied. See that function and
+        ``share_int``/...) to the canonical/constructor names, so a
+        ``sample_params.json`` fit applies its ``max_decs``/
+        ``min_grad_norm``/``share_int`` settings as ``maxdecs``/``min_nd``/
+        ``share_iter``. See that function and
         :func:`pamica.fortran_params.read_fortran_param_file` for the
         Fortran-side key-mapping table and the deliberately-unmapped keys
         they warn about rather than silently drop.

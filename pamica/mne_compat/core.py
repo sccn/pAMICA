@@ -929,7 +929,7 @@ class AMICAICA:
     def shared_components(self) -> list:
         """Components shared across models by ``share_comps`` (issue #60).
 
-        One group of ``(model_idx, component_idx)`` pairs per shared column;
+        One group of ``(model_idx, component_idx)`` pairs per shared component;
         empty when nothing is shared (always so for a single model or a default
         multi-model fit with ``share_comps`` off).
         """

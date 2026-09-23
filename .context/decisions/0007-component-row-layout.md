@@ -81,7 +81,7 @@ and refuses an `A` that does not invert the `W` beside it (a multi-model directo
   rejected. A component shared by two models sits in a row of two different blocks in that layout,
   so the tied object cannot be stored once, and every future per-component operation would need the same translation.
 - **Convert merged old saves by re-deriving the merge under the new metric:**
-  rejected. The old merge tied parameters that are not components, so there is no fitted state to convert; a refit is the only honest answer.
+  rejected. The old merge tied parameters that are not components, so there is no fitted state to convert, and a refit is required.
 - **Leave the EEGLAB `A` in the old C-order layout:** rejected. The file then had no meaning outside pamica for several models,
   and the reference's layout is also what `load_results` should read from a reference run.
 

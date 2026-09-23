@@ -96,16 +96,21 @@ which ranks sources by the same back-projected variance (IC1 = highest):
 
 ```python
 order = model.variance_order()           # source indices, highest variance first
-A = model.get_mixing_matrix()[:, order]  # scalp maps in EEGLAB order
+A = model.get_sensor_mixing_matrix()[:, order]  # scalp maps in EEGLAB order
 W = model.get_unmixing_matrix()[order]   # unmixing rows in EEGLAB order
 ```
 
 Pass `return_svar=True` to also get the per-component variances.
 
+`get_sensor_mixing_matrix()` gives the maps in input-channel space;
+`get_mixing_matrix()` is the sphered-space matrix, which is not a scalp map.
+
 ## Multi-model note
 
-Single-model output files are byte-identical in layout to a native AMICA run. For
-`n_models > 1` the per-model axis layout is self-consistent (it round-trips
-through `loadmodout15` and pamica's own reader) but is not byte-identical to a
-native multi-model AMICA run; see the multi-model equivalence discussion in
-[Validation & Parity](validation.md).
+Every file is written in the reference's layout for any number of models:
+`W` with the model axis slowest (issue #159) and `A` with one column per component (issue #334),
+so `loadmodout15` reads a multi-model directory the same way it reads a native one.
+The values themselves are another matter:
+multi-model AMICA is not partition-identifiable,
+so two runs, native or pamica, do not produce the same models;
+see the multi-model discussion in [Validation & Parity](validation.md#multi-model-distributional-similarity).

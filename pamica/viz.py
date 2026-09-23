@@ -15,12 +15,12 @@ their rendered output and ``help`` text, never their source, per the project's
 clean-room posture for GPL code. Every quantity they draw is pinned to a MATLAB
 oracle; see ``.context/issue-136/matlab_viz_verification.md``.
 
-A per-component scalp-topography view is deliberately NOT here yet: deriving
-source activations from a loaded ``AmicaOutput`` depends on a ``W`` convention
-that turned out to be broken in the loader itself, tracked as issue #159. It
-was also the only planned plot with no working upstream reference
-(``pop_topohistplot`` is broken on current EEGLAB), so nothing external could
-have caught a wrong activation space. It is cut rather than shipped unverified.
+A per-component scalp-topography view is deliberately NOT here: it was the
+only planned plot with no working upstream reference (``pop_topohistplot`` is
+broken on current EEGLAB), so nothing external could catch a wrong activation
+space. It is left out until it can be verified; the loader ``W`` convention it
+also depended on was fixed in issue #159. The MNE wrapper's
+``AMICAICA.plot_components`` draws scalp maps through MNE instead.
 """
 
 from collections.abc import Sequence

@@ -25,8 +25,8 @@ sources = model.transform(X)    # source activations, EEGLAB variance order
 
 `fit` writes the data and a full `input.param` (so it does not depend on an
 installed `sample_data`), runs the binary, and loads the result with
-`loadmodout`, exposed as `model.output_` (an
-[`AmicaOutput`](numpy-backend.md)). `n_models` and `n_mix` are friendly aliases;
+`loadmodout`, exposed as `model.output_` (a
+`pamica.numpy_impl.load.AmicaOutput`). `n_models` and `n_mix` are friendly aliases;
 any Fortran `input.param` field (`max_iter`, `lrate`, `pdftype`, `do_newton`,
 ...) can be passed as a keyword. A collapsed fit (non-finite weights) is raised
 as a clear degenerate-fit error rather than an opaque SVD failure.

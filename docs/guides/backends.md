@@ -1,7 +1,8 @@
 # Backends & Devices
 
 pamica ships one primary PyTorch backend behind the [`AMICA`](../api/amica.md)
-interface, plus an optional Apple-GPU backend and a legacy NumPy reference.
+interface, plus an optional Apple-GPU backend, a legacy NumPy reference, and
+the Fortran reference binary itself as a native backend.
 
 ## Backends
 
@@ -9,7 +10,8 @@ interface, plus an optional Apple-GPU backend and a legacy NumPy reference.
 |---|---|---|
 | PyTorch natural-gradient EM | [`AMICATorchNG`](../api/torch-backend.md) | **Default.** Fortran-parity backend; CUDA / CPU, and float32 on MPS. |
 | MLX (Apple GPU) | [`AMICAMLXNG`](../api/mlx-backend.md) (`pamica.mlx_impl`) | Optional Apple-Silicon GPU backend; float32 only. |
-| NumPy reference | [`AMICA_NumPy`](../api/numpy-backend.md) | Legacy oracle + CLI; carries the same parity fixes. |
+| NumPy reference | [`AMICA_NumPy`](../api/numpy-backend.md) | Legacy oracle + CLI; carries the same parity fixes, generalized Gaussian only. |
+| Native Fortran | [`AMICANative`](../api/native-backend.md) | Runs the reference binary on your data; the parity oracle. |
 
 The `AMICA` wrapper and the MNE wrapper `AMICAICA` build `AMICATorchNG` by default and `AMICAMLXNG` with `backend="mlx"`
 (see [Selecting a backend](#selecting-a-backend)).
@@ -40,7 +42,13 @@ Everything the wrappers offer works on both backends:
   MLX always runs on its default device (the Apple GPU) in float32,
   so `AMICA(backend="mlx", device=...)` and `fit(..., dtype=...)` on an MLX model raise `ValueError`.
 - The default stays `"torch"`, the float64 Fortran-parity path; there is no automatic selection.
-- `AMICA.from_params_file(path, backend="mlx")` applies the file's settings through `AMICAMLXNG`'s own constructor,
+- The wrappers build only these two backends.
+  The legacy NumPy backend and the native binary are used directly, as `AMICA_NumPy` (which reads a parameter file itself, `params_file=`)
+  and `AMICANative` (which takes Fortran `input.param` keys as keywords); see [the backend table](amica-differences.md#backend-differences).
+- `AMICA.from_params_file` is the wrapper's parameter-file entry point;
+  `AMICAICA` takes its settings as `fit` keywords instead.
+- `AMICA.from_params_file(path, backend="mlx")` stores the file's settings on the instance;
+  `fit` then passes them to `AMICAMLXNG`'s own constructor as defaults (an explicit `fit` keyword wins)
   and names any setting that backend cannot take in its "not applied" warning.
 - `save` records the backend (`format_version` 2), so `AMICA.load` restores the model on the backend that fit it.
   Files written before backend selection (version 1) still load, as PyTorch models.
@@ -49,7 +57,8 @@ Everything the wrappers offer works on both backends:
   Loading an MLX model needs MLX installed and takes no `device`.
 
 The raw classes stay available for direct use (`from pamica.mlx_impl import AMICAMLXNG`),
-but the wrappers are the supported route: they add the degenerate-fit contract, the params-file reader and the MNE export.
+but the wrappers are the supported route: they add the `converged_`/`stop_reason_` record, the params-file reader, `.pt` `save`/`load` and the MNE export.
+The raw classes refuse output from a degenerate fit too (issue #306).
 
 ### Precision on the MLX backend
 
@@ -107,18 +116,20 @@ so its export omits the `LLt` file (with a warning).
 
 With the PyTorch backend, `AMICA(device=...)` accepts `"cuda"`, `"cpu"`, `"mps"`, or `None` (auto):
 
-- **`None` (auto)** — selects CUDA if available, else CPU. An auto-selected MPS
-  device is redirected to CPU because the parity default is float64, which MPS
-  cannot represent.
-- **`"cuda"`** — the bit-safe path for float64 Fortran parity on NVIDIA GPUs.
-- **`"mps"`** — requires `dtype=torch.float32`. Note that PyTorch-MPS is not a
+- **`None` (auto)**: picks MPS, then CUDA, then CPU, whichever is available first.
+  For a float64 fit (the default) the wrapper redirects an MPS pick to CPU, because MPS cannot represent float64,
+  so on a Mac a default fit runs on the CPU and a `dtype=torch.float32` fit on MPS.
+  The raw `AMICATorchNG` does not redirect: with `device=None` and float64 on a Mac its constructor raises `ValueError`,
+  so pass `device="cpu"` there.
+- **`"cuda"`**: the bit-safe path for float64 Fortran parity on NVIDIA GPUs.
+- **`"mps"`**: requires `dtype=torch.float32`. Note that PyTorch-MPS is not a
   performance win for AMICA (see below); prefer the MLX backend on Apple hardware.
 
 ## Precision: float64 vs float32
 
-- **float64** — the default; required for Fortran-parity runs. CUDA float64
+- **float64**: the default; required for Fortran-parity runs. CUDA float64
   agrees with the CPU log-likelihood to ~5 significant digits.
-- **float32** — required on the Apple GPUs (MPS/MLX have no float64) and
+- **float32**: required on the Apple GPUs (MPS/MLX have no float64) and
   ~7-significant-digit, not float64-parity. It is not a general speedup: CUDA is
   overhead-bound so float32 is about as fast as float64, while on CPU float32 is
   modestly faster and scales better across cores. The Apple-GPU speed win comes
@@ -144,7 +155,7 @@ Measured on real 70-channel EEG (see the project benchmarks and
   remains the recommendation over `device="mps"` on Apple hardware. See
   [Block-size sensitivity](validation.md#block-size-sensitivity) for the full sweep.
 - On **NVIDIA**, CUDA float64 is the bit-safe path (~4.5x over a 16-thread CPU,
-  warmed); float32 is faster still.
+  warmed); float32 is about as fast, since CUDA is overhead-bound at EEG scale.
 - On **CPU**, intra-op threads are workload-limited; around 4 threads was the
   sweet spot in the measured laptop sweep, with 8+ regressing.
 
@@ -153,5 +164,5 @@ All backends agree on the log-likelihood to ~3 significant digits on real data.
 !!! note "Cross-backend equivalence and data adequacy"
     Whether two backends recover the *same* independent components depends on how
     well-determined the decomposition is (the data-adequacy factor
-    `k = frames / channels^2`). See [Validation & Parity](validation.md); the
-    full data-size sweep is being finalized.
+    `k = frames / channels^2`). See the channel and frame sweeps in
+    [Validation & Parity](validation.md#data-adequacy-and-cross-backend-equivalence).

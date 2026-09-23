@@ -5,6 +5,19 @@
 pamica uses [UV](https://docs.astral.sh/uv/) for environment and dependency
 management.
 
+### From the Python Package Index (PyPI)
+
+Released versions are on PyPI as `pamica`:
+
+```bash
+uv add pamica                # in a uv project
+uv pip install pamica        # or into an existing environment
+```
+
+The optional extras install the same way, for example `uv add "pamica[mlx]"` or `uv add "pamica[mne]"`.
+The changes listed under "Unreleased" in the [changelog](changelog.md) are not in a release yet;
+install from source to use them.
+
 ### From source
 
 ```bash
@@ -12,9 +25,6 @@ git clone https://github.com/sccn/pAMICA.git
 cd pAMICA
 uv sync            # install the project and its dependencies into .venv
 ```
-
-A packaged release on the Python Package Index (PyPI) is planned; until then,
-install from source as above.
 
 ### Optional Apple Silicon backend (MLX)
 
@@ -48,8 +58,9 @@ amica.fit(X, max_iter=100)
 
 # Unmixed sources and the mixing/unmixing matrices
 S = amica.transform(X)
-A = amica.get_mixing_matrix(0)     # mixing matrix for model 0
-W = amica.get_unmixing_matrix(0)   # unmixing matrix for model 0
+A = amica.get_mixing_matrix(0)     # model 0's mixing matrix, sphered space
+W = amica.get_unmixing_matrix(0)   # model 0's unmixing matrix, sphered space
+maps = amica.get_sensor_mixing_matrix(0)  # scalp maps, input-channel space
 
 print("final log-likelihood:", amica.final_ll_)
 ```
@@ -59,6 +70,9 @@ print("final log-likelihood:", amica.final_ll_)
     higher-likelihood iterate, so `final_ll_` is the log-likelihood of the
     *returned* model. `ll_history_` is the true per-iteration trajectory and may
     dip below its peak on a late overshoot.
+    As in the reference, a fit that stops on a convergence check returns the
+    parameters `final_ll_` was computed from, while one that runs to `max_iter`
+    takes one more update after its last likelihood.
 
 ## Choosing a device and precision
 
@@ -100,6 +114,7 @@ and the measured precision ([Precision on the MLX backend](guides/backends.md#pr
 
 ## Next steps
 
-- [Backends & Devices](guides/backends.md) — CUDA / CPU / MLX and float32 vs float64.
-- [Validation & Parity](guides/validation.md) — comparing against the Fortran reference.
-- [API Reference](api/index.md) — full parameter and method documentation.
+- [Backends & Devices](guides/backends.md): CUDA / CPU / MLX and float32 vs float64.
+- [Validation & Parity](guides/validation.md): comparing against the Fortran reference.
+- [pamica vs. AMICA](guides/amica-differences.md): every deliberate difference from the reference.
+- [API Reference](api/index.md): full parameter and method documentation.
