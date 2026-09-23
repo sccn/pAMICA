@@ -109,7 +109,7 @@ will be hosted at `eeglab.org/pyAMICA`.
       and fixed a column-major mixture-param format bug (see [[amica92-eeglab-dropin]] /
       `.context/scratch_history.md`).
 
-### Phase R2: Documentation — DONE
+### Phase R2: Documentation (done)
 - [x] MkDocs Material site + concepts/API/guides, `docs` extra, `docs.yml` Pages
       workflow, and community health files (CONTRIBUTING, CODE_OF_CONDUCT, CITATION.cff)
       built in #97; README de-WIP'd and modernized in #102. `site_url:
@@ -117,7 +117,7 @@ will be hosted at `eeglab.org/pyAMICA`.
 - [x] **Standup:** Pages deploy at `https://eeglab.org/pAMICA/` from `sccn/pAMICA`
       (`mkdocs.yml` `site_url`, `docs.yml`).
 
-### Phase R3: Transfer to github.com/sccn — DONE
+### Phase R3: Transfer to github.com/sccn (done)
 - [x] The repository lives at `github.com/sccn/pAMICA`; README badges and the docs deploy target
       point there.
 
