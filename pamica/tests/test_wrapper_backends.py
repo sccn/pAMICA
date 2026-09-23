@@ -515,9 +515,22 @@ def test_unknown_format_version_names_the_readable_ones(fitted, tmp_path):
         AMICA.load(str(path))
 
 
+def _labeled_mlx_payload(fitted, tmp_path) -> Path:
+    """A real torch-fitted save relabeled ``wrapper["backend"] = "mlx"``.
+
+    Both checks below fire on the recorded backend name before any parameter
+    is read, so the relabeled file exercises them on every machine, MLX or not.
+    """
+    path = tmp_path / "labeled_mlx.pt"
+    fitted("torch").save(str(path))
+    payload = torch.load(path, weights_only=True)
+    payload["wrapper"]["backend"] = "mlx"
+    torch.save(payload, path)
+    return path
+
+
 def test_mlx_payload_with_a_device_raises(fitted, tmp_path):
-    path = tmp_path / "mlx.pt"
-    fitted("mlx").save(str(path))
+    path = _labeled_mlx_payload(fitted, tmp_path)
     with pytest.raises(ValueError, match="holds an MLX-backend model.*device=None"):
         AMICA.load(str(path), device="cpu")
 
@@ -525,8 +538,7 @@ def test_mlx_payload_with_a_device_raises(fitted, tmp_path):
 def test_mlx_payload_without_mlx_names_the_backend(fitted, tmp_path, monkeypatch):
     """Written on a machine with MLX, opened on one without (the
     ``sys.modules`` marker, as in the construction test above)."""
-    path = tmp_path / "mlx.pt"
-    fitted("mlx").save(str(path))
+    path = _labeled_mlx_payload(fitted, tmp_path)
     monkeypatch.setitem(sys.modules, "mlx", None)
     with pytest.raises(ImportError, match="holds an MLX-backend model.*not installed"):
         AMICA.load(str(path))
