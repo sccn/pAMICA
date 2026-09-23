@@ -731,7 +731,8 @@ def test_load_results_refuses_a_pre_change_multi_model_A(pre, real_data, tmp_pat
 # warm fit clamps a mixture there, every sample's log-density differs from
 # pamica's exact one by that much times its responsibility, which is unrelated
 # to the mixing layout and would swamp the round-off this test measures. (The
-# Laplace branch, ``rho == 1``, is exact in both.)
+# Laplace branch, ``rho == 1``, is exact in both.) Whether pamica adopts the
+# single-precision value is issue #344.
 _OPT: Dict[str, Any] = dict(
     block_size=512,
     lrate=0.05,
@@ -740,7 +741,7 @@ _OPT: Dict[str, Any] = dict(
     rholratefact=0.5,
     rho0=1.5,
     minrho=1.0,
-    maxrho=1.99,
+    maxrho=1.99,  # below the reference's single-precision rho == 2 branch (#344)
     invsigmin=0.0,
     invsigmax=100.0,
     do_newton=False,

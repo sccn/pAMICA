@@ -87,11 +87,17 @@ PDFTYPE_NAMES = {
 
 _LOG2 = math.log(2.0)
 _LOG4 = math.log(4.0)  # logistic-family normalizer (amica15.f90:1346)
-_HALF_LOG_PI = 0.5 * math.log(math.pi)
-# Log-normalizers for the non-GG density families, using Fortran's exact literal
-# constants (amica15.f90:1333/1359/1371) so the log-density matches the reference
-# binary bit-for-bit: 2.506628274 = sqrt(2*pi) (Gaussian, pdtype 2); 4.132731354 /
-# 1.858073988 = the sub-/super-Gaussian cosh normalizers (pdtype 4 / 1).
+_HALF_LOG_PI = 0.5 * math.log(math.pi)  # exact; the reference's differs (issue #344)
+# Log-normalizers for the non-GG density families, from the decimal literals the
+# reference writes (amica15.f90:1333/1359/1371): 2.506628274 = sqrt(2*pi)
+# (Gaussian, pdtype 2); 4.132731354 / 1.858073988 = the sub-/super-Gaussian cosh
+# normalizers (pdtype 4 / 1). These are the literals' double-precision values,
+# not the binary's: gfortran reads ``dble(2.506628274)`` as a single-precision
+# literal widened to double, so the binary's log-normalizers differ from these
+# by 3.7e-10, 2.0e-8 and -2.1e-8 (computed from the literals; the same kind of
+# literal in the rho == 2 branch, :1313, measurably moves the reference's
+# log-likelihood). Recorded in docs/guides/amica-differences.md (row 16);
+# whether to adopt the single-precision values is issue #344.
 _LOG_SQRT_2PI = math.log(2.506628274)
 _LOG_NORM_COSH_SUB = math.log(4.132731354)
 _LOG_NORM_COSH_SUP = math.log(1.858073988)

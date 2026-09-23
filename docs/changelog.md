@@ -42,8 +42,9 @@ Release notes are also published on the
     `pamica.numpy_impl.data.load_results` reads it in that layout
     and refuses a multi-model directory written by an earlier version, whose `A` does not invert the `W` beside it;
     write such a directory again from the fitted or reloaded model.
-  - The differences page records that the reference's density normalizers are single-precision literals:
+  - Row 16 of the differences page records that the reference's density normalizers are single-precision literals:
     in the exact-Gaussian branch (`rho == 2`) 3.0e-8 away from the one pamica uses, and up to 2.1e-8 in the `pdftype` 1, 2 and 4 families.
+    Issue #344 decides whether to adopt them; the comments that called pamica's constants bit-for-bit with the binary are corrected.
 
 - **Phase 7 of epic #324: `doscaling` rescales components, as the reference does (issue #333).**
   **Behavior change:** default fits on every backend (PyTorch, NumPy and MLX) now follow the reference's trajectory,
