@@ -265,7 +265,7 @@ def test_non_finite_sphere_still_fails_loudly(real_data):
         comp_thresh=0.9,
     )
     ng = model.model_
-    assert ng is not None and ng.sphere is not None
+    assert isinstance(ng, AMICATorchNG) and ng.sphere is not None
     assert not bool(torch.isfinite(ng.sphere).all())
     with pytest.raises(RuntimeError, match="non-finite"):
         ng._identify_shared_comps()
@@ -291,7 +291,7 @@ def test_get_sensor_mixing_matrix_non_finite_sphere_fails_loudly(real_data):
         comp_thresh=0.9,
     )
     ng = model.model_
-    assert ng is not None and ng.sphere is not None
+    assert isinstance(ng, AMICATorchNG) and ng.sphere is not None
     assert not bool(torch.isfinite(ng.sphere).all())
     with pytest.raises(RuntimeError, match="non-finite"):
         ng.get_sensor_mixing_matrix()
@@ -433,7 +433,7 @@ def test_rank_reduced_share_fit_completes(real_data):
         comp_thresh=0.9,
     )
     ng = model.model_
-    assert ng is not None and ng.sphere is not None
+    assert isinstance(ng, AMICATorchNG) and ng.sphere is not None
     assert ng.n_channels == 16 and ng.n_channels_in == NW
     assert tuple(ng.sphere.shape) == (16, NW)  # non-square: no inverse exists
     assert int(ng.comp_used.sum()) < ng.n_comps  # the sharing path really ran
@@ -466,7 +466,7 @@ def test_low_rank_projected_data_share_fit_completes(real_data):
         comp_thresh=0.9,
     )
     ng = model.model_
-    assert ng is not None and ng.sphere is not None
+    assert isinstance(ng, AMICATorchNG) and ng.sphere is not None
     assert ng.n_channels == rank and ng.n_channels_in == NW
     assert tuple(ng.sphere.shape) == (rank, NW)
     assert int(ng.comp_used.sum()) < ng.n_comps

@@ -42,10 +42,10 @@ MLX computes in float32, so its files are not bit-identical to a float64
 export the way a torch fit's are to Fortran's):
 
 ```python
-from pamica.mlx_impl import AMICAMLXNG  # requires the mlx extra
+from pamica import AMICA
 
-model = AMICAMLXNG(n_channels=X.shape[0], n_mix=3)
-model.fit(X)                      # X is (n_channels, n_samples)
+model = AMICA(n_mix=3, backend="mlx")   # requires the mlx extra (issue #313)
+model.fit(X)                            # X is (n_channels, n_samples)
 model.write_amica_output("amicaout")
 ```
 

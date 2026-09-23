@@ -70,11 +70,12 @@ The wrapper auto-selects a device and computes in float64 for Fortran parity.
   overhead-bound (float32 is about as fast as float64).
 - On Apple Silicon the MLX backend is the fastest option and carries the full
   feature surface (all pdf families, Newton, rejection, EEGLAB export, and
-  Mutual Information Reduction (MIR) diagnostics); import it explicitly.
+  Mutual Information Reduction (MIR) diagnostics); select it with
+  `backend="mlx"` on `AMICA` or the MNE wrapper `AMICAICA` (float32 only).
 
 ```python
 AMICA(device="cuda").fit(X)               # NVIDIA GPU, float64
-from pamica.mlx_impl import AMICAMLXNG    # Apple GPU (install the mlx extra)
+AMICA(backend="mlx").fit(X)               # Apple GPU, float32 (install the mlx extra)
 ```
 
 ### EEGLAB interoperability

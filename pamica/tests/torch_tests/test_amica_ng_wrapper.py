@@ -112,7 +112,7 @@ def test_ng_default_device_avoids_mps_float64(real_data, caplog):
         model.fit(real_data[:, :2048], max_iter=2, block_size=1024, seed=42)
 
     # float64 parity runs must never land on MPS.
-    assert model.model_ is not None
+    assert isinstance(model.model_, AMICATorchNG)
     assert model.model_.device.type in ("cpu", "cuda")
     if torch.backends.mps.is_available():
         assert model.model_.device.type == "cpu"
@@ -140,7 +140,7 @@ def test_ng_mps_float32_escape_hatch(real_data):
     model.fit(
         real_data[:, :2048], max_iter=2, block_size=1024, seed=42, dtype=torch.float32
     )
-    assert model.model_ is not None
+    assert isinstance(model.model_, AMICATorchNG)
     assert model.model_.device.type == "mps"
     assert model.model_.dtype == torch.float32
 
