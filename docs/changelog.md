@@ -14,7 +14,7 @@ Release notes are also published on the
   and `--backend mlx` without MLX exits with status 2 and the install hint.
   On the bundled sample all three backends meet the reference bar (log-likelihood within 3.2e-5, matched correlation 0.9992, Amari distance 0.004);
   the rows and each backend's expected bar are in the validation guide, pinned by an `AMICA_RUN_FORTRAN`-gated test.
-  - The getting-started page gains a complete Apple Silicon (MLX) path,
+  - The getting-started page gains a short Apple Silicon (MLX) route that links to the backends guide's full workflow,
     and the differences page records two existing divergences:
     `do_sphere=False` fits unscaled data where the reference divides each channel by its standard deviation (issue #328),
     and a second `fit` on the same `AMICA_NumPy` instance continues from the first (related to issue #312).
