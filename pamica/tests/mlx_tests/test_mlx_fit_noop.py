@@ -31,6 +31,13 @@ historical ``A`` (components as stored columns) is mapped onto rows with the
 same lossless conversion a pre-#334 save goes through
 (:func:`pamica.component_layout.rows_from_legacy_columns`) before the bit-for-bit
 comparison; every per-model block, and so every other array, is unchanged.
+
+Issue #344 (epic #324 Phase 13) gave every backend the reference's
+single-precision density constants, and these fits reach ``rho == 2``, where
+the generalized Gaussian's normalizer is one of them, so the live class runs
+with the constants it had before that change
+(:func:`pamica.tests.pre_change.use_pre_344_constants`); the new values are
+pinned against the reference by ``pamica/tests/test_reference_constants.py``.
 """
 
 import importlib
@@ -44,7 +51,10 @@ mx = pytest.importorskip("mlx.core")
 
 from pamica.component_layout import rows_from_legacy_columns  # noqa: E402
 from pamica.mlx_impl.core import AMICAMLXNG as CurrentAMICAMLXNG  # noqa: E402
-from pamica.tests.pre_change import load_pre_change_package  # noqa: E402
+from pamica.tests.pre_change import (  # noqa: E402
+    load_pre_change_package,
+    use_pre_344_constants,
+)
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
 DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
@@ -116,8 +126,9 @@ def _historical(model: Any, name: str) -> np.ndarray:
 
 @pytest.mark.parametrize("n_models", [1, 2])
 def test_unscaled_fit_is_bit_identical_to_the_pre_phase3_epic_tip(
-    real_data, historical_amicamlxng, n_models
+    real_data, historical_amicamlxng, n_models, monkeypatch
 ):
+    use_pre_344_constants(monkeypatch, "mlx")
     kwargs: dict[str, Any] = dict(
         n_channels=NW,
         n_models=n_models,
@@ -145,10 +156,11 @@ def test_unscaled_fit_is_bit_identical_to_the_pre_phase3_epic_tip(
 
 
 def test_unscaled_fit_with_keep_best_off_is_also_bit_identical(
-    real_data, historical_amicamlxng
+    real_data, historical_amicamlxng, monkeypatch
 ):
     """Same check with keep_best explicitly off, so the comparison does not
     depend on whichever safeguard branch a given seed happens to take."""
+    use_pre_344_constants(monkeypatch, "mlx")
     kwargs: dict[str, Any] = dict(
         n_channels=NW,
         n_mix=NMIX,

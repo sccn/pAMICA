@@ -595,10 +595,12 @@ def run_multimodel_ensemble(
 # (matches test_ng_backend.py::test_sufficient_stats_match_numpy_reference).
 # ---------------------------------------------------------------------------
 
+# The reference's log-normalizers: each default-kind literal is rounded to
+# single precision before ``dble`` widens it (issue #344); 4.0 is exact.
 _LOG4 = math.log(4.0)
-_LSQ2PI = math.log(2.506628274)
-_LNSUB = math.log(4.132731354)
-_LNSUP = math.log(1.858073988)
+_LSQ2PI = math.log(float(np.float32(2.506628274)))
+_LNSUB = math.log(float(np.float32(4.132731354)))
+_LNSUP = math.log(float(np.float32(1.858073988)))
 
 
 def _fortran_z0(y: np.ndarray, code: int) -> np.ndarray:

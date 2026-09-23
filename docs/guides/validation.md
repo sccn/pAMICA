@@ -140,6 +140,12 @@ AMICA models each source with one of the reference's five `pdftype` density fami
 For every family other than the default generalized Gaussian, the vectorized log-density and score reproduce the literal `amica15.f90` expressions
 to float64 precision (test bound $<10^{-12}$, observed $\sim\!10^{-15}$):
 the source model is not an approximation of the Fortran one, it is the same function.
+That includes the normalizing constants at the precision the binary uses them:
+the reference writes them as single-precision literals widened to double, and every backend has used those values since issue #344
+([the differences guide](amica-differences.md#single-precision-constants-issue-344)).
+Seeded with pamica's initialization, the native binary's log-likelihood for families 2, 4 and 1 matches PyTorch's to $3\times10^{-15}$ after one and three iterations,
+where the decimals' double values had been off by $3.7\times10^{-10}$, $2.0\times10^{-8}$ and $-2.1\times10^{-8}$
+(`pamica/tests/test_reference_constants.py`, opt-in with `AMICA_RUN_FORTRAN=1`).
 The generalized Gaussian has no closed-form literal to compare against, since its score depends on the adaptive shape $\rho$,
 so the default family is validated by the single-model parity above instead.
 The oracle column below records which check applies to each family:

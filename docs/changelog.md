@@ -5,6 +5,36 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 13 of epic #324: every backend uses the reference's single-precision constants (issue #344).**
+  The reference writes several density normalizers as default-kind Fortran literals widened with `dble`, for example `log(dble(2.506628274))`,
+  so the binary uses the float32 rounding of each decimal, not the decimal.
+  pamica used the decimals' double values.
+  The PyTorch, NumPy and MLX backends now take the reference's values from one module, `pamica/reference_constants.py`
+  ([the differences guide](guides/amica-differences.md#single-precision-constants-issue-344) has the table).
+  - **Behavior change: fits in which a mixture reaches `rho == 2` move slightly, toward the reference.**
+    The default `maxrho = 2` clamps mixtures there, where the reference's normalizer, `log(dble(1.772453851))`, is 3.0e-8 above the `0.5 * log(pi)` pamica used,
+    so default fits of the generalized Gaussian take this branch once a mixture reaches the clamp
+    (on 4096 samples of the bundled recording, a two-model fit gets there on its fifth iteration).
+    Seeded with a warm two-model state that has mixtures at `rho == 2`, the PyTorch and NumPy updates now match the native binary to float64 round-off:
+    after three iterations the log-likelihood differs by 1.6e-13, `A` by 3.8e-13 and `mu` by 5.7e-9,
+    where the previous code was off by 1.2e-8, 3.4e-8 and 8.4e-3.
+  - **Behavior change: the Gaussian (`pdftype` 2) and the sub- and super-Gaussian cosh families (`pdftype` 4 and 1) report a different log-likelihood**,
+    lower by 3.7e-10 and 2.0e-8 and higher by 2.1e-8, which now matches the binary's to 2.7e-15.
+    Their parameter updates move only by round-off, since a family's normalizer shifts every mixture alike.
+  - The underflow guard of the rho update, `epsdble`, is likewise the reference's `1.0e-16` in single precision (1.0000000168623835e-16).
+  - The NumPy plotting helper `pamica.numpy_impl.pdf.compute_pdf`, which `viz.plot_pdf_fits` draws, takes its normalizers from the same module,
+    so it draws the density the fit uses; its unused companion `compute_log_pdf` is removed.
+  - Row 16 of the differences page now records the one kind of single-precision literal pamica keeps at its decimal value:
+    the compiled-in defaults of `input.param` keys, which the binary uses only when the key is missing
+    (then its `comp_thresh` is 0.9900000095); a value given in `input.param` is read as double, and pamica's native engine gives every one.
+  - Tests: `pamica/tests/test_reference_constants.py` pins every constant against the float32 rounding of its literal on the cited reference line,
+    computed by exact rational arithmetic; pins the sweep of both reference sources; checks that no backend keeps its own copy;
+    and (opt-in, `AMICA_RUN_FORTRAN=1`) seeds the native binary for `pdftype` 2, 4 and 1.
+    The merged-state oracle in `pamica/tests/test_component_rows.py` no longer holds `maxrho` at 1.99.
+    The tests that compare a live backend bit for bit with code from before this change
+    (`test_component_rows.py`, `test_doscaling_rows.py` and `mlx_tests/test_mlx_fit_noop.py`)
+    give the live backend its old constants first, so they still isolate the change they were written for.
+
 - **Phase 11 of epic #324: every backend follows the reference's iteration order (issues #339 and #345).**
   Each iteration of every backend (PyTorch, NumPy and MLX) now runs in the reference's order (amica15.f90:949-1142,
   [ADR 0008](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0008-iteration-order.md)):

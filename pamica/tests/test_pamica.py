@@ -74,9 +74,11 @@ def test_pdf_computation():
     npt.assert_allclose(pdf, np.exp(-np.abs(y)) / 2.0)
     npt.assert_allclose(dpdf, -np.sign(y) * pdf)
 
-    # Test Gaussian distribution
+    # Test Gaussian distribution, normalized by the reference's
+    # single-precision sqrt(pi), 1.772453851 rounded to float32
+    # (amica15.f90:1313, issue #344)
     pdf, dpdf = compute_pdf(y, rho=2.0)
-    npt.assert_allclose(pdf, np.exp(-y * y) / np.sqrt(np.pi))
+    npt.assert_allclose(pdf, np.exp(-y * y) / float(np.float32(1.772453851)))
     npt.assert_allclose(dpdf, -2 * y * pdf)
 
 
