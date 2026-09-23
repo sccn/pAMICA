@@ -246,6 +246,14 @@ class AMICAICA:
         requires MLX (``ImportError`` here otherwise) and takes neither
         ``device`` nor a ``dtype`` fit keyword.
 
+    Raises
+    ------
+    ValueError
+        If ``backend`` is not ``"torch"`` or ``"mlx"``, or ``device`` is set
+        with ``backend="mlx"``.
+    ImportError
+        If ``backend="mlx"`` and MLX is not installed.
+
     Attributes
     ----------
     amica_ : AMICA
@@ -431,12 +439,17 @@ class AMICAICA:
         Raises
         ------
         TypeError
-            If ``inst`` is not an MNE ``Raw``/``Epochs``.
+            If ``inst`` is not an MNE ``Raw``/``Epochs``, or (from
+            :meth:`AMICA.fit`) a keyword in ``fit_kwargs`` is neither an
+            :meth:`AMICA.fit` parameter nor a constructor keyword of the
+            selected backend.
         ValueError
             If ``start``/``stop`` are given for ``Epochs``, ``stop`` exceeds the
             recording length, the selected data is non-finite, or no samples
             remain to fit (an empty ``start``/``stop`` range, or ``bad``
-            annotations covering the entire selected range).
+            annotations covering the entire selected range); or (from
+            :meth:`AMICA.fit`) ``fit_kwargs`` carries ``dtype`` or
+            ``device`` with ``backend="mlx"``.
         """
         if not isinstance(inst, (mne.io.BaseRaw, mne.BaseEpochs)):
             raise TypeError(
