@@ -206,51 +206,162 @@ def test_accessors_match_float64_torch_twin():
         assert err < 1e-4, f"model {h}: get_rho differs by {err:.3e}"
 
 
-def test_variance_order_matches_float64_twin():
+# Float32 perturbation study behind the variance_order agreement check below:
+# the same 2-model, 30-iteration MLX fit on the input and on 48 copies of it,
+# each element multiplied by (1 + eps * z) with eps the float32 machine
+# epsilon (1.19e-7) and z standard normal (numpy default_rng(20260922)), each
+# compared with its float64 twin (98 per-model orders, Apple M4 Pro). Both
+# backends compute the order host-side in float64, so the per-component
+# variance difference comes only from MLX's float32 parameters (W and the
+# sphere): at most 1.65e-6 relative. No pair of components fell inside the
+# resulting band in any fit (the closest adjacent pair sat 34x outside its
+# band), so no order ever differed; 35 of the 3038 adjacent gaps were under
+# 1e-3 relative, none under 3e-5.
+_SVAR_STUDY_MAX_REL = 1.65e-6
+_SVAR_SAFETY = 3.0
+# At most one in-band swap per model. From the study's gap density near zero
+# (35 of 3038 adjacent gaps under 1e-3) and its widest band (2.9e-6), an
+# adjacent pair lands inside the band with probability about 3e-5, so about
+# 1e-3 in-band pairs are expected per 32-component model: one swap covers a
+# rare near-tie on other hardware, while two in one model (about 5e-7) would
+# signal a real ordering change, as would any swap outside the band.
+_MAX_ORDER_SWAPS = 1
+
+
+def _per_component(order: np.ndarray, svar_sorted: np.ndarray) -> np.ndarray:
+    """Undo ``variance_order``'s sort: the variance of each source index."""
+    assert np.array_equal(np.sort(order), np.arange(order.size))
+    v = np.empty(order.size, dtype=np.float64)
+    v[order] = svar_sorted
+    return v
+
+
+def _order_violations(
+    order32: np.ndarray, v32: np.ndarray, order64: np.ndarray, v64: np.ndarray
+) -> list[str]:
+    """Every way the MLX order (``order32``, per-source variances ``v32``)
+    departs from the float64 twin's (``order64``, ``v64``) beyond float32
+    rounding; empty when the two agree.
+
+    A pair of sources may swap order only when the gap between their twin
+    variances lies inside the float32 band, the sum of the two sources'
+    measured ``|v32 - v64|``. The band's width is itself capped at
+    ``_SVAR_SAFETY`` times the study's largest per-source difference, and the
+    number of swapped pairs at ``_MAX_ORDER_SWAPS``.
+    """
+    n = v64.size
+    d = np.abs(v32 - v64)
+    violations = []
+    rel = d / v64
+    cap = _SVAR_SAFETY * _SVAR_STUDY_MAX_REL
+    if rel.max() > cap:
+        violations.append(
+            f"source {int(rel.argmax())}'s variance differs by {rel.max():.2e} "
+            f"relative, over the {cap:.2e} float32 cap"
+        )
+    rank32 = np.empty(n, dtype=np.int64)
+    rank32[order32] = np.arange(n)
+    rank64 = np.empty(n, dtype=np.int64)
+    rank64[order64] = np.arange(n)
+    i, j = np.triu_indices(n, k=1)
+    swapped = (rank32[i] - rank32[j]) * (rank64[i] - rank64[j]) < 0
+    gap = np.abs(v64[i] - v64[j])
+    band = d[i] + d[j]
+    wide = np.flatnonzero(swapped & (gap > band))
+    if wide.size:
+        k = wide[np.argmax(gap[wide] / band[wide])]
+        violations.append(
+            f"{wide.size} swapped pairs lie outside the float32 band, worst "
+            f"sources {int(i[k])} and {int(j[k])}: gap {gap[k]:.3e} > band "
+            f"{band[k]:.3e}"
+        )
+    n_swaps = int(swapped.sum())
+    if n_swaps > _MAX_ORDER_SWAPS:
+        violations.append(
+            f"{n_swaps} swapped pairs, over the cap of {_MAX_ORDER_SWAPS}"
+        )
+    return violations
+
+
+def _variance_orders(model, ng, h: int):
+    """Both backends' order and per-source variances for model ``h``, after
+    checking that each order sorts its own variances in descending order."""
+    order32, svar32 = model.variance_order(h, return_svar=True)
+    order64, svar64 = ng.variance_order(h, return_svar=True)
+    assert np.all(np.diff(svar32) <= 0) and np.all(np.diff(svar64) <= 0)
+    v32 = _per_component(order32, np.asarray(svar32, dtype=np.float64))
+    v64 = _per_component(order64, np.asarray(svar64, dtype=np.float64))
+    return order32, v32, order64, v64
+
+
+@pytest.fixture(scope="module")
+def variance_order_fit():
+    """One 2-model MLX fit and its float64 twin, shared by the
+    ``variance_order`` agreement test and its negative controls."""
+    model = _fit_model(n_models=2, max_iter=30)
+    return model, _torch_twin(model)
+
+
+def test_variance_order_matches_float64_twin(variance_order_fit):
     """``variance_order`` (issue #92, epic #278 polish round) agrees with the
     float64 twin on the actual ORDER, not just close variance values.
 
-    A near-tie between two sources' back-projected variance would make the
-    order genuinely ambiguous between float32 MLX and float64 torch even
-    though both computed the quantity correctly -- that risk is checked for,
-    not silently assumed away: the assertion below requires every consecutive
-    gap in the twin's own (float64) descending-sorted variances to clear
-    1e-3 relative, well above the ~1e-4 to 1e-3 float32-vs-float64
-    disagreement measured for ``get_mixing_matrix``/``get_rho`` above, so an
-    order mismatch here is a real regression rather than a coin flip on a
-    near-tied pair. A short (5-iteration) fit was tried first and rejected
-    for this reason -- its minimum gap was ~2e-4, inside the float32 noise
-    band -- so this test runs the fit longer (50 iterations) specifically to
-    reach a spectrum with real separation (measured minimum gap ~0.24%,
-    comfortably above the bound below; 30 iterations served, at ~0.47%, until
-    issue #333's component rescale moved the trajectory and brought that
-    fit's minimum gap down to 5.0e-4, which this assertion then correctly
-    rejected); a shorter/noisier config is exactly
-    the kind of near-tie this assertion exists to catch and reject rather
-    than let the order check pass by luck. If a future data/config change
-    shrinks the gap back down, this assertion is designed to fail loudly (not
-    the order check) so the weaker config gets replaced rather than the order
-    check getting silently loosened. Multi-model, so ``model_idx`` routing is
+    The two orders must agree exactly except for swaps between sources whose
+    variance gap lies inside the float32 band measured here, with the band's
+    width and the number of swaps capped from the perturbation study recorded
+    above (see :func:`_order_violations`). This replaced a fixed 1e-3
+    near-tie precondition on the twin's gaps: it assumed a float32 band about
+    300 times wider than the measured one, and failed on a CI runner whose
+    GPU trajectory produced a 1.65e-4 gap, well clear of any float32
+    ambiguity. ``test_variance_order_check_catches_a_divergence`` shows the
+    check fails on real divergences. Multi-model, so ``model_idx`` routing is
     exercised.
     """
-    model = _fit_model(n_models=2, max_iter=50)
-    ng = _torch_twin(model)
-
+    model, ng = variance_order_fit
     for h in range(2):
-        order_mlx, svar_mlx = model.variance_order(h, return_svar=True)
-        order_ng, svar_ng = ng.variance_order(h, return_svar=True)
+        violations = _order_violations(*_variance_orders(model, ng, h))
+        assert not violations, f"model {h}: " + "; ".join(violations)
 
-        gaps = -np.diff(svar_ng) / np.maximum(svar_ng[:-1], svar_ng.max() * 1e-6)
-        assert gaps.min() > 1e-3, (
-            f"model {h}: variance gaps too tight ({gaps.min():.2e}) for an "
-            "order comparison to be meaningful on this fit/config"
-        )
 
-        assert np.array_equal(order_mlx, order_ng), (
-            f"model {h}: variance_order disagrees: {order_mlx} vs {order_ng}"
-        )
-        err = _relerr(svar_mlx.astype(np.float64), svar_ng)
-        assert err < 1e-3, f"model {h}: variance_order svar differs by {err:.3e}"
+@pytest.mark.parametrize(
+    ("corruption", "expected"),
+    [
+        ("reversed", "outside the float32 band"),
+        ("shuffled", "outside the float32 band"),
+        ("closest_pair_swap", "outside the float32 band"),
+        ("inflated_variance", "float32 cap"),
+    ],
+)
+def test_variance_order_check_catches_a_divergence(
+    variance_order_fit, corruption, expected
+):
+    """Negative controls for :func:`_order_violations` on the real fit: the
+    MLX side's order reversed or shuffled; the closest adjacent pair whose
+    gap lies outside the float32 band swapped (the hardest real swap to
+    catch, and a single one, under the swap cap, so only the band can catch
+    it); or one source's variance moved by twice the float32 cap."""
+    model, ng = variance_order_fit
+    order32, v32, order64, v64 = _variance_orders(model, ng, 0)
+    assert not _order_violations(order32, v32, order64, v64)
+
+    if corruption == "reversed":
+        order32 = order32[::-1].copy()
+    elif corruption == "shuffled":
+        order32 = np.random.default_rng(0).permutation(order32)
+    elif corruption == "closest_pair_swap":
+        d = np.abs(v32 - v64)[order64]
+        gap = -np.diff(v64[order64])
+        separated = np.flatnonzero(gap > d[:-1] + d[1:])
+        k = int(separated[np.argmin(gap[separated])])
+        pa, pb = (int(np.flatnonzero(order32 == src)[0]) for src in order64[k : k + 2])
+        order32 = order32.copy()
+        order32[[pa, pb]] = order32[[pb, pa]]
+    else:
+        v32 = v32.copy()
+        v32[order32[0]] *= 1.0 + 2.0 * _SVAR_SAFETY * _SVAR_STUDY_MAX_REL
+
+    violations = _order_violations(order32, v32, order64, v64)
+    assert any(expected in v for v in violations), violations
 
 
 def test_sensor_mixing_matrix_matches_twin_on_rank_reduced_fit():
