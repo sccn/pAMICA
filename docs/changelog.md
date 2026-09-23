@@ -5,6 +5,19 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 6 of epic #324: the validation harness covers every backend (issue #315).**
+  `validate_implementations.py --backend {torch,numpy,mlx}` (or a comma-separated list, or `all`)
+  compares each backend against one Fortran reference run with the same settings;
+  the default remains `torch` and prints the same report as before.
+  NumPy receives the settings through its own key-translation table, PyTorch and MLX through `AMICA(backend=...)`;
+  an explicit `--backend` also prints and saves a one-row-per-backend summary with runtimes (`parity_summary.md`),
+  and `--backend mlx` without MLX exits with status 2 and the install hint.
+  On the bundled sample all three backends meet the reference bar (log-likelihood within 3.2e-5, matched correlation 0.9992, Amari distance 0.004);
+  the rows and each backend's expected bar are in the validation guide, pinned by an `AMICA_RUN_FORTRAN`-gated test.
+  - The getting-started page gains a complete Apple Silicon (MLX) path,
+    and the differences page records two existing divergences:
+    `do_sphere=False` fits unscaled data where the reference divides each channel by its standard deviation (issue #328),
+    and a second `fit` on the same `AMICA_NumPy` instance continues from the first (related to issue #312).
 - **Phase 4 of epic #324: backend selection in `AMICA` and `AMICAICA` (issue #313).**
   `AMICA` and `AMICAICA` gain a `backend` parameter:
   `"torch"` (the default, `AMICATorchNG`, float64 Fortran parity) or `"mlx"` (`AMICAMLXNG`, Apple GPU, float32 only).

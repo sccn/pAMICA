@@ -24,11 +24,12 @@ that is not listed, that is a bug worth
 | 10 | Restarts across seeds | none (its `maxrestarts` only *recovers* from an early NaN) | available as `n_restarts`, **off by default** (`n_restarts=1`) | the weakest under-determined components are init-basin sensitive, so best-of-N buys robustness; but a default that ran N fits would change every result and cost N times as long | `n_restarts=1` (the default) |
 | 11 | Reconstruction after rank reduction (`AMICAICA.apply`) | output has no representation of the discarded principal component analysis (PCA) subspace (sphere rows past `numeigs` are zero), so any back-projection drops it | the MNE export carries the full PCA basis, so `apply` restores the residual | MNE's own `ICA` does; the residual was never part of the independent component analysis (ICA) decomposition, so it is not ICA's to remove | `apply(..., n_pca_components=ica.n_components_)` |
 | 12 | `pcadb` | parsed (amica15.f90:3459-3461), never used | unset by default; when set alone, keeps the dimensions within `pcadb` dB of the largest eigenvalue; ignored when `pcakeep` is also set | a dB cut is a scale-free way to drop low-variance directions; letting `pcakeep` win preserves what a reference `input.param` that sets both (both bundled files do) means to the binary | leave `pcadb` unset (the default), or set `pcakeep` |
+| 13 | Preprocessing with `do_sphere=False` | divides each channel by its standard deviation and adds a log-determinant term to the likelihood (amica15.f90:516-526) | identity sphere with a zero log-determinant, on all three array backends: the data are fitted unscaled | not a deliberate choice: an existing divergence, found during epic #324 and not yet ported | none yet (issue #328) |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
 row 3 with ADR 0003; row 5 with issue #50, extended to the raw backends by issue #306; row 8 with issues #60 and #240;
 row 9 with issue #232; row 10 with issue #198; row 11 with issue #322 (ADR 0005);
-row 12 with issue #323.
+row 12 with issue #323; row 13 is recorded, not yet resolved, by issue #328.
 
 Two `share_comps` details are pamica's own because the reference cannot decide
 them: the A-freeze window after a merge is anchored on `share_start` (the literal
@@ -205,6 +206,7 @@ so the params-file reader, the degenerate-fit contract, `.pt` `save`/`load`, the
 | Mutual Information Reduction (MIR) diagnostic | yes | no | yes | n/a |
 | Persistence | `state_dict` + EEGLAB `amicaout` export | EEGLAB `amicaout` | `state_dict`/`.npz` `save`-`load` + EEGLAB `amicaout` export | EEGLAB `amicaout` |
 | Fortran `input.param` reader | yes (`AMICA.from_params_file`, #132) | yes (`AMICA_NumPy(params_file=...)` / `from_params_file`, #304) | yes (`AMICA.from_params_file(..., backend="mlx")`) | native |
+| A second `fit` on the same instance | starts from a fresh initialization | continues from the previous fit ([see below](#refitting-a-numpy-instance-continues-from-the-previous-fit-issue-312)) | starts from a fresh initialization | every run starts fresh, or from `load_*` files |
 
 The NumPy row's "GG only" (generalized Gaussian, GG) corrects an earlier
 version of this table, which listed "all five": `AMICA_NumPy._compute_log_pdf`
@@ -557,6 +559,38 @@ and `pcakeep=0` or `pcadb <= 0` ran to a degenerate `nan_ll` fit.
 The reference has no such check;
 with `pcakeep <= 0` it sets `numeigs = min(pcakeep, ...) <= 0` and carries on, the situation row 2 describes.
 
+## `do_sphere=False` does not scale the channels (issue #328)
+
+This is row 13 of the table above: a known divergence, not a design decision, recorded here until it is resolved.
+
+**What the reference does.**
+With `do_sphere 0` the reference does not skip preprocessing.
+Its no-sphere branch (amica15.f90:516-526) takes the data covariance and sets
+`S = diag(1/sqrt(var_i))` for every channel with positive variance,
+so each channel is divided by its standard deviation before fitting,
+and it accumulates `sldet = sum_i 0.5*log(S(i,i))` into the likelihood.
+`numeigs = nx`, so no dimension is dropped (pamica matches that part; see the previous section).
+
+**What pamica does.**
+All three array backends use an identity sphere and `sldet = 0` when `do_sphere=False`,
+so they fit the data unscaled.
+
+**Consequences.**
+A `do_sphere=False` fit is not trajectory-comparable to the binary's:
+the natural-gradient EM is not scale-invariant through its `A = I + noise` initialization and its step sizes, so the two fit differently scaled data.
+The reported log-likelihood also differs by the log-determinant term.
+That term looks inconsistent in the reference itself:
+`log|det S|` for `S = diag(1/sqrt(var_i))` is `-0.5 * sum_i log(var_i)`,
+but the reference adds `0.5*log(S(i,i)) = -0.25 * log(var_i)` per channel, half of that.
+Being a constant added to every model's per-sample log-likelihood,
+it cancels in the model posteriors and does not change the fitted parameters, only the reported likelihood.
+The default `do_sphere=True` path is unaffected.
+
+**How to restore the reference behavior.**
+There is no option for it yet.
+Issue #328 decides whether to port the per-channel scaling to all three backends
+and whether to reproduce the reference's `0.5*log(S(i,i))` term or use the full log-determinant with an escape hatch.
+
 ## `mir_step`'s upfront PCA-reduction gate
 
 MIR is undefined on a rank-reduced sphere,
@@ -700,6 +734,33 @@ Practical notes:
   can appear on disk mid-fit. The final write replaces it — what is on disk when
   `fit` returns is the winner's state, which is a tested claim, not just a
   documented intention.
+
+## Refitting a NumPy instance continues from the previous fit (issue #312)
+
+This is a difference between the backends, recorded in the backend table above,
+not a divergence from the reference.
+
+**What happens.**
+`AMICA`, `AMICATorchNG` and `AMICAMLXNG` draw a fresh initialization on every `fit`,
+so fitting the same instance twice with the same seed reproduces the first fit exactly.
+`AMICA_NumPy` does not.
+Its `_initialize_parameters` initializes a parameter only while it is `None`,
+so a second `fit` on the same instance starts from the first fit's `A`, `mu`, `alpha`, `beta`, `rho`, `gm` and `c`
+and from its annealed learning-rate ceilings,
+and it appends to the first fit's `ll` and `nd` histories instead of starting new ones.
+On the bundled sample, the second fit's starting `A` is exactly the first fit's final `A`,
+and three plus three iterations leave six entries in `ll`.
+Passing `restart_seeds` (or `n_restarts > 1`) resets this state before each fit, so those paths start fresh.
+
+**Why.**
+The initialize-only-if-unset pattern lets the legacy backend honor starting values assigned before `fit`.
+It is not a deliberate cross-backend design:
+a warm start that works on purpose, on every backend, is the subject of issue #312,
+which also covers the reference's own `load_*` warm-start keywords.
+
+**How to get a fresh fit.**
+Construct a new `AMICA_NumPy` instance for each fit, as the NumPy command-line interface and the validation harness do,
+or pass `restart_seeds=[seed]`.
 
 ## Unmapped Fortran keywords
 

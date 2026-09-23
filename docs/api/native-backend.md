@@ -75,14 +75,15 @@ pointing at the build script.
 
 `validate_implementations.py` can source the reference through this engine
 instead of the bundled macOS-only `amica15mac` fixture, so the real Fortran
-reference can be compared against the PyTorch backend on any platform:
+reference can be compared against pamica's backends on any platform
+(`--backend torch`, the default, or `numpy`, `mlx`, a comma-separated list, or `all`):
 
 ```bash
 # Resolve/download the native binary (or honor PAMICA_NATIVE_BINARY):
 python validate_implementations.py --native-engine
 
-# Or point at a specific binary:
-python validate_implementations.py --fortran-binary /path/to/amica15
+# Or point at a specific binary, and compare every backend against it:
+python validate_implementations.py --fortran-binary /path/to/amica15 --backend all
 ```
 
 ::: pamica.native.engine.AMICANative
