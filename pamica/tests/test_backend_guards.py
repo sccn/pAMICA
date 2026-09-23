@@ -121,6 +121,8 @@ _TORCH_MLX_ACCESSORS: List[Accessor] = [
     ("get_unmixing_matrix", lambda m, X: m.get_unmixing_matrix(), False),
     ("get_sensor_mixing_matrix", lambda m, X: m.get_sensor_mixing_matrix(), False),
     ("get_rho", lambda m, X: m.get_rho(), False),
+    ("get_pdftype", lambda m, X: m.get_pdftype(), False),
+    ("shared_components", lambda m, X: m.shared_components(), False),
     ("variance_order", lambda m, X: m.variance_order(), False),
     ("model_loglik", lambda m, X: m.model_loglik(X), True),
     ("model_probability", lambda m, X: m.model_probability(X), True),
@@ -232,34 +234,46 @@ def test_data_accessors_reject_1d_and_wrong_channel_count(backend, real_data, tm
             fn(m, bad_channels)
 
 
+# mir() is deliberately excluded here: it raises ValueError for ANY
+# pcakeep-reduced model (its rank-deficient-sphere guard, unrelated to
+# channel-count validation), so a "good" 32-channel input would never
+# return a value to assert on. transform/model_loglik/model_probability/pmi
+# all still validate the input shape ahead of any PCA-specific check.
+_PCA_CHANNEL_CHECK_NAMES = ("transform", "model_loglik", "model_probability", "pmi")
+
+
 @pytest.mark.parametrize("backend", _BACKENDS)
-def test_transform_channel_count_follows_n_channels_in_after_pca(
-    backend, real_data, tmp_path
-):
+def test_channel_count_follows_n_channels_in_after_pca(backend, real_data, tmp_path):
     """After a ``pcakeep=20`` fit on 32 channels, the model's fitted rank is
-    20 but its input channel count stays 32: a 32-channel array must be
-    accepted and a 20-channel one rejected (the ``n_channels_in`` rule)."""
-    m, _accessors = _build(backend, real_data, tmp_path, pcakeep=PCAKEEP)
+    20 but its input channel count stays 32: every data-taking accessor
+    (transform/model_loglik/model_probability/pmi) must accept a 32-channel
+    array and reject a 20-channel one (the ``n_channels_in`` rule)."""
+    m, accessors = _build(backend, real_data, tmp_path, pcakeep=PCAKEEP)
+    data_accessors = [
+        (name, fn)
+        for name, fn, is_data in accessors
+        if is_data and name in _PCA_CHANNEL_CHECK_NAMES
+    ]
+    assert data_accessors
 
     if backend == "torch":
         assert m.n_channels_in == NW
         assert m.n_channels == PCAKEEP
-        assert m.transform(real_data).shape[0] == PCAKEEP
-        with pytest.raises(ValueError, match="channels"):
-            m.transform(real_data[:PCAKEEP])
+        good, bad = real_data, real_data[:PCAKEEP]
     elif backend == "mlx":
         assert m.n_channels_in == NW
         assert m.n_channels == PCAKEEP
-        data32 = real_data.astype(np.float32)
-        assert m.transform(data32).shape[0] == PCAKEEP
-        with pytest.raises(ValueError, match="channels"):
-            m.transform(data32[:PCAKEEP])
+        good = real_data.astype(np.float32)
+        bad = real_data[:PCAKEEP].astype(np.float32)
     else:
         assert m.data_dim_in == NW
         assert m.data_dim == PCAKEEP
-        assert m.transform(real_data).shape[0] == PCAKEEP
+        good, bad = real_data, real_data[:PCAKEEP]
+
+    for name, fn in data_accessors:
+        assert fn(m, good) is not None
         with pytest.raises(ValueError, match="channels"):
-            m.transform(real_data[:PCAKEEP])
+            fn(m, bad)
 
 
 # ---------------------------------------------------------------------
