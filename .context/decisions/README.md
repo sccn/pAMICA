@@ -6,7 +6,7 @@ Architecture Decision Records (ADRs) capture significant decisions that shape th
 
 - One file per decision: `NNNN-short-kebab-title.md`, zero-padded to four digits.
 - `0000-template.md` is the template; copy it to start a new ADR. Do not edit `0000-template.md` itself.
-- Number sequentially. The next ADR after `0007-...` is `0008-...`.
+- Number sequentially. The next ADR after `0008-...` is `0009-...`.
 - Status flows `proposed` -> `accepted` -> (later) `superseded by ADR-NNNN`. Never delete an ADR; supersede it.
 - Keep each ADR short. If it grows past two screens, you are probably writing a design doc, not a decision.
 
@@ -32,3 +32,4 @@ Add new entries here as you create ADRs:
 - ADR 0005 - [Restore the PCA residual in the MNE export](0005-restore-pca-residual-in-mne-export.md) (accepted)
 - ADR 0006 - [Components are rows of each stored mixing block](0006-component-orientation.md) (accepted; amends ADR 0001; storage amended by ADR 0007)
 - ADR 0007 - [Store the mixing matrix with one component per row](0007-component-row-layout.md) (accepted; amends ADRs 0001 and 0006)
+- ADR 0008 - [Follow the reference's iteration order](0008-iteration-order.md) (accepted)

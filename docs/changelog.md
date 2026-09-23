@@ -5,6 +5,56 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 11 of epic #324: every backend follows the reference's iteration order (issues #339 and #345).**
+  Each iteration of every backend (PyTorch, NumPy and MLX) now runs in the reference's order (amica15.f90:949-1142,
+  [ADR 0008](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0008-iteration-order.md)):
+  the E-step computes the log-likelihood and the update direction,
+  then the likelihood-decrease response and the stopping checks run,
+  a fit that stops leaves before any update,
+  and otherwise the parameters are updated with the rates those checks just set.
+  Fits with a likelihood decrease, fits that stop on a convergence check, and fits that reach `share_start` (iteration 100 by default) now end elsewhere, closer to the reference;
+  every other fit is byte-identical to before.
+  - **Behavior change: a likelihood decrease takes effect in the same iteration's update.**
+    Before, the halved `lrate` and the scaled rho rate reached the update one iteration late.
+    On a seeded 30-iteration run with eight decreases (`lrate=0.5`, no Newton, `doscaling` on),
+    the largest per-iteration log-likelihood gap to the native binary fell from 1.4e-2 to 2.7e-5 (PyTorch) and 8.2e-5 (NumPy),
+    and the largest gap in `A` from 0.22 to 8.1e-4 and 6.8e-4;
+    the binary against itself (1 thread against 4) differs by 1.9e-5 and 6.0e-4 on the same run.
+    On a run that ratchets at `maxdecs`, the gaps fell from 1.3e-2 to 6.6e-6 and 8.6e-6 (binary floor 4.2e-6).
+    Every decrease now falls on the reference's iterations.
+  - **Behavior change: a fit that stops on a convergence check returns the parameters its `final_ll_` was computed from.**
+    On a `min_dll`, gradient-norm or `lrate`-floor stop, the stopping iteration used to take its update anyway,
+    so the returned parameters were one update past `final_ll_`, and the exported `LLt` one update behind them.
+    That iteration now also runs no share scan, kurtosis switch, `mir_history_` waypoint or rejection pass.
+    A fit that runs to `max_iter` still updates on its last iteration, as the reference does.
+  - **Behavior change: the reference's A-freeze applies to every fit.**
+    Once `iter >= share_start`, the reference holds the `A` update, its `lrate` ramp and its rho-rate reset
+    on every iteration with `mod(iter, share_iter) <= 5` (amica15.f90:1803), whether or not `share_comps` is on.
+    pamica held `A` only under `share_comps`, in a window counted from `share_start`.
+    So every default fit of 100 or more iterations now holds `A` on iterations 100-105 (and 200-205, and so on), as the reference does.
+    On a seeded 16-iteration run with `share_start=3` and `share_iter=10`,
+    the gap to the binary fell from 6.1e-3 to 6.6e-7 in log-likelihood (binary floor 4.3e-7) and from 0.19 to 5.0e-6 in `A`.
+  - Parity on the bundled sample, before and after, on all three backends:
+    against the bundled 200-iteration reference output, the log-likelihood gap falls from 2.2e-4 to 2.3e-4 down to 1.2e-4 to 1.3e-4,
+    the mean matched component correlation rises from 0.9972-0.9973 to 0.9982-0.9983 (minimum 0.969-0.970 to 0.981-0.982),
+    and the Amari distance falls from 6.3e-3 to 4.8e-3.
+    The validation harness's 100-iteration run keeps its final log-likelihood (gap 2.6e-4 to 2.7e-4),
+    and its mean matched correlation rises from 0.9988 to 0.9991 (Amari distance 0.0044 to 0.0038),
+    because the reference holds `A` on its 100th iteration.
+  - **New validation:** `share_iter` (NumPy `share_int`) must be an integer >= 7 on every backend, whether or not `share_comps` is on,
+    because a shorter cycle would never update `A` again.
+    No bundled configuration used a smaller value.
+  - The rho learning rate is now two values, as in the reference:
+    the working rate `rholrate`, scaled on each decrease and reset to its ceiling by each `A` update,
+    and the ceiling `rholrate_cap`, ratcheted at `maxdecs`.
+    PyTorch and MLX saves store `rholrate_cap`; a save without it loads with the ceiling equal to its `rholrate`.
+  - Smaller consequences of the order:
+    the MNE export's `n_iter_` is now `iteration + 1`, the number of E-steps that ran (it was one fewer);
+    an MLX fit that stops on non-finite parameters now records that iteration's log-likelihood;
+    NumPy's restart after a non-finite likelihood now happens before the update, and its outlier rejection after the checkpoint writes, as in the reference.
+  - Tests: `pamica/tests/test_iteration_order.py` checks the order, the decrease timing, the stop semantics and the freeze through real fits on every backend,
+    and `pamica/tests/test_iteration_order_native_oracle.py` (opt-in, `AMICA_RUN_FORTRAN=1`) is the native-binary comparison above.
+
 - **Fix: tests no longer make a full clone shallow (issue #343).**
   Tests that load historical code ran `git fetch origin <sha> --depth 1` to reach the pinned commit;
   in a full clone that records a shallow boundary, after which `git gc` can prune history.

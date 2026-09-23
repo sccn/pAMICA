@@ -37,12 +37,19 @@ row 14 with issue #333 (ADR 0006);
 row 15 with issue #335, which also made the NumPy restart window count from 1;
 row 16 is recorded, not yet resolved, by issue #344.
 
-Two `share_comps` details are pamica's own because the reference cannot decide
-them: the A-freeze window after a merge is anchored on `share_start` (the literal
-`mod(iter, share_iter)` misaligns unless `share_start` is a multiple of
-`share_iter`, and freezes A permanently for `share_iter <= 6`, which the array
-backends reject up front), and the merge similarity metric has no bit-exact
-oracle, because the reference's `Spinv2` is declared but never allocated.
+The A-freeze is the reference's arithmetic, applied as it is (issue #345):
+once `iter >= share_start`, every iteration with `mod(iter, share_iter) <= 5` holds the `A` update,
+together with the `lrate` ramp and the `rholrate` reset that share its branch (amica15.f90:1803).
+The reference applies it to every fit, one model or several, whether or not `share_comps` is on,
+so with the defaults (`share_start = share_iter = 100`) every backend holds `A` on iterations 100-105, 200-205, and so on.
+Until issue #345 pamica held `A` only under `share_comps` with two or more models, on each scan iteration and the five after it, counted from `share_start`.
+The literal remainder starts the window on the scan iteration only when `share_start` is a multiple of `share_iter`, as with the defaults;
+otherwise the window and the scan fall on different iterations, in the reference and in pamica alike.
+A `share_iter` below 7 would never update `A` again, so every backend rejects it, sharing on or off
+(the NumPy backend spells it `share_int`).
+
+One `share_comps` detail is pamica's own because the reference cannot decide it:
+the merge similarity metric has no bit-exact oracle, because the reference's `Spinv2` is declared but never allocated.
 Its scan still runs, but every similarity it computes is NaN, so a reference run with `share_comps` on never merges anything:
 seeded from pamica's initialization, the pinned binary leaves `comp_list` unchanged
 and reports 64 unique components after a scan at iteration 8, even at `comp_thresh=0`.
@@ -333,7 +340,7 @@ that on the bundled sample). Statements elsewhere in these guides about the
 Component sharing was the other gap, closed by issue #263: `AMICAMLXNG` now takes
 `share_comps`/`share_start`/`share_iter`/`comp_thresh` with the PyTorch
 backend's names, defaults and validation, runs the same merge schedule and
-post-merge A-freeze, and exposes `comp_used`/`shared_components()`.
+A-freeze, and exposes `comp_used`/`shared_components()`.
 It does not re-derive the merge metric — it calls the same
 `identify_shared_components` kernel the NumPy backend uses, on the host float64
 sensor maps `pinv(sphere) @ A.T` (one column per component, issue #334), so all
@@ -461,11 +468,11 @@ Two consequences to know:
   but its similarity with `Spinv2 = Spinv^T Spinv`, applied to the binary's own state after 8 iterations from pamica's initialization,
   merges exactly the pairs the PyTorch and NumPy scans merge: 32, 32 and 30 at `comp_thresh` 0.9, 0.95 and 0.99.
 - A model left with few components of its own then loses its responsibility, and can end in a non-finite fit.
-  In a short recipe (4096 samples, `share_start=8`, `share_iter=10`, `comp_thresh=0.9`), 28 merges at iteration 8
-  dropped the second model's `gm` from 0.41 to 0.003, and one more merge at iteration 18 drove it to zero and the fit to NaN.
+  In a short recipe (4096 samples, seed 20, `share_start=11`, `share_iter=11`, `comp_thresh=0.9`), 25 merges at iteration 11
+  dropped the second model's `gm` from 0.53 to 6.0e-4 within two iterations, and the fit went non-finite at iteration 25.
   Seeded with the same merged states, the reference's update does the same:
-  the second model's `gm` falls to 0.005 within two iterations, as pamica's does from the same state,
-  and from the second merge it reaches zero in one iteration and the binary reports NaN and reinitializes.
+  the second model's `gm` falls to 6.0e-4 within two iterations, as pamica's does from the same state,
+  and from the state after the second scan (iteration 22) it reaches zero in one iteration and the binary reports NaN and reinitializes.
   This is the algorithm on models that have not yet separated, not a defect of the port.
   The reference's default `share_start=100` avoids it; keep `share_start` well past the first iterations.
 - Saved models: a PyTorch `state_dict` (now `format_version` 4) or MLX save (now format 2) from an earlier version
@@ -491,6 +498,11 @@ gap. All three backends share it by construction, and it is pinned as
 behavior rather than fixed (`test_merge_on_the_final_iteration_completes` in
 each of `tests/torch_tests/test_ng_sharing.py`,
 `tests/test_numpy_share_comps.py` and `tests/mlx_tests/test_mlx_sharing.py`).
+
+It can only happen on a fit that runs to `max_iter`.
+A fit that stops on a convergence check (`min_dll`, the gradient norm, the `lrate` floor)
+exits before that iteration's update and scan, as the reference does (amica15.f90:1111, issue #339),
+so its returned parameters are the ones `final_ll_` was computed from.
 
 One interaction worth knowing: the `keep_best` safeguard (row 3 above,
 implemented on PyTorch and, since epic #278 Phase 2, MLX) is disabled
@@ -519,7 +531,12 @@ Fortran's iteration runs `get_updates_and_likelihood` (amica15.f90:996), then
 parameters as they stood *before* the M-step whose `W`/`A` sit next to it. It
 is not the likelihood of the written decomposition; it is the likelihood of its
 immediate predecessor, and it is the E-step that produced the last entry of the
-written `LL` trajectory. The relation that holds on both sides — on the
+written `LL` trajectory.
+The exception is a fit that stops on a convergence check:
+the reference exits before that iteration's `update_params` (amica15.f90:1111),
+and since issue #339 every pamica backend does too,
+so the final write's `LLt` is the likelihood of the `W`/`A` beside it.
+The relation that holds on both sides — on the
 committed reference output as much as on pamica's — is
 
 ```
