@@ -5,6 +5,39 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 14 of epic #324: `AMICA_NumPy` rejects unknown/unsupported keyword arguments (issue #346).**
+  `AMICA_NumPy(**kwargs)` used to forward every keyword into a params dict read with `params.get(...)`,
+  so a typo (`max_iters=50`) or an option the legacy backend does not implement (`keep_best=True`)
+  constructed silently and had no effect,
+  unlike the PyTorch/MLX constructors,
+  which take explicit keyword parameters and already raised `TypeError` on an unknown name.
+  - **Behavior change (legacy NumPy backend only): an unrecognized or unsupported keyword argument now raises `TypeError` instead of being silently ignored.**
+    A typo raises `TypeError` naming the offending keyword(s),
+    with a `difflib`-based "did you mean" suggestion when a close match exists.
+    An option implemented on the PyTorch backend (`AMICATorchNG`) but not this one
+    (for example `keep_best`, `device`, `dtype`, the kurtosis-switch schedule)
+    raises `TypeError` naming the option and pointing to `AMICA(backend='torch')`.
+  - The three settings this backend spells differently from `AMICATorchNG`
+    (`min_nd`/`maxdecs`/`share_iter`, the canonical spelling a params file already resolves either way)
+    are now also accepted as keyword arguments directly,
+    translated to this backend's own attribute name the same way the params-file route already translates them.
+    Passing both spellings of the same setting at once raises `TypeError` naming both,
+    rather than picking one silently.
+  - The accepted-keyword set is derived from the same source the params-file routing uses
+    (`_CONSUMED_KEYS`/`_CANONICAL_TO_NUMPY_KEY`),
+    and the unsupported-option list is derived from `AMICATorchNG`'s own constructor signature,
+    so neither can drift from what the constructor actually reads.
+  - **Review follow-up:** `files`/`data_dim`/`field_dim` (data-location metadata) now work as keyword
+    arguments directly, with the same meaning as in `params_file`, instead of passing the check but
+    staying silently inert; `n_models`/`n_mix` (`AMICATorchNG`'s spelling of this backend's own
+    `num_models`/`num_mix`) get a message naming the correct spelling rather than the generic
+    (and here wrong) "use `AMICA(backend='torch')`" message; `n_channels` gets its own message, since
+    it is inferred from the data passed to `fit()` on every backend, not a constructor keyword on any
+    of them; and every offending keyword in one call is now named in a single error, however many
+    different kinds are mixed together (a first version named only the first category it found).
+    The `AMICA` wrapper's own `backend='mlx'` keyword check had the same single-category drop and is
+    fixed the same way.
+
 - **Fix: tests no longer make a full clone shallow (issue #343).**
   Tests that load historical code ran `git fetch origin <sha> --depth 1` to reach the pinned commit;
   in a full clone that records a shallow boundary, after which `git gc` can prune history.
