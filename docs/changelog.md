@@ -18,6 +18,10 @@ and every backend's fitting follows the Fortran reference more closely.
     each iteration runs in the reference's order, so a likelihood decrease takes effect in the same iteration and a convergence stop returns the parameters its likelihood was computed from (issue #339);
     the reference's A-freeze holds the mixing update on iterations 100-105, 200-205, and so on, of every fit (issue #345);
     and the density normalizers are the reference's single-precision constants (issue #344).
+    A sixth is a wrapper change: an `AMICA()` or `AMICAICA()` fit that sets no `lrate` now runs at 0.1, the backends' default, where it ran at 0.05,
+    which raises the final log-likelihood of a default 100-iteration fit on the bundled sample by 0.008
+    (issue #354, [Defaults and device selection](#defaults-and-device-selection));
+    the raw backends already used 0.1.
     Two more reach default fits in narrow cases.
     With schedule gates counted from 1 (issue #335), a `maxdecs` ratchet that completes on iteration `newt_start + 1` tightens the rho-rate ceiling whether or not Newton is on,
     and on NumPy a non-finite likelihood on iteration `restartiter + 1` ends the fit.
@@ -457,6 +461,44 @@ and every backend's fitting follows the Fortran reference more closely.
     validated on real data against a float64 `AMICATorchNG` twin holding identical fitted parameters
     (the component order matches exactly on a configuration with non-degenerate variance gaps).
 
+### Defaults and device selection
+
+- **`AMICA` and `AMICAICA` take their `fit` defaults from the backend** (issue #354, epic #324 Phase 17).
+  **Behavior change: an `AMICA()` or `AMICAICA()` fit that sets no `lrate` now runs at 0.1, where it ran at 0.05.**
+  The wrapper's 0.05 was the value of EEGLAB's `runamica15.m`,
+  while `AMICATorchNG`, `AMICAMLXNG` and `AMICA_NumPy` default to 0.1, the compiled amica15 default (amica15_header.f90:68),
+  so `AMICA().fit(X)` and `AMICATorchNG(n_channels).fit(X)` ran at different learning rates.
+  `AMICA.fit` now reads the defaults of `max_iter`, `lrate`, `do_mean`, `do_sphere` and `do_newton` from the selected backend's signatures,
+  so the wrapper and the backend cannot drift apart again;
+  the other four already agreed, so only `lrate` moves.
+  `AMICAICA` forwards its keywords to `AMICA.fit` and has no default of its own, so it follows.
+  An explicit `lrate`, or one from a parameter file (both bundled files set 0.05), is unaffected.
+  On the bundled sample (PyTorch, seed 42, the default 100 iterations), a default wrapper fit now ends at log-likelihood -3.42768, where it ended at -3.43566,
+  and its sources match the earlier fit's with a mean Hungarian-matched correlation of 0.983 (minimum 0.931).
+  Pass `lrate=0.05` to reproduce an earlier default wrapper fit.
+  The differences guide gains a [table of the defaults](guides/amica-differences.md#default-settings-issue-354) of pamica, the compiled binary and `runamica15.m`,
+  and says how to reproduce an EEGLAB run from the `input.param` it wrote.
+  - Tests: `pamica/tests/test_wrapper_backends.py` checks on both backends that the wrapper resolves the backend's own defaults,
+    that a default wrapper fit is the default backend fit (the same learning rate and log-likelihood trajectory),
+    and that an explicit `lrate` still takes precedence;
+    a cross-backend test holds every constructor default that `AMICATorchNG` and `AMICAMLXNG` share equal,
+    since the defaults table gives one pamica column for both.
+    `pamica/tests/mne_tests/test_mne_backends.py` checks that an `AMICAICA` fit runs at the backend's default.
+    No existing test depended on the old default;
+    the figures quoted in two torch-against-MLX test docstrings were measured again at the new one.
+- **The raw `AMICATorchNG` runs a default construction on the CPU on Apple Silicon** (issue #354).
+  `AMICATorchNG(n_channels)` with default arguments raised `ValueError` on every Mac with Metal Performance Shaders (MPS):
+  automatic device selection picks MPS, which cannot represent the float64 default.
+  When `device=None` picks MPS for a float64 model, the constructor now uses the CPU and logs a warning, as the `AMICA` wrapper did.
+  The wrappers and `AMICA.load` now pass `device` through and rely on the backend, and the wrapper's own copy of the fallback is removed.
+  An explicit `device="mps"` at float64 still raises `ValueError`, and `device=None` with `dtype=torch.float32` still picks MPS.
+  The warning now comes from the `pamica.torch_impl.core` logger, and the wrapper no longer also prints it when `verbose=True`.
+  The MLX backend has no device choice of this kind, so the change is PyTorch-only.
+  - Tests: `pamica/tests/torch_tests/test_amica_ng_wrapper.py` constructs and fits the raw backend with default arguments,
+    checks that `dtype=torch.float32` keeps MPS and that an explicit `device="mps"` at float64 raises,
+    and loads a saved model with `device=None`.
+    The tests that need MPS skip without it; the macOS CI runner has it.
+
 ### MNE wrapper
 
 - **`AMICAICA.apply` restores the PCA residual of rank-reduced fits** (issue #322).
@@ -541,6 +583,9 @@ and every backend's fitting follows the Fortran reference more closely.
 
 ### Removed
 
+- **The `package-data` entry for a `pamica/data` directory** (issue #354).
+  `pyproject.toml` listed `"pamica" = ["data/*"]`, and no such directory exists, so the entry matched nothing.
+  The built wheel holds the same files as before, `pamica/numpy_impl/params.json` included.
 - **Dead legacy code in `pamica.numpy_impl.pdf`** (issue #352).
   `choose_pdf_type`, which nothing called, is removed,
   and `compute_pdf` loses its `pdftype` argument and the branches for three legacy densities no backend fits:
