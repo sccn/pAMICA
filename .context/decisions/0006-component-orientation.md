@@ -75,6 +75,7 @@ it is applied uniformly, model by model, and Phase 8 replaces it.
 - Remaining known difference: pamica does not normalize its drawn initial `A`
   (the reference normalizes a drawn one, amica15.f90:818-819, but not a loaded one).
   The two draws come from different random generators anyway, and the first iteration's rescale normalizes every component.
+  Epic #324 Phase 8 (issue #334) aligns it with the reference while it rewrites the storage layout and the initialization.
 
 ## Alternatives considered
 
