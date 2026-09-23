@@ -19,27 +19,31 @@ that is not listed, that is a bug worth
 | 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | the `AMICA` wrapper, on either backend, refuses `transform`/`get_*`/`save`; the raw `AMICATorchNG`, `AMICAMLXNG` and NumPy `AMICA` backends now refuse their own output accessors on a degenerate fit too (issue #306), not just the wrapper; NumPy additionally reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk) | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50, #240 and #306) |
 | 6 | Precision | float64 | float64 (float32 on Apple GPUs) | Apple GPUs have no float64; float32 agrees to ~7 significant digits, not bit-parity | `dtype=torch.float64` |
 | 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
-| 8 | Columns merged away by `share_comps` | updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided) | a fit must not end holding NaN parameters, mask or no mask; the columns are dead either way | — (see issues #60, #240) |
+| 8 | Components merged away by `share_comps` | mixing vector and density updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided, never rescaled) | a fit must not end holding NaN parameters, mask or no mask; the components are dead either way | — (see issues #60, #240, #334) |
 | 9 | Block-size search | on (`do_opt_block=1`), sweeps 128–1024, **aborts** if a candidate cannot allocate | off; sweeps 4096–32768; a candidate that cannot allocate is skipped and the fit continues | the choice is timing-based and therefore machine-dependent, which a parity run cannot have; Fortran's range sits far below where any pamica backend peaks; and running out of memory is a reason to use a smaller block, not to stop | `do_opt_block=True` (but pin `block_size` for a bit-for-bit comparison) |
 | 10 | Restarts across seeds | none (its `maxrestarts` only *recovers* from an early NaN) | available as `n_restarts`, **off by default** (`n_restarts=1`) | the weakest under-determined components are init-basin sensitive, so best-of-N buys robustness; but a default that ran N fits would change every result and cost N times as long | `n_restarts=1` (the default) |
 | 11 | Reconstruction after rank reduction (`AMICAICA.apply`) | output has no representation of the discarded principal component analysis (PCA) subspace (sphere rows past `numeigs` are zero), so any back-projection drops it | the MNE export carries the full PCA basis, so `apply` restores the residual | MNE's own `ICA` does; the residual was never part of the independent component analysis (ICA) decomposition, so it is not ICA's to remove | `apply(..., n_pca_components=ica.n_components_)` |
 | 12 | `pcadb` | parsed (amica15.f90:3459-3461), never used | unset by default; when set alone, keeps the dimensions within `pcadb` dB of the largest eigenvalue; ignored when `pcakeep` is also set | a dB cut is a scale-free way to drop low-variance directions; letting `pcakeep` win preserves what a reference `input.param` that sets both (both bundled files do) means to the binary | leave `pcadb` unset (the default), or set `pcakeep` |
 | 13 | Preprocessing with `do_sphere=False` | divides each channel by its standard deviation and adds a log-determinant term to the likelihood (amica15.f90:516-526) | identity sphere with a zero log-determinant, on all three array backends: the data are fitted unscaled | not a deliberate choice: an existing divergence, found during epic #324 and not yet ported | none yet (issue #328) |
 | 14 | `scalestep` | parsed (amica15.f90:3686), never used; rescales every iteration (:1843) | rescales every `scalestep` iterations counted from 1; default 1 matches the reference | pamica has always honored the keyword, and keeping it costs nothing; since issue #333 it counts from 1 like the reference's live cadences (`writestep`, `histstep`) instead of firing on the first iteration | `scalestep=1`, the default |
+| 15 | Single-precision density normalizers | `log(dble(1.772453851))` in the exact-Gaussian branch of the generalized Gaussian (`rho == 2`, amica15.f90:1313) is a single-precision literal widened to double, 3.0e-8 above `log(sqrt(pi))`; the Gaussian and cosh families (`pdftype` 2, 4 and 1, :1333, :1359, :1371) use literals of the same kind | `0.5 * log(pi)` for `rho == 2`; the double-precision values of the decimal literals for the other families, which differ from the reference's in the log by 3.7e-10, 2.0e-8 and -2.1e-8 | not a deliberate choice: found during epic #324 Phase 8, while seeding the reference from warm states in which mixtures sit at `maxrho = 2`; each such mixture's log-density differs by 3.0e-8, weighted by its responsibility (2.8e-9 in the log-likelihood of one warm two-model state of the sample). The other families' offsets are computed from the literals, not yet measured against the binary | none; the seeded oracles keep `maxrho` below 2 |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
-row 3 with ADR 0003; row 5 with issue #50, extended to the raw backends by issue #306; row 8 with issues #60 and #240;
+row 3 with ADR 0003; row 5 with issue #50, extended to the raw backends by issue #306; row 8 with issues #60, #240 and #334;
 row 9 with issue #232; row 10 with issue #198; row 11 with issue #322 (ADR 0005);
 row 12 with issue #323; row 13 is recorded, not yet resolved, by issue #328;
-row 14 with issue #333 (ADR 0006).
+row 14 with issue #333 (ADR 0006); row 15 is recorded, not resolved, from epic #324 Phase 8 (issue #334).
 
 Two `share_comps` details are pamica's own because the reference cannot decide
 them: the A-freeze window after a merge is anchored on `share_start` (the literal
 `mod(iter, share_iter)` misaligns unless `share_start` is a multiple of
-`share_iter`, and freezes A permanently for `share_iter <= 6`, which both array
+`share_iter`, and freezes A permanently for `share_iter <= 6`, which the array
 backends reject up front), and the merge similarity metric has no bit-exact
-oracle at all — the reference's `Spinv2` is declared but never allocated, so its
-own reassignment is unrunnable.
+oracle, because the reference's `Spinv2` is declared but never allocated, so its
+own scan is unrunnable. The merged state the scan produces does have one:
+the reference's `load_comp_list` seeds a merged `comp_list`, and the PyTorch
+and NumPy updates from such a state match the native binary to float64 round-off
+([below](#component-sharing-compares-and-ties-components-issue-334)).
 
 ## 1. Relative rank threshold
 
@@ -252,7 +256,7 @@ is simply absent from the constructor, rather than silently downgrading.
 
 One MLX failure mode used to be worse than loud — it was uncatchable. MLX
 0.32's CPU-stream `mx.linalg.inv` does not raise a Python exception on a
-singular per-model unmixing matrix `A[:, comp_list[:, h]]`: LAPACK's LU
+singular per-model mixing block `A[comp_list[:, h], :]`: LAPACK's LU
 failure aborts the whole process (`libc++abi: ... [Inverse::eval_cpu] LU
 factorization failed`), which no `try`/`except` around `fit` can catch.
 Issue #274 closed that gap: `_update_unmixing_matrices` now condition-checks
@@ -325,11 +329,12 @@ Component sharing was the other gap, closed by issue #263: `AMICAMLXNG` now take
 backend's names, defaults and validation, runs the same merge schedule and
 post-merge A-freeze, and exposes `comp_used`/`shared_components()`.
 It does not re-derive the merge metric — it calls the same
-`identify_shared_components` kernel the NumPy backend uses, on host float64
-`pinv(sphere) @ A`, so all three backends decide identically from one fitted
-state (`pamica/tests/test_mlx_sharing_cross_backend.py` pins that against
+`identify_shared_components` kernel the NumPy backend uses, on the host float64
+sensor maps `pinv(sphere) @ A.T` (one column per component, issue #334), so all
+three backends decide identically from one fitted state
+(`pamica/tests/test_mlx_sharing_cross_backend.py` pins that against
 `AMICATorchNG`).
-Row 8 of the "At a glance" table at the top of this page (merged-away columns
+Row 8 of the "At a glance" table at the top of this page (merged-away components
 frozen at their last finite value, not left NaN behind the mask) holds in MLX as
 well.
 
@@ -375,8 +380,8 @@ the moments that would drive it — so it is behavior-validated on real EEG, and
 ## Component sharing on rank-reduced fits
 
 `share_comps` merges components that are near-collinear *across models*,
-comparing each pair of mixing columns after mapping them back to input-channel
-(sensor) space.
+comparing each pair of component mixing vectors after mapping them back to
+input-channel (sensor) space.
 The PyTorch backend built that back-map with `inv(sphere)`, so it refused every
 rank-reduced or rank-deficient fit: with rank reduction active the sphere is
 `(n_kept, n_channels)` and has no inverse, and a square sphere fitted on
@@ -397,19 +402,63 @@ well-conditioned data are unchanged; the bundled sample reproduces its previous
 
 The NumPy backend now reaches the merge decision from the same metric (issue
 #258): `identify_shared_components` takes the de-sphered sensor-space maps
-directly -- `pinv(sphere) @ A`, the same back-map described above -- instead of
-comparing columns of the sphered `A`.
+directly -- `pinv(sphere) @ A.T` since issue #334, the same back-map described
+above -- instead of comparing columns of the sphered `A`.
 The two backends therefore make the identical merge decision from the same
 fitted state (`pamica/tests/test_numpy_share_comps.py::test_numpy_merge_decision_matches_torch_backend`).
 The MLX backend calls that same kernel on the same host float64 inputs (issue
 #263), so all three agree.
-On one real fitted 2-model state the top candidate cross-model pair measured
+On one real fitted 2-model state (measured before issue #334, when the metric
+still compared stored columns) the top candidate cross-model pair measured
 0.992 cosine similarity in sensor space against 0.970 in the old sphered
 space -- close enough that, with the default `comp_thresh=0.99`, the two
 metrics disagree on whether that pair merges. A NumPy fit that shares
 components can therefore reach a different `comp_list` than it did before
 #258, even on a full-rank, well-conditioned sphere; only the `pinv`-vs-`inv`
 comparison two paragraphs above is unaffected by that swap.
+
+## Component sharing compares and ties components (issue #334)
+
+The reference's mixing matrix `A(nw, num_comps)` holds component `k` in column `k`,
+and `comp_list(i, h)` names the component source `i` of model `h` uses,
+for its mixing vector and its density alike.
+Every pamica backend now stores the same matrix transposed, `A` of shape `(n_comps, nw)`,
+so a component id names the same component in `A` as in `mu`, `sbeta` (`beta`), `alpha` and `rho`
+([ADR 0007](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0007-component-row-layout.md)).
+Before issue #334 the backends stored each model's block transposed inside an `(nw, n_comps)` array
+and indexed its COLUMNS by component id, but a stored column is one sphered channel's loadings across a model's components, not a component.
+`share_comps` therefore compared and tied the wrong vectors:
+
+- The metric now compares the components' scalp maps: the vector it uses for source `i` of model `h`
+  is exactly column `i` of `get_sensor_mixing_matrix(h)`.
+  The old metric's vectors had median |cosine| 0.27 to 0.39 with those maps on a two-model fit of the sample,
+  so it merged pairs whose maps disagreed and missed pairs whose maps agreed.
+- A merge now re-points `comp_list`, as the reference's does:
+  the two sources share one mixing vector and one density, nothing is copied or averaged at the merge,
+  and a merge of two identical components leaves the log-likelihood exactly unchanged (the old fold changed it by -0.186 on such a pair).
+  The `gm`-weighted `dAk/zeta` step then averages the models' steps for that one component.
+
+Seeded from a merged state through the reference's `load_comp_list`,
+the PyTorch and NumPy updates match the native binary to float64 round-off after one and three iterations,
+with `doscaling` on and off (`pamica/tests/test_component_rows.py`, opt-in with `AMICA_RUN_FORTRAN=1`).
+On the bundled sample (2 models, 300 iterations, `share_start=100`, `comp_thresh=0.95`)
+the scan merges three pairs whose maps agree (|cos| 0.956 to 0.971),
+where the old metric merged three whose maps did not (|cos| 0.06, 0.35 and 0.55).
+
+Two consequences to know:
+
+- A scan early in a fit merges most components.
+  Both models start near the identity, so their components stay near-collinear for the first iterations
+  (on the sample with 2 models and seed 42, a scan at iteration 8 merges all 32 at `comp_thresh=0.95` and 24 at 0.99;
+  one at iteration 20 merges 24 and 5),
+  and a model left with little responsibility can then collapse, in some short recipes to a non-finite fit.
+  The reference's default `share_start=100` avoids this; keep `share_start` well past the first iterations.
+- Saved models: a PyTorch `state_dict` (now `format_version` 4) or MLX save (now format 2) from an earlier version
+  is converted without loss unless `share_comps` had merged components,
+  in which case loading raises `ValueError` and the model must be refit.
+  `AMICA.save` files go through the same conversion.
+  The EEGLAB export's `A` file is the reference's layout for any number of models;
+  `load_results` refuses a multi-model directory written by an earlier version.
 
 ## `final_ll_` trails a final-iteration merge (issue #269)
 

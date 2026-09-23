@@ -25,5 +25,7 @@ so the transform can be composed by hand:
 
 `save` writes `format_version` 2, which records the backend;
 `load` restores the model on that backend and still reads version 1 files, which predate backend selection and always hold a PyTorch model.
+A model saved before issue #334, which changed how the mixing matrix is stored, is converted on load without loss;
+one in which `share_comps` had merged components raises `ValueError` and must be refit.
 
 ::: pamica.AMICA

@@ -23,7 +23,9 @@ Source extraction (`transform` and the `get_mixing_matrix`/`get_unmixing_matrix`
 `get_sensor_mixing_matrix`/`get_rho` accessors) and persistence
 (`state_dict`/`from_state_dict` and `.npz` `save`/`load`) are implemented (epic
 #278 Phase 1, issue #287); the `.npz` format is device- and framework-agnostic
-(JSON-encoded config/extra plus native param arrays, no torch coupling). The
+(JSON-encoded config/extra plus native param arrays, no torch coupling).
+Since issue #334 the format is version 2, which stores the mixing matrix `A` with one component per row;
+a version 1 save is converted on load, unless `share_comps` had merged components, which raises `ValueError`. The
 best-iterate safeguard (`keep_best`) is implemented (epic #278 Phase 2, issue
 #288). Outlier rejection (`do_reject`), the LLt-stash-backed scoring accessors
 (`model_loglik`/`model_probability`), the EEGLAB `write_amica_output` export,

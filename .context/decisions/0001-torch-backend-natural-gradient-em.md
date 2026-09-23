@@ -80,3 +80,11 @@ The #24 fix left `A` stored with each model's block equal to the TRANSPOSE of th
 [ADR 0006](0006-component-orientation.md) states that convention precisely,
 records the `doscaling` defect it caused (stored columns were normalized; fixed in epic #324 Phase 7)
 and the planned move to a component-row layout for `share_comps` (Phase 8, issue #334).
+
+## Addendum (2026-09-23, issue #334)
+
+[ADR 0007](0007-component-row-layout.md) replaces the storage this ADR introduced:
+`A` is now `(n_comps, n)` with one component per row and `comp_list` indexing rows,
+so each model's block, and every result without a `share_comps` merge, is unchanged,
+while the share metric and merge act on components as the reference's do.
+Saved models convert without loss unless a merge had fired.
