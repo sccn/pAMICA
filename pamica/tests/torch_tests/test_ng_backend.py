@@ -1058,6 +1058,7 @@ def test_state_dict_roundtrip_all_fields():
         "lrate_cap",
         "newtrate",
         "rholrate",
+        "rholrate_cap",  # issue #339: the rho-rate ceiling, beside the working rate
         "final_ll_",  # issue #51: the returned iterate's LL survives a round-trip
         "keep_best",
     ):
@@ -1594,14 +1595,16 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
     """Issue #193: the rho learning rate is a maxdecs-ratcheted *ceiling*, not a
     per-LL-decrease monotone decay.
 
-    Fortran resets ``rholrate = rholrate0`` every iteration before the rho update
-    (amica15.f90:1806/1813) and only tightens the ceiling at ``maxdecs``
-    (amica15.f90:1068, gated on ``iter > newt_start``). torch previously decayed
-    ``rholrate`` on EVERY LL decrease with no reset, collapsing it to ~1e-5 within
-    a few hundred iterations and freezing rho at a stale shape.
+    Fortran scales the working ``rholrate`` on each decrease (amica15.f90:1063),
+    resets it to the ceiling ``rholrate0`` in every A update before the rho
+    update (amica15.f90:1806/1813), and only tightens the ceiling at ``maxdecs``
+    (amica15.f90:1068, gated on ``iter > newt_start``). pamica names that
+    ceiling ``rholrate_cap`` (issue #339). torch previously decayed the one
+    ``rholrate`` on EVERY LL decrease with no reset, collapsing it to ~1e-5
+    within a few hundred iterations and freezing rho at a stale shape.
 
     On the real sample data a long-enough Newton run overshoots and triggers
-    several LL decreases. The surviving ``rholrate`` must have ratcheted exactly
+    several LL decreases. The surviving ceiling must have ratcheted exactly
     as often as ``newtrate`` (both gated on ``iter > newt_start`` at ``maxdecs``,
     matched 0.5 factor here), NOT once per decrease.
 
@@ -1627,8 +1630,8 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
 
     # rholrate and newtrate share the maxdecs ratchet schedule, so the surviving
     # rho ceiling ratcheted the same number of times as newtrate.
-    assert m.rholrate == pytest.approx(m.rholrate0 * (m.newtrate / m.newtrate0))
+    assert m.rholrate_cap == pytest.approx(m.rholrate0 * (m.newtrate / m.newtrate0))
     # The old per-decrease decay (rholrate0 * rholratefact**n_dec) sits orders of
     # magnitude below the fixed ceiling; guard against a regression to it.
     buggy = m.rholrate0 * (m.rholratefact**n_dec)
-    assert m.rholrate > buggy * 10
+    assert m.rholrate_cap > buggy * 10

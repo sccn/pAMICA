@@ -417,3 +417,34 @@ def test_a_keep_best_restore_returns_the_parameters_of_its_ll(backend, X, tmp_pa
     assert model.final_ll_ != ll[-1], "keep_best restored nothing"
     assert model.final_ll_ == max(ll)
     assert _recomputed_ll(model, backend, x) == model.final_ll_
+
+
+# --- #339: the rho-rate ceiling is saved with the model -----------------------
+
+
+@pytest.mark.parametrize("backend", ["torch", "mlx"])
+def test_the_rho_rate_ceiling_survives_a_save(backend, X, tmp_path):
+    """The rho rate is two values since issue #339, the working ``rholrate``
+    and its ceiling ``rholrate_cap`` (the reference's ``rholrate0``). A save
+    round-trips both exactly; a save written before the split has only
+    ``rholrate``, which held the ceiling then, so it loads as the ceiling.
+    ``maxdecs=1`` with ``newt_start=0`` ratchets the ceiling on the first
+    decrease, so it no longer equals the pristine ``rholrate0``."""
+    cfg = dict(_DECREASE, maxdecs=1, newt_start=0)
+    model = _model(backend, _DECREASE_ITERS, tmp_path, **cfg)
+    _fit(model, backend, X[:, :_DECREASE_FRAMES], _DECREASE_ITERS)
+    assert model.rholrate_cap < model.rholrate0, "the ceiling never ratcheted"
+
+    def load(state: Dict[str, Any]) -> Any:
+        if backend == "torch":
+            return AMICATorchNG.from_state_dict(state, device="cpu")
+        return type(model).from_state_dict(state)
+
+    state = model.state_dict()
+    restored = load(state)
+    assert restored.rholrate_cap == model.rholrate_cap
+    assert restored.rholrate == model.rholrate
+
+    del state["extra"]["rholrate_cap"]
+    legacy = load(state)
+    assert legacy.rholrate_cap == state["extra"]["rholrate"]

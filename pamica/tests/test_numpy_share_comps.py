@@ -487,6 +487,7 @@ def test_shared_column_update_matches_the_torch_backend():
     ng.comp_list = torch.from_numpy(model.comp_list.copy())
     ng.lrate = model.lrate
     ng.rholrate = model.rholrate
+    ng.rholrate_cap = model.rholrate_cap
     ng.iteration = model.iter
     ng._update_unmixing_matrices()
     assert int(ng.comp_used.sum()) == int(model.comp_used.sum())
