@@ -268,6 +268,17 @@ def test_every_gate_fires_on_the_reference_iteration():
     assert [i for i in idx if schedule.within_restart_window(i, 3)] == [0, 1, 2]
 
 
+@pytest.mark.parametrize("interval", [0, -2])
+def test_a_non_positive_interval_is_a_value_error_not_a_zero_division(interval):
+    """The constructors validate every interval they pass in; the shared helpers
+    still refuse a non-positive one by name instead of surfacing a bare
+    ``ZeroDivisionError`` (or, for a negative one, a silently wrong cadence)."""
+    with pytest.raises(ValueError, match=r"every: step must be >= 1"):
+        schedule.every(0, interval)
+    with pytest.raises(ValueError, match=r"periodic_due: interval must be >= 1"):
+        schedule.periodic_due(0, 1, interval)
+
+
 # --- Newton switch -----------------------------------------------------------
 
 
@@ -453,19 +464,24 @@ class _NaNOnIteration(AMICA_NumPy):
         return upd
 
 
-@pytest.mark.parametrize(("nan_iter", "restarts"), [(2, 1), (3, 0)])
+@pytest.mark.parametrize(
+    ("restartiter", "nan_iter", "restarts"), [(3, 2, 1), (3, 3, 0), (0, 0, 0)]
+)
 def test_numpy_restart_window_is_the_first_restartiter_iterations(
-    nan_iter, restarts, X, tmp_path
+    restartiter, nan_iter, restarts, X, tmp_path
 ):
     """A non-finite likelihood restarts from a fresh draw only within the first
     ``restartiter`` iterations (``iter .le. restartiter``, amica15.f90:1022).
 
-    NumPy only: it is the one backend with the reference's restart-on-NaN
-    recovery (PyTorch and MLX stop on a non-finite likelihood, and their
-    best-of-N ``n_restarts`` is a different mechanism). With ``restartiter=3``,
-    a NaN on the 3rd iteration (index 2) restarts and the fit recovers; a NaN
-    on the 4th (index 3) is past the window and ends the fit. Before issue #335
-    the 4th iteration still restarted.
+    NumPy only: it is the one backend with a restart-on-NaN recovery (PyTorch
+    and MLX stop on a non-finite likelihood, and their best-of-N
+    ``n_restarts`` is a different mechanism). With ``restartiter=3``, a NaN on
+    the 3rd iteration (index 2) restarts and the fit recovers; a NaN on the 4th
+    (index 3) is past the window and ends the fit. ``restartiter=0`` disables
+    the recovery, as in the reference: a NaN on the very first iteration ends
+    the fit although ``maxrestarts`` would allow a restart. Before issue #335
+    both the 4th iteration and, with ``restartiter=0``, the first still
+    restarted.
     """
     m = _NaNOnIteration(
         num_models=1,
@@ -476,7 +492,7 @@ def test_numpy_restart_window_is_the_first_restartiter_iterations(
         use_tqdm=False,
         do_opt_block=False,
         writestep=10**7,
-        restartiter=3,
+        restartiter=restartiter,
         maxrestarts=3,
         outdir=str(tmp_path / "out"),
     )
@@ -484,3 +500,84 @@ def test_numpy_restart_window_is_the_first_restartiter_iterations(
     m.fit(X)
     assert m.numrestarts == restarts
     assert m.converged is bool(restarts), m.stop_reason
+    if not restarts:
+        assert m.stop_reason is not None and "Non-finite" in m.stop_reason
+        assert len(m.ll) == nan_iter + 1  # stopped on the poisoned iteration
+
+
+# --- validation of the settings the gates read ------------------------------
+
+
+def _construct(backend: str, **kwargs: Any):
+    """A backend built with ``kwargs`` (torch/MLX spelling), no data touched."""
+    if backend == "numpy":
+        return AMICA_NumPy(use_tqdm=False, **kwargs)
+    if backend == "torch":
+        return AMICATorchNG(n_channels=NW, device="cpu", **kwargs)
+    return _mlx_class()(n_channels=NW, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "minimum", "extra"),
+    [
+        # Checked whether or not Newton is on: it also gates the rho-rate
+        # ratchet on the natural-gradient path.
+        ("newt_start", -1, 0, {}),
+        ("newt_start", -1, 0, {"do_newton": True}),
+        ("newt_start", 2.5, 0, {}),
+        ("newt_start", True, 0, {}),
+        # Counted from 1: rejstart <= 0 would silently skip the reference's
+        # unconditional first pass.
+        ("rejstart", 0, 1, {"do_reject": True}),
+        ("rejstart", -2, 1, {"do_reject": True}),
+        ("rejstart", 2.0, 1, {"do_reject": True}),
+    ],
+)
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_schedule_settings_are_rejected_with_one_message(
+    backend, setting, value, minimum, extra
+):
+    """Every backend refuses the same ``newt_start``/``rejstart`` values with
+    the same message (``pamica.schedule.validate_iteration_setting``)."""
+    with pytest.raises(ValueError) as exc:
+        _construct(backend, **{setting: value}, **extra)
+    assert str(exc.value) == f"{setting} must be an integer >= {minimum}, got {value!r}"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_boundary_schedule_settings_are_accepted(backend):
+    """The smallest meaningful values construct, numpy integers included, and
+    ``rejstart`` is inert (unchecked) while ``do_reject`` is off, the pattern
+    ``share_start`` follows."""
+    for kwargs in (
+        {"newt_start": 0},
+        {"newt_start": np.int64(3)},
+        {"do_reject": True, "rejstart": 1},
+        {"rejstart": 0},
+    ):
+        _construct(backend, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"do_history": True, "histstep": 0},
+            "histstep must be an integer >= 1, got 0",
+        ),
+        ({"restartiter": -1}, "restartiter must be an integer >= 0, got -1"),
+        ({"maxrestarts": -1}, "maxrestarts must be an integer >= 0, got -1"),
+        ({"restartiter": 2.5}, "restartiter must be an integer >= 0, got 2.5"),
+    ],
+)
+def test_numpy_only_schedule_settings_are_validated(kwargs, message):
+    """The NumPy backend's own schedule settings (no PyTorch or MLX
+    counterpart): ``histstep=0`` with ``do_history`` on used to be a bare
+    ``ZeroDivisionError`` on the first iteration, and a negative
+    ``restartiter``/``maxrestarts`` has no meaning."""
+    with pytest.raises(ValueError) as exc:
+        AMICA_NumPy(use_tqdm=False, **kwargs)
+    assert str(exc.value) == message
+    # The inert and boundary values construct.
+    AMICA_NumPy(use_tqdm=False, do_history=False, histstep=0)
+    AMICA_NumPy(use_tqdm=False, restartiter=0, maxrestarts=0)

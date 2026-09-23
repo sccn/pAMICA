@@ -413,14 +413,19 @@ class AMICAMLXNG:
         1, as the reference counts it (``iter .ge. newt_start``): the Newton
         step is taken on the ``newt_start``-th iteration, i.e. once
         ``iteration + 1 >= newt_start`` for the 0-based ``iteration``
-        attribute, so ``newt_start`` of 0 or 1 uses it from the first
-        iteration (issue #335). It also gates the ``rholrate`` ceiling
-        ratchet to iterations after ``newt_start``, independently of
-        ``do_newton`` (Fortran amica15.f90:1067).
+        attribute (issue #335). ``newt_start=0`` fits exactly as ``1`` does,
+        Newton from the first iteration. It also gates the ``maxdecs`` ratchet
+        of the ``rholrate`` ceiling, independently of ``do_newton``, and under
+        Newton that of ``newtrate``, to iterations after ``newt_start``
+        (Fortran amica15.f90:1067/1070), so it is validated (an integer
+        >= 0) whether or not ``do_newton`` is on.
     ``newtrate`` (0.5)
         Maximum learning rate the ramp climbs to while Newton is active and
         positive definite; the natural-gradient phase (and any fallback
-        iteration) is capped at ``lrate_cap`` instead.
+        iteration) is capped at ``lrate_cap`` instead. A ceiling itself: under
+        Newton it ratchets down by ``lratefact`` at each ``maxdecs`` cycle
+        completed after iteration ``newt_start`` (amica15.f90:1070), and is
+        reset to its constructor value at the start of every fit.
     ``newt_ramp`` (10)
         Denominator of the per-iteration learning-rate ramp toward the current
         ceiling: ``lrate = min(ceiling, lrate + min(1/newt_ramp, lrate))``.
@@ -514,7 +519,9 @@ class AMICAMLXNG:
     ``rejstart`` (2) / ``rejint`` (3) / ``maxrej`` (1)
         Rejection schedule: first iteration to reject (counted from 1, as the
         reference counts it; issue #335), interval between subsequent passes,
-        and the maximum number of passes.
+        and the maximum number of passes. ``rejstart`` must be an integer
+        >= 1 when ``do_reject`` is on: ``rejstart <= 0`` would silently skip
+        the reference's unconditional first pass.
 
     The best-iterate safeguard (issue #51, epic #278 Phase 2/#288) likewise
     carries AMICATorchNG's name, default and semantics:
@@ -665,7 +672,9 @@ class AMICAMLXNG:
         # do_newton (amica15.f90:1067) -- so it stays meaningful for a
         # natural-gradient fit too. newtrate is a CEILING that ratchets down at
         # maxdecs during fit, so keep the constructor value for the per-fit reset
-        # in _initialize_parameters (as lrate0/rholrate0 do).
+        # in _initialize_parameters (as lrate0/rholrate0 do). Validated whether
+        # or not do_newton is on, for that same ratchet gate.
+        schedule.validate_iteration_setting("newt_start", newt_start, 0)
         self.newt_start = newt_start
         self.newtrate = newtrate
         self.newtrate0 = newtrate
@@ -693,6 +702,9 @@ class AMICAMLXNG:
                 raise ValueError(f"rejsig must be > 0, got {rejsig}")
             if maxrej < 0:
                 raise ValueError(f"maxrej must be >= 0, got {maxrej}")
+            # Counted from 1, so rejstart <= 0 would silently disable the
+            # reference's unconditional ``iter == rejstart`` pass.
+            schedule.validate_iteration_setting("rejstart", rejstart, 1)
         self.numrej = 0
         self.good_idx: Optional[mx.array] = None
 

@@ -305,6 +305,28 @@ class AMICA:
             one WARNING, when ``do_sphere`` is False, as in the reference. See
             :mod:`pamica.rank`.
 
+            ``newt_start`` (20), ``rejstart`` (2), ``writestep`` (100) and
+            ``histstep`` (10) name iterations counted from 1, as the
+            reference's do (issue #335): Newton takes its first step on
+            iteration ``newt_start``, the first rejection follows iteration
+            ``rejstart``, and a checkpoint lands on every ``writestep``-th
+            iteration. ``newt_start`` must be an integer >= 0 (0 and 1 fit
+            identically), ``rejstart`` an integer >= 1 when ``do_reject`` is
+            on, and ``histstep`` an integer >= 1 when ``do_history`` is on,
+            or the constructor raises ``ValueError`` (for ``newt_start`` and
+            ``rejstart``, with the same messages as the PyTorch and MLX
+            backends). See :mod:`pamica.schedule`.
+
+            ``restartiter`` (10) and ``maxrestarts`` (3) configure the
+            restart-on-NaN recovery (Fortran amica15.f90:1022-1050): a
+            non-finite likelihood within the first ``restartiter`` iterations,
+            counted from 1, redraws the mixing matrix and continues, up to
+            ``maxrestarts`` times; ``restartiter=0`` disables it, as in the
+            reference. Both must be integers >= 0. The restart count, and what
+            the fit does after a restart, differ from the reference; see
+            ``docs/guides/amica-differences.md``. The PyTorch and MLX backends
+            have no restart-on-NaN path: they stop on a non-finite likelihood.
+
             ``outdir`` (None) is where the fit writes its ``out.txt`` log,
             its ``writestep`` checkpoints, its ``do_history`` snapshots and its
             final results, in the Fortran ``amicaout`` layout. The default
@@ -350,6 +372,10 @@ class AMICA:
             raise ValueError(f"max_iter must be >= 1, got {self.max_iter}")
         self.do_newton = params.get("do_newton", False)
         self.newt_start = params.get("newt_start", 20)
+        # Validated whether or not do_newton is on: newt_start also gates the
+        # rho-rate ceiling ratchet on the natural-gradient path
+        # (schedule.past_newton_start, amica15.f90:1067).
+        schedule.validate_iteration_setting("newt_start", self.newt_start, 0)
         self.newt_ramp = params.get("newt_ramp", 10)
         self.newtrate = params.get("newtrate", 0.5)
         self.do_reject = params.get("do_reject", False)
@@ -364,15 +390,16 @@ class AMICA:
             # reject-below-the-mean semantics (at 0 the threshold is the mean, so
             # ~half the samples drop every pass, and negative values invert it);
             # maxrej<0 is a sanity guard (it would just make rejection inert via
-            # the maxrej>0 schedule gate); rejstart<0 is nonsensical.
+            # the maxrej>0 schedule gate); rejstart counts from 1, so
+            # rejstart<=0 would silently disable the reference's unconditional
+            # ``iter == rejstart`` pass.
             if self.rejint < 1:
                 raise ValueError(f"rejint must be >= 1, got {self.rejint}")
             if self.rejsig <= 0:
                 raise ValueError(f"rejsig must be > 0, got {self.rejsig}")
             if self.maxrej < 0:
                 raise ValueError(f"maxrej must be >= 0, got {self.maxrej}")
-            if self.rejstart < 0:
-                raise ValueError(f"rejstart must be >= 0, got {self.rejstart}")
+            schedule.validate_iteration_setting("rejstart", self.rejstart, 1)
         self.num_comps = params.get("num_comps", -1)
         self.lrate = params.get("lrate", 0.1)
         self.lrate0 = self.lrate
@@ -388,6 +415,10 @@ class AMICA:
         self.invsigmin = params.get("invsigmin", 1e-4)
         self.do_history = params.get("do_history", False)
         self.histstep = params.get("histstep", 10)
+        if self.do_history:
+            # A history snapshot fires on ``mod(iter, histstep) == 0``; 0 was a
+            # bare ZeroDivisionError on the first iteration of the fit.
+            schedule.validate_iteration_setting("histstep", self.histstep, 1)
         # Block-size search (issue #232). OFF by default, unlike Fortran, whose
         # header default is .true.: the choice is timing-based and therefore
         # machine-dependent, so a parity run has to be able to pin block_size.
@@ -448,10 +479,16 @@ class AMICA:
         # (Fortran maxincs, amica17.f90:1087).
         self.maxincs = params.get("maxincs", 5)
         # Restart-on-NaN (Fortran amica15.f90:1022-1052): if the LL goes
-        # non-finite at iter <= restartiter, reinitialize and start over, up to
-        # maxrestarts times; a later NaN stops the fit (Fortran exits too).
+        # non-finite within the first restartiter iterations, counted from 1 as
+        # the reference counts them (``iter .le. restartiter``), reinitialize and
+        # start over, up to maxrestarts times; a later NaN stops the fit (Fortran
+        # exits too). restartiter=0 therefore disables the recovery, as in the
+        # reference. The restart count differs from the reference's; see
+        # docs/guides/amica-differences.md.
         self.restartiter = params.get("restartiter", 10)
         self.maxrestarts = params.get("maxrestarts", 3)
+        schedule.validate_iteration_setting("restartiter", self.restartiter, 0)
+        schedule.validate_iteration_setting("maxrestarts", self.maxrestarts, 0)
         self.numrestarts = 0
         # Set by fit(): whether the fit ended usable, and the reason it stopped.
         # converged=False signals a terminal non-finite LL or non-finite fitted

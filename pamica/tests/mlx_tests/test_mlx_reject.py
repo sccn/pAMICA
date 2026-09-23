@@ -60,10 +60,14 @@ def _model(**kwargs: Any) -> AMICAMLXNG:
 
 # --- constructor validation --------------------------------------------
 def test_reject_param_validation():
-    """Matches AMICATorchNG's validation exactly (torch_impl/core.py:
-    679-685): rejint<1 would ZeroDivisionError in the reject schedule,
-    rejsig<=0 breaks the reject-below-mean semantics, maxrej<0 is a sanity
-    guard. rejstart is NOT validated (torch does not validate it either)."""
+    """Matches AMICATorchNG's validation exactly: rejint<1 would
+    ZeroDivisionError in the reject schedule, rejsig<=0 breaks the
+    reject-below-mean semantics, maxrej<0 is a sanity guard, and rejstart
+    counts from 1, so rejstart<=0 would silently skip the unconditional first
+    pass (issue #335; the cross-backend message check is
+    ``test_schedule_gates.py``)."""
+    with pytest.raises(ValueError, match="rejstart"):
+        _model(do_reject=True, rejstart=0)
     with pytest.raises(ValueError, match="rejint"):
         _model(do_reject=True, rejint=0)
     with pytest.raises(ValueError, match="rejsig"):

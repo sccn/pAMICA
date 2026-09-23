@@ -444,10 +444,11 @@ class AMICATorchNG:
         from 1, as the reference counts it (``iter .ge. newt_start``): the
         Newton step is taken on the ``newt_start``-th iteration, i.e. once
         ``iteration + 1 >= newt_start`` for the 0-based ``iteration``
-        attribute, so ``newt_start`` of 0 or 1 uses it from the first
-        iteration (issue #335). It also gates the ``maxdecs`` ratchet of the
-        ``rholrate`` ceiling (and, under Newton, of ``newtrate``) to
-        iterations after ``newt_start`` (Fortran amica15.f90:1067/1070).
+        attribute (issue #335). ``newt_start=0`` fits exactly as ``1`` does,
+        Newton from the first iteration. It also gates the ``maxdecs`` ratchet
+        of the ``rholrate`` ceiling (and, under Newton, of ``newtrate``) to
+        iterations after ``newt_start`` (Fortran amica15.f90:1067/1070), so it
+        is validated (an integer >= 0) whether or not ``do_newton`` is on.
     newtrate : float, default=0.5
         Maximum learning rate the ramp climbs to while Newton is active
         (the natural-gradient phase is capped at ``lrate``/``lrate0``).
@@ -463,7 +464,9 @@ class AMICATorchNG:
     rejstart, rejint, maxrej : int
         First rejection iteration, interval between rejections, and maximum
         number of rejection passes (matching ``amica15.f90:1136``).
-        ``rejstart`` counts from 1, as the reference counts it (issue #335).
+        ``rejstart`` counts from 1, as the reference counts it (issue #335),
+        and must be an integer >= 1 when ``do_reject`` is on: ``rejstart <= 0``
+        would silently skip the reference's unconditional first pass.
     rho0, minrho, maxrho, rholrate : float
         Generalized-Gaussian shape-parameter initialization, clamp bounds,
         and learning rate.
@@ -698,6 +701,10 @@ class AMICATorchNG:
         self.newt_ramp = newt_ramp
 
         self.do_newton = do_newton
+        # Validated whether or not do_newton is on: newt_start also gates the
+        # rho-rate ceiling ratchet on the natural-gradient path
+        # (schedule.past_newton_start, amica15.f90:1067).
+        schedule.validate_iteration_setting("newt_start", newt_start, 0)
         self.newt_start = newt_start
         self.newtrate = newtrate
         self.newtrate0 = newtrate
@@ -714,6 +721,9 @@ class AMICATorchNG:
                 raise ValueError(f"rejsig must be > 0, got {rejsig}")
             if maxrej < 0:
                 raise ValueError(f"maxrej must be >= 0, got {maxrej}")
+            # Counted from 1, so rejstart <= 0 would silently disable the
+            # reference's unconditional ``iter == rejstart`` pass.
+            schedule.validate_iteration_setting("rejstart", rejstart, 1)
 
         self.rho0 = rho0
         self.minrho = minrho
