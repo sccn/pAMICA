@@ -50,15 +50,15 @@ _NG_PARAMS = set(inspect.signature(AMICATorchNG).parameters) - {"n_channels"}
 _DATA_LOCATION_KEYS = {"files", "outdir", "data_dim", "field_dim"}
 
 # params.json keys consumed explicitly (as AMICA()/fit() args or run metadata)
-# rather than forwarded as AMICATorchNG constructor kwargs. Any key that is
-# neither here nor a key the backend run applies is a setting that backend
-# cannot honor; each run_*_amica warns about those (_warn_ignored) so a parity
+# rather than forwarded as backend constructor kwargs. Any key that is neither
+# here nor a key the backend run applies is a setting that backend cannot
+# honor; each run_*_amica warns about those (_warn_ignored) so a parity
 # comparison against the Fortran run can't silently diverge. `max_decs` is not
-# listed: load_sample_data
-# now reads params.json through read_params_file (issue #304), which already
-# renames it (and min_grad_norm/share_int) to the canonical maxdecs/min_nd/
-# share_iter spelling -- the same spelling _NG_PARAMS filters on -- so those
-# three land in ng_kwargs automatically instead of needing a special case here.
+# listed: load_sample_data reads params.json through read_params_file (issue
+# #304), which already renames it (and min_grad_norm/share_int) to the
+# canonical maxdecs/min_nd/share_iter spelling -- the spelling the backend
+# constructors use -- so those three are applied automatically instead of
+# needing a special case here.
 _HANDLED_KEYS = {
     "files",
     "outdir",
@@ -450,38 +450,46 @@ def _warn_ignored(params: Dict, applied: set, backend_class: str, short: str) ->
         )
 
 
-def run_pytorch_amica(
-    data: np.ndarray, params: Dict, output_dir: Path, seed: int
-) -> Dict:
-    """Run the PyTorch natural-gradient EM backend and collect results."""
-    print("Running PyTorch AMICA (natural-gradient EM backend)...")
+def _run_wrapper_amica(backend: str, data: np.ndarray, params: Dict, seed: int) -> Dict:
+    """Fit through the ``AMICA`` wrapper with ``backend`` (``"torch"`` or
+    ``"mlx"``) and collect results.
 
-    # Set seed for reproducibility (AMICATorchNG also seeds its own init).
-    set_all_seeds(seed)
+    The two backends take the same constructor keywords, so the canonical
+    params map onto both the same way; the wrapper's own ``fit`` resolves the
+    PyTorch device (with its MPS/float64 -> CPU fallback).
+    """
+    if backend == "torch":
+        backend_cls, short = AMICATorchNG, "NG"
+        backend_params = _NG_PARAMS
+    else:
+        from pamica.mlx_impl import AMICAMLXNG
 
-    _check_full_rank_comps(params, "PyTorch")
+        backend_cls, short = AMICAMLXNG, "MLX"
+        backend_params = set(inspect.signature(AMICAMLXNG).parameters) - {"n_channels"}
 
-    # Map the sample params.json onto AMICATorchNG constructor kwargs. The
+    _check_full_rank_comps(params, _BACKEND_LABELS[backend])
+
+    # Map the sample params.json onto the backend's constructor kwargs. The
     # backend seeds init, builds the symmetric-ZCA sphere, and starts from an
     # identity-plus-small-perturbation mixing matrix internally, so no manual
-    # parameter poking is needed (unlike the removed basic backend). AMICA.fit()
-    # handles device selection (and the MPS/float64 -> CPU fallback). `params`
+    # parameter poking is needed (unlike the removed basic backend). `params`
     # is already canonical-keyed (read_params_file, issue #304), so maxdecs/
-    # min_nd/share_iter land here via the plain _NG_PARAMS filter -- no
-    # special case needed for the json schema's max_decs/min_grad_norm/
+    # min_nd/share_iter land here via the plain constructor-signature filter
+    # -- no special case needed for the json schema's max_decs/min_grad_norm/
     # share_int spellings.
-    ng_kwargs = {k: v for k, v in params.items() if k in _NG_PARAMS}
+    backend_kwargs = {k: v for k, v in params.items() if k in backend_params}
     # lrate/do_mean/do_sphere/do_newton/seed/device are passed explicitly to
     # AMICA()/fit(); drop them from **kwargs to avoid duplicate keyword args.
     for k in ("lrate", "do_mean", "do_sphere", "do_newton", "seed", "device"):
-        ng_kwargs.pop(k, None)
+        backend_kwargs.pop(k, None)
 
-    _warn_ignored(params, set(ng_kwargs), "AMICATorchNG", "NG")
+    _warn_ignored(params, set(backend_kwargs), backend_cls.__name__, short)
 
     model = AMICA(
         n_models=params.get("num_models", 1),
         n_mix=params.get("num_mix", 3),
         verbose=True,
+        backend=backend,
     )
     start = time.perf_counter()
     model.fit(
@@ -492,7 +500,7 @@ def run_pytorch_amica(
         do_sphere=params.get("do_sphere", True),
         do_newton=params.get("do_newton", False),
         seed=seed,
-        **ng_kwargs,
+        **backend_kwargs,
     )
     runtime_s = time.perf_counter() - start
 
@@ -502,11 +510,24 @@ def run_pytorch_amica(
         # sit below the returned iterate after a late overshoot.
         "final_ll": model.final_ll_,
         "final_iter": len(model.ll_history_),
-        "W": model.get_unmixing_matrix(0),
-        "A": model.get_mixing_matrix(0),
-        "ll_history": model.ll_history_,
+        # float64 (a no-op for torch), so the comparison arithmetic runs at the
+        # same precision for every backend.
+        "W": model.get_unmixing_matrix(0).astype(np.float64),
+        "A": model.get_mixing_matrix(0).astype(np.float64),
+        "ll_history": list(model.ll_history_),
         "runtime_s": runtime_s,
     }
+
+
+def run_pytorch_amica(
+    data: np.ndarray, params: Dict, output_dir: Path, seed: int
+) -> Dict:
+    """Run the PyTorch natural-gradient EM backend and collect results."""
+    print("Running PyTorch AMICA (natural-gradient EM backend)...")
+
+    # Set seed for reproducibility (AMICATorchNG also seeds its own init).
+    set_all_seeds(seed)
+    return _run_wrapper_amica("torch", data, params, seed)
 
 
 def run_numpy_amica(
@@ -578,52 +599,10 @@ def mlx_unavailable_reason() -> Optional[str]:
 
 
 def run_mlx_amica(data: np.ndarray, params: Dict, output_dir: Path, seed: int) -> Dict:
-    """Run the MLX backend (``AMICAMLXNG``, float32 on the Apple GPU) and
-    collect results.
-
-    Its constructor carries ``AMICATorchNG``'s parameter names, so the
-    canonical params map onto it the same way they map onto the PyTorch run.
-    """
-    from pamica.mlx_impl import AMICAMLXNG
-
+    """Run the MLX backend (``AMICA(backend="mlx")``, float32 on the Apple
+    GPU) and collect results."""
     print("Running MLX AMICA (Apple-GPU float32 backend)...")
-
-    _check_full_rank_comps(params, "MLX")
-
-    mlx_params = set(inspect.signature(AMICAMLXNG).parameters) - {
-        "n_channels",
-        "n_models",
-        "n_mix",
-        "seed",
-    }
-    mlx_kwargs = {k: v for k, v in params.items() if k in mlx_params}
-    _warn_ignored(params, set(mlx_kwargs), "AMICAMLXNG", "MLX")
-
-    model = AMICAMLXNG(
-        n_channels=data.shape[0],
-        n_models=params.get("num_models", 1),
-        n_mix=params.get("num_mix", 3),
-        seed=seed,
-        **mlx_kwargs,
-    )
-    start = time.perf_counter()
-    model.fit(data.astype(np.float32), max_iter=params.get("max_iter", 100))
-    runtime_s = time.perf_counter() - start
-    if model.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS:
-        raise RuntimeError(
-            f"AMICAMLXNG fit ended degenerate (stop_reason={model.stop_reason!r})"
-        )
-
-    return {
-        "final_ll": model.final_ll_,
-        "final_iter": len(model.ll_history),
-        # float64 copies, so the comparison arithmetic below runs at the same
-        # precision for every backend.
-        "W": model.get_unmixing_matrix(0).astype(np.float64),
-        "A": model.get_mixing_matrix(0).astype(np.float64),
-        "ll_history": list(model.ll_history),
-        "runtime_s": runtime_s,
-    }
+    return _run_wrapper_amica("mlx", data, params, seed)
 
 
 _RUNNERS: Dict[str, Callable[[np.ndarray, Dict, Path, int], Dict]] = {
