@@ -104,7 +104,7 @@ from scipy.special import digamma, gamma, gammaln
 from .. import blocktune
 from .. import restarts
 from ..metrics import mir as mir_metric
-from ..metrics import pairwise_mi
+from ..metrics import model_probability_from_loglik, pairwise_mi
 from ..numpy_impl.utils import identify_shared_components
 from ..rank import (
     MINEIG,
@@ -2265,6 +2265,7 @@ class AMICAMLXNG:
                 "AMICAMLXNG.shared_components() requires a fitted model; call "
                 "fit() first."
             )
+        self._check_usable("get the shared components")
         cl = np.array(self.comp_list)  # (n_channels, n_models)
         groups = []
         for col in np.unique(cl):
@@ -3094,6 +3095,34 @@ class AMICAMLXNG:
                 f"fit (valid: 0..{self.n_models - 1})."
             )
 
+    def _nonfinite_params(self) -> list:
+        """Names of :attr:`_PARAM_ARRAYS` currently holding a non-finite
+        value (matching the legacy NumPy backend's own
+        ``_nonfinite_params``; issue #306 cross-backend review; port of
+        ``AMICATorchNG._nonfinite_params``). Parameters not yet allocated
+        (``None``, e.g. a partially initialized instance) are skipped rather
+        than treated as bad.
+
+        Single-sync fast path: every parameter's ``isfinite().all()`` is
+        stacked into one small array and reduced with exactly one
+        ``.item()`` MLX graph evaluation, instead of one evaluation per
+        parameter -- MLX is lazy, so each ``bool(mx.array)``/``.item()``
+        forces the whole pending graph to materialize on the accelerator,
+        making the naive per-parameter loop essentially the entire cost of a
+        small ``transform()`` call (measured ~2.2 ms across a 12-array
+        sweep, PR #329 review). The per-parameter breakdown -- one further,
+        small evaluation -- is only computed once that reduction is already
+        ``False``.
+        """
+        names = [name for name in self._PARAM_ARRAYS if getattr(self, name) is not None]
+        if not names:
+            return []
+        flags = mx.stack([mx.all(mx.isfinite(getattr(self, name))) for name in names])
+        if bool(mx.all(flags).item()):
+            return []
+        bad = (~flags).tolist()
+        return [name for name, is_bad in zip(names, bad) if is_bad]
+
     def _check_usable(self, action: str) -> None:
         """Refuse to serve output from a degenerate fit (issue #306; port of
         ``AMICATorchNG._check_usable``).
@@ -3103,7 +3132,7 @@ class AMICAMLXNG:
         this assumes a fit has actually run and adds the two layers
         :meth:`state_dict`/:meth:`write_amica_output` already use beyond
         that: the ``stop_reason`` gate, then a defense-in-depth isfinite
-        sweep over the same :attr:`_PARAM_ARRAYS` set. Mirrors the
+        sweep via :meth:`_nonfinite_params`. Mirrors the
         :class:`~pamica.AMICA` wrapper's ``_check_usable`` (issue #50) for
         callers using this backend directly.
         """
@@ -3114,11 +3143,7 @@ class AMICAMLXNG:
                 f"parameters and would produce NaN output. Lower lrate, "
                 f"disable Newton, or check data conditioning, then refit."
             )
-        nonfinite = [
-            name
-            for name in self._PARAM_ARRAYS
-            if not bool(mx.all(mx.isfinite(getattr(self, name))).item())
-        ]
+        nonfinite = self._nonfinite_params()
         if nonfinite:
             raise RuntimeError(
                 f"Refusing to {action}: parameters {nonfinite} hold "
@@ -3156,6 +3181,7 @@ class AMICAMLXNG:
                 "AMICAMLXNG.get_pdftype() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the density family")
         codes = np.array(self.pdtype[:, model_idx], dtype=np.int64)
         # Silent-failure guard: an out-of-range stored code would otherwise
         # fall through the _score/_log_pdf mx.where chain to a stale GG
@@ -3406,9 +3432,11 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted.
+            If the model is unfitted, or the fit ended degenerate (issue
+            #306).
         ValueError
-            If the fitted sphere is rank-reduced (non-square): whether from
+            If ``X`` is not a 2D array of the fitted input channel count, or
+            if the fitted sphere is rank-reduced (non-square): whether from
             explicit ``pcakeep``/``pcadb`` or from automatic ``mineig``/
             ``mineig_rel`` numerical-rank detection, the sphere is
             rank-deficient, so MIR's log-Jacobian term is undefined
@@ -3513,6 +3541,18 @@ class AMICAMLXNG:
             )
         self._check_usable("compute the model log-likelihood")
         self._check_input_shape(X)
+        return self._model_loglik_unchecked(X)
+
+    def _model_loglik_unchecked(self, X: np.ndarray) -> np.ndarray:
+        """Core ``Lht`` computation for :meth:`model_loglik`, with no
+        degenerate-fit guard or shape validation of its own (issue #306 PR
+        #329 review; port of ``AMICATorchNG._model_loglik_unchecked``):
+        :meth:`model_loglik` and :meth:`model_probability` each do their own
+        single guard + shape check, with their own action wording, then
+        both call this -- so the guard no longer runs twice on a
+        :meth:`model_probability` call, which used to run its own
+        ``_check_usable`` and then :meth:`model_loglik`'s (measured ~2x the
+        cost of a single guard evaluation on this backend)."""
         X = np.ascontiguousarray(X)
         if not np.isfinite(X).all():
             bad = np.flatnonzero(~np.isfinite(X).all(axis=1))
@@ -3565,30 +3605,17 @@ class AMICAMLXNG:
                 "call fit() first."
             )
         self._check_usable("compute the model probability")
-        Lht = self.model_loglik(X)
-        col_max = Lht.max(axis=0, keepdims=True)
-        if not np.isfinite(col_max).all():
-            # NaN and -inf are different failure modes and must not share a
-            # message: -inf is every model underflowing at a real sample (an
-            # extreme outlier), while NaN is numerical corruption. isfinite
-            # alone conflates them (PR #311 review scope extension, issue
-            # #306).
-            nan_mask = np.isnan(col_max)
-            if nan_mask.any():
-                raise ValueError(
-                    f"AMICAMLXNG.model_probability(): {int(nan_mask.sum())} "
-                    "sample(s) have a NaN log-likelihood (numerical "
-                    "corruption), so the posterior is undefined there."
-                )
-            n_bad = int((~np.isfinite(col_max)).sum())
-            raise ValueError(
-                f"AMICAMLXNG.model_probability(): every model has -inf "
-                f"log-likelihood at {n_bad} sample(s), so the posterior is "
-                "undefined there (an extreme outlier under a tight source "
-                "density)."
-            )
-        ex = np.exp(Lht - col_max)
-        return ex / ex.sum(axis=0, keepdims=True)
+        self._check_input_shape(X)
+        Lht = self._model_loglik_unchecked(X)
+        # NaN and -inf are different failure modes and must not share a
+        # message: -inf is every model underflowing at a real sample (an
+        # extreme outlier), while NaN is numerical corruption. isfinite alone
+        # conflates them (PR #311 review scope extension, issue #306). The
+        # diagnosis + normalization is shared with AMICATorchNG (PR #329
+        # review) rather than duplicated per backend.
+        return model_probability_from_loglik(
+            Lht, caller="AMICAMLXNG.model_probability()"
+        )
 
     # ------------------------------------------------------------------
     # EEGLAB export (issue #92; epic #278 Phase 3/#289 port of
@@ -3654,11 +3681,7 @@ class AMICAMLXNG:
         # neutralizes a stale LLt stash: a failed final iteration's
         # _llt_lht/_llt_lt (from before the nan_params/nan_ll break) can no
         # longer reach disk once this guard refuses the write outright.
-        nonfinite = [
-            name
-            for name in self._PARAM_ARRAYS
-            if not bool(mx.all(mx.isfinite(getattr(self, name))).item())
-        ]
+        nonfinite = self._nonfinite_params()
         if nonfinite:
             raise RuntimeError(
                 f"Refusing to write output for a model with non-finite "
@@ -3798,11 +3821,7 @@ class AMICAMLXNG:
         # bookkeeping ever misses it (the codebase has known NaN-suppression
         # risks). isfinite on the integer comp_list/pdtype is trivially
         # all-True.
-        nonfinite = [
-            name
-            for name in self._PARAM_ARRAYS
-            if not bool(mx.all(mx.isfinite(getattr(self, name))).item())
-        ]
+        nonfinite = self._nonfinite_params()
         if nonfinite:
             raise RuntimeError(
                 f"Refusing to serialize a model with non-finite parameters "
