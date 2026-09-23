@@ -92,6 +92,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from tqdm import tqdm
 from .. import blocktune
 from .. import restarts
+from .. import schedule
 from ..fortran_params import read_params_file
 from ..rank import (
     MINEIG,
@@ -2035,7 +2036,9 @@ class AMICA:
             self.rho[:, cols] = np.clip(new_rho, self.minrho, self.maxrho)
 
         # Update unmixing matrices
-        newton_active = self.do_newton and self.iter >= self.newt_start
+        newton_active = schedule.newton_active(
+            self.do_newton, self.iter, self.newt_start
+        )
         if newton_active:
             # Finalize Newton curvature statistics (Fortran amica17.f90:1762-1776).
             # The dsigma2/dkappa/dlambda accumulators already carry the sbeta^2
@@ -2220,10 +2223,7 @@ class AMICA:
         """
         if not self.share_comps or self.num_models < 2:
             return False
-        itf = self.iter + 1  # Fortran-style 1-indexed iteration
-        if itf < self.share_start:
-            return False
-        return (itf - self.share_start) % self.share_int <= 5
+        return schedule.share_freeze(self.iter, self.share_start, self.share_int)
 
     def _optimize(self):
         """Main optimization loop."""
@@ -2268,12 +2268,10 @@ class AMICA:
             for iter in iterator:
                 self.iter = iter
                 final_iter = iter
-                # Fortran-style 1-indexed iteration. Every schedule the reference
-                # expresses as `mod(iter, step)` (share_comps, writestep,
-                # histstep) is anchored on this, not on the 0-indexed loop
-                # counter, so an identical setting fires on the same iterations
-                # here, in AMICATorchNG, and in the binary.
-                itf = iter + 1
+                # Every schedule below counts iterations from 1, as the reference
+                # does (pamica.schedule converts this 0-indexed loop counter), so
+                # an identical setting fires on the same iterations here, in
+                # AMICATorchNG, in AMICAMLXNG, and in the binary (issue #335).
 
                 # Get updates and likelihood
                 updates = self._get_updates_and_likelihood()
@@ -2285,13 +2283,14 @@ class AMICA:
                 # non-finite LL usually means an unlucky init, so redraw A and
                 # start over, up to maxrestarts times, within the first
                 # restartiter iterations (Fortran's absolute `iter <= restartiter`
-                # window; the iteration counter is not reset on restart here). A
+                # window over its 1-based counter; the iteration counter is not
+                # reset on restart here). A
                 # later NaN falls through to _check_convergence, which stops
                 # (Fortran exits too).
                 if (
                     len(self.ll) > 0
                     and not np.isfinite(self.ll[-1])
-                    and iter <= self.restartiter
+                    and schedule.within_restart_window(iter, self.restartiter)
                     and self.numrestarts < self.maxrestarts
                 ):
                     self.numrestarts += 1
@@ -2347,24 +2346,20 @@ class AMICA:
                     break
 
                 # Reset the decrease counter when Newton turns on (Fortran
-                # amica17.f90:1105-1108).
-                if self.do_newton and iter == self.newt_start:
+                # amica15.f90:1099-1102).
+                if schedule.newton_switches_on(self.do_newton, iter, self.newt_start):
                     numdecs = 0
 
-                # Reject outliers if requested (Fortran amica17.f90:1142). The
-                # max(1, ...) clamp matches Fortran and AMICATorchNG: without it,
-                # Python's non-negative modulo makes (iter - rejstart) % rejint
-                # hit 0 for iter < rejstart, firing rejection before rejstart.
-                if (
-                    self.do_reject
-                    and self.maxrej > 0
-                    and (
-                        (iter == self.rejstart)
-                        or (
-                            (max(1, iter - self.rejstart) % self.rejint == 0)
-                            and (self.numrej < self.maxrej)
-                        )
-                    )
+                # Reject outliers if requested (Fortran amica15.f90:1136; the
+                # schedule, including its max(1, ...) clamp, is shared with
+                # AMICATorchNG and AMICAMLXNG in pamica.schedule).
+                if schedule.rejection_due(
+                    self.do_reject,
+                    iter,
+                    self.rejstart,
+                    self.rejint,
+                    self.numrej,
+                    self.maxrej,
                 ):
                     self._reject_outliers()
                     self.numrej += 1
@@ -2376,20 +2371,18 @@ class AMICA:
                 # merged comp_list (Fortran runs identify_shared_comps before
                 # get_unmixing_matrices, amica15.f90:1858,1863) -- otherwise the
                 # next E-step would read a stale W while indexing the densities
-                # by the merged comp_list. itf is the Fortran-style 1-indexed
-                # iteration (itf, above), the same anchor AMICATorchNG uses, so
-                # an identical (share_start, share_int) fires on the same
-                # iterations in both backends and lines up with _a_frozen.
+                # by the merged comp_list. The schedule is pamica.schedule's, the
+                # one AMICATorchNG and AMICAMLXNG use, so an identical
+                # (share_start, share_int) fires on the same iterations in every
+                # backend and lines up with _a_frozen.
                 #
                 # This runs AFTER self.ll.append(updates["ll"]) inside
                 # _update_parameters above, so a merge on the final iteration
                 # lands in self.A/comp_list but not in the ll value already
                 # stored -- see the final_ll_ note on self.ll's init (issue
                 # #269).
-                if (
-                    self.share_comps
-                    and itf >= self.share_start
-                    and (itf - self.share_start) % self.share_int == 0
+                if self.share_comps and schedule.periodic_due(
+                    iter, self.share_start, self.share_int
                 ):
                     # Sensor-space maps (issue #258): pinv(sphere) @ A, matching
                     # AMICATorchNG._identify_shared_comps so both backends make
@@ -2423,10 +2416,10 @@ class AMICA:
                 # than one interval. Both are skipped (loudly) from a non-finite
                 # state so a checkpoint cannot persist NaN parameters that
                 # loadmodout reads back without complaint (issue #240).
-                if self.writestep > 0 and itf % self.writestep == 0:
+                if self.writestep > 0 and schedule.every(iter, self.writestep):
                     self._write_checkpoint("results")
 
-                if self.do_history and itf % self.histstep == 0:
+                if self.do_history and schedule.every(iter, self.histstep):
                     self._write_checkpoint("history")
         finally:
             # Close the progress bar if using tqdm
@@ -2532,7 +2525,7 @@ class AMICA:
             numdecs += 1
             if numdecs >= self.max_decs:
                 self.lrate0 *= self.lratefact
-                if self.iter > self.newt_start:
+                if schedule.past_newton_start(self.iter, self.newt_start):
                     # rho rate is a ceiling reset to rholrate0 each iteration
                     # (Fortran amica15.f90:1806/1813); it ratchets ONLY here at maxdecs
                     # (amica15.f90:1068), never per LL-decrease. The old per-decrease
@@ -2540,7 +2533,9 @@ class AMICA:
                     # reset that collapsed the rho rate and froze rho at a stale
                     # shape (issue #193).
                     self.rholrate *= self.rholratefact
-                if self.do_newton and self.iter > self.newt_start:
+                if self.do_newton and schedule.past_newton_start(
+                    self.iter, self.newt_start
+                ):
                     self.newtrate *= self.lratefact
                 numdecs = 0
 

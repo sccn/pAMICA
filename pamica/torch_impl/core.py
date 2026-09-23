@@ -55,6 +55,7 @@ from tqdm import tqdm
 
 from .. import blocktune
 from .. import restarts
+from .. import schedule
 from ..metrics import mir as mir_metric
 from ..metrics import model_probability_from_loglik, pairwise_mi
 from ..rank import (
@@ -431,15 +432,22 @@ class AMICATorchNG:
         (ceiling is ``lrate_cap`` for natural gradient, ``newtrate`` for
         Newton).
     do_newton : bool, default=False
-        Enable the Newton preconditioner for the ``A``/``W`` update once
-        ``iteration >= newt_start``. Ported from the Fortran reference
+        Enable the Newton preconditioner for the ``A``/``W`` update from
+        iteration ``newt_start`` on. Ported from the Fortran reference
         (``amica17.f90``): natural gradient alone plateaus well short of the
         Fortran solution, and the Newton step (a per-source-pair 2x2 solve
         preconditioning the natural gradient by an approximate Hessian) is
         what closes the gap.
     newt_start : int, default=20
         Iteration at which the Newton step switches on (natural gradient is
-        used before it, letting the mixture parameters settle first).
+        used before it, letting the mixture parameters settle first). Counted
+        from 1, as the reference counts it (``iter .ge. newt_start``): the
+        Newton step is taken on the ``newt_start``-th iteration, i.e. once
+        ``iteration + 1 >= newt_start`` for the 0-based ``iteration``
+        attribute, so ``newt_start`` of 0 or 1 uses it from the first
+        iteration (issue #335). It also gates the ``maxdecs`` ratchet of the
+        ``rholrate`` ceiling (and, under Newton, of ``newtrate``) to
+        iterations after ``newt_start`` (Fortran amica15.f90:1067/1070).
     newtrate : float, default=0.5
         Maximum learning rate the ramp climbs to while Newton is active
         (the natural-gradient phase is capped at ``lrate``/``lrate0``).
@@ -454,7 +462,8 @@ class AMICATorchNG:
         log-likelihood.
     rejstart, rejint, maxrej : int
         First rejection iteration, interval between rejections, and maximum
-        number of rejection passes (matching ``amica17.f90:1141-1146``).
+        number of rejection passes (matching ``amica15.f90:1136``).
+        ``rejstart`` counts from 1, as the reference counts it (issue #335).
     rho0, minrho, maxrho, rholrate : float
         Generalized-Gaussian shape-parameter initialization, clamp bounds,
         and learning rate.
@@ -483,9 +492,9 @@ class AMICATorchNG:
         pre-#26 implementation.
     kurt_start, num_kurt, kurt_int : int
         Adaptive-switch schedule (only used when ``pdftype=1``): first iteration
-        to re-estimate kurtosis, number of switch passes, and the iteration
-        interval between them. ``num_kurt=0`` disables switching (the family
-        stays at its super-Gaussian init).
+        to re-estimate kurtosis (counted from 1), number of switch passes, and
+        the iteration interval between them. ``num_kurt=0`` disables switching
+        (the family stays at its super-Gaussian init).
     invsigmin, invsigmax : float
         Clamp bounds for the mixture scale parameter ``beta``.
     doscaling, scalestep : bool, int
@@ -504,8 +513,9 @@ class AMICATorchNG:
         fires on the LAST fit iteration is reflected in the returned model but
         trails in ``final_ll_``; see that attribute's comment (issue #269).
     share_start, share_iter : int
-        Sharing schedule: first iteration to attempt merges and the interval
-        between attempts (Fortran ``share_start``/``share_iter``). The A-update
+        Sharing schedule: first iteration to attempt merges (counted from 1)
+        and the interval between attempts (Fortran
+        ``share_start``/``share_iter``). The A-update
         is held for the first 6 iterations of every cycle (independent of whether
         a merge fired) so densities can settle; ``share_iter`` must be ``> 6`` so
         that window never consumes the whole cycle.
@@ -1657,7 +1667,9 @@ class AMICATorchNG:
         # moves mu (amica17.f90:1762-1774), and the NumPy port bakes it in at
         # accumulation time. Do it here, before self.mu is reassigned below, so
         # lambda uses this iteration's mu rather than the updated one.
-        newton_active = self.do_newton and self.iteration >= self.newt_start
+        newton_active = schedule.newton_active(
+            self.do_newton, self.iteration, self.newt_start
+        )
         if newton_active:
             sigma2, lambda_, kappa = self._finalize_newton_stats(acc)
 
@@ -1841,7 +1853,8 @@ class AMICATorchNG:
         amica15.f90:1803). The window fires each cycle regardless of whether that
         cycle's ``_identify_shared_comps`` actually merged a pair.
 
-        Anchored on ``(itf - share_start) % share_iter`` so it stays aligned with
+        Anchored on ``share_start`` (:func:`pamica.schedule.share_freeze`, which
+        counts iterations from 1 like the reference) so it stays aligned with
         the merge schedule for any ``share_start``; the literal Fortran formula
         uses ``mod(iter, share_iter)`` (misaligned unless share_start is a
         multiple of share_iter, and a permanent freeze for ``share_iter <= 6``),
@@ -1853,10 +1866,7 @@ class AMICATorchNG:
         """
         if not self.share_comps or self.n_models < 2:
             return False
-        itf = self.iteration + 1  # Fortran-style 1-indexed iteration
-        if itf < self.share_start:
-            return False
-        return (itf - self.share_start) % self.share_iter <= 5
+        return schedule.share_freeze(self.iteration, self.share_start, self.share_iter)
 
     def _identify_shared_comps(self) -> None:
         """Merge near-collinear mixing columns across models (Fortran
@@ -2548,21 +2558,14 @@ class AMICATorchNG:
                 best_snapshot = self._snapshot_params()
 
             # Whether rejection fires this iteration (Fortran schedule,
-            # amica17.f90:1141-1146). Fortran rejects using the per-sample
+            # amica15.f90:1136, with rejstart counted from 1 as the reference
+            # counts it; issue #335). Fortran rejects using the per-sample
             # log-likelihood from THIS iteration's E-step, i.e. the PRE-update
             # parameters (loglik is stored in get_updates_and_likelihood before
             # update_params runs). Capture it here, before _update_parameters,
             # to match that ordering.
-            will_reject = (
-                self.do_reject
-                and self.maxrej > 0
-                and (
-                    it == self.rejstart
-                    or (
-                        max(1, it - self.rejstart) % self.rejint == 0
-                        and self.numrej < self.maxrej
-                    )
-                )
+            will_reject = schedule.rejection_due(
+                self.do_reject, it, self.rejstart, self.rejint, self.numrej, self.maxrej
             )
             if will_reject:
                 assert self.good_idx is not None
@@ -2575,14 +2578,11 @@ class AMICATorchNG:
             # Extended-Infomax adaptive PDF switch (Fortran do_choose_pdfs). Runs
             # on the kurt_start/num_kurt/kurt_int schedule using the just-updated
             # W; the new per-source families take effect from the next E-step.
-            # itf is the Fortran-style 1-indexed iteration. num_kurt=0 disables
-            # switching (the family stays at its pdftype=1 super-Gaussian init).
+            # kurt_start counts from 1, like every reference schedule. num_kurt=0
+            # disables switching (the family stays at its pdftype=1
+            # super-Gaussian init).
             if self.do_choose_pdfs and self.n_kurt_done < self.num_kurt:
-                itf = it + 1
-                if (
-                    itf >= self.kurt_start
-                    and (itf - self.kurt_start) % self.kurt_int == 0
-                ):
+                if schedule.periodic_due(it, self.kurt_start, self.kurt_int):
                     self._choose_pdfs(X_use)
                     self.n_kurt_done += 1
 
@@ -2599,14 +2599,11 @@ class AMICATorchNG:
             # so a merge on the final iteration lands in the returned
             # A/W/comp_list but not in the ``ll_history``/``final_ll_`` value
             # appended just below -- see final_ll_'s comment (issue #269).
-            if self.share_comps:
-                itf = it + 1
-                if (
-                    itf >= self.share_start
-                    and (itf - self.share_start) % self.share_iter == 0
-                ):
-                    self._identify_shared_comps()
-                    self._update_unmixing_matrices()
+            if self.share_comps and schedule.periodic_due(
+                it, self.share_start, self.share_iter
+            ):
+                self._identify_shared_comps()
+                self._update_unmixing_matrices()
 
             self.ll_history.append(ll)
 
@@ -2746,9 +2743,11 @@ class AMICATorchNG:
                     numdecs += 1
                     if numdecs >= self.maxdecs:
                         self.lrate_cap *= self.lratefact
-                        if it > self.newt_start:
+                        if schedule.past_newton_start(it, self.newt_start):
                             self.rholrate *= self.rholratefact
-                        if self.do_newton and it > self.newt_start:
+                        if self.do_newton and schedule.past_newton_start(
+                            it, self.newt_start
+                        ):
                             self.newtrate *= self.lratefact
                         numdecs = 0
 
@@ -2795,7 +2794,7 @@ class AMICATorchNG:
                 self.stop_reason = "grad_norm"
                 leave = True
 
-            if self.do_newton and it == self.newt_start:
+            if schedule.newton_switches_on(self.do_newton, it, self.newt_start):
                 numdecs = 0
 
             if leave:
