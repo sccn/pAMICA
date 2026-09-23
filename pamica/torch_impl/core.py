@@ -17,8 +17,8 @@ Key design points (see ``.context/decisions/0001-torch-backend-natural-gradient-
 * ``W`` (and ``A``) are stored and mutated directly; ``W`` is recomputed from
   ``A`` once per iteration via a batched ``torch.linalg.inv`` (matching
   ``numpy_impl.utils.get_unmixing_matrices``), never via ``pinv`` in the hot path.
-* ``A`` stores one component per ROW, shape ``(n_comps, n_channels)`` (issue
-  #334, :mod:`pamica.component_layout`, ADR 0007): row ``k`` is the reference's
+* ``A`` stores one component per ROW, shape ``(n_comps, n_channels)``
+  (issue #334, :mod:`pamica.component_layout`, ADR 0007): row ``k`` is the reference's
   column ``A(:, k)`` and model ``h``'s block is ``A[comp_list[:, h], :]``.
 * The E-step is vectorized over ``(model, mix, source)`` via broadcasting;
   the only Python loops are over models (typically 1-3) and over blocks.
@@ -515,11 +515,13 @@ class AMICATorchNG:
         Newton).
     do_newton : bool, default=False
         Enable the Newton preconditioner for the ``A``/``W`` update from
-        iteration ``newt_start`` on. Ported from the Fortran reference
-        (``amica17.f90``): natural gradient alone plateaus well short of the
-        Fortran solution, and the Newton step (a per-source-pair 2x2 solve
-        preconditioning the natural gradient by an approximate Hessian) is
-        what closes the gap.
+        iteration ``newt_start`` on, ported from the Fortran reference: a
+        per-source-pair 2x2 solve that preconditions the natural gradient by
+        an approximate Hessian, which converges faster near the optimum. An
+        iteration whose Hessian is not positive definite falls back to the
+        natural gradient (counted in ``n_newton_fallbacks``). The reference
+        runs Newton by default (``do_newton 1``); pamica defaults it off (see
+        ``docs/guides/amica-differences.md``).
     newt_start : int, default=20
         Iteration at which the Newton step switches on (natural gradient is
         used before it, letting the mixture parameters settle first). Counted
@@ -579,8 +581,7 @@ class AMICATorchNG:
         super-Gaussian (code 1) and sub-Gaussian (code 4) cosh densities by
         kurtosis sign. For every non-GG family the GG shape update is frozen
         (Fortran ``dorho=.false.``); the single-component families 1/4 (and the
-        adaptive mode) require ``n_mix=1``. ``pdftype=0`` is byte-for-byte the
-        pre-#26 implementation.
+        adaptive mode) require ``n_mix=1``.
     kurt_start, num_kurt, kurt_int : int
         Adaptive-switch schedule (only used when ``pdftype=1``): first iteration
         to re-estimate kurtosis (counted from 1), number of switch passes, and
@@ -2417,8 +2418,9 @@ class AMICATorchNG:
         ``restart_lls_`` (NaN where a restart ended degenerate) and
         ``restart_stop_reasons_``. The winner is named in one INFO log line.
 
-        A restart that ends degenerate (``nan_ll``/``singular_ll``) is excluded
-        from selection but recorded. If *every* restart is degenerate the model
+        A restart that ends degenerate (any stop in
+        ``_DEGENERATE_STOP_REASONS``, including ``"restart_error"`` for a
+        restart that raised) is excluded from selection but recorded. If *every* restart is degenerate the model
         is left holding the last one, so issue #50's degenerate-fit contract
         applies exactly as it does to a single degenerate fit.
         """
@@ -3471,8 +3473,8 @@ class AMICATorchNG:
     def get_model_center(self, model_idx: int = 0) -> np.ndarray:
         """Model ``model_idx``'s center ``c`` in sphered space, shape ``(n_channels,)``.
 
-        The per-model offset :meth:`transform` subtracts after sphering (issue
-        #27). Identically zero for a single-model fit, since the ``c`` update
+        The per-model offset :meth:`transform` subtracts after sphering
+        (issue #27). Identically zero for a single-model fit, since the ``c`` update
         is gated to ``n_models > 1``. Returned as an independent float64 copy
         whatever the fit ``dtype``.
         """
@@ -3551,8 +3553,8 @@ class AMICATorchNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted, or the fit ended degenerate (issue
-            #306).
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306).
         ValueError
             If ``X`` is not a 2D array of the fitted input channel count, or
             if the fitted sphere is rank-reduced (non-square): whether from
@@ -3604,8 +3606,8 @@ class AMICATorchNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted, or the fit ended degenerate (issue
-            #306), both via :meth:`transform`.
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306), both via :meth:`transform`.
         ValueError
             If ``X`` is not a 2D array of the fitted input channel count
             (via :meth:`transform`).
@@ -3645,8 +3647,8 @@ class AMICATorchNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted, or the fit ended degenerate (issue
-            #306).
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306).
         ValueError
             If ``X`` is not a 2D array of the fitted input channel count, or
             contains non-finite (NaN/Inf) values.
@@ -3661,8 +3663,8 @@ class AMICATorchNG:
 
     def _model_loglik_unchecked(self, X: np.ndarray) -> np.ndarray:
         """Core ``Lht`` computation for :meth:`model_loglik`, with no
-        degenerate-fit guard or shape validation of its own (issue #306 PR
-        #329 review): :meth:`model_loglik` and :meth:`model_probability` each
+        degenerate-fit guard or shape validation of its own (issue #306
+        PR #329 review): :meth:`model_loglik` and :meth:`model_probability` each
         do their own single guard + shape check, with their own action
         wording, then both call this -- so the guard no longer runs twice
         (~2x cost) on a :meth:`model_probability` call, which used to run
@@ -3708,8 +3710,8 @@ class AMICATorchNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted, or the fit ended degenerate (issue
-            #306).
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306).
         ValueError
             If ``X`` is not a 2D array of the fitted input channel count, if
             ``X`` is non-finite, if every model underflows to ``-inf``
@@ -3901,8 +3903,8 @@ class AMICATorchNG:
         parameters are written in fit order. Single-model output is
         byte-compatible with the Fortran reference.
 
-        Also writes ``LLt`` (the per-sample/per-model log-likelihood, issue
-        #155) for a model that was just ``fit()`` in this process, from the
+        Also writes ``LLt`` (the per-sample/per-model log-likelihood,
+        issue #155) for a model that was just ``fit()`` in this process, from the
         stash the training E-step filled (issue #157) -- so, exactly as in the
         reference, ``LLt`` is the E-step of the returned iterate: one M-step
         older than the ``W``/``A`` written beside it after a fit that ran to
