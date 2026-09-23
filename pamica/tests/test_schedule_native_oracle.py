@@ -14,12 +14,12 @@ axis fixed in issue #333. Over 6 iterations (four Newton M-steps) the
 log-likelihood trajectory and the mixing matrix of both float64 backends match
 the reference to round-off:
 
-========  ======================  ======================
-backend   max abs LL deviation    max abs ``A`` deviation
-========  ======================  ======================
-PyTorch   5.4e-11 (1.2e-3 before) 4.2e-10 (3.1e-2 before)
-NumPy     2.1e-12 (1.2e-3 before) 1.1e-10 (3.1e-2 before)
-========  ======================  ======================
+========  =======================  =======================
+backend   max abs LL deviation     max abs ``A`` deviation
+========  =======================  =======================
+PyTorch   5.4e-11 (1.25e-3 before) 4.2e-10 (3.1e-2 before)
+NumPy     2.1e-12 (1.25e-3 before) 1.1e-10 (3.1e-2 before)
+========  =======================  =======================
 
 "Before" is the same run before issue #335, when Newton switched on one
 iteration late. The deviations grow with the iteration count on this
