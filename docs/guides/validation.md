@@ -27,7 +27,7 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 | Device and precision invariance | same independent components across CPU/CUDA/MPS/MLX, float32/float64, Linux/macOS | identical (1.000) across all eight torch/MLX combinations |
 | Cross-backend log-likelihood | converged LL across every backend | agree to ~3 significant digits (max pairwise ~0.003) |
 | EEGLAB output | `write_amica_output` round-trip through `loadmodout15` | single-model bytes are an exact serialization; loads with correct layout |
-| Degenerate fits | NaN or singular log-likelihood | refused, never returned as NaN sources |
+| Degenerate fits | non-finite log-likelihood, update direction or parameters | refused, never returned as NaN sources |
 
 ## The validation harness
 
@@ -379,8 +379,9 @@ The round-trip is verified two ways:
   and fixed, a column-major format bug in the mixture-parameter arrays.
 
 `variance_order()` reproduces EEGLAB's IC ordering (IC1 = highest back-projected variance) in Python without a
-disk round-trip. For `n_models > 1` the layout is self-consistent and round-trips through both readers, but is
-not byte-identical to a native multi-model run (see the multi-model discussion above).
+disk round-trip. For `n_models > 1` every file is also in the reference's layout (`W` since issue #159, `A` since issue #334),
+and the directory round-trips through both readers; the values differ from any one native run
+only because multi-model AMICA is not partition-identifiable (see the multi-model discussion above).
 Full usage is in the [EEGLAB interoperability guide](eeglab.md); tests are in `pamica/tests/torch_tests/test_amica_ng_wrapper.py`.
 
 ## Performance across backends
@@ -511,7 +512,7 @@ guarded to a no-op so the parity results above stay byte-for-byte unchanged.
 | Per-model bias `c` update (#27) | on for `n_models>1` | Fortran `update_c`; per-block stats bit-exact; no-op for `n_models=1` |
 | Component sharing (`share_comps`, #60, #334) | off by default | Fortran `identify_shared_comps` ported; the scan itself has no bit-exact oracle (`Spinv2` is never allocated, so the reference's scan computes NaN similarities and never merges), but the update from a merged state seeded through the reference's `load_comp_list` matches the native binary to float64 round-off on PyTorch and NumPy (`test_component_rows.py`, opt-in with `AMICA_RUN_FORTRAN=1`); byte-identical when unshared |
 | Outlier rejection (`do_reject`, #123) | off by default | `good_idx` mechanism on all three backends (NumPy, PyTorch, MLX -- the last landed epic #278 Phase 3, #289); MLX/NumPy ports validated vs the PyTorch backend |
-| Degenerate-fit contract (#50) | always | the `AMICA` wrapper refuses a NaN or singular fit (`converged_` / `stop_reason_`); `transform`/`get_*`/`save` raise through the wrapper instead of returning NaN sources. This is a wrapper-level contract, not a raw-backend one -- calling a raw `AMICATorchNG`/`AMICAMLXNG`/`AMICA_NumPy` instance's `transform`/`get_*`/`save` directly, bypassing the wrapper, is not gated (tracked as issue #306). `write_amica_output` is the one exception: both the PyTorch and MLX backends gained the same degenerate/non-finite refusal directly on the raw class in this epic, since it has no wrapper equivalent to gate it. |
+| Degenerate-fit contract (#50, #306, #339) | always | a fit that stops on a non-finite log-likelihood (`nan_ll`/`singular_ll`), update direction (`nan_direction`) or parameters (`nan_params`) is marked unusable (`converged_=False`, with `stop_reason_`), and every output path refuses it instead of returning NaN sources: the `AMICA` wrapper's `transform`/`get_*`/`write_amica_output`/`save`, and since issue #306 the raw `AMICATorchNG`, `AMICAMLXNG` and `AMICA_NumPy` output accessors too (`pamica/tests/test_backend_guards.py`, `pamica/tests/test_nonfinite_stops.py`). |
 | End-to-end workflow (#315) | always, PyTorch and MLX | average-referenced sample EEG with `pcakeep = n_channels - 1` through `AMICAICA`: 31 components, `get_sources` equal to `transform`, an exclusion that removes exactly one back-projection and keeps the residual, the EEGLAB export reloaded by `loadmodout`, `save`/`load`, an `input.param`-driven fit, and the two backends' sources Hungarian-matched with a minimum correlation of at least 0.999 (measured 0.999999999) |
 
 Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests/test_ng_sharing.py`, `torch_tests/test_amica_ng_wrapper.py`, `test_numpy_reject.py`, and `mne_tests/test_end_to_end_workflow.py`.
