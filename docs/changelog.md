@@ -9,7 +9,8 @@ Release notes are also published on the
   **Behavior change:**
   `AMICATorchNG`, `AMICAMLXNG` and the legacy NumPy `AMICA` backend's fitted-output accessors
   (`transform`, `get_mixing_matrix`, `get_unmixing_matrix`, `get_sensor_mixing_matrix`, `get_rho`,
-  `variance_order`, `model_loglik`, `model_probability`, `mir` and `pmi` on torch/MLX;
+  `get_pdftype`, `shared_components`, `variance_order`, `model_loglik`, `model_probability`,
+  `mir` and `pmi` on torch/MLX;
   `transform`, `get_weights` and `get_sensor_mixing_matrix` on NumPy)
   now raise `RuntimeError` when called on a fit the backend itself classified as degenerate,
   or when a fitted parameter holds a non-finite value,
