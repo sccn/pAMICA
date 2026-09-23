@@ -22,7 +22,7 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
 2. the three backends rescale one shared state identically, including a
    permuted ``comp_list`` and a merged one, where the per-block rule is applied
    uniformly until the component-row layout of Phase 8 (issue #334) replaces
-   it;
+   it; a zero- or NaN-norm row is left untouched, as in the reference;
 3. ``doscaling=False`` is byte-identical to the pre-fix code: each backend class
    at commit ``fb13d76`` is loaded from git and fitted in the same process;
 4. ``scalestep``, a pamica extension the reference parses but never reads,
@@ -338,6 +338,42 @@ def test_mlx_rescales_like_torch(two_model_state):
     want = _rescaled("torch", (*f32, comp_list))
     for g, w in zip(got[:3], want[:3]):
         np.testing.assert_allclose(g, w, rtol=1e-6, atol=0)
+
+
+@pytest.mark.parametrize("bad", [0.0, np.nan], ids=["zero", "nan"])
+@pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
+def test_a_zero_or_nan_norm_row_is_left_untouched(unscaled_state, backend, bad):
+    """The zero-norm guard (the reference's ``Anrmk > 0``): a component row
+    whose norm is zero, or NaN (``NaN > 0`` is false), keeps its row and its
+    ``mu``/``beta`` columns bit for bit, while every other row is rescaled
+    exactly as it is without the planted row (rows are independent)."""
+    A, mu, beta, comp_list = unscaled_state
+    h, i = 1, 7  # source 7 of model 1: a block other than the first
+    k = comp_list[i, h]
+    planted = A.copy()
+    planted[i, comp_list[:, h]] = bad
+    dtype = np.float32 if backend == "mlx" else np.float64
+    before = tuple(np.asarray(x, dtype) for x in (planted, mu, beta))
+
+    got_A, got_mu, got_beta, _ = _rescaled(backend, (planted, mu, beta, comp_list))
+    clean_A, clean_mu, clean_beta, _ = _rescaled(backend, unscaled_state)
+
+    rows = np.zeros(A.shape, dtype=bool)
+    rows[i, comp_list[:, h]] = True
+    assert got_A[rows].tobytes() == before[0][rows].tobytes()
+    assert got_mu[:, k].tobytes() == before[1][:, k].tobytes()
+    assert got_beta[:, k].tobytes() == before[2][:, k].tobytes()
+
+    others = np.arange(mu.shape[1]) != k
+    assert got_A[~rows].tobytes() == clean_A[~rows].tobytes()
+    assert got_mu[:, others].tobytes() == clean_mu[:, others].tobytes()
+    assert got_beta[:, others].tobytes() == clean_beta[:, others].tobytes()
+    # ...and those rows are unit norm, so the rescale really ran on them.
+    unit = 1e-6 if backend == "mlx" else 1e-14
+    for hh in range(comp_list.shape[1]):
+        norms = np.linalg.norm(got_A[:, comp_list[:, hh]].astype(np.float64), axis=1)
+        keep = np.arange(NW) != i if hh == h else np.ones(NW, dtype=bool)
+        assert np.abs(norms[keep] - 1.0).max() <= unit
 
 
 # --- 3. doscaling=False is byte-identical to the pre-fix code ---------------
