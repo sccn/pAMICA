@@ -15,9 +15,10 @@ Pinned here, cross-backend per ``.rules/backend_parity.md`` (PyTorch and NumPy
 always run; MLX checks skip individually without MLX or an Apple GPU):
 
 1. one doscaling pass, through each backend's own ``_rescale_components``, is an
-   exact change of scale: the log-likelihood moves by float round-off only and
-   every component row ends at unit norm, while the old column rule on the same
-   state moves the log-likelihood by far more (so these tests catch the bug);
+   exact change of scale on natural-gradient and Newton states alike: the
+   log-likelihood moves by float round-off only and every component row ends
+   at unit norm, while the old column rule on the same state moves the
+   log-likelihood by far more (so these tests catch the bug);
 2. the three backends rescale one shared state identically, including a merged
    ``comp_list``, where the per-block rule is applied uniformly until the
    component-row layout of Phase 8 (issue #334) replaces it;
@@ -66,14 +67,22 @@ N_SLICE = 8192
 
 # A float64 log-likelihood (per sample and channel, about -3.4) changed by a
 # pure rescale moves by round-off only: measured 0 to 4.4e-16 (1 ULP) on the
-# sample. The float32 MLX likelihood moves by float32 round-off: measured 3e-8
-# to 6e-8 (a float32 ULP at 3.4 is 2.4e-7).
+# sample. The float32 MLX likelihood moves by float32 round-off: measured
+# 3.5e-9 to 6e-8 (a float32 ULP at 3.4 is 2.4e-7).
 LL_TOL_F64 = 1e-13
 LL_TOL_F32 = 1e-6
 # The old stored-column rule on the same 3-iteration states moved the
-# log-likelihood by 1.0e-4 to 1.1e-4 (a compensated rescale of the wrong
-# vectors), ten times this bound and a hundred times the float32 tolerance.
+# log-likelihood by 1.0e-4 to 1.1e-4 (natural gradient) and 2.1e-4 to 2.2e-4
+# (with Newton steps), a compensated rescale of the wrong vectors: at least ten
+# times this bound and a hundred times the float32 tolerance.
 COLUMN_RULE_MIN_DLL = 1e-5
+
+# A real state reached WITH Newton steps: Newton from the second iteration
+# (0-based iteration 1). A positive-definite Newton step ramps lrate past the
+# natural-gradient ceiling (the lrate default, 0.1), which the setup asserts;
+# measured on every backend, one and two models: 0.3 after 3 iterations.
+NEWTON: Dict[str, Any] = dict(do_newton=True, newt_start=1)
+NG_LRATE_CEILING = 0.1
 
 pytestmark = pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
 
@@ -110,8 +119,14 @@ def _mean_ll(lht: np.ndarray, n_channels: int) -> float:
 
 
 # --- 1. one pass is an exact change of scale, per backend -------------------
+# Each state is a real short unscaled fit, natural gradient only or with Newton
+# steps (the Newton update moves A differently, so its rows are another test).
+newton_param = pytest.mark.parametrize("newton", [False, True], ids=["ng", "newton"])
+
+
+@newton_param
 @pytest.mark.parametrize("n_models", [1, 2])
-def test_torch_rescale_is_an_exact_change_of_scale(real_slice, n_models):
+def test_torch_rescale_is_an_exact_change_of_scale(real_slice, n_models, newton):
     m = AMICATorchNG(
         n_channels=NW,
         n_models=n_models,
@@ -121,8 +136,10 @@ def test_torch_rescale_is_an_exact_change_of_scale(real_slice, n_models):
         dtype=torch.float64,
         doscaling=False,
         keep_best=False,
+        **(NEWTON if newton else {}),
     )
     m.fit(real_slice, max_iter=3, verbose=False)
+    assert (m.lrate > NG_LRATE_CEILING) == newton, "test setup: Newton steps"
     assert m.A is not None and m.mu is not None and m.beta is not None
     assert m.comp_list is not None
     comp_list = m.comp_list.numpy()
@@ -145,8 +162,11 @@ def test_torch_rescale_is_an_exact_change_of_scale(real_slice, n_models):
     assert abs(_mean_ll(m.model_loglik(real_slice), NW) - ll0) > COLUMN_RULE_MIN_DLL
 
 
+@newton_param
 @pytest.mark.parametrize("n_models", [1, 2])
-def test_numpy_rescale_is_an_exact_change_of_scale(real_slice, n_models, tmp_path):
+def test_numpy_rescale_is_an_exact_change_of_scale(
+    real_slice, n_models, newton, tmp_path
+):
     m = AMICA_NumPy(
         num_models=n_models,
         num_mix=NMIX,
@@ -158,8 +178,10 @@ def test_numpy_rescale_is_an_exact_change_of_scale(real_slice, n_models, tmp_pat
         block_size=8192,
         doscaling=False,
         writestep=10000,
+        **(NEWTON if newton else {}),
     )
     m.fit(real_slice)
+    assert (m.lrate > NG_LRATE_CEILING) == newton, "test setup: Newton steps"
     assert m.A is not None and m.mu is not None and m.beta is not None
     assert m.comp_list is not None
     comp_list = m.comp_list
@@ -179,8 +201,9 @@ def test_numpy_rescale_is_an_exact_change_of_scale(real_slice, n_models, tmp_pat
     assert abs(m._get_updates_and_likelihood()["ll"] - ll0) > COLUMN_RULE_MIN_DLL
 
 
+@newton_param
 @pytest.mark.parametrize("n_models", [1, 2])
-def test_mlx_rescale_is_an_exact_change_of_scale(real_slice, n_models):
+def test_mlx_rescale_is_an_exact_change_of_scale(real_slice, n_models, newton):
     mlx_core = _mlx_core()
     mx = mlx_core.mx
     m = mlx_core.AMICAMLXNG(
@@ -190,8 +213,10 @@ def test_mlx_rescale_is_an_exact_change_of_scale(real_slice, n_models):
         seed=SEED,
         doscaling=False,
         keep_best=False,
+        **(NEWTON if newton else {}),
     )
     m.fit(real_slice, max_iter=3, verbose=False)
+    assert (m.lrate > NG_LRATE_CEILING) == newton, "test setup: Newton steps"
     comp_list = np.array(m.comp_list)
     saved = {k: getattr(m, k) for k in ("A", "mu", "beta")}
     ll0 = _mean_ll(m.model_loglik(real_slice), NW)
