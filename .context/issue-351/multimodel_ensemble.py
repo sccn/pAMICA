@@ -64,7 +64,10 @@ def main() -> None:
     p.add_argument("n", nargs="?", type=int, default=20)
     p.add_argument("--from-npz", type=Path)
     p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--tag", default="", help="suffix for the output file names")
+    p.add_argument("--no-figure", action="store_true")
     a = p.parse_args()
+    sfx = f"_{a.tag}" if a.tag else ""
     ens27 = _load(REPO / ".context/issue-27/multimodel_ensemble.py", "ens27")
     ama27 = _load(REPO / ".context/issue-27/amari_distance.py", "ama27")
 
@@ -111,14 +114,14 @@ def main() -> None:
             "range_within_pamica": [float(wG.min()), float(wG.max())],
             "range_between": [float(bt.min()), float(bt.max())],
         }
-    (HERE / "multimodel_summary.json").write_text(json.dumps(summary, indent=2))
+    (HERE / f"multimodel_summary{sfx}.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))
 
     corr_detail = {
         (r["implementation"], r["run"]): r
         for r in ama27.per_run_detail(Fs, Gs, ama27.xcorr)
     }
-    with open(HERE / "per_run_detail.csv", "w", newline="") as f:
+    with open(HERE / f"per_run_detail{sfx}.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(
             [
@@ -138,6 +141,8 @@ def main() -> None:
                 ]
             )  # fmt: skip
 
+    if a.no_figure:
+        return
     ens27.figure(within_F, within_G, between, F_ll, G_ll, diff, p_perm, ks, HERE)
     shutil.copyfile(HERE / "multimodel_ensemble_distributions.png", FIGURE)
     print(f"figure -> {FIGURE} (n={n} each)")
