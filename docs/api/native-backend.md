@@ -80,10 +80,10 @@ reference can be compared against pamica's backends on any platform
 
 ```bash
 # Resolve/download the native binary (or honor PAMICA_NATIVE_BINARY):
-python validate_implementations.py --native-engine
+uv run python validate_implementations.py --native-engine
 
 # Or point at a specific binary, and compare every backend against it:
-python validate_implementations.py --fortran-binary /path/to/amica15 --backend all
+uv run python validate_implementations.py --fortran-binary /path/to/amica15 --backend all
 ```
 
 ::: pamica.native.engine.AMICANative

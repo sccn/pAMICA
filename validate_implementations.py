@@ -228,14 +228,21 @@ LEGACY_BINARY = _SAMPLE_DIR / "amica15mac"
 
 
 def default_reference_binary(*, download: bool = True) -> Path:
-    """The reference binary to compare against, preferring the native engine.
+    """The reference binary a run uses when none is named, preferring the
+    native engine.
+
+    This is the one description of the resolution order (the
+    ``--native-engine`` help refers to it; ``--fortran-binary`` bypasses it):
+    first the native engine, through
+    :func:`pamica.native.resolver.resolve` -- the ``PAMICA_NATIVE_BINARY``
+    override, then the cached release binary for the host, then a fresh
+    download of it (verified against its SHA-256); failing all of those, the
+    bundled macOS x86_64 ``sample_data/amica15mac`` fixture, with a warning.
 
     The native engine is built from a source carrying the ``seed`` option
-    (sccn/amica PR #54), so its runs are reproducible; the bundled
-    ``amica15mac`` fixture predates it and re-randomizes its initialization on
-    every run, which makes any comparison against it a comparison with a random
-    draw (issue #228). Falls back to the fixture, loudly, when the native engine
-    cannot be resolved.
+    (sccn/amica PR #54), so its runs are reproducible; the fixture predates it
+    and re-randomizes its initialization on every run, which makes any
+    comparison against it a comparison with a random draw (issue #228).
     """
     try:
         from pamica.native import resolver
@@ -904,12 +911,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--native-engine",
         action="store_true",
-        help="Run the reference through pamica.native: resolve the binary via "
-        "PAMICA_NATIVE_BINARY or the cached/downloaded cross-platform release "
-        "binary. This is also what the default (no reference flag) resolves "
-        "to, falling back to the bundled macOS x86_64 sample_data/amica15mac "
-        "only when no native binary can be resolved; with this flag that "
-        "failure skips the Fortran comparison instead.",
+        help="Use the native engine only: the default resolution order (see "
+        "default_reference_binary) without its fallback to the bundled "
+        "amica15mac, so a native binary that cannot be resolved skips the "
+        "Fortran comparison instead.",
     )
     parser.add_argument(
         "--fortran-binary",
