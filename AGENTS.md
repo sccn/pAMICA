@@ -146,18 +146,18 @@ dead code even in amica15 (the moment buffers are never accumulated), so the aut
 bit-exact oracle and is validated by real-data LL. `pdftype=0` stays the default and is
 byte-for-byte unchanged. See `.context/decisions/` and `pamica/tests/torch_tests/test_ng_pdf_families.py`.
 
-**Component sharing (#60): DONE.** `share_comps` multi-model reassignment is ported to
-`AMICATorchNG`: on the `share_start`/`share_iter` schedule, components near-collinear across
-different models (cosine angle of their de-sphered mixing columns above `comp_thresh`) are merged
-into one shared mixing column + density, with an A-freeze for ~6 iterations after each merge
-(Fortran `identify_shared_comps`, amica15.f90:1916). The M-step already sums sufficient stats
-through `comp_list`; the A-update was refactored to accumulate shared columns the same way
-(byte-identical when unshared), and merged-away columns are frozen (avoiding 0/0 NaN that Fortran
-tolerates behind its `comp_used` mask). OFF by default and a no-op for `n_models=1`, so single-model
-(#24) and default multi-model (#27) parity stay byte-for-byte (full torch suite green). The A-update
-is the Fortran `gm`-weighted average (`dAk/zeta`), so shared columns are averaged not summed. No
-bit-exact oracle: the reference `Spinv2` metric is *declared but never allocated* (unrunnable, like
-the dead `do_choose_pdfs`, #26), so it is behavior-validated (`tests/torch_tests/test_ng_sharing.py`).
+**Component sharing (#60, #334): DONE.** `share_comps` runs on all three backends. Every backend
+stores `A` as `(n_comps, n_channels)`, one component per row (ADR 0007, #334), so a `comp_list` id
+names the same component in `A` and in the densities. On the `share_start`/`share_iter` schedule,
+components whose de-sphered mixing vectors (rows of `A` mapped through `pinv(sphere)`, i.e. the
+scalp maps) are near-collinear across models, with cosine above `comp_thresh`, are merged: the merge
+re-points `comp_list`, so the two sources share one component (mixing vector and density), and the
+`gm`-weighted `dAk/zeta` step averages that component over the models that share it
+(Fortran `identify_shared_comps`, amica15.f90:1916). Merged-away rows are frozen. A-freeze for 6
+iterations after each merge. OFF by default; byte-identical when no merge fires. The reference
+binary's own scan never merges (`Spinv2` is never allocated, so every similarity is NaN), but the
+update from a merged state seeded through `load_comp_list` matches it to float64 round-off
+(`pamica/tests/test_component_rows.py`, `AMICA_RUN_FORTRAN=1`).
 
 **Open (non-blocking, tracked):**
 - **Multi-model (#27): VALIDATED by distributional equivalence.** Multi-model AMICA is not
