@@ -1062,9 +1062,11 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
 # The kind of recipe the sharing tests used before issue #334 made the metric
 # compare true component maps: 4096 samples, pamica's default optimizer, an
 # early scan at a loose threshold. The first scan (iteration 11) merges 28
-# components and the second model's gm falls from 0.57 to 9.0e-4 within two
-# iterations; by the second scan (iteration 22, which merges nothing more) it
-# is 2.4e-4, and the fit's parameters go non-finite in iteration 23. Issue #345
+# components and the second model's gm falls in the fit (whose A is held on
+# those iterations) from 0.57 to 9.0e-4 within two iterations, and to 4.2e-3
+# in the freeze-free continuation the test runs on both sides; by the second
+# scan (iteration 22, which merges nothing more) it is 2.4e-4 in the fit, and
+# the fit's parameters go non-finite in iteration 23. Issue #345
 # moved the A-freeze to the reference's iterations (mod(iter, share_iter) <= 5),
 # so share_start is a multiple of share_iter here, which puts each window on its
 # scan iteration; the earlier recipe (seed 7, scans at 8 and 18) went
