@@ -159,7 +159,9 @@ Measured on real 70-channel EEG (see the project benchmarks and
 - On **CPU**, intra-op threads are workload-limited; around 4 threads was the
   sweet spot in the measured laptop sweep, with 8+ regressing.
 
-All backends agree on the log-likelihood to ~3 significant digits on real data.
+With the same settings and the same start, the backends' log-likelihoods after 25 iterations of the throughput sweep agree to 1e-5 at 32 and 48 channels;
+at 70 channels on its 30000 frames ($k\approx6$) they differ by up to 1e-3, about the effect of perturbing one sample by 1e-9 µV
+([details](validation.md#cross-backend-log-likelihood-agreement-single-model)).
 
 !!! note "Cross-backend equivalence and data adequacy"
     Whether two backends recover the *same* independent components depends on how
