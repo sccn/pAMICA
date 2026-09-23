@@ -15,7 +15,7 @@ mutating pyplot's global state.
   probable model at each timepoint.
 A per-component scalp-topography plot is not included: the one upstream
 reference it could be checked against (EEGLAB's `pop_topohistplot`) is broken
-on current EEGLAB, so it was cut rather than shipped unverified. For scalp maps,
+on current EEGLAB, so it is left out until it can be verified. For scalp maps,
 use the MNE wrapper's [`plot_components`](mne-compat.md).
 
 ```python

@@ -18,7 +18,7 @@ oracle; see ``.context/issue-136/matlab_viz_verification.md``.
 A per-component scalp-topography view is deliberately NOT here: it was the
 only planned plot with no working upstream reference (``pop_topohistplot`` is
 broken on current EEGLAB), so nothing external could catch a wrong activation
-space. It is cut rather than shipped unverified; the loader ``W`` convention it
+space. It is left out until it can be verified; the loader ``W`` convention it
 also depended on was fixed in issue #159. The MNE wrapper's
 ``AMICAICA.plot_components`` draws scalp maps through MNE instead.
 """

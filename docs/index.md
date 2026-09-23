@@ -34,7 +34,8 @@ Hungarian-matched component correlation both agree with Fortran on real EEG.
 
 !!! note "Precision and parity"
     The natural-gradient backend computes in float64 for Fortran parity. Apple
-    MPS cannot represent float64, so parity runs use CPU or CUDA; float32 is
-    required on MPS/MLX but is ~7-significant-digit, not float64-parity, and
-    is not a general speedup (the Apple-GPU speed comes from the MLX backend).
-    Use float64 for reference-parity runs.
+    MPS cannot represent float64, so parity runs use CPU or CUDA. float32 is
+    required on MPS/MLX and carries about seven significant digits; it runs
+    about as fast as float64 on CUDA and modestly faster on CPU, and the
+    Apple-GPU speed comes from the MLX backend. Use float64 for
+    reference-parity runs.

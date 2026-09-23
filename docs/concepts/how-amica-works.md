@@ -63,7 +63,7 @@ Before anything is updated, the iteration looks at what the E-step found.
   when the gradient norm falls to `min_nd`,
   or when a decrease finds the learning rate already at its floor (`minlrate`).
   A non-finite log-likelihood or update direction also ends the fit, and marks it degenerate:
-  such a fit is refused rather than returned as NaN sources.
+  every output method then refuses the model, so no NaN sources reach an analysis.
 
 The likelihood and gradient checks cannot fire on the first iteration, which has no earlier likelihood to compare with.
 
@@ -131,7 +131,8 @@ At `max_iter` the last iteration still takes its update, as in the reference,
 so the last likelihood computed belongs to the parameters one update earlier.
 
 Because the learning-rate schedule is not monotone, pamica by default returns the **highest-likelihood iterate** it visited
-(the *best-iterate* safeguard, `keep_best`) rather than the last one, and reports its likelihood as `final_ll_`.
+(the *best-iterate* safeguard, `keep_best`), which is the last one unless the fit ended below an earlier peak,
+and reports its likelihood as `final_ll_`.
 The reference has no such safeguard,
 and pamica turns it off under component sharing and outlier rejection, where likelihoods from different iterations are not comparable.
 

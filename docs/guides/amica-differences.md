@@ -6,7 +6,7 @@ reference is how correctness is defined here. This page lists every place pamica
 
 Anything not on this page is intended to match the reference. If you find a difference
 that is not listed, that is a bug worth
-[reporting](https://github.com/sccn/pAMICA/issues), not a documented choice.
+[reporting](https://github.com/sccn/pAMICA/issues).
 
 ## At a glance
 
