@@ -99,6 +99,7 @@ from .. import blocktune
 from .. import restarts
 from .. import schedule
 from ..fortran_params import read_params_file
+from ..initialization import initial_mixing
 from ..rank import (
     MINEIG,
     MINEIG_REL,
@@ -1733,18 +1734,20 @@ class AMICA:
         assert self.data_dim is not None
         # Initialize mixing/unmixing matrices. A holds one component per row
         # (issue #334, pamica.component_layout): model h's block is rows
-        # h*data_dim..(h+1)*data_dim-1 under the default comp_list below.
+        # h*data_dim..(h+1)*data_dim-1 under the default comp_list below. A
+        # drawn A is normalized to unit-norm components as the reference does
+        # (issue #341, pamica.initialization), here and in the restart after a
+        # non-finite likelihood, which redraws through this method; an A
+        # supplied before fit() is used as is, like the reference's loaded A.
         if self.A is None:
+            drawn = initial_mixing(
+                self.rng,
+                self.data_dim,
+                self.num_models,
+                fix_init=bool(getattr(self, "fix_init", False)),
+            )
             self.A = np.zeros((self.num_comps, self.data_dim))
-            for h in range(self.num_models):
-                if not hasattr(self, "fix_init") or not self.fix_init:
-                    self.A[h * self.data_dim : (h + 1) * self.data_dim, :] = np.eye(
-                        self.data_dim
-                    ) + 0.01 * (0.5 - self.rng.rand(self.data_dim, self.data_dim))
-                else:
-                    self.A[h * self.data_dim : (h + 1) * self.data_dim, :] = np.eye(
-                        self.data_dim
-                    )
+            self.A[: drawn.shape[0], :] = drawn
 
         # Initialize component assignments
         self.comp_list = np.zeros((self.data_dim, self.num_models), dtype=int)
@@ -1809,7 +1812,9 @@ class AMICA:
 
         Matches Fortran's restart path (amica15.f90:1026-1046): it re-draws
         *only* the mixing matrix ``A`` (from the already-advanced RNG, a new
-        random basin) and recomputes ``comp_list``/``W``; the last-successful
+        random basin), normalizes each redrawn component to unit norm as the
+        reference does (:1039-1040, issue #341), and recomputes
+        ``comp_list``/``W``; the last-successful
         mixture parameters (``mu``/``alpha``/``beta``/``rho``/``gm``/``c``) are
         kept, not cold-reset. The learning rate and the LL/gradient-norm history
         are reset so the restarted run is judged from scratch; preprocessing

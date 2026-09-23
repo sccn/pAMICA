@@ -60,6 +60,7 @@ from .. import blocktune
 from .. import restarts
 from .. import schedule
 from ..component_layout import rows_from_legacy_columns
+from ..initialization import initial_mixing
 from ..metrics import mir as mir_metric
 from ..metrics import model_probability_from_loglik, pairwise_mi
 from ..rank import (
@@ -1195,10 +1196,9 @@ class AMICATorchNG:
         n, m, ncomp, nmix = self.n_channels, self.n_models, self.n_comps, self.n_mix
 
         # One row per component (issue #334): model h's block is rows
-        # h*n..(h+1)*n-1, the same n x n draw the column layout held before.
-        A_np = np.zeros((ncomp, n), dtype=np.float64)
-        for h in range(m):
-            A_np[h * n : (h + 1) * n, :] = np.eye(n) + 0.01 * (0.5 - rng.rand(n, n))
+        # h*n..(h+1)*n-1. Drawn and normalized to unit-norm components as the
+        # reference does (issue #341, pamica.initialization).
+        A_np = initial_mixing(rng, n, m)
 
         comp_list_np = np.zeros((n, m), dtype=np.int64)
         for h in range(m):
