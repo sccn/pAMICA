@@ -80,6 +80,14 @@ def mlx_keep(raw):
 
 
 @pytest.fixture(scope="module")
+def torch_keep(raw):
+    """The PyTorch twin of ``mlx_keep`` (the default backend)."""
+    return AMICAICA(random_state=SEED, device="cpu", verbose=False).fit(
+        raw, max_iter=2, pcakeep=N_KEEP
+    )
+
+
+@pytest.fixture(scope="module")
 def mlx_full(raw):
     _require_mlx()
     return AMICAICA(random_state=SEED, verbose=False, backend="mlx").fit(
@@ -99,6 +107,23 @@ def test_backend_is_validated_like_amica():
     with pytest.raises(ValueError, match="applies only to backend='torch'"):
         AMICAICA(backend="mlx", device="cpu")
     assert AMICAICA().backend == "torch"
+
+
+@pytest.mark.parametrize("backend", ["torch", "mlx"])
+def test_unfitted_repr_names_the_backend(backend):
+    if backend == "mlx":
+        _require_mlx()
+    assert repr(AMICAICA(n_models=2, backend=backend)) == (
+        f"<AMICAICA (unfitted, backend={backend!r}, n_models=2, n_mix=3)>"
+    )
+
+
+def test_fitted_repr_names_the_backend(torch_keep, mlx_keep):
+    for fitted, backend in ((torch_keep, "torch"), (mlx_keep, "mlx")):
+        assert repr(fitted) == (
+            f"<AMICAICA (fitted: {N_KEEP} components, backend={backend!r}, "
+            "n_models=1, n_mix=3, raw)>"
+        )
 
 
 def test_mlx_without_mlx_raises_import_error(monkeypatch):
@@ -183,12 +208,9 @@ def test_saved_ica_applies_identically(raw, mlx_keep, tmp_path):
         )
 
 
-def test_mlx_and_torch_export_the_same_basis(raw, mlx_keep):
+def test_mlx_and_torch_export_the_same_basis(mlx_keep, torch_keep):
     """Both backends build the PCA basis from their float64 sphere, so the
     basis, the variances and the component count agree across backends."""
-    torch_keep = AMICAICA(random_state=SEED, device="cpu", verbose=False).fit(
-        raw, max_iter=2, pcakeep=N_KEEP
-    )
     assert torch_keep.n_components_ == mlx_keep.n_components_ == N_KEEP
     ev_t = torch_keep.pca_explained_variance_
     p_m, p_t = mlx_keep.pca_components_, torch_keep.pca_components_

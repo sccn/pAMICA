@@ -641,6 +641,18 @@ class AMICA:
                 f"lrate, disable Newton, or check data conditioning, then refit."
             )
 
+    def __repr__(self) -> str:
+        config = (
+            f"backend={self.backend!r}, n_models={self.n_models}, n_mix={self.n_mix}"
+        )
+        if self.model_ is None:
+            return f"<AMICA (unfitted, {config})>"
+        if not self.converged_:
+            return (
+                f"<AMICA (degenerate fit, stop_reason={self.stop_reason_!r}, {config})>"
+            )
+        return f"<AMICA (fitted: {self.model_.n_channels} sources, {config})>"
+
     def transform(self, X: np.ndarray, model_idx: int = 0) -> np.ndarray:
         """
         Transform data to source space.

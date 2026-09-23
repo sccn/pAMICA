@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -65,7 +66,7 @@ def _require_mlx():
     return mlx_core.AMICAMLXNG
 
 
-def _backend_class(backend: str) -> type:
+def _backend_class(backend: str) -> Any:
     return AMICATorchNG if backend == "torch" else _require_mlx()
 
 
@@ -260,23 +261,38 @@ def test_unfitted_accessors_raise_not_fitted(backend):
             accessor()
 
 
-def test_degenerate_mlx_fit_is_refused_like_torch(real_data):
-    """The #50 contract on MLX: a NaN in real EEG drives a genuine degenerate
-    stop, which the wrapper classifies with AMICAMLXNG's own
-    ``_DEGENERATE_STOP_REASONS`` and refuses to use."""
-    AMICAMLXNG = _require_mlx()
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_degenerate_fit_is_refused_on_both_backends(real_data, backend):
+    """The #50 contract: a NaN in real EEG drives a genuine degenerate stop
+    (torch ``nan_ll``, MLX ``nan_params``), which the wrapper classifies with
+    the backend class's own ``_DEGENERATE_STOP_REASONS`` and refuses to use."""
+    backend_cls = _backend_class(backend)
     bad = real_data[:, :4096].copy()
     bad[0, 0] = np.nan
-    model = _wrapper("mlx")
+    model = _wrapper(backend)
     model.fit(bad, max_iter=3, seed=0)
-    assert model.stop_reason_ in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert model.stop_reason_ in backend_cls._DEGENERATE_STOP_REASONS
     assert model.converged_ is False and model.is_fitted_ is False
+    assert repr(model) == (
+        f"<AMICA (degenerate fit, stop_reason={model.stop_reason_!r}, "
+        f"backend={backend!r}, n_models=1, n_mix=3)>"
+    )
     for action in (model.transform, model.model_loglik):
         with pytest.raises(RuntimeError, match="degenerate"):
             action(real_data[:, :512])
     for accessor in (model.get_sphere, model.get_mean, model.get_model_center):
         with pytest.raises(RuntimeError, match="degenerate"):
             accessor()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_repr_names_the_backend_and_state(fitted, backend):
+    assert repr(_wrapper(backend, n_models=2, n_mix=4)) == (
+        f"<AMICA (unfitted, backend={backend!r}, n_models=2, n_mix=4)>"
+    )
+    assert repr(fitted(backend)) == (
+        f"<AMICA (fitted: {NW} sources, backend={backend!r}, n_models=1, n_mix=3)>"
+    )
 
 
 # --- from_params_file on MLX (issue #304's MLX path) ---------------------------------

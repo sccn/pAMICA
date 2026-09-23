@@ -1012,16 +1012,17 @@ class AMICAICA:
             )
 
     def __repr__(self) -> str:
+        config = (
+            f"backend={self.backend!r}, n_models={self.n_models}, n_mix={self.n_mix}"
+        )
         if self.amica_ is None:
-            return (
-                f"<AMICAICA (unfitted, n_models={self.n_models}, n_mix={self.n_mix})>"
-            )
+            return f"<AMICAICA (unfitted, {config})>"
         if not self.converged_:
             return (
                 f"<AMICAICA (degenerate fit, stop_reason={self.stop_reason_!r}, "
-                f"n_models={self.n_models}, n_mix={self.n_mix}, {self._fit_kind})>"
+                f"{config}, {self._fit_kind})>"
             )
         return (
-            f"<AMICAICA (fitted: {self.n_components_} components, "
-            f"n_models={self.n_models}, n_mix={self.n_mix}, {self._fit_kind})>"
+            f"<AMICAICA (fitted: {self.n_components_} components, {config}, "
+            f"{self._fit_kind})>"
         )
