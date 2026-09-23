@@ -49,9 +49,9 @@ _MLX_INSTALL_HINT = (
 )
 
 # Sentinel distinguishing "caller did not pass this fit() argument" from
-# "caller explicitly passed the same value as the hard default", so a
+# "caller explicitly passed the same value as the backend's default", so a
 # from_params_file default can be overridden by an explicit call-site value
-# without also being masked by fit()'s own hard-coded defaults.
+# without also being masked by the backend defaults fit() falls back to.
 _UNSET = object()
 
 
@@ -129,6 +129,25 @@ def _ctor_params(backend_cls: type) -> frozenset:
         - {"n_channels", "n_models", "n_mix", "device"}
         - _FIT_NAMED_PARAMS
     )
+
+
+@functools.cache
+def _fit_defaults(backend_cls: "type[AMICATorchNG] | type[AMICAMLXNG]") -> dict:
+    """The defaults of ``fit()``'s named parameters, for one backend class
+    (issue #354).
+
+    Read from the backend's own signatures, so the wrapper cannot drift from
+    it: ``max_iter`` from ``backend_cls.fit``, and ``lrate``/``do_mean``/
+    ``do_sphere``/``do_newton`` from the constructor. An argument left unset
+    in :meth:`AMICA.fit`, and absent from a parameter file, takes this value,
+    so ``AMICA().fit(X)`` runs exactly as ``backend_cls(n_channels).fit(X)``.
+    """
+    ctor = inspect.signature(backend_cls).parameters
+    defaults = {name: ctor[name].default for name in _FIT_NAMED_PARAMS - {"max_iter"}}
+    defaults["max_iter"] = (
+        inspect.signature(backend_cls.fit).parameters["max_iter"].default
+    )
+    return defaults
 
 
 # AMICA.save's payload version (issue #313). Version 2 records the backend
@@ -426,14 +445,22 @@ class AMICA:
         """
         Fit AMICA model to data.
 
+        The defaults of ``max_iter``, ``lrate``, ``do_mean``, ``do_sphere``
+        and ``do_newton`` are the selected backend's own, read from its
+        signatures (issue #354), so ``AMICA().fit(X)`` fits exactly as the
+        backend class does with its defaults. Both backends default to the
+        values listed below.
+
         Parameters
         ----------
         X : np.ndarray
             Input data of shape (n_channels, n_samples)
         max_iter : int, default=100
             Maximum number of iterations
-        lrate : float, default=0.05
-            Learning rate
+        lrate : float, default=0.1
+            Initial and maximum natural-gradient learning rate, the compiled
+            amica15 default. EEGLAB's ``runamica15.m`` uses 0.05; see the
+            defaults table in ``docs/guides/amica-differences.md``.
         do_mean : bool, default=True
             Whether to remove mean from data
         do_sphere : bool, default=True
@@ -479,7 +506,7 @@ class AMICA:
             When the instance was built via :meth:`from_params_file`
             (issue #132), any of the parameters above -- named or in ``**kwargs`` --
             left unset here falls back to that file's translated value instead
-            of the hard-coded default; an explicitly passed argument always
+            of the backend's default; an explicitly passed argument always
             wins over the file. Settings the file carries that match neither a
             named ``fit()`` parameter nor a constructor keyword of the
             selected backend (data-location metadata like ``files``/
@@ -556,17 +583,18 @@ class AMICA:
         # the file carries that apply to neither surface are named in one
         # warning rather than silently discarded.
         file_params = self._file_params or {}
+        backend_defaults = _fit_defaults(backend_cls)
 
-        def _file_default(explicit, name, hard_default):
+        def _file_default(explicit, name):
             if explicit is not _UNSET:
                 return explicit
-            return file_params.get(name, hard_default)
+            return file_params.get(name, backend_defaults[name])
 
-        max_iter = _file_default(max_iter, "max_iter", 100)
-        lrate = _file_default(lrate, "lrate", 0.05)
-        do_mean = _file_default(do_mean, "do_mean", True)
-        do_sphere = _file_default(do_sphere, "do_sphere", True)
-        do_newton = _file_default(do_newton, "do_newton", False)
+        max_iter = _file_default(max_iter, "max_iter")
+        lrate = _file_default(lrate, "lrate")
+        do_mean = _file_default(do_mean, "do_mean")
+        do_sphere = _file_default(do_sphere, "do_sphere")
+        do_newton = _file_default(do_newton, "do_newton")
 
         if file_params:
             for key, value in file_params.items():

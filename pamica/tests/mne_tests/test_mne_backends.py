@@ -16,6 +16,7 @@ Real sample EEG only: the bundled EEGLAB ``eeglab_data.set`` (32 channels,
 the construction checks run everywhere.
 """
 
+import inspect
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -149,6 +150,17 @@ def test_mlx_rejects_a_dtype(raw):
     with pytest.raises(ValueError, match="apply only to backend='torch'"):
         ica.fit(raw, stop=2048, max_iter=1, dtype=torch.float32)
     assert ica.amica_ is None
+
+
+@pytest.mark.parametrize("fixture", ["torch_keep", "mlx_keep"])
+def test_fit_without_lrate_uses_the_backend_default(fixture, request):
+    """``AMICAICA.fit`` forwards its keywords to ``AMICA.fit`` and sets no
+    ``lrate`` of its own, so a fit that passes none runs at the backend's
+    default, as ``AMICA`` does (issue #354)."""
+    fitted = request.getfixturevalue(fixture)
+    backend = fitted.amica_.model_
+    default = inspect.signature(type(backend)).parameters["lrate"].default
+    assert backend.lrate0 == default
 
 
 # --- the MLX fit and its export ---------------------------------------------------
