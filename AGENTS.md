@@ -153,8 +153,10 @@ components whose de-sphered mixing vectors (rows of `A` mapped through `pinv(sph
 scalp maps) are near-collinear across models, with cosine above `comp_thresh`, are merged: the merge
 re-points `comp_list`, so the two sources share one component (mixing vector and density), and the
 `gm`-weighted `dAk/zeta` step averages that component over the models that share it
-(Fortran `identify_shared_comps`, amica15.f90:1916). Merged-away rows are frozen. A-freeze for 6
-iterations after each merge. OFF by default; byte-identical when no merge fires. The reference
+(Fortran `identify_shared_comps`, amica15.f90:1916). Merged-away rows are frozen. The A-freeze is
+the reference's schedule and applies to every fit, sharing on or off (ADR 0008, #345): from
+`share_start` on, `A` is held on every iteration with `mod(iter, share_iter) <= 5` (100-105,
+200-205, ... by default). Sharing is OFF by default; byte-identical when no merge fires. The reference
 binary's own scan never merges (`Spinv2` is never allocated, so every similarity is NaN), but the
 update from a merged state seeded through `load_comp_list` matches it to float64 round-off
 (`pamica/tests/test_component_rows.py`, `AMICA_RUN_FORTRAN=1`).

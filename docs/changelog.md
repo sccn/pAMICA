@@ -19,8 +19,10 @@ Release notes are also published on the
     On a seeded 30-iteration run with eight decreases (`lrate=0.5`, no Newton, `doscaling` on),
     the largest per-iteration log-likelihood gap to the native binary fell from 1.4e-2 to 2.7e-5 (PyTorch) and 8.2e-5 (NumPy),
     and the largest gap in `A` from 0.22 to 8.1e-4 and 6.8e-4;
-    the binary against itself (1 thread against 4) differs by 1.9e-5 and 6.0e-4 on the same run.
-    On a run that ratchets at `maxdecs`, the gaps fell from 1.3e-2 to 6.6e-6 and 8.6e-6 (binary floor 4.2e-6).
+    the binary against itself (1 thread against 2 or 4, whose reduction order is not reproducible from run to run)
+    differs by 4.1e-5 to 1.3e-4 in log-likelihood and 5.3e-4 to 1.2e-3 in `A` over three runs.
+    On a run that ratchets at `maxdecs`, the log-likelihood gap fell from 1.3e-2 to 6.6e-6 (PyTorch) and 8.6e-6 (NumPy),
+    and the gap in `A` from 0.14 to 3.0e-4 and 2.7e-4 (binary floors 5.7e-6 to 9.6e-6 and 1.4e-4 to 4.2e-4).
     Every decrease now falls on the reference's iterations.
   - **Behavior change: a fit that stops on a convergence check returns the parameters its `final_ll_` was computed from.**
     On a `min_dll`, gradient-norm or `lrate`-floor stop, the stopping iteration used to take its update anyway,
@@ -33,7 +35,7 @@ Release notes are also published on the
     pamica held `A` only under `share_comps`, in a window counted from `share_start`.
     So every default fit of 100 or more iterations now holds `A` on iterations 100-105 (and 200-205, and so on), as the reference does.
     On a seeded 16-iteration run with `share_start=3` and `share_iter=10`,
-    the gap to the binary fell from 6.1e-3 to 6.6e-7 in log-likelihood (binary floor 4.3e-7) and from 0.19 to 5.0e-6 in `A`.
+    the gap to the binary fell from 6.1e-3 to 6.6e-7 in log-likelihood (binary floor 4.0e-7 to 4.3e-7) and from 0.19 to 5.0e-6 in `A`.
   - Parity on the bundled sample, before and after, on all three backends:
     against the bundled 200-iteration reference output, the log-likelihood gap falls from 2.2e-4 to 2.3e-4 down to 1.2e-4 to 1.3e-4,
     the mean matched component correlation rises from 0.9972-0.9973 to 0.9982-0.9983 (minimum 0.969-0.970 to 0.981-0.982),
@@ -41,18 +43,33 @@ Release notes are also published on the
     The validation harness's 100-iteration run keeps its final log-likelihood (gap 2.6e-4 to 2.7e-4),
     and its mean matched correlation rises from 0.9988 to 0.9991 (Amari distance 0.0044 to 0.0038),
     because the reference holds `A` on its 100th iteration.
-  - **New validation:** `share_iter` (NumPy `share_int`) must be an integer >= 7 on every backend, whether or not `share_comps` is on,
-    because a shorter cycle would never update `A` again.
+  - **Behavior change: every backend stops the same way on a non-finite value.**
+    A non-finite log-likelihood is never recorded: the NumPy backend used to leave it as the last `self.ll` entry,
+    which PyTorch and MLX never did.
+    A non-finite update direction or gradient norm, which passes both `<= min_nd` checks, now stops the fit before the update
+    with the new degenerate `stop_reason` `"nan_direction"`; it used to be applied.
+    Non-finite parameters right after an update now stop PyTorch and NumPy as they stopped MLX (`"nan_params"`, same check and message),
+    so a corruption on the last iteration no longer ends as `max_iter`.
+    The `AMICA` wrapper treats both new reasons as degenerate (`converged_=False`, output refused).
+    The NumPy backend names them in its own prose vocabulary and reports `converged=False`;
+    inside its restart-on-NaN window it lets a restart take over only when `A`/`W` alone went non-finite, which a restart redraws.
+    Its restart also clears the small-gain count `numincs`, as the reference's NaN comparison does.
+  - **New validation:** `share_iter` (NumPy `share_int` or `share_iter`) must be an integer >= 7,
+    and `share_start` an integer >= 1, on every backend whether or not `share_comps` is on:
+    a `share_iter` below 7 would hold `A` permanently from `share_start` on, and `share_start=0` would start the freeze on the first iteration.
+    The same checks apply through a Fortran params file.
     No bundled configuration used a smaller value.
+    Loading a PyTorch `state_dict` or an MLX save refuses a missing or non-finite learning rate with a `ValueError` naming the field.
   - The rho learning rate is now two values, as in the reference:
     the working rate `rholrate`, scaled on each decrease and reset to its ceiling by each `A` update,
     and the ceiling `rholrate_cap`, ratcheted at `maxdecs`.
     PyTorch and MLX saves store `rholrate_cap`; a save without it loads with the ceiling equal to its `rholrate`.
   - Smaller consequences of the order:
-    the MNE export's `n_iter_` is now `iteration + 1`, the number of E-steps that ran (it was one fewer);
+    the MNE export's `n_iter_` is now `iteration + 1`, the number of E-steps that ran (it was `max(iteration, 1)`);
     an MLX fit that stops on non-finite parameters now records that iteration's log-likelihood;
     NumPy's restart after a non-finite likelihood now happens before the update, and its outlier rejection after the checkpoint writes, as in the reference.
-  - Tests: `pamica/tests/test_iteration_order.py` checks the order, the decrease timing, the stop semantics and the freeze through real fits on every backend,
+  - Tests: `pamica/tests/test_iteration_order.py` checks the order, the decrease timing, the stop semantics of every convergence stop and the freeze through real fits on every backend,
+    `pamica/tests/test_nonfinite_stops.py` the non-finite stops by injection,
     and `pamica/tests/test_iteration_order_native_oracle.py` (opt-in, `AMICA_RUN_FORTRAN=1`) is the native-binary comparison above.
 
 - **Phase 14 of epic #324: `AMICA_NumPy` rejects unknown/unsupported keyword arguments (issue #346).**

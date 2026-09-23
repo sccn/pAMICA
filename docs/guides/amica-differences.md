@@ -16,7 +16,7 @@ that is not listed, that is a bug worth
 | 2 | Zero numerical rank | `numeigs = 0`, continues | `ValueError` naming cause and fix | fitting a zero-dimensional model is not a recoverable state | — (no reason to want it) |
 | 3 | Returned iterate | last EM iterate | highest-likelihood iterate (`keep_best`) | the lrate schedule is non-monotone; late Newton overshoots cut LL variance 12.7x → 2.0x | `keep_best=False` |
 | 4 | Newton | on (`do_newton=1`) | off | isolates the algorithm from initialization for parity work | `do_newton=True` |
-| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | the `AMICA` wrapper, on either backend, refuses `transform`/`get_*`/`save`; the raw `AMICATorchNG`, `AMICAMLXNG` and NumPy `AMICA` backends now refuse their own output accessors on a degenerate fit too (issue #306), not just the wrapper; NumPy additionally reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk) | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50, #240 and #306) |
+| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | the `AMICA` wrapper, on either backend, refuses `transform`/`get_*`/`save`; the raw `AMICATorchNG`, `AMICAMLXNG` and NumPy `AMICA` backends now refuse their own output accessors on a degenerate fit too (issue #306), not just the wrapper; NumPy additionally reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk). Every backend stops before a non-finite value is applied or returned: a non-finite likelihood (never recorded in the history), update direction (`nan_direction`) or parameter after an update (`nan_params`), where the reference applies a NaN step and exits on the next likelihood | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50, #240, #306 and #339) |
 | 6 | Precision | float64 | float64 (float32 on Apple GPUs) | Apple GPUs have no float64; float32 agrees to ~7 significant digits, not bit-parity | `dtype=torch.float64` |
 | 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
 | 8 | Components merged away by `share_comps` | mixing vector and density updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided, never rescaled) | a fit must not end holding NaN parameters, mask or no mask; the components are dead either way | — (see issues #60, #240, #334) |
@@ -30,7 +30,7 @@ that is not listed, that is a bug worth
 | 16 | Single-precision density normalizers | `log(dble(1.772453851))` in the exact-Gaussian branch of the generalized Gaussian (`rho == 2`, amica15.f90:1313) is a single-precision literal widened to double, 3.0e-8 above `log(sqrt(pi))`; the Gaussian and cosh families (`pdftype` 2, 4 and 1, :1333, :1359, :1371) use literals of the same kind | `0.5 * log(pi)` for `rho == 2`; the double-precision values of the decimal literals for the other families, which differ from the reference's in the log by 3.7e-10, 2.0e-8 and -2.1e-8 | not a deliberate choice: found during epic #324 Phase 8, while seeding the reference from warm states in which mixtures sit at `maxrho = 2`; each such mixture's log-density differs by 3.0e-8, weighted by its responsibility (2.8e-9 in the log-likelihood of one warm two-model state of the sample). The other families' offsets are computed from the literals, not yet measured against the binary | none yet (issue #344 decides whether to adopt the reference's values); the seeded oracles keep `maxrho` below 2 |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
-row 3 with ADR 0003; row 5 with issue #50, extended to the raw backends by issue #306; row 8 with issues #60, #240 and #334;
+row 3 with ADR 0003; row 5 with issue #50, extended to the raw backends by issue #306 and to non-finite steps and updates by issue #339; row 8 with issues #60, #240 and #334;
 row 9 with issue #232; row 10 with issue #198; row 11 with issue #322 (ADR 0005);
 row 12 with issue #323; row 13 is recorded, not yet resolved, by issue #328;
 row 14 with issue #333 (ADR 0006);
@@ -538,8 +538,8 @@ The exception is a fit that stops on a convergence check:
 the reference exits before that iteration's `update_params` (amica15.f90:1111),
 and since issue #339 every pamica backend does too,
 so the final write's `LLt` is the likelihood of the `W`/`A` beside it.
-The relation that holds on both sides — on the
-committed reference output as much as on pamica's — is
+The relation that holds on both sides, on the
+committed reference output as much as on pamica's, is
 
 ```
 LLt[num_models, :].sum() / (n_good_samples * nw) == LL[-1]
