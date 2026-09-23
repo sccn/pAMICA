@@ -61,10 +61,14 @@ def _model(**kwargs: Any) -> AMICAMLXNG:
 
 # --- constructor validation --------------------------------------------
 def test_reject_param_validation():
-    """Matches AMICATorchNG's validation exactly (torch_impl/core.py:
-    679-685): rejint<1 would ZeroDivisionError in the reject schedule,
-    rejsig<=0 breaks the reject-below-mean semantics, maxrej<0 is a sanity
-    guard. rejstart is NOT validated (torch does not validate it either)."""
+    """Matches AMICATorchNG's validation exactly: rejint<1 would
+    ZeroDivisionError in the reject schedule, rejsig<=0 breaks the
+    reject-below-mean semantics, maxrej<0 is a sanity guard, and rejstart
+    counts from 1, so rejstart<=0 would silently skip the unconditional first
+    pass (issue #335; the cross-backend message check is
+    ``test_schedule_gates.py``)."""
+    with pytest.raises(ValueError, match="rejstart"):
+        _model(do_reject=True, rejstart=0)
     with pytest.raises(ValueError, match="rejint"):
         _model(do_reject=True, rejint=0)
     with pytest.raises(ValueError, match="rejsig"):
@@ -99,10 +103,12 @@ def test_do_reject_false_leaves_good_idx_unset(real_data):
 
 # --- the reject schedule -------------------------------------------------
 def test_rejection_shrinks_good_sample_set_on_the_expected_schedule(real_data):
-    """rejstart=2/rejint=3/maxrej=2: rejection fires at it=2 (unconditional)
-    and it=5 (max(1,5-2)%3==0, numrej<2), then is capped -- no more passes
-    at it=8/11 despite the modulo condition recurring, matching Fortran's
-    schedule (amica15.f90:1142) and the torch/NumPy backends' own tests."""
+    """rejstart=2/rejint=3/maxrej=2: rejection fires at iteration 2
+    (unconditional) and 5 (max(1,5-2)%3==0, numrej<2), then is capped -- no
+    more passes at 8/11 despite the modulo condition recurring, matching
+    Fortran's schedule (amica15.f90:1136, iterations counted from 1 as the
+    reference counts them, issue #335) and the torch/NumPy backends' own
+    tests."""
     n_total = real_data.shape[1]
     m = _model(
         seed=42,
@@ -232,11 +238,13 @@ def test_keep_best_inactive_reason_prefers_do_reject_when_both_are_on(
 
 # The aggressive-Newton recipe that genuinely overshoots on this backend
 # (test_mlx_keepbest.py's module docstring), plus a single rejection pass.
+# newt_start and rejstart count from 1 since issue #335: 2 and 6 are the run
+# measured as 1 and 5 before.
 _OVERSHOOT_KWARGS: dict[str, Any] = dict(
     n_models=2,
     seed=0,
     do_newton=True,
-    newt_start=1,
+    newt_start=2,
     lrate=0.5,
     newtrate=3.0,
     use_min_dll=True,
@@ -245,7 +253,7 @@ _OVERSHOOT_KWARGS: dict[str, Any] = dict(
     use_grad_norm=False,
 )
 _REJECT_KWARGS: dict[str, Any] = dict(
-    do_reject=True, rejsig=3.0, rejstart=5, rejint=5, maxrej=1
+    do_reject=True, rejsig=3.0, rejstart=6, rejint=5, maxrej=1
 )
 _OVERSHOOT_MAX_ITER = 150
 

@@ -81,10 +81,11 @@ LL_TOL_F32 = 1e-6
 COLUMN_RULE_MIN_DLL = 1e-5
 
 # A real state reached WITH Newton steps: Newton from the second iteration
-# (0-based iteration 1). A positive-definite Newton step ramps lrate past the
-# natural-gradient ceiling (the lrate default, 0.1), which the setup asserts;
-# measured on every backend, one and two models: 0.3 after 3 iterations.
-NEWTON: Dict[str, Any] = dict(do_newton=True, newt_start=1)
+# (newt_start=2; it counts from 1 since issue #335). A positive-definite Newton
+# step ramps lrate past the natural-gradient ceiling (the lrate default, 0.1),
+# which the setup asserts; measured on every backend, one and two models: 0.3
+# after 3 iterations.
+NEWTON: Dict[str, Any] = dict(do_newton=True, newt_start=2)
 NG_LRATE_CEILING = 0.1
 
 pytestmark = pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")

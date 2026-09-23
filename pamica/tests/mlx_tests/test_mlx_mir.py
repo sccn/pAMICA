@@ -372,7 +372,7 @@ def test_mir_history_survives_keep_best_restore(real_data):
         seed=1,
         block_size=BLOCK,
         do_newton=True,
-        newt_start=1,
+        newt_start=2,
         lrate=0.5,
         newtrate=3.0,  # overshoots since issue #333 (test_mlx_keepbest.py)
         use_min_dll=True,

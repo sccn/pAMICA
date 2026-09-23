@@ -113,6 +113,44 @@ Release notes are also published on the
     `plot_model_comparison` skipped the sphere.
     They now plot the model's own sensor maps and sources (what `get_sensor_mixing_matrix` and `transform` return), checked against those accessors on a real fit.
     `load_results` also reads a rank-reduced fit's zero-padded sphere, which it used to reject.
+- **Phase 9 of epic #324: iteration schedules count from 1, as the reference's do (issue #335).**
+  **Behavior change:** `newt_start`, `rejstart` and (on NumPy) `restartiter` now name iterations counted from 1, like the reference's `iter` (amica15.f90:949):
+  the first Newton M-step is the `newt_start`-th iteration's, the first rejection follows the `rejstart`-th,
+  and a non-finite likelihood restarts the fit only within the first `restartiter` iterations.
+  The PyTorch, NumPy and MLX backends compared their 0-based loop index with these 1-based settings,
+  so each of the following fired one iteration late or, for the restart window, covered one iteration too many:
+  - the Newton switch (`iter .ge. newt_start`), the decrease-counter reset on the switch-on iteration (`iter == newt_start`),
+    and the `maxdecs` ratchet of the rho-rate ceiling and of `newtrate` (`iter > newt_start`);
+  - the outlier-rejection schedule (`iter == rejstart`, then every `rejint` iterations);
+  - the NumPy backend's restart-on-NaN window (`iter .le. restartiter`).
+
+  Measured against the pinned v0.3.3 native binary, seeded with pamica's own initialization, `doscaling` off and single-threaded:
+  with `newt_start=3`, the first 6 iterations now match to round-off,
+  the log-likelihood within 5.4e-11 (PyTorch) and 2.1e-12 (NumPy) and `A` within 4.2e-10 and 1.1e-10,
+  where they deviated by 1.25e-3 and 3.1e-2 before.
+  Over 100 iterations with the reference's own `newt_start=50`, the largest log-likelihood deviation drops from 1.33e-3 to 6.7e-6 (PyTorch) and 4.1e-6 (NumPy).
+  That is the floor this recording sets before Newton even starts:
+  one mixture component's shape sits at `rho=1`, where the location update divides by `|y|` and amplifies round-off from one iteration to the next.
+  With `doscaling` on as well (the default, component rows since issue #333), the same 100-iteration comparison stays within 3.9e-6 (PyTorch) and 7.0e-6 (NumPy);
+  with only the #333 fix it was 2.1e-4 apart, the gap ADR 0006 attributed to this Newton start.
+  - Default fits (`do_newton=False`, `do_reject=False`) change in two narrow cases only.
+    A `maxdecs` ratchet that completes on exactly iteration `newt_start + 1` (21 by default) now tightens the rho-rate ceiling, as the reference's does.
+    On NumPy, a non-finite likelihood on iteration `restartiter + 1` (11 by default) now ends the fit instead of restarting it.
+  - To reproduce a trajectory from before this change, add 1 to `newt_start` and `rejstart` (and to `restartiter` on NumPy).
+  - **New validation**, with the same message on every backend: `newt_start` must be an integer >= 0 whether or not `do_newton` is on
+    (it also gates the rho-rate ratchet), and `rejstart` an integer >= 1 when `do_reject` is on
+    (with 1-based counting, `rejstart <= 0` silently skipped the reference's unconditional first pass; NumPy used to accept 0, PyTorch and MLX any value).
+    On NumPy, `restartiter` and `maxrestarts` must be integers >= 0, and `histstep` an integer >= 1 when `do_history` is on
+    (`histstep=0` was a bare `ZeroDivisionError` mid-fit).
+    `restartiter=0` disables restart-on-NaN, as in the reference.
+    NumPy's restart-on-NaN recovery itself differs from the reference's, which never resumes fitting after a restart;
+    that is now recorded as row 15 of the differences guide.
+  - Every schedule gate now lives in one shared module, `pamica/schedule.py`, which all three backends call.
+    The share-merge, A-freeze, kurtosis-switch and `writestep`/`histstep` schedules already counted from 1 and are unchanged,
+    and `scalestep` (1-based since issue #333) uses the same helper and validator.
+  - `iteration`, `ll_history` and `mir_history_` keep their 0-based indexing.
+  - Tests: `pamica/tests/test_schedule_gates.py` observes each gate through real fits on all three backends,
+    and `pamica/tests/test_schedule_native_oracle.py` (opt-in, `AMICA_RUN_FORTRAN=1`) is the native-binary comparison above.
 - **Phase 4 of epic #324: backend selection in `AMICA` and `AMICAICA` (issue #313).**
   `AMICA` and `AMICAICA` gain a `backend` parameter:
   `"torch"` (the default, `AMICATorchNG`, float64 Fortran parity) or `"mlx"` (`AMICAMLXNG`, Apple GPU, float32 only).
