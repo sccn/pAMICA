@@ -39,8 +39,8 @@ NMIX = 3
 SEED = 42
 N_SAMPLES = 4096
 ITERS = 10
-# The epic #324 head Phase 8 branched from: the last component-column layout.
-PRE_CHANGE_COMMIT = "3627a6e2dd0361072ad9d212ee69dc33a923fd1b"
+# The epic #324 head Phase 8 merges onto: the last component-column layout.
+PRE_CHANGE_COMMIT = "0930c0e68ec9e2bbef3d20d51cff4c03029248f2"
 
 # Fit recipes. "merged" merges a few pairs at iteration 8 under either layout's
 # metric (both models are still near-collinear there); the refusal test checks

@@ -14,7 +14,7 @@ Pinned here, cross-backend per ``.rules/backend_parity.md`` (PyTorch and NumPy
 always run; MLX checks skip individually without MLX or an Apple GPU):
 
 1. every configuration without a merge is byte-identical to the pre-change code
-   (the package at commit ``3627a6e`` is loaded from git): one, two and three
+   (the package at commit ``0930c0e`` is loaded from git): one, two and three
    models, ``doscaling`` and Newton on and off, ``pdftype`` 0 and 1,
    ``do_reject``; the old ``A`` maps onto the new one through the conversion
    the persistence layer uses;
@@ -61,9 +61,10 @@ FIELD = 30504
 NMIX = 3
 SEED = 42
 
-# The epic #324 head this phase branched from: the last commit with the
-# component-column layout (Phase 7's doscaling fix included).
-PRE_CHANGE_COMMIT = "3627a6e2dd0361072ad9d212ee69dc33a923fd1b"
+# The epic #324 head this phase merges onto: the last commit with the
+# component-column layout (Phase 7's doscaling fix and Phase 9's schedule
+# gates included, so the two sides differ by this phase alone).
+PRE_CHANGE_COMMIT = "0930c0e68ec9e2bbef3d20d51cff4c03029248f2"
 
 pytestmark = pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
 
