@@ -72,10 +72,22 @@ def _controlled_ng(A: torch.Tensor, n_channels: int, n_models: int) -> AMICATorc
 def test_single_model_byte_identical_with_share_toggled(real_data):
     """Sharing is a no-op for n_models=1, so a single-model fit must be
     byte-for-byte identical with share_comps on vs off (the gm-weighted A-update
-    reduces to the plain update since gm=[1] cancels exactly)."""
+    reduces to the plain update since gm=[1] cancels exactly).
+
+    Both fits carry the same share_start/share_iter: the reference's A-freeze
+    reads them whether or not sharing is on (issue #345), so with share_iter=8
+    both hold A on iteration 8, and only share_comps differs between them."""
     x = real_data[:, :4096]
     off = AMICA(n_models=1, n_mix=3, device="cpu", verbose=False)
-    off.fit(x, max_iter=8, seed=42, block_size=1024, do_newton=True)
+    off.fit(
+        x,
+        max_iter=8,
+        seed=42,
+        block_size=1024,
+        do_newton=True,
+        share_start=7,
+        share_iter=8,
+    )
     on = AMICA(n_models=1, n_mix=3, device="cpu", verbose=False)
     on.fit(
         x,
@@ -182,14 +194,18 @@ def test_comp_thresh_one_merges_only_exact_duplicates():
 # --- freeze schedule --------------------------------------------------------
 
 
-def test_a_frozen_window():
-    """A is frozen for the merge iteration + 5 after it, thawed for the rest of
-    each cycle, and frozen again at the next cycle boundary."""
+@pytest.mark.parametrize("share_comps, n_models", [(True, 2), (False, 2), (False, 1)])
+def test_a_frozen_window(share_comps, n_models):
+    """The reference's arithmetic, ``iter >= share_start`` and
+    ``mod(iter, share_iter) <= 5`` (amica15.f90:1803, 1-indexed), for any model
+    count and with sharing on or off (issue #345). The remainder is of ``iter``
+    itself, so with ``share_start=10`` (not a multiple of 20) nothing is held
+    until iteration 20; the window is not anchored on share_start."""
     ng = AMICATorchNG(
         n_channels=4,
-        n_models=2,
+        n_models=n_models,
         device="cpu",
-        share_comps=True,
+        share_comps=share_comps,
         share_start=10,
         share_iter=20,
     )
@@ -198,23 +214,22 @@ def test_a_frozen_window():
         ng.iteration = itf - 1  # itf is the Fortran-style 1-indexed iteration
         return ng._a_frozen()
 
-    assert not any(frozen(i) for i in range(1, 10))  # before share_start
-    assert all(frozen(i) for i in range(10, 16))  # merge + 5 (residue 0..5)
-    assert not any(frozen(i) for i in range(16, 30))  # thawed rest of cycle
-    assert all(frozen(i) for i in range(30, 36))  # next cycle boundary
+    assert not any(frozen(i) for i in range(1, 20))  # before/at share_start
+    assert all(frozen(i) for i in range(20, 26))  # remainder 0..5
+    assert not any(frozen(i) for i in range(26, 40))  # remainder 6..19
+    assert all(frozen(i) for i in range(40, 46))  # next cycle
 
 
-def test_a_frozen_off_for_single_model():
-    ng = AMICATorchNG(
-        n_channels=4,
-        n_models=1,
-        device="cpu",
-        share_comps=True,
-        share_start=2,
-        share_iter=8,
-    )
-    ng.iteration = 3
-    assert ng._a_frozen() is False
+def test_a_frozen_window_starting_inside_a_cycle():
+    """share_start inside the 0..5 remainder band holds A from share_start to
+    the band's end, as the reference's arithmetic does: 3, 4, 5, then 10-15."""
+    ng = AMICATorchNG(n_channels=4, device="cpu", share_start=3, share_iter=10)
+    held = []
+    for itf in range(1, 21):
+        ng.iteration = itf - 1
+        if ng._a_frozen():
+            held.append(itf)
+    assert held == [3, 4, 5, 10, 11, 12, 13, 14, 15, 20]
 
 
 # --- validation -------------------------------------------------------------

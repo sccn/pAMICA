@@ -48,12 +48,20 @@ def _real_data(n_samples: int = 4096) -> np.ndarray:
 def _shared_fit(
     max_iter: int = 10,
     share_comps: bool = True,
-    share_start: int = 2,
+    share_start: int = 8,
     share_int: int = 8,
     **kwargs,
 ):
-    """A 2-model fit with sharing on: merge at iteration ``share_start``, the
-    6-iteration A-freeze, then iterations where A moves again."""
+    """A 2-model fit with sharing on: merge at iteration ``share_start``, a
+    multiple of ``share_int`` as with the reference's defaults, so the
+    reference's A-freeze (iterations 8-13, issue #345) starts on the merge
+    iteration.
+
+    With ``share_comps=False`` the freeze still applies (it does not depend on
+    sharing), but a 3-iteration fit ends before it, so the direct M-steps the
+    tests below take from that state, at iteration 3, move A. (With the
+    previous ``share_start=2`` they were held, and a test on A would have
+    compared a matrix that never moved.)"""
     model = AMICA(
         num_models=2,
         num_mix=3,
@@ -103,9 +111,11 @@ def _force_merged_column(model):
 def test_share_constructor_validation(kwargs, match):
     """Rejected up front, and for the same reasons as AMICATorchNG.
 
-    ``share_int <= 6`` is the one that bites: the post-merge A-freeze window is
-    6 iterations long, so a shorter cycle would hold A frozen on every iteration
-    of every cycle and the fit would silently stop moving its mixing matrix.
+    ``share_int <= 6`` is the one that bites: the reference holds A on every
+    iteration whose remainder mod ``share_int`` is 0 to 5, so a shorter cycle
+    would hold A frozen on every iteration of every cycle and the fit would
+    silently stop moving its mixing matrix. (That one is rejected with sharing
+    off too; see ``test_iteration_order.py``.)
     """
     with pytest.raises(ValueError, match=match):
         AMICA(num_models=2, share_comps=True, use_tqdm=False, **kwargs)
@@ -392,11 +402,14 @@ def test_merged_away_column_does_not_move():
 
 
 # --- post-merge A-freeze (#242) ---------------------------------------------
-def test_a_frozen_window_matches_the_torch_schedule():
-    """Identical window to AMICATorchNG: the merge iteration and the 5 after."""
+@pytest.mark.parametrize("share_comps, num_models", [(True, 2), (False, 2), (False, 1)])
+def test_a_frozen_window_matches_the_torch_schedule(share_comps, num_models):
+    """Identical window to AMICATorchNG, the reference's ``iter >= share_start``
+    and ``mod(iter, share_int) <= 5`` (amica15.f90:1803, 1-indexed), with
+    sharing on or off and for any model count (issue #345)."""
     model = AMICA(
-        num_models=2,
-        share_comps=True,
+        num_models=num_models,
+        share_comps=share_comps,
         share_start=10,
         share_int=20,
         use_tqdm=False,
@@ -406,19 +419,18 @@ def test_a_frozen_window_matches_the_torch_schedule():
         model.iter = itf - 1  # _a_frozen works in Fortran-style 1-indexed iters
         return model._a_frozen()
 
-    assert not any(frozen(i) for i in range(1, 10))  # before share_start
-    assert all(frozen(i) for i in range(10, 16))  # merge iteration + 5
-    assert not any(frozen(i) for i in range(16, 30))  # A moves again
-    assert all(frozen(i) for i in range(30, 36))  # next cycle
+    assert not any(frozen(i) for i in range(1, 20))  # remainder above 5 or early
+    assert all(frozen(i) for i in range(20, 26))  # remainder 0..5
+    assert not any(frozen(i) for i in range(26, 40))  # A moves again
+    assert all(frozen(i) for i in range(40, 46))  # next cycle
 
 
-def test_a_frozen_is_off_for_a_single_model():
-    """A model cannot share with itself, so sharing never freezes A there."""
-    model = AMICA(
-        num_models=1, share_comps=True, share_start=1, share_int=8, use_tqdm=False
-    )
+def test_a_frozen_applies_to_a_single_model_without_sharing():
+    """The reference never checks share_comps in the A-update guard, so a
+    one-model fit with sharing off is held too (issue #345)."""
+    model = AMICA(num_models=1, share_start=1, share_int=8, use_tqdm=False)
     model.iter = 0
-    assert model._a_frozen() is False
+    assert model._a_frozen() is True
 
 
 def test_freeze_holds_A_but_still_measures_the_gradient():

@@ -51,9 +51,11 @@ pytestmark = pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data miss
 # the likelihood-decrease bookkeeping has something to count within a short
 # budget. lrate=0.6/maxdecs=2/seed=3/8192 frames is test_mlx_newton.py's
 # schedule fixture: it was chosen there by sweeping seeds, block sizes and
-# sample counts, and here it completes the first maxdecs cycle at iteration 11
-# on all three backends. Every test below still reads the iterations it needs
-# off the executing machine's own trajectory rather than trusting that number.
+# sample counts, and here it completes the first maxdecs cycle at iteration 9
+# on all three backends (iteration 11 before issue #339 moved the decrease
+# response ahead of the update). Every test below still reads the iterations it
+# needs off the executing machine's own trajectory rather than trusting that
+# number.
 _OVERSHOOT: dict[str, Any] = dict(lrate=0.6, lratefact=0.5, maxdecs=2)
 # The Newton-phase ceiling test_mlx_newton.py pairs with it: at newtrate=1.0
 # the post-switch-on trajectory can be monotone, leaving the reset unobservable.
@@ -89,7 +91,7 @@ class _Run:
     lrate: float
     lrate_ceiling: float  # lrate_cap (torch/MLX), lrate0 (NumPy)
     lrate_ceiling0: float
-    rholrate: float
+    rholrate: float  # the rho-rate ceiling: rholrate_cap on every backend
     rholrate0: float
     newtrate: float
     newtrate0: float
@@ -130,7 +132,7 @@ def _fit(
             lrate=m.lrate,
             lrate_ceiling=m.lrate0,
             lrate_ceiling0=m._pristine_state["lrate0"],
-            rholrate=m.rholrate,
+            rholrate=m.rholrate_cap,
             rholrate0=m.rholrate0,
             newtrate=m.newtrate,
             newtrate0=m._pristine_state["newtrate"],
@@ -165,7 +167,7 @@ def _fit(
         lrate=m.lrate,
         lrate_ceiling=m.lrate_cap,
         lrate_ceiling0=m.lrate0,
-        rholrate=m.rholrate,
+        rholrate=m.rholrate_cap,
         rholrate0=m.rholrate0,
         newtrate=m.newtrate,
         newtrate0=m.newtrate0,
@@ -293,15 +295,16 @@ def test_every_gate_fires_on_the_reference_iteration():
     # Share merges from share_start=3 every 4 (amica15.f90:1856): 3, 7, 11.
     assert [i for i in idx if schedule.periodic_due(i, 3, 4)] == [2, 6, 10]
     assert fires(lambda i: schedule.periodic_due(i, 1, 1)) == list(idx)
-    # The A-freeze: the merge iteration and the 5 after it, anchored on
-    # share_start (a documented pamica decision), share_start=3, share_iter=8.
+    # The A-freeze (amica15.f90:1803): from share_start=3 on, every iteration
+    # whose remainder mod share_iter=8 is 0 to 5 (3, 4, 5, then 8 to 13),
+    # whether or not share_comps is on (issue #345).
     assert [i for i in idx if schedule.share_freeze(i, 3, 8)] == [
         2,
         3,
         4,
-        5,
-        6,
         7,
+        8,
+        9,
         10,
         11,
     ]
@@ -448,11 +451,15 @@ def test_rho_rate_ratchet_opens_only_after_iteration_newt_start(backend, X, tmp_
 # lrate 0.5/0.6/0.8, maxdecs 2/3, newt_ramp 10/1 and 4096/8192 frames for a
 # ratchet at ll index 20, first on PyTorch and then checked on NumPy and MLX;
 # re-searched when issue #333's component-row doscaling changed the default
-# trajectories. This one decreases at ll indices 4, 5, 8 and 9, 19, 20 on all
-# three backends, so it ratchets at 8 and 20; the smallest of those decreases
-# is 4.7e-4, far above round-off, float32 included.
+# trajectories, and again when issue #339 moved the decrease response ahead of
+# the update (seed 1, the previous choice, now ratchets at 8 and 16). Seven
+# configurations qualify on PyTorch; this one, seed 3, also does on NumPy and
+# MLX (seed 4, the widest-margin PyTorch candidate, ratchets at 16 in float32).
+# It decreases at ll indices 4, 5, 8 and 14, 15, 20 on all three backends, so it
+# ratchets at 8 and 20; the smallest decrease is 2.4e-3 and the smallest
+# likelihood step of the run 4.4e-4, far above round-off, float32 included.
 _DEFAULT_GATE_FRAMES = 4096
-_DEFAULT_GATE_SEED = 1
+_DEFAULT_GATE_SEED = 3
 _DEFAULT_GATE: dict[str, Any] = dict(lrate=0.6, lratefact=0.5, maxdecs=3, newt_ramp=1)
 
 

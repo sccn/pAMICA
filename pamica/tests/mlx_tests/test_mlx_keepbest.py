@@ -31,16 +31,19 @@ on the same config PyTorch's float64 one does):
   instead of stored columns, the earlier ``newtrate=0.5``/60-iteration recipe
   ran monotone to ``max_iter`` on every seed tried (0-11).
 * ``_FORCED_RESTORE_PDFTYPE1_KWARGS``: the ``pdftype=1``/``n_mix=1`` analogue
-  (seed 2, ``kurt_start=6``) chosen so the adaptive switcher's first kurtosis
-  re-evaluation (run at the end of iteration 5, after that iteration's E-step)
-  comes strictly AFTER the peak iterate (measured at iteration 5), while the
-  run lasts long enough for all five passes (it stops via ``min_dll`` at
-  iteration 12) -- the scenario
+  (seed 3, ``kurt_start=7``) chosen so the adaptive switcher's first kurtosis
+  re-evaluation (run at the end of iteration 7, after that iteration's E-step)
+  comes strictly AFTER the E-step of the peak iterate (0-based ll index 6),
+  while the run lasts long enough for all five passes (it stops via ``min_dll``
+  at ll index 19, 0.26 below the peak): the scenario
   ``test_pdftype1_forced_restore_rolls_back_n_kurt_done_with_pdtype`` needs to
   prove the restore rolls ``n_kurt_done`` back in step with ``pdtype``, not
-  just the floating-point arrays. (``kurt_start=8`` served until issue #333;
-  the rescale fix moved that run's ``min_dll`` stop to iteration 8, after
-  only two passes.)
+  just the floating-point arrays. (``kurt_start=8`` served until issue #333,
+  seed 2 with ``kurt_start=6`` until issue #339, whose earlier decrease
+  response no longer lets that run overshoot. Seeds 0-5 and ``kurt_start``
+  3-11 were searched; seed 1 with ``kurt_start=8`` also qualifies, and most
+  other overshooting runs end in a ``nan_params`` stop, which skips the
+  restore.)
 
 The truncated-refit bit-identity check (both here and in the pdftype=1 test)
 uses ``max_iter=argmax`` where ``argmax = int(np.argmax(ll_history))``: a
@@ -147,7 +150,7 @@ _FORCED_RESTORE_PDFTYPE1_KWARGS: dict[str, Any] = dict(
     n_models=2,
     n_mix=1,
     pdftype=1,
-    seed=2,
+    seed=3,
     block_size=BLOCK,
     do_newton=True,
     newt_start=2,
@@ -156,7 +159,7 @@ _FORCED_RESTORE_PDFTYPE1_KWARGS: dict[str, Any] = dict(
     min_dll=1e-4,
     maxincs=2,
     use_grad_norm=False,
-    kurt_start=6,
+    kurt_start=7,
     num_kurt=5,
     kurt_int=1,
 )
@@ -366,8 +369,8 @@ def test_pdftype1_forced_restore_rolls_back_n_kurt_done_with_pdtype(real_data):
     ``AMICATorchNG``).
 
     The recipe (module docstring) runs the adaptive switcher's first
-    kurtosis pass at the end of iteration 5, strictly after the E-step that
-    measures the peak at iteration 5, so ``keep_best=False`` reaches
+    kurtosis pass at the end of iteration 7, strictly after the E-step that
+    measures the peak (ll index 6), so ``keep_best=False`` reaches
     ``n_kurt_done=5`` (all switch passes ran) with a mixed pdtype, while the
     restored ``keep_best=True`` model must be pinned at the pre-switch state:
     ``n_kurt_done=0`` and ``pdtype`` unchanged from its all-super-Gaussian

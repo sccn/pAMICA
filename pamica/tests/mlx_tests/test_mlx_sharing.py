@@ -288,9 +288,10 @@ def test_convergence_stop_can_fire_while_A_is_frozen():
     assert model.stop_reason == "grad_norm"
     # It stops on the first iteration that can stop at all (two LL values are
     # required, Fortran's `if (iter > 1)`), which is itf=2 -- inside the first
-    # freeze window [share_start, share_start + 5] = [1, 6].
+    # freeze window, iterations 1-5 (from share_start, remainders 1-5 mod 8,
+    # amica15.f90:1803).
     itf = model.iteration + 1
-    assert itf == 2 and model.share_start <= itf <= model.share_start + 5
+    assert itf == 2 and itf >= model.share_start and itf % model.share_iter <= 5
     assert model._a_frozen() is True, "the stop did not land inside the window"
     assert model._ndtmpsum is not None and model._ndtmpsum <= model.min_nd
     assert model.final_ll_ is not None and np.isfinite(model.final_ll_)
@@ -446,14 +447,17 @@ def test_merged_away_columns_keep_their_last_finite_value():
 # --- (e) the post-merge A-freeze window ---------------------------------------
 
 
-def test_a_frozen_window_matches_the_torch_schedule():
-    """Identical window to AMICATorchNG: the merge iteration and the 5 after."""
+@pytest.mark.parametrize("share_comps, n_models", [(True, 2), (False, 2), (False, 1)])
+def test_a_frozen_window_matches_the_torch_schedule(share_comps, n_models):
+    """Identical window to AMICATorchNG, the reference's ``iter >=
+    share_start`` and ``mod(iter, share_iter) <= 5`` (amica15.f90:1803,
+    1-indexed), with sharing on or off and for any model count (issue #345)."""
     from pamica.mlx_impl import AMICAMLXNG
 
     model = AMICAMLXNG(
         n_channels=8,
-        n_models=2,
-        share_comps=True,
+        n_models=n_models,
+        share_comps=share_comps,
         share_start=10,
         share_iter=20,
     )
@@ -462,21 +466,20 @@ def test_a_frozen_window_matches_the_torch_schedule():
         model.iteration = itf - 1  # itf is the Fortran-style 1-indexed iteration
         return model._a_frozen()
 
-    assert not any(frozen(i) for i in range(1, 10))  # before share_start
-    assert all(frozen(i) for i in range(10, 16))  # merge + 5 (residue 0..5)
-    assert not any(frozen(i) for i in range(16, 30))  # thawed rest of cycle
-    assert all(frozen(i) for i in range(30, 36))  # next cycle boundary
+    assert not any(frozen(i) for i in range(1, 20))  # remainder above 5 or early
+    assert all(frozen(i) for i in range(20, 26))  # remainder 0..5
+    assert not any(frozen(i) for i in range(26, 40))  # thawed rest of cycle
+    assert all(frozen(i) for i in range(40, 46))  # next cycle
 
 
-def test_a_frozen_is_off_for_a_single_model():
-    """A model cannot share with itself, so sharing never freezes A there."""
+def test_a_frozen_applies_to_a_single_model_without_sharing():
+    """The reference never checks share_comps in the A-update guard, so a
+    one-model fit with sharing off is held too (issue #345)."""
     from pamica.mlx_impl import AMICAMLXNG
 
-    model = AMICAMLXNG(
-        n_channels=8, n_models=1, share_comps=True, share_start=2, share_iter=8
-    )
+    model = AMICAMLXNG(n_channels=8, n_models=1, share_start=2, share_iter=8)
     model.iteration = 3
-    assert model._a_frozen() is False
+    assert model._a_frozen() is True
 
 
 def test_freeze_holds_A_while_the_mixture_keeps_moving():
@@ -484,10 +487,16 @@ def test_freeze_holds_A_while_the_mixture_keeps_moving():
     parameters and the gradient norm keep updating -- Fortran computes ``dAk``/
     ``ndtmpsum`` in the accumulation pass, which runs whether or not the A step
     is taken (issue #207). A moves again at the sixth iteration after the merge.
+
+    ``share_start`` is a multiple of ``share_iter``, as with the reference's
+    defaults, so the window (remainders 0-5, amica15.f90:1803) starts on the
+    merge iteration: iterations 7-12, thawed on 13. (It was 4 of 20 under the
+    anchored window issue #345 replaced, which the reference holds on 4 and 5
+    only.)
     """
-    share_start, share_iter = 4, 20
+    share_start, share_iter = 7, 7
     model, x_t = _warm_model(
-        warmup=share_start - 1,  # iterations 0..2, so the next itf is share_start
+        warmup=share_start - 1,  # iterations 0..5, so the next itf is share_start
         share_comps=True,
         share_start=share_start,
         share_iter=share_iter,
@@ -501,7 +510,7 @@ def test_freeze_holds_A_while_the_mixture_keeps_moving():
     mu_start = np.array(model.mu)
     lrate_start = model.lrate
 
-    frozen_iters = range(share_start - 1, share_start + 5)  # itf = 4..9
+    frozen_iters = range(share_start - 1, share_start + 5)  # itf = 7..12
     for it in frozen_iters:
         model.iteration = it
         assert model._a_frozen() is True
@@ -538,9 +547,10 @@ def test_freeze_holds_A_while_the_mixture_keeps_moving():
 )
 def test_share_constructor_validation(kwargs, match):
     """Rejected up front, for the same reasons and with the same messages as
-    ``AMICATorchNG``. ``share_iter <= 6`` is the one that bites: the post-merge
-    A-freeze is 6 iterations long, so a shorter cycle would hold A frozen on
-    every iteration of every cycle and the mixing matrix would stop moving."""
+    ``AMICATorchNG``. ``share_iter <= 6`` is the one that bites: the reference
+    holds A on every iteration whose remainder mod ``share_iter`` is 0 to 5, so
+    a shorter cycle would hold A frozen on every iteration of every cycle and
+    the mixing matrix would stop moving."""
     from pamica.mlx_impl import AMICAMLXNG
 
     with pytest.raises(ValueError, match=match):
@@ -548,12 +558,16 @@ def test_share_constructor_validation(kwargs, match):
 
 
 def test_share_settings_are_not_validated_when_sharing_is_off():
-    """The validation is gated on ``share_comps``, as in AMICATorchNG, so a
-    default-constructed model carries the (unused) defaults untouched."""
+    """The merge settings are validated only with ``share_comps`` on, as in
+    AMICATorchNG, so they are carried untouched otherwise. ``share_iter`` is the
+    exception: the reference's A-freeze reads it whether or not sharing is on
+    (issue #345), so it is validated always."""
     from pamica.mlx_impl import AMICAMLXNG
 
-    model = AMICAMLXNG(n_channels=8, n_models=2, share_start=0, share_iter=1)
-    assert model.share_comps is False and model.share_iter == 1
+    model = AMICAMLXNG(n_channels=8, n_models=2, share_start=0, comp_thresh=0.0)
+    assert model.share_comps is False and model.share_start == 0
+    with pytest.raises(ValueError, match="share_iter must be an integer >= 7"):
+        AMICAMLXNG(n_channels=8, n_models=2, share_iter=1)
 
 
 def test_single_model_sharing_is_accepted_and_inert():

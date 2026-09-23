@@ -815,16 +815,26 @@ def test_mir_history_survives_keep_best_restore(real_data):
     # stopping iteration; the earlier equality-with-a-multiple-of-5 form was
     # satisfied by a truncating restore as well as a correct one.
     final_it = len(ng.ll_history) - 1
+    # The min_dll stop exits before its iteration's update, as the reference
+    # does (issue #339), so that iteration records no waypoint: the last one
+    # belongs to the iteration before it.
+    last_update_it = final_it - 1
     assert ng.final_ll_ is not None
     best_it = ng.ll_history.index(ng.final_ll_)
-    assert best_it < final_it, (
-        "test setup: the restore must discard at least one iteration, or "
+    # Waypoint i is computed after iteration i's update, from the parameters
+    # whose likelihood is ll_history[i + 1]; the restore returns the ones
+    # measured at ll_history[best_it], so every waypoint from best_it on was
+    # computed from parameters it discards. A restore that rolled
+    # mir_history_ back with its snapshot (taken at best_it's E-step, before
+    # waypoint best_it exists) would end it at best_it - 1.
+    assert best_it <= last_update_it, (
+        "test setup: the restore must discard at least one waypoint, or "
         "there is no truncation window to guard"
     )
-    assert last_it == final_it, "the post-peak waypoints were dropped"
+    assert last_it == last_update_it, "the post-peak waypoints were dropped"
     # The count is what a partial truncation would move even if the last entry
     # happened to survive.
-    assert len(ng.mir_history_) == final_it + 1, (
+    assert len(ng.mir_history_) == last_update_it + 1, (
         "mir_history_ is not the full per-iteration trajectory"
     )
 
