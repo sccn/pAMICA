@@ -100,14 +100,14 @@ Runtime is one run's wall-clock time for the fit alone and varies by about a thi
 the reference's includes process start-up and is single-threaded.
 Epic #324 left the runtimes unchanged: the code before it (e38aa11), run in the same session, took 10.1, 17.9, 32.5 and 3.2 seconds.
 
-**The log-likelihood difference in these rows is set by the two starting points, not by the update rule.**
+**The log-likelihood difference in these rows mostly reflects the two starting points.**
 The harness starts each side from its own draw: numpy's `RandomState(42)` for pamica, gfortran's generator seeded with 42 for the reference.
 After 100 iterations the final log-likelihood still depends on where a fit started.
 Over eight seeds, the reference's own final log-likelihood has a standard deviation of 2.6e-4 and a range of 8.0e-4 (pamica's: 2.7e-4 and 8.0e-4),
 and over the 64 pairs of a pamica start and a reference start the median difference is 3.5e-4 (range 1.7e-5 to 8.2e-4).
-The 2.7e-4 in the table is one draw from that spread.
-Before epic #324 the same run showed 2.9e-5, which was a cancellation for this one pair of starts, not tighter parity:
-from a shared start, the code before the epic lagged the reference by 2.4e-4 after 100 iterations, and that lag happened to offset the difference between the two starts.
+The 2.7e-4 in the table lies within that spread.
+Before epic #324 the same run showed 2.9e-5, which reflected this particular pair of starts:
+from a shared start, the code before the epic trailed the reference by 2.4e-4 after 100 iterations, which offset most of the difference between the two starts.
 
 The update rule itself is compared from a shared start:
 pamica's seed-42 initialization is written into the reference's `load_*` files, and both sides run the harness settings for 100 iterations, the reference on one thread
@@ -530,8 +530,8 @@ At 70 channels the sweep's 30000 frames give $k\approx6$, and 25 iterations at `
 two float64 runs of the same code on CPU and CUDA differ by 2.3e-4, the backends by up to 1.1e-3,
 and adding 1e-9 µV to one sample changes the torch-CPU value by 1.3e-15 after one iteration and 4.4e-4 after 25
 (the trajectory has a likelihood decrease on its 25th iteration).
-So the 70-channel column measures that sensitivity, not a difference between the backends' arithmetic;
-the code before epic #324 shows the same growth.
+The 70-channel differences are of the same size as that sensitivity,
+and the code before epic #324 shows the same growth.
 NumPy is called without a seed here, so it starts from its own draw, which is why its column sits apart (by up to 4.2e-3 at 70 channels).
 The component-level float32 comparison is in [the per-backend rows](#parity-rows-per-backend):
 from a shared start, MLX float32 and PyTorch float64 agree to a mean matched correlation of 0.99999991 after 100 iterations.
