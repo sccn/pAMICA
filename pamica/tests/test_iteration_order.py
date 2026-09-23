@@ -22,6 +22,7 @@ The native-binary oracles for the same behavior are
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -448,3 +449,51 @@ def test_the_rho_rate_ceiling_survives_a_save(backend, X, tmp_path):
     del state["extra"]["rholrate_cap"]
     legacy = load(state)
     assert legacy.rholrate_cap == state["extra"]["rholrate"]
+
+
+@pytest.mark.parametrize(
+    "field", ["lrate", "lrate_cap", "newtrate", "rholrate", "rholrate_cap"]
+)
+@pytest.mark.parametrize("backend", ["torch", "mlx"])
+def test_a_save_with_a_nonfinite_rate_is_refused_by_name(backend, field, X, tmp_path):
+    """A NaN learning rate in a save would load silently and turn the next
+    refit's first update into NaN parameters, so loading refuses it with a
+    ``ValueError`` naming the field, through ``from_state_dict`` and, on MLX,
+    through a file written by ``save``."""
+    model = _model(backend, 2, tmp_path, keep_best=False)
+    _fit(model, backend, X[:, :2048], 2)
+
+    state = model.state_dict()
+    state["extra"][field] = float("nan")
+    with pytest.raises(ValueError, match=f"extra field '{field}' must be a finite"):
+        if backend == "torch":
+            AMICATorchNG.from_state_dict(state, device="cpu")
+        else:
+            type(model).from_state_dict(state)
+
+    if backend == "mlx":
+        path = tmp_path / "model.npz"
+        model.save(str(path))
+        with np.load(path, allow_pickle=False) as data:
+            raw = {name: data[name] for name in data.files}
+        extra = json.loads(raw["extra"].item())
+        extra[field] = float("nan")
+        raw["extra"] = np.array(json.dumps(extra))
+        np.savez_compressed(path, **raw)
+        with pytest.raises(ValueError, match=f"extra field '{field}' must be"):
+            type(model).load(str(path))
+
+
+@pytest.mark.parametrize("backend", ["torch", "mlx"])
+def test_a_save_without_its_rho_rate_is_refused_by_name(backend, X, tmp_path):
+    """A save missing ``rholrate`` is malformed, reported like a missing
+    parameter tensor rather than as a bare ``KeyError``."""
+    model = _model(backend, 2, tmp_path, keep_best=False)
+    _fit(model, backend, X[:, :2048], 2)
+    state = model.state_dict()
+    del state["extra"]["rholrate"]
+    with pytest.raises(ValueError, match=r"missing extra fields \['rholrate'\]"):
+        if backend == "torch":
+            AMICATorchNG.from_state_dict(state, device="cpu")
+        else:
+            type(model).from_state_dict(state)

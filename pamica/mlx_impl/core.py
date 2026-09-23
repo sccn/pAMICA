@@ -343,6 +343,38 @@ def _safe_int_cast(name: str, value: np.ndarray, dtype) -> np.ndarray:
     return rounded.astype(dtype)
 
 
+# The learning rates a save carries (issue #339 review). rholrate_cap is
+# additive: a save written before issue #339 kept one rho rate, the ceiling,
+# under "rholrate", and a fit that never held A ends with the working rate
+# equal to it.
+_SAVED_RATES = ("lrate", "lrate_cap", "newtrate", "rholrate")
+
+
+def _saved_rates(extra: dict, owner: str) -> dict:
+    """The saved learning rates, each a finite number, or a named ValueError.
+
+    A missing rate is reported like a missing parameter tensor, and a
+    non-finite or non-numeric one is refused: a NaN rate would load silently
+    and turn the next refit's first update into NaN parameters.
+    """
+    missing = [name for name in _SAVED_RATES if name not in extra]
+    if missing:
+        raise ValueError(f"malformed {owner} state: missing extra fields {missing}")
+    rates = {name: extra[name] for name in _SAVED_RATES}
+    rates["rholrate_cap"] = extra.get("rholrate_cap", extra["rholrate"])
+    for name, value in rates.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError(
+                f"malformed {owner} state: extra field {name!r} must be a finite "
+                f"number, got {value!r}"
+            )
+    return rates
+
+
 class _UpdateStep(NamedTuple):
     """The mixing-matrix step one E-step implies, computed before the
     iteration's stopping checks and applied after them (the reference's
@@ -4425,14 +4457,10 @@ class AMICAMLXNG:
         self.stop_reason = extra["stop_reason"]
         self.n_kurt_done = extra["n_kurt_done"]
         self.n_newton_fallbacks = extra["n_newton_fallbacks"]
-        self.lrate = extra["lrate"]
-        self.lrate_cap = extra["lrate_cap"]
-        self.newtrate = extra["newtrate"]
-        self.rholrate = extra["rholrate"]
-        # Additive-only (issue #339), NOT in _EXTRA_KEYS: a payload written
-        # before it kept one rho rate, the ceiling, under "rholrate", and a fit
-        # that never held A ends with the working rate equal to it.
-        self.rholrate_cap = extra.get("rholrate_cap", extra["rholrate"])
+        # The rates, validated (a non-finite one is a named ValueError);
+        # rholrate_cap is additive, NOT in _EXTRA_KEYS, see _saved_rates.
+        for name, value in _saved_rates(extra, "AMICAMLXNG").items():
+            setattr(self, name, value)
         self.restart_seeds_ = list(extra["restart_seeds_"])
         self.restart_lls_ = list(extra["restart_lls_"])
         self.restart_stop_reasons_ = list(extra["restart_stop_reasons_"])
