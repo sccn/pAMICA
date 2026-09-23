@@ -704,6 +704,50 @@ class AMICA:
             self._sphere_pinv = np.linalg.pinv(self.sphere)
         return self._sphere_pinv
 
+    def _check_usable(self, action: str) -> None:
+        """Refuse to serve output from a degenerate fit (issue #306; port of
+        ``AMICATorchNG._check_usable`` for the legacy NumPy backend).
+
+        Callers first check their own unfitted marker(s) and raise the
+        existing ``"Model has not been fitted yet"`` ``RuntimeError``
+        (unchanged); this assumes a fit has actually run. NumPy's single
+        ``converged`` flag already folds together every degenerate cause
+        (non-finite LL, non-finite exit parameters, or a restart error, see
+        :meth:`_fit_once`) that the PyTorch/MLX backends track via
+        ``stop_reason``/``_DEGENERATE_STOP_REASONS``, so the equivalent gate
+        here is simply ``not self.converged``; the defense-in-depth isfinite
+        sweep reuses :meth:`_nonfinite_params`, the same predicate ``fit()``'s
+        own outcome bookkeeping and every checkpoint write already trust.
+        """
+        if not self.converged:
+            raise RuntimeError(
+                f"Refusing to {action}: fit ended degenerate (stop_reason="
+                f"{self.stop_reason!r}), so the model holds non-finite "
+                f"parameters and would produce NaN output. Lower lrate, "
+                f"disable Newton, or check data conditioning, then refit."
+            )
+        nonfinite = self._nonfinite_params()
+        if nonfinite:
+            raise RuntimeError(
+                f"Refusing to {action}: parameters {nonfinite} hold "
+                f"non-finite values (stop_reason={self.stop_reason!r})."
+            )
+
+    def _check_input_shape(self, data: np.ndarray) -> None:
+        """Validate a data array against the fitted input channel count,
+        mirroring :meth:`fit`'s own ``data`` validation (issue #306): a raw
+        matmul/broadcast error deep inside a method is less useful than this
+        named ``ValueError`` at the entry point."""
+        if data.ndim != 2:
+            raise ValueError(
+                f"data must be a 2D array (n_channels, n_samples), got shape "
+                f"{data.shape}"
+            )
+        if data.shape[0] != self.data_dim_in:
+            raise ValueError(
+                f"data has {data.shape[0]} channels, model expects {self.data_dim_in}"
+            )
+
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space.
 
@@ -714,6 +758,7 @@ class AMICA:
         """
         if self.sphere is None or self.A is None or self.comp_list is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
+        self._check_usable("get the sensor mixing matrix")
         A = self.A[:, self.comp_list[:, model_idx]]
         return self._pinv_sphere() @ A
 
@@ -728,6 +773,7 @@ class AMICA:
         """
         if self.W is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
+        self._check_usable("get the weights (unmixing matrix)")
         # Internal W = inv(A) is stored transposed relative to the true unmixing
         # (the E-step forms activations as (X-c)^T @ W), so return W^T (issue #24).
         # This is the raw unmixing matrix; it does not account for the per-model
@@ -2693,9 +2739,18 @@ class AMICA:
         -------
         S : ndarray of shape (n_components, n_samples, n_models)
             The unmixed sources for each model
+
+        Raises
+        ------
+        RuntimeError
+            If the model is unfitted, or the fit ended degenerate (issue #306).
+        ValueError
+            If ``data`` is not a 2D array of the fitted input channel count.
         """
         if self.W is None or self.comp_list is None or self.c is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
+        self._check_usable("transform")
+        self._check_input_shape(data)
 
         if self.mean is not None:
             data = data - self.mean

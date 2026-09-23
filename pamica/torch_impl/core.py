@@ -56,7 +56,7 @@ from tqdm import tqdm
 from .. import blocktune
 from .. import restarts
 from ..metrics import mir as mir_metric
-from ..metrics import pairwise_mi
+from ..metrics import model_probability_from_loglik, pairwise_mi
 from ..rank import (
     MINEIG,
     MINEIG_REL,
@@ -2962,6 +2962,75 @@ class AMICATorchNG:
                 f"fit (valid: 0..{self.n_models - 1})."
             )
 
+    def _nonfinite_params(self) -> list:
+        """Names of :attr:`_PARAM_TENSORS` currently holding a non-finite
+        value (matching the legacy NumPy backend's own
+        ``_nonfinite_params``; issue #306 cross-backend review). Parameters
+        not yet allocated (``None``, e.g. a partially initialized instance)
+        are skipped rather than treated as bad.
+
+        Single-sync fast path: every parameter's ``isfinite().all()`` is
+        stacked into one small tensor and reduced with exactly one
+        ``.item()``/``bool()`` device sync, instead of one sync per
+        parameter (measured ~2.2 ms of avoidable host-device round trips
+        across a 12-tensor sweep before this, PR #329 review -- CUDA/MPS
+        pay for each ``bool(tensor)``, not just MLX). The per-parameter
+        breakdown -- one further, small sync -- is only computed once that
+        reduction is already ``False``.
+        """
+        names = [
+            name for name in self._PARAM_TENSORS if getattr(self, name) is not None
+        ]
+        if not names:
+            return []
+        flags = torch.stack(
+            [torch.isfinite(getattr(self, name)).all() for name in names]
+        )
+        if bool(flags.all()):
+            return []
+        bad = flags.logical_not().tolist()
+        return [name for name, is_bad in zip(names, bad) if is_bad]
+
+    def _check_usable(self, action: str) -> None:
+        """Refuse to serve output from a degenerate fit (issue #306).
+
+        Callers first check their own unfitted marker(s) and raise the
+        existing ``requires a fitted model`` ``RuntimeError`` (unchanged);
+        this assumes a fit has actually run and adds the two layers
+        :meth:`state_dict`/:meth:`write_amica_output` already use beyond
+        that: the ``stop_reason`` gate, then a defense-in-depth isfinite
+        sweep via :meth:`_nonfinite_params`. Mirrors the
+        :class:`~pamica.AMICA` wrapper's ``_check_usable`` (issue #50) for
+        callers using this backend directly.
+        """
+        if self.stop_reason in self._DEGENERATE_STOP_REASONS:
+            raise RuntimeError(
+                f"Refusing to {action}: fit ended degenerate (stop_reason="
+                f"{self.stop_reason!r}), so the model holds non-finite "
+                f"parameters and would produce NaN output. Lower lrate, "
+                f"disable Newton, or check data conditioning, then refit."
+            )
+        nonfinite = self._nonfinite_params()
+        if nonfinite:
+            raise RuntimeError(
+                f"Refusing to {action}: parameters {nonfinite} hold "
+                f"non-finite values (stop_reason={self.stop_reason!r})."
+            )
+
+    def _check_input_shape(self, X: np.ndarray) -> None:
+        """Validate a data array against the fitted input channel count,
+        mirroring :meth:`fit`'s own ``X`` validation (issue #306): a raw
+        matmul/broadcast error deep inside a method is less useful than this
+        named ``ValueError`` at the entry point."""
+        if X.ndim != 2:
+            raise ValueError(
+                f"X must be a 2D array (n_channels, n_samples), got shape {X.shape}"
+            )
+        if X.shape[0] != self.n_channels_in:
+            raise ValueError(
+                f"X has {X.shape[0]} channels, model expects {self.n_channels_in}"
+            )
+
     def transform(self, X: np.ndarray, model_idx: int = 0) -> np.ndarray:
         """Apply the learned unmixing matrix to (new) data.
 
@@ -2976,6 +3045,8 @@ class AMICATorchNG:
                 "AMICATorchNG.transform() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("transform")
+        self._check_input_shape(X)
         X_t = torch.from_numpy(np.ascontiguousarray(X)).to(self.device, self.dtype)
         X_t = self.sphere @ (X_t - self.mean)
         # c is the per-model data-space center: unmix as W(x - c) (issue #27).
@@ -2990,6 +3061,7 @@ class AMICATorchNG:
                 "fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the mixing matrix")
         return self.A[:, self.comp_list[:, model_idx]].T.cpu().numpy()
 
     @property
@@ -3027,6 +3099,7 @@ class AMICATorchNG:
                 "model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the sensor mixing matrix")
         A = self.A[:, self.comp_list[:, model_idx]].T
         return (self._pinv_sphere() @ A).cpu().numpy()
 
@@ -3038,6 +3111,7 @@ class AMICATorchNG:
                 "fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the unmixing matrix")
         return self.W[:, :, model_idx].T.cpu().numpy()
 
     # ------------------------------------------------------------------
@@ -3154,9 +3228,11 @@ class AMICATorchNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted.
+            If the model is unfitted, or the fit ended degenerate (issue
+            #306).
         ValueError
-            If the fitted sphere is rank-reduced (non-square): whether from
+            If ``X`` is not a 2D array of the fitted input channel count, or
+            if the fitted sphere is rank-reduced (non-square): whether from
             explicit ``pcakeep``/``pcadb`` or from automatic ``mineig``/
             ``mineig_rel`` numerical-rank detection, the sphere is
             rank-deficient, so MIR's log-Jacobian term is undefined
@@ -3167,6 +3243,8 @@ class AMICATorchNG:
                 "AMICATorchNG.mir() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("compute MIR")
+        self._check_input_shape(X)
         if self._pca_reduced():
             raise ValueError(
                 "mir() is incompatible with PCA reduction: the fitted "
@@ -3203,7 +3281,11 @@ class AMICATorchNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted (via ``transform``).
+            If the model is unfitted, or the fit ended degenerate (issue
+            #306), both via :meth:`transform`.
+        ValueError
+            If ``X`` is not a 2D array of the fitted input channel count
+            (via :meth:`transform`).
         """
         return pairwise_mi(self.transform(X, model_idx=model_idx), nbins)
 
@@ -3240,14 +3322,32 @@ class AMICATorchNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted.
+            If the model is unfitted, or the fit ended degenerate (issue
+            #306).
         ValueError
-            If ``X`` contains non-finite (NaN/Inf) values.
+            If ``X`` is not a 2D array of the fitted input channel count, or
+            contains non-finite (NaN/Inf) values.
         """
         if self.sphere is None or self.mean is None or self.W is None:
             raise RuntimeError(
                 "AMICATorchNG.model_loglik() requires a fitted model; call fit() first."
             )
+        self._check_usable("compute the model log-likelihood")
+        self._check_input_shape(X)
+        return self._model_loglik_unchecked(X)
+
+    def _model_loglik_unchecked(self, X: np.ndarray) -> np.ndarray:
+        """Core ``Lht`` computation for :meth:`model_loglik`, with no
+        degenerate-fit guard or shape validation of its own (issue #306 PR
+        #329 review): :meth:`model_loglik` and :meth:`model_probability` each
+        do their own single guard + shape check, with their own action
+        wording, then both call this -- so the guard no longer runs twice
+        (~2x cost) on a :meth:`model_probability` call, which used to run
+        its own ``_check_usable`` and then :meth:`model_loglik`'s."""
+        # Narrows Optional[Tensor] for the type checker: both callers already
+        # checked these are set before calling this private helper.
+        assert self.sphere is not None
+        assert self.mean is not None
         X = np.ascontiguousarray(X)
         if not np.isfinite(X).all():
             bad = np.flatnonzero(~np.isfinite(X).all(axis=1))
@@ -3285,23 +3385,32 @@ class AMICATorchNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted.
+            If the model is unfitted, or the fit ended degenerate (issue
+            #306).
         ValueError
-            If ``X`` is non-finite, or if every model underflows to ``-inf``
-            log-likelihood at some sample (the posterior is undefined there).
+            If ``X`` is not a 2D array of the fitted input channel count, if
+            ``X`` is non-finite, if every model underflows to ``-inf``
+            log-likelihood at some sample (the posterior is undefined
+            there), or if a log-likelihood is NaN (numerical corruption,
+            distinct from the ``-inf`` underflow case above).
         """
-        Lht = self.model_loglik(X)
-        col_max = Lht.max(axis=0, keepdims=True)
-        if not np.isfinite(col_max).all():
-            n_bad = int((~np.isfinite(col_max)).sum())
-            raise ValueError(
-                f"AMICATorchNG.model_probability(): every model has -inf "
-                f"log-likelihood at {n_bad} sample(s), so the posterior is "
-                "undefined there (an extreme outlier under a tight source "
-                "density)."
+        if self.sphere is None or self.mean is None or self.W is None:
+            raise RuntimeError(
+                "AMICATorchNG.model_probability() requires a fitted model; "
+                "call fit() first."
             )
-        ex = np.exp(Lht - col_max)
-        return ex / ex.sum(axis=0, keepdims=True)
+        self._check_usable("compute the model probability")
+        self._check_input_shape(X)
+        Lht = self._model_loglik_unchecked(X)
+        # NaN and -inf are different failure modes and must not share a
+        # message: -inf is every model underflowing at a real sample (an
+        # extreme outlier), while NaN is numerical corruption. isfinite alone
+        # conflates them (PR #311 review scope extension, issue #306). The
+        # diagnosis + normalization is shared with AMICAMLXNG (PR #329
+        # review) rather than duplicated per backend.
+        return model_probability_from_loglik(
+            Lht, caller="AMICATorchNG.model_probability()"
+        )
 
     # ------------------------------------------------------------------
     # Fitted-parameter metadata (issue #142)
@@ -3324,6 +3433,7 @@ class AMICATorchNG:
                 "AMICATorchNG.get_pdftype() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the density family")
         return self.pdtype[:, model_idx].detach().cpu().numpy()
 
     def get_rho(self, model_idx: int = 0) -> np.ndarray:
@@ -3344,15 +3454,12 @@ class AMICATorchNG:
                 "AMICATorchNG.get_rho() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
-        # Defense-in-depth, matching state_dict()'s isfinite sweep: a degenerate
-        # multi-model fit can leave one model's rho non-finite without the
-        # aggregate LL tripping nan_ll, and _check_usable only inspects
-        # stop_reason. Refuse rather than return a silent NaN.
-        if not torch.isfinite(self.rho).all():
-            raise RuntimeError(
-                "AMICATorchNG.get_rho(): rho holds non-finite values (a "
-                "degenerate fit); inspect stop_reason and refit."
-            )
+        # Folded into the shared guard (issue #306): a degenerate multi-model
+        # fit can leave one model's rho non-finite without the aggregate LL
+        # tripping a _DEGENERATE_STOP_REASONS marker, which _check_usable's
+        # defense-in-depth isfinite sweep over _PARAM_TENSORS (rho included)
+        # still catches. Refuse rather than return a silent NaN.
+        self._check_usable("get rho")
         idx = self.comp_list[:, model_idx]
         return self.rho[:, idx].detach().cpu().numpy()
 
@@ -3381,6 +3488,7 @@ class AMICATorchNG:
                 "AMICATorchNG.shared_components() requires a fitted model; call "
                 "fit() first."
             )
+        self._check_usable("get the shared components")
         cl = self.comp_list.detach().cpu().numpy()  # (n_sources, n_models)
         groups = []
         for col in np.unique(cl):
@@ -3435,6 +3543,7 @@ class AMICATorchNG:
                 "fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("compute the variance order")
         cl = self.comp_list[:, model_idx].cpu().numpy()
         alpha = self.alpha[:, cl].cpu().numpy()
         mu = self.mu[:, cl].cpu().numpy()
@@ -3505,11 +3614,7 @@ class AMICATorchNG:
         # neutralizes a stale LLt stash: a failed final iteration's
         # _llt_lht/_llt_lt (from before the nan_params/nan_ll break) can no
         # longer reach disk once this guard refuses the write outright.
-        nonfinite = [
-            name
-            for name in self._PARAM_TENSORS
-            if not torch.isfinite(getattr(self, name)).all()
-        ]
+        nonfinite = self._nonfinite_params()
         if nonfinite:
             raise RuntimeError(
                 f"Refusing to write output for a model with non-finite "
@@ -3622,11 +3727,7 @@ class AMICATorchNG:
         # Defense-in-depth: catch a non-finite parameter even if stop_reason
         # bookkeeping ever misses it (the codebase has known NaN-suppression
         # risks). isfinite on the integer comp_list is trivially all-True.
-        nonfinite = [
-            name
-            for name in self._PARAM_TENSORS
-            if not torch.isfinite(getattr(self, name)).all()
-        ]
+        nonfinite = self._nonfinite_params()
         if nonfinite:
             raise RuntimeError(
                 f"Refusing to serialize a model with non-finite parameters "
@@ -3792,7 +3893,20 @@ class AMICATorchNG:
                 )
         config = dict(state["config"])
         config["dtype"] = getattr(torch, config["dtype"])
-        obj = cls(device=device, **config)
+        # A missing/unexpected key in a malformed or foreign-version payload
+        # surfaces as a bare TypeError from the constructor call; every other
+        # validation step in this method already names the payload as the
+        # culprit with a ValueError, so wrap this one the same way instead of
+        # letting a mismatched-keyword TypeError propagate unexplained
+        # (issue #306).
+        try:
+            obj = cls(device=device, **config)
+        except TypeError as exc:
+            raise ValueError(
+                f"malformed AMICATorchNG state: config does not match the "
+                f"AMICATorchNG constructor ({exc}); the payload may be "
+                "truncated or from an incompatible version."
+            ) from exc
         obj._load_params(state)
         return obj
 
