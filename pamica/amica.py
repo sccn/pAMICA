@@ -758,8 +758,10 @@ class AMICA:
         """
         Get the unmixing matrix W, which acts on sphered data.
 
-        The full transform from input channels is ``W @ get_sphere()``
-        (see :meth:`get_sphere`).
+        :meth:`transform` applies it after centering and sphering:
+        ``S = W @ (get_sphere() @ (X - mean[:, None]) - c[:, None])``, with
+        ``mean = get_mean()`` and ``c = get_model_center(model_idx)``, so
+        ``W @ get_sphere()`` is only the linear part of that map.
 
         Parameters
         ----------
@@ -892,8 +894,10 @@ class AMICA:
         """
         Mutual Information Reduction (issue #137) of the fitted unmixing on ``X``.
 
-        Composes the full raw-data-to-sources transform (unmixing @ sphere)
-        the documented way and delegates to :func:`pamica.metrics.mir`.
+        Composes the linear part of the raw-data-to-sources transform
+        (unmixing @ sphere) and delegates to :func:`pamica.metrics.mir`. MIR
+        is shift-invariant, so the mean and center that :meth:`transform`
+        subtracts do not change it.
 
         Parameters
         ----------

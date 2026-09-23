@@ -3537,7 +3537,7 @@ class AMICATorchNG:
     ) -> Tuple[float, float]:
         """Mutual Information Reduction (issue #137) of this model's unmixing on ``X``.
 
-        Composes the full raw-data-to-sources transform ``W_fort @ sphere`` --
+        Composes the linear part of the raw-data-to-sources transform, ``W_fort @ sphere`` --
         i.e. ``get_unmixing_matrix(model_idx) @ sphere`` -- and delegates to
         :func:`pamica.metrics.mir`. MIR is shift-invariant, so the data-space
         mean/``c`` centering ``transform`` applies is irrelevant here.

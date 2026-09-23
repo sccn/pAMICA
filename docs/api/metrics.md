@@ -6,9 +6,10 @@ sources from any source.
 
 - **`mir`**: Mutual Information Reduction, in nats: how much mutual information
   a linear unmixing removes from the data. Higher is a better separation. It
-  needs the **full raw-data-to-sources transform** (the unmixing composed with
+  needs the **linear map from raw data to sources** (the unmixing composed with
   the sphering matrix), which must be square and invertible, since the estimate
-  includes a log-Jacobian term.
+  includes a log-Jacobian term. The mean and per-model center that `transform`
+  subtracts are offsets, and MIR does not depend on them.
 - **`pairwise_mi`**: the symmetric mutual-information matrix between sources.
   Its diagonal is each source's own entropy, not a mutual information.
 - **`block_diagonal_order`**: a permutation that clusters mutually dependent
