@@ -70,7 +70,11 @@ def _model(backend: str, max_iter: int, tmp_path: Path, **cfg: Any) -> Any:
     if backend == "numpy":
         # NumPy's spellings; it has no keep_best (it always returns the last
         # iterate, which is what keep_best=False asks of the others).
-        renames = {"share_iter": "share_int", "maxdecs": "max_decs"}
+        renames = {
+            "share_iter": "share_int",
+            "maxdecs": "max_decs",
+            "min_nd": "min_grad_norm",
+        }
         params = {renames.get(k, k): v for k, v in cfg.items() if k != "keep_best"}
         return AMICA_NumPy(
             num_models=1,
@@ -373,9 +377,42 @@ def test_the_step_after_a_decrease_already_uses_the_halved_rate(backend, X, tmp_
 # --- #339: a stop returns the parameters its final likelihood describes -------
 
 
-# A min_dll stop within a few iterations: gains below 1e-3 for more than 2
-# iterations in a row.
-_STOP = dict(use_min_dll=True, min_dll=1e-3, maxincs=2, keep_best=False)
+# One recipe per convergence stop, each on 4096 samples of the bundled
+# recording, one model, seed 42, stopping well inside the budget on every
+# backend that has the stop. "twin" is the override that switches the stop off
+# without changing the trajectory before it, so the same iterations can be run
+# to max_iter. NumPy reports both halves of the decrease branch
+# (grad_norm_floor, lrate_floor) as one reason.
+_OFF = dict(use_min_dll=False, use_grad_norm=False, keep_best=False)
+_STOPS: Dict[str, Dict[str, Any]] = {
+    # Gains below 1e-3 for more than 2 iterations in a row.
+    "min_dll": dict(
+        cfg=dict(_OFF, use_min_dll=True, min_dll=1e-3, maxincs=2),
+        twin=dict(use_min_dll=False),
+        numpy="Converged: small likelihood increase",
+    ),
+    # ndtmpsum runs 0.02139 at index 14 and 0.02039 at 15 on every backend, so
+    # 0.0209 is crossed at 15 with 5e-4 to spare on both sides.
+    "grad_norm": dict(
+        cfg=dict(_OFF, use_grad_norm=True, min_nd=0.0209),
+        twin=dict(use_grad_norm=False),
+        numpy="Converged: small gradient norm",
+    ),
+    # lrate 0.5 overshoots within a few iterations; min_nd above any norm makes
+    # the first decrease stop through the ``ndtmpsum <= min_nd`` half.
+    "grad_norm_floor": dict(
+        cfg=dict(_OFF, lrate=0.5, min_nd=1.0),
+        twin=dict(min_nd=0.0),
+        numpy="Converged: minimum change threshold met",
+    ),
+    # The same overshoot with minlrate above lrate and a norm floor no norm
+    # reaches, so the first decrease stops through the ``lrate <= minlrate`` half.
+    "lrate_floor": dict(
+        cfg=dict(_OFF, lrate=0.5, minlrate=0.6, min_nd=0.0),
+        twin=dict(minlrate=1e-12),
+        numpy="Converged: minimum change threshold met",
+    ),
+}
 _STOP_ITERS = 60
 _STOP_FRAMES = 4096
 
@@ -391,33 +428,38 @@ def _recomputed_ll(model: Any, backend: str, x: np.ndarray) -> float:
     return float((acc["ll"] / (n * model.n_channels)).item())
 
 
+@pytest.mark.parametrize("stop", list(_STOPS))
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_a_stopped_fit_returns_the_parameters_its_final_ll_describes(
-    backend, X, tmp_path
+    backend, stop, X, tmp_path
 ):
-    """A convergence stop exits before its iteration's update, as the reference
-    does (amica15.f90:1111), so the returned parameters reproduce the recorded
+    """Every convergence stop (``min_dll``, ``grad_norm``, ``grad_norm_floor``,
+    ``lrate_floor``) exits before its iteration's update, as the reference does
+    (amica15.f90:1111), so the returned parameters reproduce the recorded
     final log-likelihood exactly. Before issue #339 the stopping iteration
     still took its update, so they were one update past it.
 
-    A fit that runs the same iterations to ``max_iter`` does take its last
-    update, as the reference's does, so there the recomputed value moves on:
-    the equality is not one any parameters near the end would pass."""
+    A fit that runs the same iterations to ``max_iter``, with the stop switched
+    off, does take its last update, as the reference's does, so there the
+    recomputed value moves on: the equality is not one any parameters near the
+    end would pass."""
+    recipe = _STOPS[stop]
     x = X[:, :_STOP_FRAMES]
-    model = _model(backend, _STOP_ITERS, tmp_path, **_STOP)
+    model = _model(backend, _STOP_ITERS, tmp_path, **recipe["cfg"])
     ll = _fit(model, backend, x, _STOP_ITERS)
     if backend == "numpy":
-        assert model.stop_reason == "Converged: small likelihood increase"
+        assert model.stop_reason == recipe["numpy"], "setup: another stop fired"
         final = float(model.ll[-1])
     else:
-        assert model.stop_reason == "min_dll"
+        assert model.stop_reason == stop, "setup: another stop fired"
         final = float(model.final_ll_)
         assert final == ll[-1]
         assert model.iteration == len(ll) - 1
-    assert len(ll) < _STOP_ITERS
+    assert 2 < len(ll) < _STOP_ITERS, "setup: the stop fired at the edge"
     assert _recomputed_ll(model, backend, x) == final
 
-    ran = _model(backend, len(ll), tmp_path, **dict(_STOP, use_min_dll=False))
+    twin_cfg = dict(recipe["cfg"], **recipe["twin"])
+    ran = _model(backend, len(ll), tmp_path, **twin_cfg)
     ll_ran = _fit(ran, backend, x, len(ll))
     assert ll_ran == ll  # the same trajectory, without the stop
     assert _recomputed_ll(ran, backend, x) != ll_ran[-1]
