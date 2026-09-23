@@ -3132,6 +3132,7 @@ class AMICATorchNG:
             raise RuntimeError(
                 "AMICATorchNG.get_sphere() requires a fitted model; call fit() first."
             )
+        self._check_usable("get the sphere")
         return self.sphere.detach().cpu().numpy().astype(np.float64)
 
     def get_mean(self) -> np.ndarray:
@@ -3144,6 +3145,7 @@ class AMICATorchNG:
             raise RuntimeError(
                 "AMICATorchNG.get_mean() requires a fitted model; call fit() first."
             )
+        self._check_usable("get the mean")
         return self.mean.detach().cpu().numpy().astype(np.float64).ravel()
 
     def get_model_center(self, model_idx: int = 0) -> np.ndarray:
@@ -3160,6 +3162,7 @@ class AMICATorchNG:
                 "fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the model center")
         return self.c[:, model_idx].detach().cpu().numpy().astype(np.float64)
 
     def _pca_reduction_requested(self, n_channels: int) -> bool:

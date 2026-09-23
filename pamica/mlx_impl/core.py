@@ -3281,6 +3281,7 @@ class AMICAMLXNG:
             raise RuntimeError(
                 "AMICAMLXNG.get_sphere() requires a fitted model; call fit() first."
             )
+        self._check_usable("get the sphere")
         return np.array(self._sphere_np, dtype=np.float64)
 
     def get_mean(self) -> np.ndarray:
@@ -3295,6 +3296,7 @@ class AMICAMLXNG:
             raise RuntimeError(
                 "AMICAMLXNG.get_mean() requires a fitted model; call fit() first."
             )
+        self._check_usable("get the mean")
         return np.array(self.mean, dtype=np.float64).ravel()
 
     def get_model_center(self, model_idx: int = 0) -> np.ndarray:
@@ -3312,6 +3314,7 @@ class AMICAMLXNG:
                 "fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the model center")
         return np.array(self.c[:, int(model_idx)], dtype=np.float64)
 
     def get_rho(self, model_idx: int = 0) -> np.ndarray:

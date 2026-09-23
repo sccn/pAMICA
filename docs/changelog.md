@@ -30,6 +30,7 @@ Release notes are also published on the
     Any other value that loading could not read back now raises `TypeError` at save time.
   - **New accessors:** `get_sphere()`, `get_mean()` and `get_model_center(model_idx)` on `AMICATorchNG`, `AMICAMLXNG` and `AMICA`,
     with the same names and shapes on both backends and float64 arrays from both.
+    The torch and MLX ones carry the degenerate-fit guard of the issue #306 entry below.
     `AMICA` also gains `get_sensor_mixing_matrix()`, which both backends already had.
   - `AMICAICA` reads the fitted mean, sphere and centers through those accessors, with no backend-specific array calls.
     An MLX export is float32-consistent (sources agree with the MLX `transform` within float32 tolerance),
@@ -40,7 +41,7 @@ Release notes are also published on the
   `AMICATorchNG`, `AMICAMLXNG` and the legacy NumPy `AMICA` backend's fitted-output accessors
   (`transform`, `get_mixing_matrix`, `get_unmixing_matrix`, `get_sensor_mixing_matrix`, `get_rho`,
   `get_pdftype`, `shared_components`, `variance_order`, `model_loglik`, `model_probability`,
-  `mir` and `pmi` on torch/MLX;
+  `mir` and `pmi` on torch/MLX, plus Phase 4's `get_sphere`, `get_mean` and `get_model_center`;
   `transform`, `get_weights` and `get_sensor_mixing_matrix` on NumPy)
   now raise `RuntimeError` when called on a fit the backend itself classified as degenerate,
   or when a fitted parameter holds a non-finite value,

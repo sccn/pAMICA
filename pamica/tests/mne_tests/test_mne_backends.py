@@ -270,3 +270,9 @@ def test_degenerate_fit_builds_no_basis_and_refuses_export(raw, backend):
         ica.to_mne_ica()
     with pytest.raises(RuntimeError, match="degenerate"):
         ica.get_sources(raw)
+    # The converged-only gate is what skips the basis; the accessors it would
+    # have read refuse the same fit with the same meaning, on the wrapper and
+    # on the raw backend (issue #306).
+    for owner in (ica.amica_, ica.amica_.model_):
+        with pytest.raises(RuntimeError, match="degenerate"):
+            owner.get_sphere()
