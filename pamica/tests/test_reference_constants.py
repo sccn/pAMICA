@@ -539,6 +539,10 @@ def test_family_matches_the_seeded_reference(
         t = torch_model(AMICATorchNG)
         t.fit(X, max_iter=k, verbose=False)
         assert t.A is not None and t.mu is not None and t.beta is not None
+        # The precondition: every source kept the family the reference runs
+        # (for pdftype=1, no kurtosis switch ran, so none left code 1).
+        assert t.pdtype is not None and np.all(t.pdtype.numpy() == pdftype)
+        assert t.n_kurt_done == 0
         errs = {
             "A": np.abs(reference_mixing(t.A.numpy()) - ref.A).max(),
             "mu": np.abs(t.mu.numpy() - ref.mu).max(),
@@ -553,6 +557,7 @@ def test_family_matches_the_seeded_reference(
         # by the literal's rounding (pamica's log-density was higher by it).
         old = torch_model(pre344.torch_impl.core.AMICATorchNG)
         old.fit(X, max_iter=k, verbose=False)
+        assert np.all(old.pdtype.numpy() == pdftype) and old.n_kurt_done == 0
         shift = np.asarray(old.ll_history) - ref.LL
         print(f"pdftype={pdftype} k={k} pre-change: LL - reference = {shift}")
         assert np.abs(shift - offset).max() <= tol["LL"]
