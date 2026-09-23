@@ -507,8 +507,8 @@ class AMICA:
         if unknown:
             raise TypeError(
                 f"AMICA.fit got unexpected keyword argument(s) {unknown}: "
-                f"neither a fit() parameter nor a {backend_cls.__name__} "
-                "constructor keyword."
+                "neither a fit() parameter nor a constructor keyword of "
+                f"{backend_cls.__name__}."
             )
 
         # Apply from_params_file's translated dict as per-call defaults

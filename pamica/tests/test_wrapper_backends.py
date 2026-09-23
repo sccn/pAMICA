@@ -183,7 +183,8 @@ def test_dtype_with_the_mlx_backend_raises_before_fitting(X):
 def test_unknown_fit_keyword_names_the_backend(X, backend):
     model = _wrapper(backend)
     name = _backend_class(backend).__name__
-    with pytest.raises(TypeError, match=rf"\['blocksize'\].*{name}"):
+    message = rf"\['blocksize'\]: neither a fit\(\) parameter nor a constructor keyword of {name}\."
+    with pytest.raises(TypeError, match=message):
         model.fit(X, max_iter=1, blocksize=512)
 
 
