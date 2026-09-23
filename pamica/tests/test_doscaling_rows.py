@@ -19,9 +19,10 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
    log-likelihood moves by float round-off only and every component row ends
    at unit norm, while the old column rule on the same state moves the
    log-likelihood by far more (so these tests catch the bug);
-2. the three backends rescale one shared state identically, including a merged
-   ``comp_list``, where the per-block rule is applied uniformly until the
-   component-row layout of Phase 8 (issue #334) replaces it;
+2. the three backends rescale one shared state identically, including a
+   permuted ``comp_list`` and a merged one, where the per-block rule is applied
+   uniformly until the component-row layout of Phase 8 (issue #334) replaces
+   it;
 3. ``doscaling=False`` is byte-identical to the pre-fix code: each backend class
    at commit ``fb13d76`` is loaded from git and fitted in the same process;
 4. ``scalestep``, a pamica extension the reference parses but never reads,
@@ -237,18 +238,13 @@ def test_mlx_rescale_is_an_exact_change_of_scale(real_slice, n_models, newton):
 
 
 # --- 2. one state, three backends, identical rescale ------------------------
-# A real two-model state: A, mu, beta and comp_list of a short unscaled fit.
 State = Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
 
-@pytest.fixture(scope="module", params=[False, True], ids=["disjoint", "merged"])
-def two_model_state(request, real_slice) -> State:
-    """``merged`` plants a share merge (model 1's source 3 folded onto model
-    0's source 5 column, the way ``identify_shared_comps`` folds a pair): the
-    shared column then sits in rows of both blocks, the one configuration where
-    the per-block rule is not a change of scale. Every backend must still apply
-    it the same way (models in order) until Phase 8 (issue #334) replaces it.
-    """
+@pytest.fixture(scope="module")
+def unscaled_state(real_slice) -> State:
+    """A real two-model state: ``A``, ``mu``, ``beta`` and ``comp_list`` of a
+    short unscaled fit, before any rescale."""
     t = AMICATorchNG(
         n_channels=NW,
         n_models=2,
@@ -262,50 +258,86 @@ def two_model_state(request, real_slice) -> State:
     t.fit(real_slice, max_iter=3, verbose=False)
     assert t.A is not None and t.mu is not None and t.beta is not None
     assert t.comp_list is not None
-    comp_list = t.comp_list.numpy().copy()
-    if request.param:
+    return (
+        t.A.numpy().copy(),
+        t.mu.numpy().copy(),
+        t.beta.numpy().copy(),
+        t.comp_list.numpy().copy(),
+    )
+
+
+@pytest.fixture(
+    scope="module",
+    params=["disjoint", "permuted", "merged"],
+)
+def two_model_state(request, unscaled_state) -> State:
+    """``permuted`` shuffles each model's ``comp_list`` column, so the stored
+    columns of a block are neither contiguous nor in order (a general index
+    pattern for every backend's scatter). ``merged`` plants a share merge
+    (model 1's source 3 folded onto model 0's source 5 column, the way
+    ``identify_shared_comps`` folds a pair): the shared column then sits in
+    rows of both blocks, the one configuration where the per-block rule is not
+    a change of scale. Every backend must still apply it the same way (models
+    in order) until Phase 8 (issue #334) replaces it.
+    """
+    A, mu, beta, comp_list = unscaled_state
+    comp_list = comp_list.copy()
+    if request.param == "permuted":
+        rng = np.random.default_rng(0)
+        for h in range(comp_list.shape[1]):
+            comp_list[:, h] = rng.permutation(comp_list[:, h])
+    elif request.param == "merged":
         comp_list[3, 1] = comp_list[5, 0]
-    return t.A.numpy().copy(), t.mu.numpy().copy(), t.beta.numpy().copy(), comp_list
+    return A, mu, beta, comp_list
 
 
-def _torch_rescaled(state: State) -> State:
-    """``AMICATorchNG._rescale_components`` applied to a float64 copy of ``state``."""
+def _rescaled(backend: str, state: State) -> State:
+    """``backend``'s own ``_rescale_components`` applied to a copy of
+    ``state`` (cast to float32 for MLX), as numpy arrays."""
     A, mu, beta, comp_list = state
-    t = AMICATorchNG(
-        n_channels=NW, n_models=2, n_mix=NMIX, device="cpu", dtype=torch.float64
-    )
-    t.A, t.mu, t.beta = (
-        torch.from_numpy(np.array(x, np.float64)) for x in (A, mu, beta)
-    )
-    t.comp_list = torch.from_numpy(comp_list.copy())
-    t._rescale_components()
-    assert t.A is not None and t.mu is not None and t.beta is not None
-    return t.A.numpy(), t.mu.numpy(), t.beta.numpy(), comp_list
+    if backend == "torch":
+        t = AMICATorchNG(
+            n_channels=NW, n_models=2, n_mix=NMIX, device="cpu", dtype=torch.float64
+        )
+        t.A, t.mu, t.beta = (
+            torch.from_numpy(np.array(x, np.float64)) for x in (A, mu, beta)
+        )
+        t.comp_list = torch.from_numpy(comp_list.copy())
+        t._rescale_components()
+        assert t.A is not None and t.mu is not None and t.beta is not None
+        return t.A.numpy(), t.mu.numpy(), t.beta.numpy(), comp_list
+    if backend == "numpy":
+        n = AMICA_NumPy(num_models=2, num_mix=NMIX, use_tqdm=False)
+        n.A, n.mu, n.beta = (np.array(x, np.float64) for x in (A, mu, beta))
+        n.comp_list = comp_list.copy()
+        n._rescale_components()
+        assert n.A is not None and n.mu is not None and n.beta is not None
+        return n.A, n.mu, n.beta, comp_list
+    mlx_core = _mlx_core()
+    mx = mlx_core.mx
+    x = mlx_core.AMICAMLXNG(n_channels=NW, n_models=2, n_mix=NMIX)
+    x.A, x.mu, x.beta = (mx.array(np.asarray(a, np.float32)) for a in (A, mu, beta))
+    x.comp_list = mx.array(comp_list)
+    x._rescale_components()
+    return np.array(x.A), np.array(x.mu), np.array(x.beta), comp_list
 
 
-def test_numpy_rescales_like_torch(two_model_state, tmp_path):
-    A, mu, beta, comp_list = two_model_state
-    n = AMICA_NumPy(num_models=2, num_mix=NMIX, outdir=str(tmp_path), use_tqdm=False)
-    n.A, n.mu, n.beta, n.comp_list = A.copy(), mu.copy(), beta.copy(), comp_list.copy()
-    n._rescale_components()
+def test_numpy_rescales_like_torch(two_model_state):
     # Same float64 arithmetic; only the sum-of-squares association may differ.
-    for got, want in zip((n.A, n.mu, n.beta), _torch_rescaled(two_model_state)):
-        np.testing.assert_allclose(got, want, rtol=1e-14, atol=0)
+    got = _rescaled("numpy", two_model_state)
+    want = _rescaled("torch", two_model_state)
+    for g, w in zip(got[:3], want[:3]):
+        np.testing.assert_allclose(g, w, rtol=1e-14, atol=0)
 
 
 def test_mlx_rescales_like_torch(two_model_state):
-    mlx_core = _mlx_core()
-    mx = mlx_core.mx
-    A, mu, beta, comp_list = two_model_state
-    f32 = [a.astype(np.float32) for a in (A, mu, beta)]
-    x = mlx_core.AMICAMLXNG(n_channels=NW, n_models=2, n_mix=NMIX)
-    x.A, x.mu, x.beta = (mx.array(a) for a in f32)
-    x.comp_list = mx.array(comp_list)
-    x._rescale_components()
+    got = _rescaled("mlx", two_model_state)
     # The float64 pass on the same float32-cast state is MLX's reference.
-    want = _torch_rescaled((*f32, comp_list))
-    for got, ref in zip((x.A, x.mu, x.beta), want):
-        np.testing.assert_allclose(np.array(got), ref, rtol=1e-6, atol=0)
+    A, mu, beta, comp_list = two_model_state
+    f32 = tuple(a.astype(np.float32) for a in (A, mu, beta))
+    want = _rescaled("torch", (*f32, comp_list))
+    for g, w in zip(got[:3], want[:3]):
+        np.testing.assert_allclose(g, w, rtol=1e-6, atol=0)
 
 
 # --- 3. doscaling=False is byte-identical to the pre-fix code ---------------
