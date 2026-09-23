@@ -22,7 +22,7 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 | Per-block sufficient statistics and one M-step | vs Fortran | bit-exact ($\sim\!10^{-15}$) |
 | Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | LL within ~0.0005 of $-3.6993$; correlation 0.998 |
 | Single-model solution (`do_newton=0`, bundled, $k\approx30$) | Amari distance vs Fortran | 0.006 |
-| Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | LL within 3.2e-5; correlation 0.9992; Amari distance 0.004, for all three |
+| Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | LL within 3.2e-5; correlation 0.9992; Amari distance 0.004, for all three (measured before issue #333's `doscaling` change; see [the per-backend rows](#parity-rows-per-backend)) |
 | Multi-model solution | distributional similarity over 20-run ensembles | indistinguishable from Fortran's own run-to-run spread ($p = 0.96$) |
 | Device and precision invariance | same independent components across CPU/CUDA/MPS/MLX, float32/float64, Linux/macOS | identical (1.000) across all eight torch/MLX combinations |
 | Cross-backend log-likelihood | converged LL across every backend | agree to ~3 significant digits (max pairwise ~0.003) |
@@ -69,6 +69,10 @@ falling back, with a warning, to the bundled macOS x86_64 `amica15mac`, which ca
 `--fortran-binary PATH` runs a specific binary.
 
 ### Parity rows per backend
+
+These rows predate epic #324 Phase 7 (issue #333),
+which changed `doscaling` from normalizing stored columns to normalizing components, as the reference does;
+they will be re-measured before the epic merges.
 
 Measured on 2026-09-22 on an Apple M4 Pro (14 cores, 64 GB, macOS 27; MLX 0.32.0, PyTorch 2.12.1, NumPy 2.5.0)
 against the v0.3.3 release native engine (`amica15-macos-arm64`, SHA-256 `c8b2ac7f...`), with the harness defaults:
