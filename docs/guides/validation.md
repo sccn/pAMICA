@@ -21,9 +21,9 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 | Source-density score and log-density (non-GG families) | vs the literal `amica15.f90` expressions | bit-exact ($<10^{-12}$) |
 | Per-block sufficient statistics and one M-step | vs Fortran | bit-exact ($\sim\!10^{-15}$) |
 | Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | LL within ~0.0005 of $-3.6993$; correlation 0.998 |
-| Single-model solution (`do_newton=0`, bundled, $k\approx30$) | Amari distance vs Fortran | 0.006 |
+| Single-model solution (`do_newton=0`, bundled, $k\approx30$) | Amari distance vs Fortran | 0.011 over the protocol's 5 run pairs, one of whose reference runs ended in another basin; 0.004 over 50 pairs (Fortran vs Fortran 0.005) |
 | Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | from independent starts: LL within 2.8e-4 (the reference's own seed-to-seed standard deviation is 2.6e-4), correlation 0.9991, Amari distance 0.004, for all three; from a shared start: LL within 1.6e-6, correlation 0.99999993 ([per-backend rows](#parity-rows-per-backend)) |
-| Multi-model solution | distributional similarity over 20-run ensembles | indistinguishable from Fortran's own run-to-run spread ($p = 0.96$) |
+| Multi-model solution | distributional similarity over 20-run ensembles | between-implementation correlation within 0.006 of Fortran's own run-to-run agreement (one-sided permutation $p = 0.88$; Amari distance $p = 0.051$); final log-likelihood $-3.3541$ against $-3.3543$ (KS $p = 0.83$) |
 | Device and precision invariance | same independent components across CPU/CUDA/MPS/MLX, float32/float64, Linux/macOS | identical (1.000) across all eight torch/MLX combinations |
 | Cross-backend log-likelihood | same settings and start, 25 iterations, every backend | agree to 1e-5 at 32 and 48 channels; at 70 channels ($k\approx6$) within 1.1e-3, the size of a round-off perturbation's effect ([details](#cross-backend-log-likelihood-agreement-single-model)) |
 | EEGLAB output | `write_amica_output` round-trip through `loadmodout15` | single-model bytes are an exact serialization; loads with correct layout |
@@ -141,9 +141,31 @@ distance:
 
 - Log-likelihood ~ -3.6993 ($k\approx153$; Fortran ~ -3.6993, gap ~0.0003).
 - Hungarian-matched component correlation ~0.998 ($k\approx153$; Fortran-vs-Fortran self-consistency
-  over the same 5 seeds: ~0.999), clearing the >0.95 gate. On the bundled sample ($k\approx30$) both
-  numbers are consistent: ~0.998 pamica-vs-Fortran, ~0.998 Fortran-vs-Fortran.
-- Amari distance ~0.006 (bundled sample; Fortran-vs-Fortran: ~0.005).
+  over the same 5 seeds: ~0.999), clearing the >0.95 gate.
+- Amari distance on the bundled sample: 0.011 over the protocol's five run pairs, 0.004 over 50 pairs (next subsection).
+
+### The bundled sample
+
+On the bundled 32-channel sample ($k\approx30$) the reproduction tier fits five pamica seeds (301-305) and five reference runs, one pair per seed,
+Newton off, 2000 iterations (re-measured on 2026-09-23 with the code of epic #324; `.context/issue-351/raw/table1_bundled/`):
+
+| seed | reference final LL | pamica final LL | mean matched correlation | min matched correlation | Amari distance |
+|---:|---:|---:|---:|---:|---:|
+| 301 | -3.3995 | -3.3997 | 0.9995 | 0.9960 | 0.0031 |
+| 302 | -3.3996 | -3.3996 | 0.9993 | 0.9952 | 0.0037 |
+| 303 | -3.4006 | -3.3997 | 0.9267 | 0.4528 | 0.0380 |
+| 304 | -3.3995 | -3.3995 | 0.9997 | 0.9981 | 0.0029 |
+| 305 | -3.3996 | -3.3994 | 0.9982 | 0.9893 | 0.0069 |
+
+The five pairs average a correlation of 0.985 and an Amari distance of 0.011;
+the ten pairs among the five reference runs average 0.971 and 0.019.
+The reference run of seed 303 ended in a lower-likelihood basin (-3.4006, against -3.3995 to -3.3996 for the other four), and its pair sets the five-pair means.
+The tier does not seed its reference runs (`AMICANative` draws a clock-based seed per run), so a rerun draws new starts, and an event like this one may or may not recur.
+With the unmixing matrices kept (`.context/issue-351/bundled_single_basins.py`),
+ten seeded reference runs (seeds 1-10, final LL -3.39984 to -3.39945) against the same five pamica fits give, over all 50 pairs,
+a mean Amari distance of 0.0044 (largest 0.0083) and a mean correlation of 0.9988;
+the reference against itself, over 45 pairs, 0.0054 (largest 0.0101) and 0.9985; pamica against itself, over 10 pairs, 0.0039 and 0.9991.
+Before epic #324 the five-pair figures were an Amari distance of ~0.006 (Fortran against Fortran ~0.005) and a correlation of ~0.998.
 
 The fixed source-density families are bit-exact against the literal Fortran score/derivative expressions (~1e-15),
 and the backend converges to the binary's solution within ~0.005 log-likelihood on either dataset.
@@ -192,100 +214,118 @@ See `pamica/tests/torch_tests/test_ng_pdf_families.py` and ADR 0002.
 
 ## Multi-model distributional similarity
 
-Multi-model AMICA is not partition-identifiable, so exact partition parity with Fortran is the wrong acceptance bar.
-The right test is whether the two implementations sample a similar distribution over solutions. Running an ensemble of `N = 20` fits per implementation on the bundled sample EEG (`n_models = 2`, 3 mixture components, 100 iterations, matched schedule),
-the pamica-vs-Fortran partition cross-correlation distribution overlaps Fortran's own run-to-run distribution:
+Multi-model AMICA is not partition-identifiable: fits from different starts reach different partitions of nearly the same likelihood,
+so a single-run partition comparison with Fortran cannot serve as the acceptance bar.
+The comparison is between the distributions of solutions the two implementations sample.
+An ensemble of `N = 20` fits per implementation on the bundled sample EEG (`n_models = 2`, 3 mixture components, 100 iterations, matched schedule)
+gives these distributions of pairwise agreement
+(`benchmarks/reproduce_table1.py --tier bundled`, re-measured on 2026-09-23 with the code of epic #324 against the pinned v0.3.3 native binary,
+whose runs here draw their own clock-based seeds; the 40 fits are saved in `.context/issue-351/raw/table1_bundled/bundled_multimodel_ensemble.npz`):
 
 | Distribution (pairwise Hungarian-matched \|corr\|) | Mean | SD | Range |
 |---|---:|---:|---|
-| within-Fortran (Fortran vs Fortran) | 0.638 | 0.040 | [0.572, 0.797] |
-| within-pamica (pamica vs pamica) | 0.661 | 0.045 | [0.583, 0.820] |
-| between (pamica vs Fortran) | 0.649 | 0.045 | [0.582, 0.886] |
+| within-Fortran (Fortran vs Fortran) | 0.626 | 0.036 | [0.568, 0.868] |
+| within-pamica (pamica vs pamica) | 0.638 | 0.042 | [0.578, 0.805] |
+| between (pamica vs Fortran) | 0.632 | 0.042 | [0.564, 0.845] |
 
-![Multi-model solution-ensemble cross-correlation distributions for pamica and Fortran.](../assets/figures/multimodel-ensemble.png){ width=640 }
+![Multi-model solution-ensemble cross-correlation and log-likelihood distributions for pamica and Fortran.](../assets/figures/multimodel-ensemble.png){ width=640 }
 /// caption
-Pairwise Hungarian-matched component correlation for 20 pamica and 20 Fortran multi-model fits of the sample EEG.
-The within-Fortran, within-pamica, and between-implementation distributions overlap: the estimators sample the same solution space.
+Pairwise Hungarian-matched component correlation (A) and final log-likelihood (B) for 20 pamica and 20 Fortran multi-model fits of the sample EEG.
+The three agreement distributions overlap, and so do the two likelihood distributions.
 ///
 
-The three distribution means lie within 0.011 of each other (between 0.649, within-Fortran 0.638), well inside a $\pm 0.05$ margin. To test this at the correct unit of analysis, we use a **run-level permutation test**:
-the 190/400 pairwise correlations are *not* independent (each of the 40 runs appears in ~39 pairs),
+The three means lie within 0.012 of each other.
+The between-minus-within-Fortran difference is +0.006, inside the $\pm 0.05$ margin the original study set
+(run-level bootstrap 90% interval -0.002 to 0.014, `.context/issue-351/equivalence_check.py`).
+The 190/400 pairwise values are not independent (each of the 40 runs appears in ~39 pairs),
 so a Mann-Whitney or TOST applied to the pairwise values is pseudoreplicated and its p-value is invalid.
-Permuting the 40 runs as intact units instead (20000 permutations, statistic = within-Fortran minus between-implementation mean correlation) respects that dependence and finds **no evidence that cross-implementation agreement is worse than Fortran's own run-to-run agreement ($p = 0.96$)**.
+The significance test permutes the 40 runs as intact units instead (20000 permutations, statistic = within-Fortran minus between-implementation mean correlation).
+For the one-sided hypothesis that cross-implementation agreement is worse than Fortran's own run-to-run agreement, it gives $p = 0.88$.
 
-The single-run cross-correlation of ~0.65 is therefore intrinsic estimator spread, not a shortfall: Fortran agrees with *itself* at 0.64.
-The per-block sufficient statistics and one M-step are bit-exact against Fortran (~$10^{-15}$),
-so the update equations are correct;
-a small residual in the log-likelihood *distribution* (pamica $-3.363 \pm 0.006$ vs Fortran $-3.354 \pm 0.003$;
-Kolmogorov-Smirnov $p \approx 6\times10^{-5}$) is an optimizer-quality effect,
-not a model-correctness defect (pamica reaches Fortran's mean with about twice as many iterations).
+The single-run cross-correlation of ~0.63 matches Fortran's agreement with itself (0.63), so it measures the estimator's run-to-run spread.
+The per-block sufficient statistics and one M-step agree with the reference to round-off (~$3\times10^{-16}$ relative).
+The final log-likelihoods agree too: pamica $-3.3541 \pm 0.003$, Fortran $-3.3543 \pm 0.002$ (Kolmogorov-Smirnov $p = 0.83$).
+The ensembles of this study measured before epic #324's changes to the fit differed on this one metric
+(pamica $-3.363 \pm 0.006$ against Fortran $-3.354 \pm 0.003$, $p \approx 6\times10^{-5}$), a gap attributed then to convergence speed.
+Refitting the pamica half with that code (e38aa11) against the same 20 reference fits gives $-3.3627 \pm 0.006$ ($p = 1\times10^{-5}$),
+and 7 of those 20 fits stop early on `min_dll`, whose check counted likelihood dips as small gains until issue #339
+(`.context/issue-351/multimodel_pamica_fits.py`).
+A seeded ensemble with the same settings (the reference seeded 0-19 and single-threaded) agrees within $8\times10^{-4}$ at 100 iterations and within $2\times10^{-4}$ at 200 and 300
+([ADR 0003](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0003-best-iterate-safeguard.md)).
 
 ### Amari distance: a second, assignment-free metric
 
 The correlation above needs a Hungarian assignment step to resolve component permutation before it can be computed.
 The Amari distance does not: it is permutation- and scale-invariant by construction,
-so it is a genuinely independent check on the same 20-run ensembles (`.context/issue-27/ensemble.npz`;
-recomputed by `.context/issue-27/amari_distance.py` with no re-fitting, since the raw unmixing matrices from the original 40 fits are already saved).
+so it is an independent check on the same 20-run ensembles, computed from the saved unmixing matrices with no refitting
+(`.context/issue-351/multimodel_ensemble.py`, which reuses `.context/issue-27/amari_distance.py`).
 Each stacked 2-model matrix is split into its per-model 32x32 blocks;
 since which Fortran model corresponds to which pamica model is not identified, both label pairings are tried and the lower-distance pairing is kept, per run pair.
-This pairing correction is not free: on this ensemble it lowers the reported distance by ~0.02-0.03 versus always keeping the naive (unswapped) pairing, a similar order of magnitude to the within-Fortran/within-pamica gap below, so part of that gap plausibly reflects how often each group happens to need the swap, not just genuine agreement differences.
+This pairing correction lowers the mean distance by 0.019 on this ensemble (333 of the 780 run pairs take the swapped pairing),
+the same order as the gaps between the groups below, so part of those gaps may reflect how often each group needs the swap.
 
 | Distribution (Amari distance, lower is better) | Mean | SD |
 |---|---:|---:|
-| within-Fortran (Fortran vs Fortran) | 0.174 | 0.023 |
-| within-pamica (pamica vs pamica) | 0.154 | 0.019 |
-| between (pamica vs Fortran) | 0.163 | 0.022 |
+| within-Fortran (Fortran vs Fortran) | 0.166 | 0.017 |
+| within-pamica (pamica vs pamica) | 0.176 | 0.025 |
+| between (pamica vs Fortran) | 0.172 | 0.022 |
 
-The same run-level permutation test (20000 permutations, intact 40-run units) finds no evidence that between-implementation agreement is worse than Fortran's own run-to-run agreement ($p > 0.999$), agreeing with the correlation-based conclusion above.
+By this metric pamica's ensemble spreads slightly more than the reference's (0.176 against 0.166),
+and the between-implementation distance lies between the two: +0.005 from within-Fortran (bootstrap 90% interval 0.002 to 0.009).
+The same one-sided run-level permutation test gives $p = 0.051$.
+Before epic #324's changes to the fit, pamica's ensemble was the tighter one:
+refit with that code against the same reference fits, within-pamica 0.151 and between 0.160 ($p = 0.998$),
+and the original ensembles of this study measured 0.154 and 0.163 against the bundled `amica15mac` binary's 0.174 ($p > 0.999$).
 
 ??? note "Per-run detail (all 40 runs, both metrics)"
 
     Table 1 in the paper and the group summaries above report distribution means;
     the table below gives each of the 40 runs' own mean agreement to its own group's other 19 runs (`within`) and to all 20 opposite-implementation runs (`between`), for both metrics.
-    Regenerate with `uv run python .context/issue-27/amari_distance.py`, which writes `.context/issue-27/per_run_detail.csv`.
+    Regenerate with `uv run python .context/issue-351/multimodel_ensemble.py --from-npz .context/issue-351/raw/table1_bundled/bundled_multimodel_ensemble.npz`,
+    which writes `.context/issue-351/per_run_detail.csv` (with each run's final log-likelihood) and the figure above.
 
     | implementation | run | corr within | corr between | Amari within | Amari between |
     |---|---:|---:|---:|---:|---:|
-    | Fortran | 0 | 0.6164 | 0.6274 | 0.1880 | 0.1745 |
-    | Fortran | 1 | 0.6292 | 0.6568 | 0.1784 | 0.1592 |
-    | Fortran | 2 | 0.6465 | 0.6396 | 0.1694 | 0.1654 |
-    | Fortran | 3 | 0.6593 | 0.6740 | 0.1627 | 0.1508 |
-    | Fortran | 4 | 0.6323 | 0.6522 | 0.1797 | 0.1629 |
-    | Fortran | 5 | 0.6692 | 0.6773 | 0.1590 | 0.1488 |
-    | Fortran | 6 | 0.6660 | 0.6808 | 0.1628 | 0.1502 |
-    | Fortran | 7 | 0.6341 | 0.6400 | 0.1786 | 0.1678 |
-    | Fortran | 8 | 0.6285 | 0.6491 | 0.1779 | 0.1663 |
-    | Fortran | 9 | 0.6212 | 0.6341 | 0.1835 | 0.1702 |
-    | Fortran | 10 | 0.6308 | 0.6414 | 0.1794 | 0.1663 |
-    | Fortran | 11 | 0.6297 | 0.6444 | 0.1736 | 0.1614 |
-    | Fortran | 12 | 0.6334 | 0.6416 | 0.1782 | 0.1690 |
-    | Fortran | 13 | 0.6513 | 0.6630 | 0.1693 | 0.1574 |
-    | Fortran | 14 | 0.6666 | 0.6689 | 0.1584 | 0.1540 |
-    | Fortran | 15 | 0.6231 | 0.6254 | 0.1827 | 0.1750 |
-    | Fortran | 16 | 0.6147 | 0.6258 | 0.1903 | 0.1755 |
-    | Fortran | 17 | 0.6280 | 0.6483 | 0.1749 | 0.1632 |
-    | Fortran | 18 | 0.6441 | 0.6371 | 0.1691 | 0.1665 |
-    | Fortran | 19 | 0.6389 | 0.6505 | 0.1733 | 0.1637 |
-    | pamica | 0 | 0.6317 | 0.6149 | 0.1690 | 0.1806 |
-    | pamica | 1 | 0.6935 | 0.6777 | 0.1440 | 0.1529 |
-    | pamica | 2 | 0.6624 | 0.6583 | 0.1545 | 0.1606 |
-    | pamica | 3 | 0.6406 | 0.6459 | 0.1527 | 0.1561 |
-    | pamica | 4 | 0.6493 | 0.6384 | 0.1506 | 0.1569 |
-    | pamica | 5 | 0.6755 | 0.6591 | 0.1548 | 0.1622 |
-    | pamica | 6 | 0.6339 | 0.6236 | 0.1677 | 0.1807 |
-    | pamica | 7 | 0.6809 | 0.6788 | 0.1417 | 0.1479 |
-    | pamica | 8 | 0.6780 | 0.6552 | 0.1508 | 0.1631 |
-    | pamica | 9 | 0.6270 | 0.6206 | 0.1703 | 0.1823 |
-    | pamica | 10 | 0.6855 | 0.6665 | 0.1474 | 0.1612 |
-    | pamica | 11 | 0.6739 | 0.6556 | 0.1506 | 0.1612 |
-    | pamica | 12 | 0.6321 | 0.6190 | 0.1617 | 0.1753 |
-    | pamica | 13 | 0.6639 | 0.6610 | 0.1519 | 0.1597 |
-    | pamica | 14 | 0.6866 | 0.6849 | 0.1460 | 0.1520 |
-    | pamica | 15 | 0.6944 | 0.6672 | 0.1417 | 0.1559 |
-    | pamica | 16 | 0.6576 | 0.6533 | 0.1551 | 0.1633 |
-    | pamica | 17 | 0.6435 | 0.6249 | 0.1615 | 0.1756 |
-    | pamica | 18 | 0.6753 | 0.6547 | 0.1442 | 0.1549 |
-    | pamica | 19 | 0.6302 | 0.6180 | 0.1562 | 0.1655 |
+    | Fortran | 0 | 0.6169 | 0.6061 | 0.1710 | 0.1853 |
+    | Fortran | 1 | 0.6348 | 0.6508 | 0.1615 | 0.1593 |
+    | Fortran | 2 | 0.6145 | 0.6064 | 0.1756 | 0.1876 |
+    | Fortran | 3 | 0.6250 | 0.6356 | 0.1655 | 0.1684 |
+    | Fortran | 4 | 0.6290 | 0.6424 | 0.1654 | 0.1663 |
+    | Fortran | 5 | 0.6118 | 0.6047 | 0.1707 | 0.1853 |
+    | Fortran | 6 | 0.6268 | 0.6334 | 0.1610 | 0.1648 |
+    | Fortran | 7 | 0.6238 | 0.6247 | 0.1700 | 0.1765 |
+    | Fortran | 8 | 0.6332 | 0.6471 | 0.1643 | 0.1696 |
+    | Fortran | 9 | 0.6344 | 0.6458 | 0.1606 | 0.1648 |
+    | Fortran | 10 | 0.6057 | 0.6019 | 0.1782 | 0.1876 |
+    | Fortran | 11 | 0.6353 | 0.6534 | 0.1627 | 0.1631 |
+    | Fortran | 12 | 0.6182 | 0.6147 | 0.1680 | 0.1796 |
+    | Fortran | 13 | 0.6497 | 0.6503 | 0.1590 | 0.1642 |
+    | Fortran | 14 | 0.6270 | 0.6343 | 0.1637 | 0.1679 |
+    | Fortran | 15 | 0.6315 | 0.6322 | 0.1653 | 0.1715 |
+    | Fortran | 16 | 0.6101 | 0.6119 | 0.1701 | 0.1772 |
+    | Fortran | 17 | 0.6181 | 0.6287 | 0.1698 | 0.1718 |
+    | Fortran | 18 | 0.6428 | 0.6764 | 0.1596 | 0.1537 |
+    | Fortran | 19 | 0.6222 | 0.6371 | 0.1638 | 0.1664 |
+    | pamica | 0 | 0.6507 | 0.6421 | 0.1703 | 0.1671 |
+    | pamica | 1 | 0.6491 | 0.6338 | 0.1687 | 0.1687 |
+    | pamica | 2 | 0.6264 | 0.6206 | 0.1829 | 0.1785 |
+    | pamica | 3 | 0.6277 | 0.6324 | 0.1860 | 0.1730 |
+    | pamica | 4 | 0.6390 | 0.6358 | 0.1804 | 0.1706 |
+    | pamica | 5 | 0.5984 | 0.6025 | 0.1983 | 0.1880 |
+    | pamica | 6 | 0.6608 | 0.6492 | 0.1605 | 0.1615 |
+    | pamica | 7 | 0.6266 | 0.6175 | 0.1823 | 0.1786 |
+    | pamica | 8 | 0.6177 | 0.6205 | 0.1859 | 0.1751 |
+    | pamica | 9 | 0.6587 | 0.6442 | 0.1633 | 0.1644 |
+    | pamica | 10 | 0.6385 | 0.6269 | 0.1747 | 0.1749 |
+    | pamica | 11 | 0.6291 | 0.6259 | 0.1800 | 0.1752 |
+    | pamica | 12 | 0.6608 | 0.6499 | 0.1642 | 0.1631 |
+    | pamica | 13 | 0.6591 | 0.6456 | 0.1638 | 0.1665 |
+    | pamica | 14 | 0.6237 | 0.6252 | 0.1823 | 0.1733 |
+    | pamica | 15 | 0.6357 | 0.6361 | 0.1795 | 0.1704 |
+    | pamica | 16 | 0.6256 | 0.6219 | 0.1789 | 0.1720 |
+    | pamica | 17 | 0.6408 | 0.6326 | 0.1784 | 0.1742 |
+    | pamica | 18 | 0.6173 | 0.6221 | 0.1868 | 0.1751 |
+    | pamica | 19 | 0.6663 | 0.6528 | 0.1574 | 0.1609 |
 
 ## Cross-platform device and precision invariance
 
@@ -661,7 +701,7 @@ uv run pytest                                             # the full parity/beha
 ```
 
 The multi-model ensemble and Amari detail regenerate from saved fits (no re-fitting) with
-`uv run python .context/issue-27/amari_distance.py`. The cross-platform benchmark and equivalence
+`uv run python .context/issue-351/multimodel_ensemble.py --from-npz .context/issue-351/raw/table1_bundled/bundled_multimodel_ensemble.npz`. The cross-platform benchmark and equivalence
 figures are produced by `benchmarks/benchmark_decompose.py` (and the sweep scripts alongside it);
 the underlying findings are in `.context/issue-84/` and `.context/issue-90/`.
 
