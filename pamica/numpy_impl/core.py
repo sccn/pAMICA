@@ -773,7 +773,7 @@ class AMICA:
         """
         if self.W is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
-        self._check_usable("get the unmixing matrix")
+        self._check_usable("get the weights (unmixing matrix)")
         # Internal W = inv(A) is stored transposed relative to the true unmixing
         # (the E-step forms activations as (X-c)^T @ W), so return W^T (issue #24).
         # This is the raw unmixing matrix; it does not account for the per-model
