@@ -60,7 +60,7 @@ AMICA settles ICA's scale ambiguity
 ([What ICA cannot pin down](what-is-ica.md#what-ica-cannot-pin-down)) by convention:
 each component's mixing vector is kept at unit norm,
 and the source's amplitude is carried by the locations $\mu_{ij}$ and scales $\beta_{ij}$ of its density.
-AMICA restores that convention after every update by rescaling each component (`doscaling`),
+AMICA restores that convention after every update by rescaling each component (`doscaling`, on by default),
 an exact change of scale that leaves the likelihood unchanged
 (see [How AMICA works](how-amica-works.md#3-exit-or-update)).
 
