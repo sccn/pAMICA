@@ -7,15 +7,21 @@ non-square after rank reduction, hence ``pinv``). The legacy NumPy backend
 returned ``pinv(sphere) @ stored_A`` without the transpose the other two apply
 (its stored ``W`` is the unmixing transposed, issue #24's convention), so its
 maps were the rows of the true mixing matrix instead of its columns: in this
-module's fits, a 10.5% (full rank) and 9.0% (``pcakeep=20``) relative
-difference from the PyTorch backend's maps, against 4.6e-12 and 9.5e-11 with
+module's fits, a 3.0% (full rank) and 2.6% (``pcakeep=20``) relative
+difference from the PyTorch backend's maps, against 6.1e-13 and 9.6e-13 with
 the transpose, which also brings ``get_weights() @ sphere @ M`` to the
 identity within 2.4e-15.
 
 PyTorch and NumPy always run, so a divergence between them cannot land; MLX
 uses ``pytest.importorskip`` plus an Apple-GPU guard (``.rules/backend_parity.md``).
-Real bundled sample EEG only, a few iterations per fit: this checks the
-accessor on a fitted state, not convergence.
+Real bundled sample EEG only, two iterations per fit: this checks the
+accessor on a fitted state, not convergence. Two, not more, because the
+float64 backends start within round-off of each other (spheres 1e-13 apart)
+and the EM iterations amplify that gap about sixfold each; at five
+iterations the reduced fit's gap was 9.5e-11 on an Apple M-series laptop but
+1.3e-9 on the GitHub macOS arm64 runner, whose BLAS rounds differently. The
+orientation bug this module guards is a percent-level difference at any
+iteration count, so fewer iterations keep a tight round-off gate portable.
 """
 
 from pathlib import Path
@@ -33,7 +39,7 @@ NW = 32
 FIELD = 30504
 SEED = 42
 N_FRAMES = 8192
-MAX_ITER = 5
+MAX_ITER = 2
 BLOCK_SIZE = 4096
 PCAKEEP = 20
 CONFIGS = {"full": None, "reduced": PCAKEEP}
@@ -115,8 +121,8 @@ def test_sensor_mixing_inverts_the_spatial_filter(fits, backend, config):
 @pytest.mark.parametrize("config", list(CONFIGS))
 def test_numpy_sensor_mixing_matches_torch(fits, config):
     """The float64 backends follow the same trajectory, so their sensor maps
-    agree to round-off (measured 4.6e-12 full rank, 9.5e-11 reduced); before
-    the fix they differed by about 10%."""
+    agree to round-off (measured 6.1e-13 full rank, 9.6e-13 reduced); before
+    the fix they differed by about 3%."""
     m_torch = fits("torch", config).get_sensor_mixing_matrix()
     m_numpy = fits("numpy", config).get_sensor_mixing_matrix()
     err = np.linalg.norm(m_numpy - m_torch) / np.linalg.norm(m_torch)
@@ -125,9 +131,9 @@ def test_numpy_sensor_mixing_matches_torch(fits, config):
 
 @pytest.mark.parametrize("config", list(CONFIGS))
 def test_mlx_sensor_mixing_matches_torch(fits, config):
-    """MLX computes in float32, so after a few iterations its sensor maps agree
+    """MLX computes in float32, so after two iterations its sensor maps agree
     with the float64 PyTorch ones to float32-trajectory tolerance (measured
-    1.5e-5 full rank, 4.4e-5 reduced), under the bar
+    5.4e-6 full rank, 2.0e-5 reduced), under the bar
     ``test_mlx_transform_cross_backend.py`` uses for the same accessor."""
     _mlx_class()
     m_torch = fits("torch", config).get_sensor_mixing_matrix()
