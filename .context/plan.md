@@ -110,7 +110,7 @@ will be hosted at `eeglab.org/pyAMICA`.
 
 ### Phase R4: JOSS paper — DONE
 - [x] `paper.md` + `paper.bib` (PR #102, #101): summary, statement of need, validation,
-      state of the field, acknowledgements. Drafted via `manuscript-writing`, polished
+      state of the field, acknowledgments. Drafted via `manuscript-writing`, polished
       via `humanizer`, passed an independent `paper-review`. Authors: Shirazi
       (corresponding), Delorme, Makeig. See [[amica-release-readiness]].
 

@@ -551,8 +551,8 @@ def test_numpy_merge_decision_matches_torch_backend():
     """Acceptance test: from one matched fitted state, the two backends reach
     the identical merge decision now that both compare sensor-space
     (de-sphered) mixing columns -- ``pinv(sphere) @ A`` -- mirroring
-    ``AMICATorchNG._identify_shared_comps`` exactly (torch_impl/core.py:1696-
-    1741) instead of numpy's former sphered-space comparison.
+    ``AMICATorchNG._identify_shared_comps`` exactly, instead of numpy's former
+    sphered-space comparison.
     """
     model = _shared_fit(max_iter=3, share_comps=False)
     # Perturb one cross-model column into near- (not exact-) collinearity, so

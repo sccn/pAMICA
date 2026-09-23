@@ -303,6 +303,13 @@ class AMICA:
             (which parses ``pcadb`` but never uses it). Both are ignored, with
             one WARNING, when ``do_sphere`` is False, as in the reference. See
             :mod:`pamica.rank`.
+
+            ``outdir`` (None) is where the fit writes its ``out.txt`` log,
+            its ``writestep`` checkpoints, its ``do_history`` snapshots and its
+            final results, in the Fortran ``amicaout`` layout. The default
+            writes no files at all, like the PyTorch and MLX backends; set it
+            (here, in a params file, or with the CLI's ``--outdir``) to get the
+            reference's on-disk output.
         """
         # Store progress bar settings
         self.use_tqdm = use_tqdm
@@ -478,7 +485,13 @@ class AMICA:
                 "(logistic) and 4 (sub-Gaussian cosh+) are available on "
                 "AMICA (AMICATorchNG) and AMICAMLXNG."
             )
-        self.outdir = Path(params.get("outdir", "output"))
+        # Where results are written. None (the default) writes nothing: no
+        # out.txt log, no writestep checkpoints, no history and no final
+        # results, the same as the PyTorch and MLX backends, which never write
+        # unless asked. An explicit outdir (keyword, params file or the CLI's
+        # --outdir) writes all of them there, as the reference binary does.
+        outdir = params.get("outdir")
+        self.outdir: Optional[Path] = None if outdir is None else Path(outdir)
 
         # Data-source config (used by fit() when called without explicit
         # data), read off the same parsed dict as the hyperparameters above
@@ -611,11 +624,6 @@ class AMICA:
         self.logger = logging.getLogger("AMICA")
         self.logger.setLevel(logging.INFO)
 
-        # Ensure output directory exists
-        self.outdir = Path(self.outdir)
-        if not self.outdir.exists():
-            self.outdir.mkdir(parents=True)
-
         # Remove any existing handlers
         for handler in self.logger.handlers[:]:
             self.logger.removeHandler(handler)
@@ -626,15 +634,24 @@ class AMICA:
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
 
-        # Add file handler for out.txt
-        self.file_path = self.outdir / "out.txt"
-        file_handler = logging.FileHandler(self.file_path, mode="w")
-        file_formatter = logging.Formatter("%(message)s")
-        file_handler.setFormatter(file_formatter)
-        self.logger.addHandler(file_handler)
+        # Add file handler for out.txt, only when an output directory was given.
+        self.file_path: Optional[Path] = None
+        if self.outdir is not None:
+            self.outdir.mkdir(parents=True, exist_ok=True)
+            self.file_path = self.outdir / "out.txt"
+            file_handler = logging.FileHandler(self.file_path, mode="w")
+            file_formatter = logging.Formatter("%(message)s")
+            file_handler.setFormatter(file_formatter)
+            self.logger.addHandler(file_handler)
 
         # Prevent propagation to avoid duplicate logging
         self.logger.propagate = False
+
+    def _append_to_log_file(self, line: str) -> None:
+        """Append ``line`` to ``outdir/out.txt``; a no-op without an outdir."""
+        if self.file_path is not None:
+            with open(self.file_path, "a") as f:
+                f.write(line + "\n")
 
     @classmethod
     def from_params_file(cls, params_file: str, **kwargs) -> "AMICA":
@@ -755,11 +772,17 @@ class AMICA:
         ``Spinv`` mapping (amica15.f90:568-578), and the only way to recover
         sensor maps when rank reduction has made the sphere non-square
         (issue #223). Mirrors ``AMICATorchNG.get_sensor_mixing_matrix``.
+
+        ``A`` here is the true mixing matrix, the stored ``A`` transposed: the
+        stored ``W = inv(stored A)`` is itself the transpose of the unmixing
+        (:meth:`get_weights`, issue #24 convention). So the result inverts the
+        spatial filter the sources come from, ``get_weights() @ sphere @ result
+        == I``, and each column is one component's sensor map.
         """
         if self.sphere is None or self.A is None or self.comp_list is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
         self._check_usable("get the sensor mixing matrix")
-        A = self.A[:, self.comp_list[:, model_idx]]
+        A = self.A[:, self.comp_list[:, model_idx]].T
         return self._pinv_sphere() @ A
 
     def get_weights(self) -> np.ndarray:
@@ -895,8 +918,9 @@ class AMICA:
         # every checkpoint, so a run that diverged to a non-finite LL (issue #39)
         # or ended holding non-finite parameters (issue #240) cannot overwrite
         # the last good on-disk result with NaNs. Under best-of-N restarts this
-        # writes the WINNER, whose state is live by the time it runs.
-        if self.converged:
+        # writes the WINNER, whose state is live by the time it runs. Nothing
+        # is written without an outdir.
+        if self.converged and self.outdir is not None:
             self._write_results()
 
         return self
@@ -2048,7 +2072,7 @@ class AMICA:
             # only happens to broadcast when num_models == 1: every multi-model
             # Newton fit raised "operands could not be broadcast together with
             # shapes (data_dim, num_models) (num_models, 1)". Same as the torch
-            # backend's ``dgm.unsqueeze(0)`` (torch_impl/core.py:1323).
+            # backend's ``dgm.unsqueeze(0)`` (``AMICATorchNG._finalize_newton_stats``).
             dgm = updates["dgm"][None, :]
             self.sigma2 = updates["dsigma2"] / dgm
             self.lambda_ = updates["dlambda"] / dgm
@@ -2330,8 +2354,7 @@ class AMICA:
                         )
 
                         # Always write detailed logs to the file
-                        with open(self.file_path, "a") as f:
-                            f.write(detailed_log + "\n")
+                        self._append_to_log_file(detailed_log)
 
                         # Also log to console if verbose or not using tqdm
                         if self.verbose or not self.use_tqdm:
@@ -2423,10 +2446,18 @@ class AMICA:
                 # than one interval. Both are skipped (loudly) from a non-finite
                 # state so a checkpoint cannot persist NaN parameters that
                 # loadmodout reads back without complaint (issue #240).
-                if self.writestep > 0 and itf % self.writestep == 0:
+                if (
+                    self.outdir is not None
+                    and self.writestep > 0
+                    and itf % self.writestep == 0
+                ):
                     self._write_checkpoint("results")
 
-                if self.do_history and itf % self.histstep == 0:
+                if (
+                    self.outdir is not None
+                    and self.do_history
+                    and itf % self.histstep == 0
+                ):
                     self._write_checkpoint("history")
         finally:
             # Close the progress bar if using tqdm
@@ -2440,16 +2471,14 @@ class AMICA:
                     )
                     self.logger.info(final_metrics)
                     # Also log to file if using tqdm (since it wouldn't be logged during iterations)
-                    with open(self.file_path, "a") as f:
-                        f.write(final_metrics + "\n")
+                    self._append_to_log_file(final_metrics)
 
             # Record and log the reason the loop stopped (None if it ran to
             # max_iter). fit() uses self.converged for the terminal outcome.
             self.stop_reason = convergence_reason
             if convergence_reason:
                 self.logger.info(convergence_reason)
-                with open(self.file_path, "a") as f:
-                    f.write(convergence_reason + "\n")
+                self._append_to_log_file(convergence_reason)
 
             # Log final message (only once)
             final_message = f"Optimization finished after {final_iter + 1} iterations"
@@ -2668,6 +2697,7 @@ class AMICA:
         # (loadmodout treats 'nd' as optional).
         from .load import write_amicaout
 
+        assert self.outdir is not None, "_write_results needs an outdir"
         Lht, Lt = self._llt_arrays()
 
         write_amicaout(
@@ -2706,6 +2736,7 @@ class AMICA:
             and self.sphere is not None
             and self.comp_list is not None
         )
+        assert self.outdir is not None, "_write_history needs an outdir"
         hist_dir = self.outdir / "history" / f"{self.iter:06d}"
         if not hist_dir.exists():
             hist_dir.mkdir(parents=True)

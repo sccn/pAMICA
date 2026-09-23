@@ -9,7 +9,7 @@
 > `transform()` sources at high fidelity under EITHER orientation, even for a
 > single-model fit where `c` is identically zero (`W @ sphered` -> mean |corr|
 > 0.877; `W.T @ sphered` -> 0.932; **0/32** components above 0.999, where a
-> merely normalised + variance-reordered `W` would give ~1.000 for all 32, since
+> merely normalized + variance-reordered `W` would give ~1.000 for all 32, since
 > correlation already quotients out scale, sign and permutation). It is also the
 > only plot with **no MATLAB oracle** (`pop_topohistplot` is broken upstream,
 > trap 5), so nothing external could catch a wrong activation space. Shipping a
@@ -27,7 +27,7 @@ adapted to plots. Plots have no byte-level contract, so the gate has two levels:
 
 1. **Data gate**: every quantity we plot must match MATLAB's where an oracle exists.
 2. **Visual gate**: our figure and MATLAB's, rendered on the same real data, must be
-   a meaningful representation of the same thing (a human judgement call, made by
+   a meaningful representation of the same thing (a human judgment call, made by
    the user; accepted 2026-07-16).
 
 MATLAB cannot run in CI, so this is recorded rather than automated.
@@ -42,9 +42,9 @@ clean-room reimplementation.
 
 **Posture: run-and-observe only. No `.m` implementation source was read at any point.**
 Everything below came from MATLAB `help` text (public API documentation), rendered
-figures, and black-box input/output behaviour. That is what makes the MATLAB gate not
+figures, and black-box input/output behavior. That is what makes the MATLAB gate not
 merely a check but the *mechanism* that keeps the reimplementation clean: it lets us
-match observable behaviour without deriving from protected expression.
+match observable behavior without deriving from protected expression.
 
 `pre_ICA_cleaning/getMIR.m` is **Apache-2.0** and was legitimately read (Phase 1
 ported it with attribution; see `THIRD_PARTY_NOTICES.md`).
@@ -83,11 +83,11 @@ Side-by-side renders on the same data are committed here:
 - `cmp_pmi.png` — MATLAB `pop_modPMI` vs `pamica.viz.plot_pmi_heatmap`, rendered on
   **identical signals** (MATLAB's own `EEG.icaact`) so the comparison isolates the
   estimator and the ordering. Both show the same dependent-subspace cluster near the
-  centre with the same radiating cross pattern, at the same MI scale.
+  center with the same radiating cross pattern, at the same MI scale.
 
 Accepted deliberate differences: viridis vs jet, we add a colorbar (MATLAB has none),
 0-based component labels (pythonic; MATLAB is 1-based), and a different ordering
-algorithm (ours greedy nearest-neighbour chain vs MATLAB's iterative cost minimisation,
+algorithm (ours greedy nearest-neighbor chain vs MATLAB's iterative cost minimization,
 `cost = 20.0533 -> 19.5856 -> 18.9268`).
 
 ## Deliberate divergences (documented so nobody "fixes" them toward MATLAB)
@@ -98,7 +98,7 @@ algorithm (ours greedy nearest-neighbour chain vs MATLAB's iterative cost minimi
    should not be unsmoothed), and matching exactly would require reading GPL source.
 2. **MI diagonal.** MATLAB zeroes it. Our `pairwise_mi` diagonal is self-entropy
    (~2.83 vs off-diagonal ~0.06), so `plot_pmi_heatmap` masks it (`mask_diagonal=True`).
-   Plotting it unmasked destroys the colour scale and hides all structure.
+   Plotting it unmasked destroys the color scale and hides all structure.
 3. **Negative MI.** MATLAB's bias correction yields small negatives (-0.006); ours is
    strictly positive. Expected estimator difference, not a bug.
 
@@ -202,7 +202,7 @@ algorithm (ours greedy nearest-neighbour chain vs MATLAB's iterative cost minimi
 6. **Do not read the figures to settle numeric questions.** The maintainer twice
    misread which model was active at t=0 from a low-res render and briefly believed the
    models were swapped. Three numeric checks (correlation +0.9886, direct values at t=0,
-   and pixel-colour sampling showing orange's plateau starting at x=74 vs blue's at
+   and pixel-color sampling showing orange's plateau starting at x=74 vs blue's at
    x=120) all confirmed there was no swap. Trust the data gate over the visual one.
 
 ## Reproducing

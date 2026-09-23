@@ -46,7 +46,7 @@ void mpi_comm_split_(const int *comm, const int *color, const int *key,
 }
 
 /* Single rank always owns the data; no name buffer to fill beyond a label. The
- * hidden Fortran length of `name` is passed last; honour it to avoid overflow. */
+ * hidden Fortran length of `name` is passed last; honor it to avoid overflow. */
 void mpi_get_processor_name_(char *name, int *resultlen, int *ierr,
                              long name_len) {
     static const char label[] = "localhost";

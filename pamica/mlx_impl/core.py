@@ -1607,7 +1607,7 @@ class AMICAMLXNG:
         # immutable and gm is
         # only ever rebound, so a plain rebinding is a safe snapshot (torch
         # clones because its tensors could be written in place). Exactly gm for
-        # n_models=1 (both are 1.0) and cancelling for a disjoint comp_list, so
+        # n_models=1 (both are 1.0) and canceling for a disjoint comp_list, so
         # the single-model and unshared multi-model paths are unchanged.
         assert self.gm is not None
         gm_prev = self.gm
@@ -2465,7 +2465,7 @@ class AMICAMLXNG:
         MIR from the current ``W``/``sphere`` every ``mir_step`` iterations
         and appends it to ``mir_history_`` as ``(iteration, mir_nats,
         variance)``. ``0`` (default) disables the waypoints and leaves fit
-        behaviour byte-for-byte unchanged. ``mir_history_`` is a true
+        behavior byte-for-byte unchanged. ``mir_history_`` is a true
         trajectory like ``ll_history``: a ``keep_best`` restore does not
         rewrite it, so the fit-end MIR is ``self.mir(X)`` on the returned
         parameters, not ``mir_history_[-1]``. Not index-aligned with

@@ -71,11 +71,12 @@ what remains as of the v0.1.0 preparation.
 - UV is the canonical environment (`pyproject.toml` + `uv.lock`); the legacy conda env is retired.
 - CI is live and green on `main`: ruff lint/format, pytest (excluding slow/Fortran-binary parity),
   and a build + clean-env import matrix on Python 3.12 and 3.13. Typos check green.
-- Validation harness (`validate_implementations.py`) runs the PyTorch (NG) backend against the
-  Fortran binary (`amica15mac`) and matches components via the Hungarian algorithm, on real sample
-  EEG; it does not exercise the NumPy or MLX backends. NumPy-vs-Fortran parity lives in pytest
-  (`test_sample_data_numpy_vs_fortran`), MLX validation in `mlx_tests/` plus the cross-backend
-  suites (extending the harness itself is tracked as issue #315).
+- Validation harness (`validate_implementations.py --backend {torch,numpy,mlx}`, a comma-separated
+  list, or `all`; default `torch`, whose report is unchanged) runs each backend against one Fortran
+  reference run with the same settings and matches components via the Hungarian algorithm, on real
+  sample EEG (#315). All three meet the Fortran bar on the bundled sample (LL within 3.2e-5,
+  correlation 0.9992, Amari 0.004; rows and bars in `docs/guides/validation.md`), pinned by the
+  `AMICA_RUN_FORTRAN`-gated test in `test_fortran_param_forwarding.py`.
 
 ## Remaining before / around v0.1.0
 

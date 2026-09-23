@@ -15,6 +15,10 @@ the same shared reader.
 Settings the file carries that this backend does not consume are named in one
 `logger.warning` rather than silently dropped.
 
+It writes files only when given an `outdir` (keyword, params file, or the CLI's `--outdir`, default `output`):
+there it writes its `out.txt` log, its `writestep` checkpoints and its final results in the Fortran `amicaout` layout.
+Without one (the default) a fit writes nothing, like the PyTorch and MLX backends.
+
 This backend implements only the generalized-Gaussian source density
 (`pdftype=0`); `AMICA_NumPy(pdftype=...)` with any other value raises
 `NotImplementedError` at construction instead of silently doing nothing -- see

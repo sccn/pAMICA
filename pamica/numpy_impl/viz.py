@@ -40,6 +40,41 @@ from typing import Optional, Union, Tuple
 from .data import load_results
 
 
+def _component_maps_and_sources(
+    results: dict, data: Optional[np.ndarray] = None, model_idx: int = 0
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Sensor maps and sources of model ``model_idx`` from :func:`load_results`.
+
+    The same quantities :meth:`AMICA_NumPy.get_sensor_mixing_matrix` and
+    :meth:`AMICA_NumPy.transform` return for the fitted model the directory was
+    written from. ``load_results`` hands back the stored arrays, whose ``W`` is
+    the unmixing transposed and whose ``A`` is the mixing transposed (issue #24
+    convention), so the maps are ``pinv(sphere) @ A[:, comps].T`` and the
+    sources are ``W.T @ (sphere @ (data - mean) - c)``.
+
+    Returns
+    -------
+    maps : ndarray, shape (n_channels, n_components)
+        One sensor map per column.
+    sources : ndarray, shape (n_components, n_samples), or None
+        The sources of ``data``; ``None`` when no data is given.
+    """
+    missing = sorted({"sphere", "mean", "c"} - results.keys())
+    if missing:
+        raise KeyError(
+            f"AMICA results are missing {missing}; the maps and sources need "
+            "the sphere, mean and model centers written with the fit."
+        )
+    comps = results["comp_list"][:, model_idx]
+    sphere = results["sphere"]
+    maps = np.linalg.pinv(sphere) @ results["A"][:, comps].T
+    if data is None:
+        return maps, None
+    sphered = sphere @ (data - results["mean"][:, None])
+    centered = sphered - results["c"][:, model_idx][:, None]
+    return maps, results["W"][:, :, model_idx].T @ centered
+
+
 def plot_convergence(
     results_dir: Union[str, Path],
     figsize: Tuple[int, int] = (10, 5),
@@ -97,7 +132,10 @@ def plot_components(
     results_dir : str or Path
         Directory containing results
     data : ndarray, optional
-        Data array to compute activations
+        Data, ``(n_channels, n_samples)`` in the units the model was fitted on,
+        whose sources (as :meth:`AMICA_NumPy.transform` computes them) are
+        plotted as activation distributions. The mixing vectors are the sensor
+        maps :meth:`AMICA_NumPy.get_sensor_mixing_matrix` returns.
     max_comps : int
         Maximum number of components to plot
     figsize : tuple
@@ -107,30 +145,30 @@ def plot_components(
         raw Fortran binary format, never compressed .npz (issue #30).
     """
     results = load_results(results_dir, compressed)
+    maps, sources = _component_maps_and_sources(results, data)
 
     # Get number of components to plot
-    n_comps = min(results["A"].shape[1], max_comps)
+    n_comps = min(maps.shape[1], max_comps)
 
     if figsize is None:
         figsize = (12, 2 * n_comps)
 
-    fig, axes = plt.subplots(n_comps, 2, figsize=figsize)
+    fig, axes = plt.subplots(n_comps, 2, figsize=figsize, squeeze=False)
 
-    # Plot mixing vectors and activations
+    # Plot sensor maps (mixing vectors) and activations
     for i in range(n_comps):
         # Plot mixing vector
         ax = axes[i, 0]
-        ax.plot(results["A"][:, i], "b-")
+        ax.plot(maps[:, i], "b-")
         ax.set_title(f"Component {i + 1}: Mixing Vector")
         ax.set_xlabel("Channel")
         ax.set_ylabel("Weight")
         ax.grid(True)
 
         # Plot activation if data provided
-        if data is not None:
+        if sources is not None:
             ax = axes[i, 1]
-            activation = np.dot(results["W"][i, :, 0], data)
-            ax.hist(activation, bins=50, density=True)
+            ax.hist(sources[i], bins=50, density=True)
             ax.set_title(f"Component {i + 1}: Activation Distribution")
             ax.set_xlabel("Activation")
             ax.set_ylabel("Density")
@@ -154,7 +192,9 @@ def plot_model_comparison(
     results_dir : str or Path
         Directory containing results
     data : ndarray
-        Data array to reconstruct
+        Data to reconstruct, ``(n_channels, n_samples)`` in the units the model
+        was fitted on. Each model's reconstruction is its sensor maps times
+        its sources, plus the model center and the data mean.
     n_examples : int
         Number of example time points
     figsize : tuple
@@ -171,11 +211,23 @@ def plot_model_comparison(
     if figsize is None:
         figsize = (12, 3 * n_examples)
 
-    fig, axes = plt.subplots(n_examples, n_models + 1, figsize=figsize)
+    fig, axes = plt.subplots(n_examples, n_models + 1, figsize=figsize, squeeze=False)
 
     # Randomly select time points
     rng = np.random.RandomState(42)
     times = rng.choice(data.shape[1], n_examples, replace=False)
+
+    # Each model's reconstruction in sensor space: its maps times its sources,
+    # plus what transform() subtracted (the model center, mapped back through
+    # the sphere, and the data mean). Exact for a full-rank fit; the retained
+    # subspace for a rank-reduced one.
+    pinv_sphere = np.linalg.pinv(results["sphere"])
+    reconstructions = []
+    for h in range(n_models):
+        maps, sources = _component_maps_and_sources(results, data[:, times], h)
+        assert sources is not None
+        offset = pinv_sphere @ results["c"][:, h] + results["mean"]
+        reconstructions.append(maps @ sources + offset[:, None])
 
     for i, t in enumerate(times):
         # Plot original data
@@ -190,11 +242,7 @@ def plot_model_comparison(
         for h in range(n_models):
             ax = axes[i, h + 1]
 
-            # Get reconstruction
-            S = np.dot(results["W"][:, :, h], data[:, t : t + 1])
-            X_hat = np.dot(results["A"][:, results["comp_list"][:, h]], S)
-
-            ax.plot(X_hat, "r-")
+            ax.plot(reconstructions[h][:, i], "r-")
             ax.plot(data[:, t], "k--", alpha=0.5)
             ax.set_title(f"Model {h + 1}" if i == 0 else "")
             ax.set_xlabel("Channel")
@@ -253,7 +301,9 @@ def plot_pdf_fits(
     results_dir : str or Path
         Directory containing results
     data : ndarray
-        Data array
+        Data, ``(n_channels, n_samples)`` in the units the model was fitted
+        on, whose model-0 sources (as :meth:`AMICA_NumPy.transform` computes
+        them) are histogrammed against each fitted source density.
     max_comps : int
         Maximum number of components to plot
     n_points : int
@@ -267,9 +317,12 @@ def plot_pdf_fits(
     from .pdf import compute_pdf
 
     results = load_results(results_dir, compressed)
+    _, S = _component_maps_and_sources(results, data)
+    assert S is not None
+    comps = results["comp_list"][:, 0]
 
     # Get number of components to plot
-    n_comps = min(results["A"].shape[1], max_comps)
+    n_comps = min(S.shape[0], max_comps)
     n_mix = results["alpha"].shape[0]
 
     if figsize is None:
@@ -278,9 +331,6 @@ def plot_pdf_fits(
     fig, axes = plt.subplots(n_comps, 1, figsize=figsize)
     if n_comps == 1:
         axes = [axes]
-
-    # Get activations
-    S = np.dot(results["W"][:, :, 0], data)
 
     for i in range(n_comps):
         ax = axes[i]
@@ -293,11 +343,11 @@ def plot_pdf_fits(
         pdf_total = np.zeros_like(x)
 
         for j in range(n_mix):
-            # Get mixture parameters
-            alpha = results["alpha"][j, i]
-            mu = results["mu"][j, i]
-            beta = results["beta"][j, i]
-            rho = results["rho"][j, i]
+            # Get mixture parameters (source i of model 0 is column comps[i])
+            alpha = results["alpha"][j, comps[i]]
+            mu = results["mu"][j, comps[i]]
+            beta = results["beta"][j, comps[i]]
+            rho = results["rho"][j, comps[i]]
 
             # Compute PDF
             y = beta * (x - mu)
