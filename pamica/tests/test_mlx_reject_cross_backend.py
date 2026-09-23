@@ -298,6 +298,19 @@ def test_reject_x_pdftype1_kurtosis_switch_matches_across_backends():
     before kurt_start=3's first switch at iteration 3, so the switcher's
     FIRST call already sees a shrunken good set on both backends -- the
     scenario the bug needed.
+
+    The good sets are checked with the same float32 band as
+    ``test_reject_decisions_agree_up_to_float32_rounding``
+    (:func:`_rejection_violations`), not an equal rejected count, which a
+    single borderline sample on other hardware would break. This config's
+    band is far inside those caps: over seeds 0-5, 7 and 8, and over 12
+    copies of the MLX input multiplied by (1 + eps * z) at seed 2 (eps the
+    float32 machine epsilon, z standard normal), it stayed within 1.2e-4 of
+    the per-sample log-likelihood's spread, held at most 1 sample, and no
+    decision differed. The pdtype decisions stay exact because the switch
+    has margin: at seed 2 the smallest |kurtosis| any switch saw is 1.24e-2,
+    560 times the largest float32-vs-float64 kurtosis difference over those
+    perturbations (2.2e-5).
     """
     X = _real_data()
     kwargs: dict[str, Any] = dict(
@@ -318,19 +331,16 @@ def test_reject_x_pdftype1_kurtosis_switch_matches_across_backends():
         keep_best=False,
     )
 
-    mlx_model = AMICAMLXNG(**kwargs)
+    mlx_model = _RecordingMLX(**kwargs)
     mlx_model.fit(X, max_iter=15, verbose=False)
 
     torch_kwargs: dict[str, Any] = dict(kwargs, device="cpu", dtype=torch.float64)
-    torch_model = AMICATorchNG(**torch_kwargs)
+    torch_model = _RecordingTorch(**torch_kwargs)
     torch_model.fit(X, max_iter=15, verbose=False)
 
     assert mlx_model.numrej > 0, "test setup: no rejection fired"
     assert mlx_model.n_kurt_done > 0, "test setup: the switcher never ran"
-    assert mlx_model.good_idx is not None and torch_model.good_idx is not None
-    assert int(mlx_model.good_idx.size) == int(torch_model.good_idx.numel()), (
-        "test setup: the two backends rejected a different number of samples"
-    )
+    assert not _rejection_violations(torch_model, mlx_model, 2.0, 2.0)
 
     assert torch_model.pdtype is not None
     mlx_pdtype = np.array(mlx_model.pdtype)
