@@ -72,8 +72,8 @@ and refuses an `A` that does not invert the `W` beside it (a multi-model directo
   The reference's default `share_start` of 100 avoids this; several short test recipes were retuned.
 - Saved models: unmerged saves load as before; saves with merged components must be refit.
   Multi-model EEGLAB directories written before this change must be written again for `load_results`.
-- Initial-`A` normalization is not part of this change: the reference normalizes a drawn initial `A` and pamica does not,
-  which changes default trajectories and is issue #341.
+- Initial-`A` normalization is not part of this change: the reference normalizes a drawn initial `A` and pamica did not,
+  which changes default trajectories and is issue #341 (epic #324 Phase 12, see ADR 0006).
 
 ## Alternatives considered
 

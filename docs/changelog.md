@@ -5,6 +5,41 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 12 of epic #324: the drawn initial mixing matrix has unit-norm components, as in the reference (issue #341).**
+  The reference draws each model's block of `A` as `0.01 * (0.5 - u)`, sets its diagonal to one
+  and divides every component by its Euclidean norm (amica15.f90:805-823);
+  its restart after a non-finite likelihood redraws the same way (:1026-1044).
+  pamica drew `I + 0.01 * (0.5 - u)` and never normalized it,
+  so its initial components had norms up to about 5e-3 away from one.
+  Every backend (PyTorch, NumPy and MLX) now draws its initial `A` through one shared function,
+  `pamica.initialization.initial_mixing`, which follows the reference's recipe,
+  and the NumPy restart after a non-finite likelihood redraws through it too.
+  The generator is called exactly as before, so `mu` and `beta` start from the same values.
+  A supplied or loaded `A` is used as is, as the reference uses a loaded one (:793-802):
+  an `A` set on a NumPy model before `fit`, a NumPy refit, a PyTorch `state_dict` and an MLX save.
+  - **Behavior change: every fit from a drawn `A` starts from a different point.**
+    Normalizing is not a compensated rescale, so it changes the first E-step and the trajectory after it.
+    With `doscaling` on (the default), the first rescale used to normalize the components after the first iteration anyway,
+    so default fits end close to where they did:
+    on the bundled sample (PyTorch, seed 42, 100 iterations), the first log-likelihood moves by 2.7e-5 with one model and 1.7e-6 with two,
+    and the final one by 1.8e-6 and 4.5e-4.
+    With `doscaling=False` the initial scale was never corrected, so the change reaches the whole fit
+    (the final log-likelihood moves by 6.6e-7 and 9.2e-4).
+    The validation harness (100 iterations, all three backends, against the native binary from its own initialization) is unchanged at its precision:
+    mean matched correlation 0.9991 and Amari distance 0.0038 before and after,
+    and a log-likelihood gap of 2.7e-4 to 2.8e-4 (2.6e-4 to 2.7e-4 before).
+  - The draw itself still cannot match the reference's, whose generator is gfortran's `random_number`.
+    Two new gated oracles check the two halves instead:
+    the binary's own drawn initialization (written by a run with `max_iter=0`) has unit-norm components with the recipe's shape,
+    and the binary, loaded with pamica's draw before normalization and with its `A` update off,
+    normalizes it to pamica's initial `A` within 4.4e-16.
+  - Tests: `pamica/tests/test_initial_mixing.py` checks the recipe, the start of every fit on every backend
+    (with a control that fails on the code before this change), the supplied and loaded paths, the NumPy restart redraw, and the two gated oracles.
+    The byte-identity tests that pin earlier changes against older commits now start the older code from the new initial `A`
+    (`pamica.tests.pre_change.with_normalized_initial_mixing`), and still pass bit for bit.
+    Data-driven tests whose trajectories moved were re-searched or re-recorded:
+    the MLX `pdftype=1` restore recipe, the MLX fit-path canary, the seed of the `doscaling` native oracle, and the early-merge collapse oracle.
+
 - **Phase 11 of epic #324: every backend follows the reference's iteration order (issues #339 and #345).**
   Each iteration of every backend (PyTorch, NumPy and MLX) now runs in the reference's order (amica15.f90:949-1142,
   [ADR 0008](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0008-iteration-order.md)):
