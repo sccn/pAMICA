@@ -358,8 +358,11 @@ files (`gm`, `W`, `S`, `mean`, `c`, `alpha`, `mu`, `sbeta`, `rho`, `comp_list`, 
 The round-trip is verified two ways:
 
 - **Byte-level:** for a single model the written files are an exact float64 serialization of the fitted
-  parameters. `W` and the symmetric zero-phase component analysis (ZCA) sphere are byte-identical in C order; the non-square mixture
+  parameters. `W` is byte-identical in C order; the sphere `S` and the non-square mixture
   parameters and `c`/`comp_list` are column-major (Fortran layout), matching the reference `amicaout` files.
+  The default symmetric zero-phase component analysis (ZCA) sphere happens to be its own transpose to about 1e-17,
+  which is why an earlier column-major/C-order mismatch in the square-sphere write path went unnoticed
+  until it was measured against an asymmetric (`do_approx_sphere=False`) sphere (issue #336).
 - **Reader-level:** the directory loads through `loadmodout15.m` (and its NumPy port `loadmodout`) with the
   expected shapes and the correct column-major layout. The MATLAB round-trip during development is what caught,
   and fixed, a column-major format bug in the mixture-parameter arrays.

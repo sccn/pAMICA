@@ -5,6 +5,20 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Fix: the EEGLAB export wrote an asymmetric sphere transposed (Phase 10 of epic #324, issue #336).**
+  `write_amica_output`, shared by the PyTorch, NumPy and MLX backends,
+  wrote the square sphere matrix `S` in C order,
+  while the Fortran reference and both readers
+  (EEGLAB's `loadmodout15.m` and pamica's `loadmodout`) read it column-major.
+  The default symmetric zero-phase component analysis (ZCA) sphere is its own transpose to about 1e-17,
+  so the bug moved only that many bytes there;
+  with `do_approx_sphere=False` the sphere is genuinely asymmetric,
+  and the exported sphere came back exactly transposed
+  (measured on the bundled sample, torch, 3 iterations:
+  before the fix `max|S_loaded - S| = 0.51`, `max|S_loaded - S.T| = 0.0`;
+  after, `max|S_loaded - S| = 0.0`, `max|S_loaded - S.T| = 0.51`).
+  `S` is now written column-major in both the square and rank-reduced branches,
+  and `load_results` reads a square sphere the same way.
 - **Phase 6 of epic #324: the validation harness covers every backend (issue #315).**
   `validate_implementations.py --backend {torch,numpy,mlx}` (or a comma-separated list, or `all`)
   compares each backend against one Fortran reference run with the same settings;
