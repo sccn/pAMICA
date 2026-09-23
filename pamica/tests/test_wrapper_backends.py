@@ -191,6 +191,26 @@ def test_unknown_fit_keyword_names_the_backend(X, backend):
         model.fit(X, max_iter=1, blocksize=512)
 
 
+def test_torch_only_and_unknown_together_name_both(X):
+    """PR #347 review item 4: a first version of this check raised on the
+    torch-only category alone, so ``fit(dtype=..., blocksize=...)`` with
+    ``backend='mlx'`` named only ``dtype`` and silently dropped
+    ``blocksize`` from the message -- the same drop the NumPy backend's own
+    kwarg check had (issue #346). Both categories are now named in ONE
+    ``TypeError``, and the two single-category messages
+    (``test_dtype_with_the_mlx_backend_raises_before_fitting``,
+    ``test_unknown_fit_keyword_names_the_backend``) are unchanged."""
+    model = _wrapper("mlx")
+    with pytest.raises(TypeError) as exc:
+        model.fit(X, max_iter=1, dtype=torch.float32, blocksize=512)
+    message = str(exc.value)
+    assert "dtype" in message
+    assert "apply only to backend='torch'" in message
+    assert "blocksize" in message
+    assert "neither a fit() parameter nor a constructor keyword" in message
+    assert model.model_ is None  # nothing was built
+
+
 def test_backend_attribute_is_rechecked_at_fit(X):
     """A backend changed after construction goes through the same checks."""
     model = AMICA(verbose=False)
