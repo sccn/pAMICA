@@ -164,6 +164,57 @@ def test_native_engine_runs_and_produces_amica_output(real_data):
 
 
 @requires_binary
+def test_native_engine_asymmetric_sphere_reads_the_right_orientation(real_data):
+    """``loadmodout`` must read the reference binary's own asymmetric sphere in
+    the right orientation (issue #336), checked without any dependence on
+    pamica's writer. ``do_approx_sphere=0`` is a plain kwarg: ``AMICANative``
+    forwards any Fortran ``input.param`` field, and amica15.f90's param parser
+    has a ``case('do_approx_sphere')`` branch (amica15.f90:3448-3455) over the
+    exact sphering path (amica15.f90:495-508) -- not the default zero-phase
+    component analysis (ZCA) sphering -- which produces a genuinely asymmetric
+    sphere.
+
+    The orientation check is that the loaded ``S`` whitens the covariance the
+    reference itself computed: ``S @ cov @ S.T == I`` to float64 round-off,
+    where ``cov`` is the population covariance of the mean-centered data
+    (``Stmp/cnt`` via ``DSYRK`` then a scale by ``1/cnt``, amica15.f90:360-389 --
+    matching ``torch.cov(..., correction=0)``, not NumPy/``torch.cov``'s default
+    ``/(N-1)``). A transposed read would fail this (a general asymmetric
+    whitening matrix does not satisfy it in the other orientation), which the
+    second assertion below confirms is not a vacuous check.
+    """
+    eng = AMICANative(
+        binary=_BINARY, n_models=1, n_mix=3, max_iter=8, threads=2, do_approx_sphere=0
+    )
+    eng.fit(real_data)
+    out = eng.output_
+    assert out is not None
+    S = out.S[: out.num_pcs]
+    assert S.shape == (32, 32), "expected a full-rank (no pcakeep) sphere"
+
+    assert np.abs(S - S.T).max() > 1e-3, (
+        "do_approx_sphere=0 sphere is unexpectedly symmetric; this test would "
+        "not guard anything"
+    )
+
+    mean = real_data.mean(axis=1, keepdims=True)
+    Xc = real_data - mean
+    cov = (Xc @ Xc.T) / Xc.shape[1]
+    identity = np.eye(out.num_pcs)
+
+    whitened = S @ cov @ S.T
+    max_err = np.abs(whitened - identity).max()
+    assert max_err < 1e-8, f"S @ cov @ S.T is not the identity: max err {max_err:.3e}"
+
+    whitened_transposed = S.T @ cov @ S
+    max_err_t = np.abs(whitened_transposed - identity).max()
+    assert max_err_t > 1.0, (
+        f"S.T @ cov @ S is unexpectedly close to the identity ({max_err_t:.3e}); "
+        "this check would not catch a transposed read"
+    )
+
+
+@requires_binary
 def test_native_engine_param_aliases_and_multimodel(real_data):
     # n_models/n_mix aliases reach the Fortran num_models/num_mix_comps. Full data
     # + enough iterations so the 2-model fit converges (a too-short multi-model run

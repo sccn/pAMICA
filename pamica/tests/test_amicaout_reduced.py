@@ -55,13 +55,20 @@ def reduced_fit(rank_deficient: np.ndarray) -> AMICATorchNG:
 
 
 def test_sphere_is_padded_to_the_fortran_record_shape(reduced_fit, tmp_path):
-    """S on disk must be nx*nx values, not num_pcs*nx."""
+    """S on disk must be nx*nx values, not num_pcs*nx, written column-major
+    (the padded branch has always used order="F"; issue #336 only fixed the
+    square branch)."""
     outdir = tmp_path / "amicaout"
     reduced_fit.write_amica_output(outdir)
     raw = np.fromfile(outdir / "S", dtype=np.float64)
     assert raw.size == NW * NW, (
         f"S has {raw.size} values; EEGLAB's loadmodout15 expects {NW * NW}"
     )
+    assert reduced_fit.sphere is not None
+    sphere = reduced_fit.sphere.cpu().numpy()
+    padded = np.zeros((NW, NW), dtype=np.float64)
+    padded[:RANK] = sphere
+    np.testing.assert_array_equal(raw, padded.ravel(order="F"))
 
 
 def test_loadmodout_reads_a_reduced_fit(reduced_fit, tmp_path):
@@ -73,6 +80,8 @@ def test_loadmodout_reads_a_reduced_fit(reduced_fit, tmp_path):
     assert out.S.shape == (NW, NW)
     # Only the first num_pcs rows carry the sphere; the pad must be exactly zero.
     np.testing.assert_array_equal(out.S[RANK:], 0.0)
+    assert reduced_fit.sphere is not None
+    np.testing.assert_array_equal(out.S[:RANK], reduced_fit.sphere.cpu().numpy())
 
 
 def test_sources_roundtrip_under_reduced_rank(reduced_fit, rank_deficient, tmp_path):
@@ -105,27 +114,38 @@ def test_sources_roundtrip_under_reduced_rank(reduced_fit, rank_deficient, tmp_p
     assert np.all(np.isfinite(ratio.mean(axis=1)))
 
 
-def test_square_sphere_bytes_are_unchanged(real_data, tmp_path):
-    """Full-rank output must stay byte-identical to the Fortran reference.
+@pytest.mark.parametrize("do_approx_sphere", [True, False])
+def test_sphere_is_written_and_read_column_major(real_data, tmp_path, do_approx_sphere):
+    """``S`` is written column-major, matching the Fortran reference and both
+    readers (EEGLAB's ``loadmodout15.m`` and pamica's ``loadmodout``), for a
+    symmetric (default) sphere and for a genuinely asymmetric one alike
+    (``do_approx_sphere=False``, issue #336).
 
-    The symmetric-ZCA sphere is its own transpose, so switching the writer to
-    column-major cannot move a byte here -- asserted rather than assumed, since
-    single-model output being byte-compatible with the reference is a standing
-    guarantee (issue #92).
+    Before the fix, the square branch wrote ``S`` C-order: invisible for the
+    default zero-phase component analysis (ZCA) sphere, which is its own
+    transpose to about 1e-17, but with ``do_approx_sphere=False`` the exported
+    sphere came back exactly transposed (measured ``max|S_loaded - S| = 0.51``,
+    ``max|S_loaded - S.T| = 0.0`` on this sample). The asymmetry assertion below
+    makes sure this test cannot pass by accident on a sphere that happens to be
+    symmetric.
     """
-    m = AMICATorchNG(n_channels=NW, seed=0, device="cpu")
+    m = AMICATorchNG(
+        n_channels=NW, seed=0, device="cpu", do_approx_sphere=do_approx_sphere
+    )
     m.fit(real_data, max_iter=3, verbose=False)
     assert m.n_channels == NW
+    assert m.sphere is not None
+    sphere = m.sphere.cpu().numpy()
+
+    if not do_approx_sphere:
+        assert np.abs(sphere - sphere.T).max() > 1e-3, (
+            "exact sphere is unexpectedly symmetric; this test would not guard anything"
+        )
 
     outdir = tmp_path / "amicaout"
     m.write_amica_output(outdir)
     on_disk = np.fromfile(outdir / "S", dtype=np.float64)
-    assert m.sphere is not None
-    sphere = m.sphere.cpu().numpy()
-    # Unchanged C-order write. The ZCA sphere is symmetric only to ~1e-17, so
-    # this is not interchangeable with a column-major write -- which is exactly
-    # why the writer leaves the square branch alone.
-    np.testing.assert_array_equal(on_disk, sphere.ravel(order="C"))
-    assert not np.array_equal(sphere.ravel(order="F"), sphere.ravel(order="C")), (
-        "sphere is bit-symmetric here, so this test no longer guards anything"
-    )
+    np.testing.assert_array_equal(on_disk, sphere.ravel(order="F"))
+
+    loaded = loadmodout(outdir).S[:NW]
+    np.testing.assert_array_equal(loaded, sphere)

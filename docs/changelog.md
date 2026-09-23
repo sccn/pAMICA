@@ -5,6 +5,29 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Fix: the EEGLAB export wrote an asymmetric sphere transposed (Phase 10 of epic #324, issue #336).**
+  `write_amicaout` (`pamica/numpy_impl/load.py`), the shared writer called from `write_amica_output` on
+  `AMICATorchNG`, `AMICAMLXNG` and the `AMICA` wrapper, and from the NumPy backend's own `_write_results`,
+  wrote the square sphere matrix `S` in C order,
+  while the Fortran reference and both readers
+  (EEGLAB's `loadmodout15.m` and pamica's `loadmodout`) read it column-major.
+  The default symmetric zero-phase component analysis (ZCA) sphere is its own transpose to about 1e-17,
+  so the bug moved only that many bytes there;
+  with `do_approx_sphere=False` the sphere is genuinely asymmetric,
+  and the exported sphere came back exactly transposed
+  (measured on the bundled sample, torch, 3 iterations:
+  before the fix `max|S_loaded - S| = 0.51`, `max|S_loaded - S.T| = 0.0`;
+  after, `max|S_loaded - S| = 0.0`, `max|S_loaded - S.T| = 0.51`).
+  `S` is now written column-major in both the square and rank-reduced branches,
+  and `load_results` reads a square sphere the same way.
+  **Action needed for existing output:** a full-rank directory written with `do_approx_sphere=False`
+  by an earlier pamica holds a C-order `S`.
+  EEGLAB always read that transposed (this fix does not change EEGLAB's own reading, only pamica's),
+  and pamica's corrected `loadmodout`/`load_results` now also read it transposed, with no error raised.
+  Regenerate any such directory by re-running the fit and `write_amica_output` again;
+  there is no on-disk version marker to detect the old layout, and this repo carries no
+  compatibility shim to read it automatically.
+  Directories from the default (symmetric) sphere and from a rank-reduced (`pcakeep`) fit are unaffected.
 - **Phase 6 of epic #324: the validation harness covers every backend (issue #315).**
   `validate_implementations.py --backend {torch,numpy,mlx}` (or a comma-separated list, or `all`)
   compares each backend against one Fortran reference run with the same settings;
