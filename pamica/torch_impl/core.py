@@ -842,9 +842,9 @@ class AMICATorchNG:
         # only (a model cannot share with itself); OFF by default so
         # single-model (#24) and default multi-model (#27) parity stay
         # byte-for-byte. The reference's Spinv2 metric is declared but never
-        # allocated, so its own scan is unrunnable (the do_choose_pdfs
-        # situation, #26); the merged state it would produce is checked against
-        # the reference through load_comp_list instead.
+        # allocated, so its own scan never merges (every similarity is NaN; the
+        # do_choose_pdfs situation, #26); the merged state it would produce is
+        # checked against the reference through load_comp_list instead.
         self.share_comps = share_comps
         self.share_start = share_start
         self.share_iter = share_iter
@@ -2037,9 +2037,10 @@ class AMICATorchNG:
         No bit-exact oracle for the metric: ``Spinv2`` is *declared* in the
         reference headers but never *allocated* anywhere in
         ``amica15.f90``/``amica17.f90`` (unlike ``Spinv``, allocated at :551), so
-        invoking ``identify_shared_comps`` with ``share_comps=.true.`` would read
-        an unallocated array through ``DGEMV`` -- undefined behavior, most likely
-        a crash, not a benign no-op. The merged STATE does have one: the
+        the pinned binary's scan reads an unallocated array through ``DGEMV``.
+        It does not crash: every similarity comes out NaN, so it never merges,
+        at any ``comp_thresh`` (measured, epic #324 Phase 8; ``comp_list`` is
+        unchanged even at ``comp_thresh=0``). The merged STATE does have one: the
         reference's ``load_comp_list`` seeds a merged ``comp_list`` directly,
         and the update from it matches this backend to float64 round-off
         (``pamica/tests/test_component_rows.py``).

@@ -29,8 +29,11 @@ Release notes are also published on the
     On the bundled sample (2 models, 300 iterations, `share_start=100`, `comp_thresh=0.95`)
     the scan now merges three pairs whose maps agree (|cos| 0.956 to 0.971), ending at log-likelihood -3.3416,
     where it merged pairs whose maps did not (|cos| 0.06, 0.35 and 0.55) and ended at -3.3484 (-3.3387 with sharing off).
-    Because the metric now sees how similar the two models still are early in a fit, a scan in the first iterations merges most components;
-    the reference's default `share_start=100` avoids that.
+    Because the metric now sees how similar the two models still are early in a fit, a scan in the first iterations merges most components,
+    and a model left with few components of its own can then collapse.
+    The reference behaves the same way: its similarity on its own early state merges the same pairs,
+    and its update from the same merged states collapses in step (its own scan never merges, because its similarity is NaN).
+    The reference's default `share_start=100` avoids that.
   - Every fit without a merge is byte-identical to before on every backend, sharing off or scheduled but not firing,
     with one exception at float round-off: the weight-gradient norm (`ndtmpsum`), which now sums per component like the reference.
   - **Persistence:** the PyTorch `state_dict` is now `format_version` 4 and the MLX save format 2.

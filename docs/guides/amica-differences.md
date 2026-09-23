@@ -42,8 +42,11 @@ them: the A-freeze window after a merge is anchored on `share_start` (the litera
 `mod(iter, share_iter)` misaligns unless `share_start` is a multiple of
 `share_iter`, and freezes A permanently for `share_iter <= 6`, which the array
 backends reject up front), and the merge similarity metric has no bit-exact
-oracle, because the reference's `Spinv2` is declared but never allocated, so its
-own scan is unrunnable. The merged state the scan produces does have one:
+oracle, because the reference's `Spinv2` is declared but never allocated.
+Its scan still runs, but every similarity it computes is NaN, so a reference run with `share_comps` on never merges anything:
+seeded from pamica's initialization, the pinned binary leaves `comp_list` unchanged
+and reports 64 unique components after a scan at iteration 8, even at `comp_thresh=0`.
+The merged state the scan would produce does have an oracle:
 the reference's `load_comp_list` seeds a merged `comp_list`, and the PyTorch
 and NumPy updates from such a state match the native binary to float64 round-off
 ([below](#component-sharing-compares-and-ties-components-issue-334)).
@@ -450,12 +453,21 @@ where the old metric merged three whose maps did not (|cos| 0.06, 0.35 and 0.55)
 
 Two consequences to know:
 
-- A scan early in a fit merges most components.
+- A scan early in a fit merges most components, and the reference's formula does the same.
   Both models start near the identity, so their components stay near-collinear for the first iterations
   (on the sample with 2 models and seed 42, a scan at iteration 8 merges all 32 at `comp_thresh=0.95` and 24 at 0.99;
-  one at iteration 20 merges 24 and 5),
-  and a model left with little responsibility can then collapse, in some short recipes to a non-finite fit.
-  The reference's default `share_start=100` avoids this; keep `share_start` well past the first iterations.
+  one at iteration 20 merges 24 and 5).
+  The reference's own scan cannot show this (it never merges, above),
+  but its similarity with `Spinv2 = Spinv^T Spinv`, applied to the binary's own state after 8 iterations from pamica's initialization,
+  merges exactly the pairs the PyTorch and NumPy scans merge: 32, 32 and 30 at `comp_thresh` 0.9, 0.95 and 0.99.
+- A model left with few components of its own then loses its responsibility, and can end in a non-finite fit.
+  In a short recipe (4096 samples, `share_start=8`, `share_iter=10`, `comp_thresh=0.9`), 28 merges at iteration 8
+  dropped the second model's `gm` from 0.41 to 0.003, and one more merge at iteration 18 drove it to zero and the fit to NaN.
+  Seeded with the same merged states, the reference's update does the same:
+  the second model's `gm` falls to 0.005 within two iterations, as pamica's does from the same state,
+  and from the second merge it reaches zero in one iteration and the binary reports NaN and reinitializes.
+  This is the algorithm on models that have not yet separated, not a defect of the port.
+  The reference's default `share_start=100` avoids it; keep `share_start` well past the first iterations.
 - Saved models: a PyTorch `state_dict` (now `format_version` 4) or MLX save (now format 2) from an earlier version
   is converted without loss unless `share_comps` had merged components,
   in which case loading raises `ValueError` and the model must be refit.
@@ -844,7 +856,8 @@ reference binary itself — the same category as the `do_choose_pdfs` and
   parameter file said.
 - (Already documented above:) `do_choose_pdfs`'s `pdftype=1` auto-switcher is
   declared but its moment buffers (`m2sum`/`m4sum`) are never accumulated, and
-  `share_comps`'s `Spinv2` similarity metric is declared but never allocated.
+  `share_comps`'s `Spinv2` similarity metric is declared but never allocated
+  (its scan runs, computes NaN similarities and never merges).
 
 One live (non-dead) divergence is worth recording explicitly rather than
 leaving it implicit in the unsupported-keys table: Fortran's `do_rho` can

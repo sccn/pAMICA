@@ -22,7 +22,7 @@ ADR 0006 made `doscaling` act on block rows, but `share_comps` still used the co
   and the `gm`-weighted `dAk/zeta` average then averaged those.
   Forcing it on a planted identical pair changed the log-likelihood by -0.186, where the reference's fold changes it by exactly 0.
 
-The reference's own scan cannot run (its `Spinv2` is declared but never allocated),
+The reference's own scan never merges (its `Spinv2` is declared but never allocated, so every similarity is NaN),
 but its `load_comp_list` seeds a merged `comp_list`, and its update from that state is a bit-level oracle.
 
 ## Decision
@@ -67,6 +67,8 @@ and refuses an `A` that does not invert the `W` beside it (a multi-model directo
   both models start near the identity, so a scan in the first iterations now merges most components
   (it compares their true maps; on the sample with seed 42, 32 of 32 at iteration 8 with `comp_thresh=0.95`, 24 with 0.99),
   and a model that loses its responsibility can collapse.
+  The reference behaves the same way: its similarity on its own early state merges exactly the pairs pamica's does,
+  and its update from the same merged states loses the second model's responsibility in step with pamica's, to NaN where pamica's goes non-finite.
   The reference's default `share_start` of 100 avoids this; several short test recipes were retuned.
 - Saved models: unmerged saves load as before; saves with merged components must be refit.
   Multi-model EEGLAB directories written before this change must be written again for `load_results`.

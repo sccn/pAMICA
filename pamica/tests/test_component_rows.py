@@ -28,7 +28,9 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
    models, and single-model exports are unchanged byte for byte;
 4. (opt-in, ``AMICA_RUN_FORTRAN=1``) the native reference binary, seeded with a
    MERGED ``comp_list`` through ``load_comp_list``, matches the PyTorch and
-   NumPy updates from that state to float64 round-off.
+   NumPy updates from that state to float64 round-off; its own scan never
+   merges; and an early mass merge collapses its update exactly as it
+   collapses pamica's.
 
 Persistence of the new layout and conversion of old saves are in
 ``test_component_rows_persistence.py``. Real bundled sample EEG only, no
@@ -969,3 +971,199 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
                 f"A {old_err:.3g}, LL {np.abs(ll_old - ref.LL).max():.3g}"
             )
             assert old_err > 1e-2
+
+
+# --- 5. early mass merges behave the same in the reference (opt-in) -------------
+# The recipe the sharing tests used before issue #334 made the metric compare
+# true component maps: 4096 samples, pamica's default optimizer, an early scan
+# at a loose threshold. The first scan (iteration 8) merges 28 components and the
+# one at iteration 18 one more; the second model then loses its responsibility
+# and the fit goes non-finite at iteration 20. _COLLAPSE_REF spells pamica's
+# defaults out for the binary, with no further scans, no A-freeze and no
+# convergence stops, so both sides run the same updates from the same state.
+_COLLAPSE_SAMPLES = 4096
+_COLLAPSE: Dict[str, Any] = dict(
+    n_channels=NW,
+    n_models=2,
+    n_mix=NMIX,
+    seed=7,
+    device="cpu",
+    dtype=torch.float64,
+    block_size=1024,
+    share_comps=True,
+    share_start=8,
+    share_iter=10,
+    comp_thresh=0.9,
+)
+_COLLAPSE_REF: Dict[str, Any] = dict(
+    block_size=1024,
+    do_opt_block=0,
+    lrate=0.1,
+    lratefact=0.5,
+    minlrate=1e-12,
+    rholrate=0.05,
+    rholratefact=0.1,
+    rho0=1.5,
+    minrho=1.0,
+    maxrho=2.0,
+    invsigmin=1e-4,
+    invsigmax=1000.0,
+    do_newton=0,
+    newt_ramp=10,
+    do_reject=0,
+    share_comps=0,
+    share_start=10**6,
+    share_iter=100,
+    use_min_dll=0,
+    use_grad_norm=0,
+)
+
+
+def _with(base: Dict[str, Any], **overrides: Any) -> Dict[str, Any]:
+    """``base`` with ``overrides`` applied (a copy)."""
+    merged: Dict[str, Any] = dict(base)
+    merged.update(overrides)
+    return merged
+
+
+def _post_scan(model: AMICATorchNG) -> Dict[str, Any]:
+    """A fitted model's state as a seed: the merged ``comp_list``, the default
+    one the reference unmixes with first, and ``c`` zeroed (the reference's
+    ``load_comp_list`` path reads the file ``c``, so it needs ``c == 0``)."""
+    seed = {
+        k: _np(getattr(model, k)).copy()
+        for k in ("A", "mu", "beta", "rho", "alpha", "gm", "mean")
+    }
+    seed["merged"] = _np(model.comp_list).copy()
+    seed["default"] = np.stack([np.arange(NW), NW + np.arange(NW)], axis=1)
+    return seed
+
+
+def _reference_seed(seed: Dict[str, Any]) -> Any:
+    from pamica.tests.native_oracle import SeedState
+
+    return SeedState(
+        A=seed["A"].T.copy(),
+        mean=seed["mean"].reshape(-1),
+        mu=seed["mu"],
+        sbeta=seed["beta"],
+        rho=seed["rho"],
+        alpha=seed["alpha"],
+        gm=seed["gm"],
+        c=np.zeros((NW, 2)),
+        comp_list=seed["merged"],
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("AMICA_RUN_FORTRAN") != "1",
+    reason="opt-in Fortran-binary integration test (set AMICA_RUN_FORTRAN=1)",
+)
+def test_the_reference_scan_never_merges(real_data, tmp_path):
+    """The reference's similarity weights by ``Spinv2``, which is never
+    allocated: its scan runs, every similarity is NaN, and nothing merges even
+    at ``comp_thresh=0``, where any finite similarity would merge."""
+    from pamica.tests.native_oracle import run_seeded_reference
+
+    init = AMICATorchNG(**_with(_COLLAPSE, share_comps=False))
+    init._preprocess(real_data[:, :_COLLAPSE_SAMPLES])
+    init._initialize_parameters()
+    seed = _post_scan(init)
+    ref = run_seeded_reference(
+        _reference_seed(seed),
+        DATA_FILE,
+        tmp_path,
+        n_samples=_COLLAPSE_SAMPLES,
+        max_iter=3,
+        num_models=2,
+        **_with(_COLLAPSE_REF, share_comps=1, share_start=2, comp_thresh=0.0),
+    )
+    assert "Number of unique components" in ref.stdout, "the scan did not run"
+    np.testing.assert_array_equal(ref.comp_list, seed["default"])
+    assert "Identifying component" not in ref.stdout
+
+
+@pytest.mark.skipif(
+    os.environ.get("AMICA_RUN_FORTRAN") != "1",
+    reason="opt-in Fortran-binary integration test (set AMICA_RUN_FORTRAN=1)",
+)
+def test_an_early_mass_merge_collapses_the_reference_too(real_data, tmp_path):
+    """From pamica's state right after each early scan, the reference's update
+    loses the second model's responsibility exactly as pamica's does: after the
+    first scan both drop its ``gm`` from above 0.3 to below 0.01 within two
+    iterations, and after the second both drive it to zero in one iteration and
+    go non-finite in the next (the binary reports NaN and reinitializes). So
+    the collapse is the algorithm on models that have not separated, not a
+    defect of the port."""
+    from pamica.tests.native_oracle import run_seeded_reference
+
+    X = real_data[:, :_COLLAPSE_SAMPLES]
+
+    def continuation(seed: Dict[str, Any], k: int) -> Tuple[np.ndarray, float]:
+        """``k`` iterations from ``seed`` in the reference's load order (see
+        ``_seeded_run``, whose accessors refuse the non-finite state this
+        reaches), with no scan and no A-freeze, like ``_COLLAPSE_REF``."""
+        model = AMICATorchNG(**_with(_COLLAPSE, share_comps=False))
+        X_t = model._preprocess(X)
+        model._initialize_parameters()
+        for name in ("A", "mu", "beta", "rho", "alpha", "gm"):
+            setattr(model, name, torch.from_numpy(seed[name].copy()))
+        model.c = torch.zeros(NW, 2, dtype=torch.float64)
+        model.comp_list = torch.from_numpy(seed["default"].copy())
+        model._update_unmixing_matrices()
+        model.comp_list = torch.from_numpy(seed["merged"].copy())
+        lls = []
+        for it in range(k):
+            model.iteration = it
+            acc = model._accumulate_blocks(X_t)
+            lls.append(float(acc["ll"]) / (X_t.shape[1] * NW))
+            model._update_parameters(acc, X_t.shape[1])
+        return np.asarray(lls), float(_np(model.gm)[1])
+
+    first = AMICATorchNG(**_COLLAPSE)
+    first.fit(X, max_iter=8, verbose=False)  # the scan runs on the last iteration
+    seed = _post_scan(first)
+    merges = 2 * NW - len(np.unique(seed["merged"]))
+    assert merges >= 20, f"setup: the first scan merged only {merges}"
+    assert seed["gm"][1] > 0.3, "setup: the second model had already collapsed"
+    ref = run_seeded_reference(
+        _reference_seed(seed),
+        DATA_FILE,
+        tmp_path / "first",
+        n_samples=_COLLAPSE_SAMPLES,
+        max_iter=2,
+        num_models=2,
+        **_COLLAPSE_REF,
+    )
+    lls, gm2 = continuation(seed, 2)
+    print(f"after the first scan: gm2 reference {ref.gm[1]:.3e}, torch {gm2:.3e}")
+    assert np.isfinite(lls).all() and np.isfinite(ref.LL).all()
+    assert gm2 < 0.01 and ref.gm[1] < 0.01
+    np.testing.assert_allclose(gm2, ref.gm[1], rtol=1e-2)
+
+    second = AMICATorchNG(**_COLLAPSE)
+    second.fit(X, max_iter=18, verbose=False)  # the second scan runs last
+    seed = _post_scan(second)
+    ref = run_seeded_reference(
+        _reference_seed(seed),
+        DATA_FILE,
+        tmp_path / "second1",
+        n_samples=_COLLAPSE_SAMPLES,
+        max_iter=1,
+        num_models=2,
+        **_COLLAPSE_REF,
+    )
+    lls, gm2 = continuation(seed, 1)
+    assert ref.gm[1] == 0.0 and gm2 == 0.0
+    with pytest.raises(RuntimeError, match="Reinitiali"):
+        run_seeded_reference(
+            _reference_seed(seed),
+            DATA_FILE,
+            tmp_path / "second2",
+            n_samples=_COLLAPSE_SAMPLES,
+            max_iter=2,
+            num_models=2,
+            **_COLLAPSE_REF,
+        )
+    lls, _ = continuation(seed, 2)
+    assert np.isfinite(lls[0]) and not np.isfinite(lls[1])

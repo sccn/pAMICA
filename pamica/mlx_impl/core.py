@@ -2241,9 +2241,9 @@ class AMICAMLXNG:
         cheap.
 
         No bit-exact oracle for the metric: the reference's ``Spinv2`` is
-        *declared* but never *allocated* in ``amica15.f90``, so invoking the
-        routine there would read an unallocated array -- it is effectively
-        unrunnable (cf. the dead ``do_choose_pdfs`` switch, #26). The merged
+        *declared* but never *allocated* in ``amica15.f90``, so the routine
+        there reads an unallocated array, every similarity comes out NaN and it
+        never merges (cf. the dead ``do_choose_pdfs`` switch, #26). The merged
         state it produces is checked against the reference through
         ``load_comp_list`` on the float64 backends, and this backend is pinned
         to AMICATorchNG.
