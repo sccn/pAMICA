@@ -6,20 +6,20 @@ reference is how correctness is defined here. This page lists every place pamica
 
 Anything not on this page is intended to match the reference. If you find a difference
 that is not listed, that is a bug worth
-[reporting](https://github.com/sccn/pAMICA/issues) — not a documented choice.
+[reporting](https://github.com/sccn/pAMICA/issues), not a documented choice.
 
 ## At a glance
 
 | # | Area | Fortran AMICA | pamica default | Why | Restore reference |
 |---|---|---|---|---|---|
 | 1 | Rank threshold | absolute floor `mineig=1e-15` | relative floor `mineig_rel=1e-12` | the absolute floor is unit-dependent: MEG in Tesla yields rank 0, and average-referenced EEG is detected by luck | `mineig_rel=None` |
-| 2 | Zero numerical rank | `numeigs = 0`, continues | `ValueError` naming cause and fix | fitting a zero-dimensional model is not a recoverable state | — (no reason to want it) |
+| 2 | Zero numerical rank | `numeigs = 0`, continues | `ValueError` naming cause and fix | fitting a zero-dimensional model is not a recoverable state | none (no reason to want it) |
 | 3 | Returned iterate | last EM iterate | highest-likelihood iterate (`keep_best`) | the lrate schedule is non-monotone; late Newton overshoots cut LL variance 12.7x → 2.0x | `keep_best=False` |
-| 4 | Newton | on (`do_newton=1`) | off | isolates the algorithm from initialization for parity work | `do_newton=True` |
-| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | the `AMICA` wrapper, on either backend, refuses `transform`/`get_*`/`save`; the raw `AMICATorchNG`, `AMICAMLXNG` and NumPy `AMICA` backends now refuse their own output accessors on a degenerate fit too (issue #306), not just the wrapper; NumPy additionally reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk). Every backend stops before a non-finite value is applied or returned: a non-finite likelihood (never recorded in the history), update direction (`nan_direction`) or parameter after an update (`nan_params`), where the reference applies a NaN step and exits on the next likelihood | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50, #240, #306 and #339) |
+| 4 | Newton | off in the compiled defaults (amica15_header.f90:19); the bundled `input.param` turns it on (`do_newton 1`) | off | the compiled default; Newton-off fits isolate the algorithm from initialization for parity work | `do_newton=True`, as the bundled `input.param` sets |
+| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | the `AMICA` wrapper, on either backend, refuses `transform`/`get_*`/`save`; the raw `AMICATorchNG`, `AMICAMLXNG` and NumPy `AMICA` backends refuse their own output accessors on a degenerate fit too (issue #306); NumPy additionally reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk). Every backend stops before a non-finite value is applied or returned: a non-finite likelihood (`nan_ll`, or `singular_ll` for an infinite one; never recorded in the history), update direction (`nan_direction`) or parameter after an update (`nan_params`), where the reference applies a NaN step and exits on the next likelihood | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | none (see issues #50, #240, #306 and #339) |
 | 6 | Precision | float64 | float64 (float32 on Apple GPUs) | Apple GPUs have no float64; float32 agrees to ~7 significant digits, not bit-parity | `dtype=torch.float64` |
-| 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
-| 8 | Components merged away by `share_comps` | mixing vector and density updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided, never rescaled) | a fit must not end holding NaN parameters, mask or no mask; the components are dead either way | — (see issues #60, #240, #334) |
+| 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | none |
+| 8 | Components merged away by `share_comps` | mixing vector and density updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided, never rescaled) | a fit must not end holding NaN parameters, mask or no mask; the components are dead either way | none (see issues #60, #240, #334) |
 | 9 | Block-size search | on (`do_opt_block=1`), sweeps 128–1024, **aborts** if a candidate cannot allocate | off; sweeps 4096–32768; a candidate that cannot allocate is skipped and the fit continues | the choice is timing-based and therefore machine-dependent, which a parity run cannot have; Fortran's range sits far below where any pamica backend peaks; and running out of memory is a reason to use a smaller block, not to stop | `do_opt_block=True` (but pin `block_size` for a bit-for-bit comparison) |
 | 10 | Restarts across seeds | none (its `maxrestarts` only *recovers* from an early NaN) | available as `n_restarts`, **off by default** (`n_restarts=1`) | the weakest under-determined components are init-basin sensitive, so best-of-N buys robustness; but a default that ran N fits would change every result and cost N times as long | `n_restarts=1` (the default) |
 | 11 | Reconstruction after rank reduction (`AMICAICA.apply`) | output has no representation of the discarded principal component analysis (PCA) subspace (sphere rows past `numeigs` are zero), so any back-projection drops it | the MNE export carries the full PCA basis, so `apply` restores the residual | MNE's own `ICA` does; the residual was never part of the independent component analysis (ICA) decomposition, so it is not ICA's to remove | `apply(..., n_pca_components=ica.n_components_)` |
@@ -225,8 +225,11 @@ so the params-file reader, the degenerate-fit contract, `.pt` `save`/`load`, the
 | `keep_best` best-iterate restore | yes | no | yes | n/a |
 | `n_restarts` best-of-N restarts | yes | yes | yes | n/a |
 | Mutual Information Reduction (MIR) diagnostic | yes | no | yes | n/a |
-| Persistence | `state_dict` + EEGLAB `amicaout` export | EEGLAB `amicaout` | `state_dict`/`.npz` `save`-`load` + EEGLAB `amicaout` export | EEGLAB `amicaout` |
-| Fortran `input.param` reader | yes (`AMICA.from_params_file`, #132) | yes (`AMICA_NumPy(params_file=...)` / `from_params_file`, #304) | yes (`AMICA.from_params_file(..., backend="mlx")`) | native |
+| `variance_order` (EEGLAB component order) | yes | no (issue #317) | yes | applied by `loadmodout15` on load |
+| Per-sample scoring (`model_loglik`/`model_probability`) | yes | no | yes | n/a |
+| Through the `AMICA` and `AMICAICA` wrappers | yes (`backend="torch"`, the default) | no, used directly | yes (`backend="mlx"`) | no, used directly as `AMICANative` |
+| Persistence | `state_dict`, `AMICA.save` `.pt` + EEGLAB `amicaout` export | EEGLAB `amicaout` | `state_dict`/`.npz` `save`-`load`, `AMICA.save` `.pt` + EEGLAB `amicaout` export | EEGLAB `amicaout` |
+| Parameter file (JSON or Fortran `input.param`) | yes (`AMICA.from_params_file`, #132) | yes (`AMICA_NumPy(params_file=...)` / `from_params_file`, #304) | yes (`AMICA.from_params_file(..., backend="mlx")`) | the binary reads `input.param`; `AMICANative` takes its keys as keywords |
 | A second `fit` on the same instance | starts from a fresh initialization | continues from the previous fit ([see below](#refitting-a-numpy-instance-continues-from-the-previous-fit-issue-312)) | starts from a fresh initialization | every run starts fresh, or from `load_*` files |
 
 The NumPy row's "GG only" (generalized Gaussian, GG) corrects an earlier
@@ -412,25 +415,15 @@ m.shared_components()                            # groups of (model, source) pai
 
 For a full-rank square sphere `pinv` equals `inv` to about 1e-15, far below the
 `comp_thresh` decision boundary (0.99 by default), so merge decisions on
-well-conditioned data are unchanged; the bundled sample reproduces its previous
-`comp_list` and log-likelihood bit for bit.
+well-conditioned data are unchanged; when that change landed, the bundled
+sample reproduced its previous `comp_list` and log-likelihood bit for bit.
 
-The NumPy backend now reaches the merge decision from the same metric (issue
-#258): `identify_shared_components` takes the de-sphered sensor-space maps
-directly -- `pinv(sphere) @ A.T` since issue #334, the same back-map described
-above -- instead of comparing columns of the sphered `A`.
-The two backends therefore make the identical merge decision from the same
-fitted state (`pamica/tests/test_numpy_share_comps.py::test_numpy_merge_decision_matches_torch_backend`).
-The MLX backend calls that same kernel on the same host float64 inputs (issue
-#263), so all three agree.
-On one real fitted 2-model state (measured before issue #334, when the metric
-still compared stored columns) the top candidate cross-model pair measured
-0.992 cosine similarity in sensor space against 0.970 in the old sphered
-space -- close enough that, with the default `comp_thresh=0.99`, the two
-metrics disagree on whether that pair merges. A NumPy fit that shares
-components can therefore reach a different `comp_list` than it did before
-#258, even on a full-rank, well-conditioned sphere; only the `pinv`-vs-`inv`
-comparison two paragraphs above is unaffected by that swap.
+All three backends reach the merge decision through one kernel, `identify_shared_components`
+(the NumPy backend since issue #258, MLX since issue #263),
+on the same host float64 sensor-space maps, `pinv(sphere) @ A.T` since issue #334,
+so they make the identical merge decision from the same fitted state
+(`pamica/tests/test_numpy_share_comps.py::test_numpy_merge_decision_matches_torch_backend`
+and `pamica/tests/test_mlx_sharing_cross_backend.py`).
 
 ## Component sharing compares and ties components (issue #334)
 
@@ -548,7 +541,7 @@ LLt[num_models, :].sum() / (n_good_samples * nw) == LL[-1]
 ```
 
 It holds bit for bit with one reference-faithful exception: a `do_reject` fit
-whose rejection fires on the same iteration as the write. `LL(iter)` is
+whose rejection fires on its last iteration, just before the final write. `LL(iter)` is
 normalized over the good set as it stood *before* that rejection
 (amica15.f90:1770), and `reject_data` then shrinks `numgoodsum`
 (amica15.f90:2252) and zeroes the rejected samples' `modloglik`/`loglik`
