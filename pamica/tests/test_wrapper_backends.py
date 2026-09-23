@@ -124,6 +124,7 @@ def test_v1_payload_still_loads_and_transforms_identically(X, tmp_path):
     loaded = AMICA.load(str(path), device="cpu")
 
     assert type(loaded.model_) is AMICATorchNG
+    assert loaded.backend == "torch"
     assert loaded.is_fitted_ and loaded.converged_
     assert loaded.stop_reason_ == model.stop_reason_
     assert loaded.final_ll_ == model.final_ll_
@@ -561,14 +562,6 @@ def test_numpy_scalar_settings_save_and_load(X, backend, tmp_path):
     assert loaded.model_.seed == SEED and type(loaded.model_.seed) is int
     assert loaded.restart_seeds_ == [SEED]
     np.testing.assert_array_equal(loaded.transform(X), model.transform(X))
-
-
-def test_v1_payload_loads_as_a_torch_model(X, tmp_path):
-    model = AMICA(device="cpu", verbose=False)
-    model.fit(X[:, :4096], max_iter=2, seed=SEED)
-    path = tmp_path / "v1.pt"
-    torch.save(_v1_payload(model), path)
-    assert AMICA.load(str(path), device="cpu").backend == "torch"
 
 
 def test_v2_payload_without_a_backend_is_malformed(fitted, tmp_path):
