@@ -126,7 +126,7 @@ and the backend converges to the binary's solution within ~0.005 log-likelihood 
 ### Newton-enabled runs and the initialization basin
 
 The comparison above disables Newton (`do_newton=0`) to isolate the algorithm from its starting point.
-With Newton enabled (`do_newton=1`, the default), agreement at the full 2000-iteration budget depends on the initialization, not on any dynamics difference between the backends.
+With Newton enabled (`do_newton=1`, as in the bundled parameter files and EEGLAB's `runamica15.m`; pamica's own default is off), agreement at the full 2000-iteration budget depends on the initialization, not on any dynamics difference between the backends.
 From an *identical* initialization (the same starting mixing matrix and densities fed to both), `pamica` and Fortran converge to the same solution:
 mean Hungarian-matched correlation ~0.997 with no collapsed components on the full 70-channel recording, the residual being floating-point summation-order noise between two implementations rather than an algorithmic gap.
 From *independent* random initializations the picture differs, because the two backends' random number generators do not share a state, so a fixed seed does not map to a matched start.
@@ -528,6 +528,7 @@ bundled `pamica/numpy_impl/params.json`; `AMICA`/`AMICATorchNG` and `AMICAMLXNG`
 take theirs from the constructor signature (`max_iter` from `fit`); Fortran
 compiles in the values in `amica15_header.f90` and the bundled
 `pamica/sample_data/input.param` overrides several.
+The [defaults table](amica-differences.md#default-settings-issue-354) of the differences guide lists every setting across these sources.
 
 | Stop | `AMICA` / `AMICATorchNG` | `AMICA_NumPy` | `AMICAMLXNG` (MLX) | Fortran (compiled / `input.param`) |
 |---|---|---|---|---|

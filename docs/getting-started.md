@@ -78,8 +78,9 @@ print("final log-likelihood:", amica.final_ll_)
 
 `AMICA` auto-selects a device.
 Because the backend computes in float64 for Fortran parity and Apple's Metal Performance Shaders (MPS) device cannot represent float64,
-an auto-selected MPS device is redirected to the central processing unit (CPU);
-pass `device="mps"` with `dtype=torch.float32` to run on MPS explicitly.
+an auto-selected MPS device is redirected to the central processing unit (CPU), with a logged warning;
+the PyTorch backend does this itself, so the raw `AMICATorchNG` chooses the same way.
+Pass `device="mps"` with `dtype=torch.float32` to run on MPS explicitly.
 On Apple Silicon the MLX backend below is faster than MPS.
 See [Backends & Devices](guides/backends.md) for the full matrix and performance guidance.
 
@@ -116,5 +117,6 @@ and the measured precision ([Precision on the MLX backend](guides/backends.md#pr
 
 - [Backends & Devices](guides/backends.md): CUDA / CPU / MLX and float32 vs float64.
 - [Validation & Parity](guides/validation.md): comparing against the Fortran reference.
-- [pamica vs. AMICA](guides/amica-differences.md): every deliberate difference from the reference.
+- [pamica vs. AMICA](guides/amica-differences.md): every deliberate difference from the reference,
+  including pamica's [default settings](guides/amica-differences.md#default-settings-issue-354) beside the compiled binary's and EEGLAB's.
 - [API Reference](api/index.md): full parameter and method documentation.
