@@ -95,15 +95,18 @@ sample. Read this section before running the external tier -- it is not a quick 
 **Bundled tier** (`--tier bundled`, default): uses `pamica/sample_data/eeglab_data.fdt`
 (32 channels, 30,504 frames, already committed -- no download). Default budget is 5 single-model
 seeds at 2000 iterations plus a 20-run multi-model ensemble at 100 iterations (matching
-`docs/guides/validation.md`'s documented protocol). Measured end to end on a 2026 Apple Silicon
-laptop (10 cores, no CUDA, MPS unusable here because these runs are float64 -- see below):
+`docs/guides/validation.md`'s documented protocol). Measured end to end on two Apple Silicon hosts
+(no CUDA; MPS unusable here because these runs are float64 -- see below):
 
-| phase | measured |
-|---|---|
-| single-model sweep (5 seeds x 2000 iter, Fortran + pamica) | ~24 min |
-| multi-model ensemble (20 runs x 100 iter, Fortran + pamica) | ~9 min |
-| score-function / sufficient-statistics check | <1 s |
-| **total** | **~33 min** |
+| phase | 2026 laptop, 10 cores | Apple M4 Pro, 14 cores, 2026-09-23 (issue #351) |
+|---|---|---|
+| single-model sweep (5 seeds x 2000 iter, Fortran + pamica) | ~24 min | ~32 min |
+| multi-model ensemble (20 runs x 100 iter, Fortran + pamica) | ~9 min | ~15 min |
+| score-function / sufficient-statistics check | <1 s | <1 s |
+| **total** | **~33 min** | **~47 min** |
+
+The M4 Pro run (`--threads 4`, `OMP_NUM_THREADS=4`, the code of epic #324) shared the machine with other
+benchmark jobs (load average 10-24), so its times are an upper bound for that host.
 
 A `--n-seeds 2 --max-iter 100 --multimodel-runs 2 --multimodel-max-iter 20` smoke test (not the
 paper's protocol -- noisier numbers, just a pipeline check) completes in well under a minute.
