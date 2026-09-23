@@ -97,6 +97,10 @@ def _backend_fit(cls: Any, backend: str, recipe: str, X: np.ndarray) -> Any:
 
 
 def _wrapper_fit(cls: Any, backend: str, recipe: str, X: np.ndarray) -> Any:
+    """A wrapper fit; an ``"mlx"`` fit skips the calling test without MLX or an
+    Apple GPU, so no wrapper route can reach the backend's ImportError."""
+    if backend == "mlx":
+        _mlx_core()
     recipe_kwargs = dict(_RECIPES[recipe])
     n_models = recipe_kwargs.pop("n_models")
     device = "cpu" if backend == "torch" else None
@@ -183,8 +187,6 @@ def test_mlx_save_round_trip(real_data, recipe, tmp_path):
 @pytest.mark.parametrize("recipe", list(_RECIPES))
 @pytest.mark.parametrize("backend", ["torch", "mlx"])
 def test_wrapper_save_round_trip(real_data, backend, recipe, tmp_path):
-    if backend == "mlx":
-        _mlx_core()
     m = _wrapper_fit(AMICA, backend, recipe, real_data)
     assert _merged(m.model_) == (recipe == "merged"), "setup: merge state"
     path = str(tmp_path / "model.pt")
@@ -258,8 +260,6 @@ def test_old_wrapper_save_converts_losslessly(
 ):
     """The wrapper's own save wraps the backend payload, so an old wrapper file
     goes through the same conversion."""
-    if backend == "mlx":
-        _mlx_core()
     old = _wrapper_fit(pre.AMICA, backend, recipe, real_data)
     path = str(tmp_path / "old.pt")
     old.save(path)
