@@ -136,6 +136,23 @@ def _read_f64(path: Path, shape: tuple[int, ...]) -> np.ndarray:
     return raw[:need].reshape(shape, order="F")
 
 
+def history_mixing(workdir: Path, nw: int, num_comps: int) -> dict[int, np.ndarray]:
+    """The reference-layout ``A`` the binary wrote after each iteration.
+
+    A run with ``do_history=1`` and ``histstep=1`` passed to
+    :func:`run_seeded_reference` writes its state after every iteration's
+    update to ``out/history/<iter>/`` (``write_history``, amica15.f90:2287-2324,
+    called at :1130). Keys are the reference's 1-based iterations; an iteration
+    that ends the run on a stop takes no update and writes no history.
+    """
+    root = Path(workdir) / "out" / "history"
+    return {
+        int(d.name): _read_f64(d / "A", (nw, num_comps))
+        for d in root.iterdir()
+        if d.name.isdigit() and (d / "A").is_file()
+    }
+
+
 def run_seeded_reference(
     state: SeedState,
     data_file: Path,
