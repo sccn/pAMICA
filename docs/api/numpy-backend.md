@@ -25,4 +25,16 @@ This backend implements only the generalized-Gaussian source density
 the backend-differences table in
 [amica-differences.md](../guides/amica-differences.md).
 
+`AMICA_NumPy(**kwargs)` rejects a keyword argument it does not recognize
+(issue #346), before any other construction runs.
+An unrecognized name raises `TypeError`,
+with a `difflib`-based "did you mean" suggestion when a close match exists.
+An option implemented on the PyTorch backend (`AMICATorchNG`) but not this one
+(for example `keep_best`, `device`, `dtype`, the kurtosis-switch schedule)
+also raises `TypeError`, naming the option and pointing to `AMICA(backend='torch')`.
+The three settings this backend spells differently from `AMICATorchNG`
+(`min_nd`/`maxdecs`/`share_iter`) are accepted under either spelling,
+the same as a params file already resolves them;
+passing both spellings of the same setting at once raises `TypeError`.
+
 ::: pamica.AMICA_NumPy
