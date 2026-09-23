@@ -35,19 +35,24 @@ on the same config PyTorch's float64 one does):
   ``maxincs=2`` stop before it ended wherever three small gains in a row fell,
   below the peak or at it depending on round-off (at it in 1 of those 12).
 * ``_FORCED_RESTORE_PDFTYPE1_KWARGS``: the ``pdftype=1``/``n_mix=1`` analogue
-  (seed 3, ``kurt_start=7``) chosen so the adaptive switcher's first kurtosis
-  re-evaluation (run at the end of iteration 7, after that iteration's E-step)
-  comes strictly AFTER the E-step of the peak iterate (0-based ll index 6),
-  while the run lasts long enough for all five passes (it stops via ``min_dll``
-  at ll index 19, 0.26 below the peak): the scenario
+  (seed 6, ``lrate=0.4``, ``kurt_start=7``) chosen so the adaptive switcher's
+  first kurtosis re-evaluation (run at the end of iteration 7, after that
+  iteration's E-step) comes strictly AFTER the E-step of the peak iterate
+  (0-based ll index 6), while the run lasts long enough for all five passes
+  (it stops via ``min_dll`` at ll index 18, 0.17 below the peak): the scenario
   ``test_pdftype1_forced_restore_rolls_back_n_kurt_done_with_pdtype`` needs to
   prove the restore rolls ``n_kurt_done`` back in step with ``pdtype``, not
   just the floating-point arrays. (``kurt_start=8`` served until issue #333,
-  seed 2 with ``kurt_start=6`` until issue #339, whose earlier decrease
-  response no longer lets that run overshoot. Seeds 0-5 and ``kurt_start``
-  3-11 were searched; seed 1 with ``kurt_start=8`` also qualifies, and most
-  other overshooting runs end in a ``nan_params`` stop, which skips the
-  restore.)
+  seed 2 with ``kurt_start=6`` until issue #339, and seed 3 with
+  ``lrate=0.5`` until issue #341, whose normalized initial ``A`` makes that run
+  climb monotonically to ``max_iter``. At ``lrate=0.5``, seeds 0-11 and
+  ``kurt_start`` 3-11 were searched and only seed 1 with ``kurt_start=11``
+  qualified, after its log-likelihood fell by 8.6e3; most other overshooting
+  runs end in a ``nan_direction`` or ``nan_params`` stop, which skips the
+  restore. The same search at ``lrate`` 0.3, 0.4, 0.6 and 0.7 found eight runs
+  with a sane overshoot (0.06 to 0.19), each of which qualified on all 12
+  relative data perturbations of 1e-6; this one keeps ``kurt_start=7`` and
+  the peak at index 6.)
 
 The truncated-refit bit-identity check (both here and in the pdftype=1 test)
 uses ``max_iter=argmax`` where ``argmax = int(np.argmax(ll_history))``: a
@@ -154,11 +159,11 @@ _FORCED_RESTORE_PDFTYPE1_KWARGS: dict[str, Any] = dict(
     n_models=2,
     n_mix=1,
     pdftype=1,
-    seed=3,
+    seed=6,
     block_size=BLOCK,
     do_newton=True,
     newt_start=2,
-    lrate=0.5,
+    lrate=0.4,
     use_min_dll=True,
     min_dll=1e-4,
     maxincs=2,
