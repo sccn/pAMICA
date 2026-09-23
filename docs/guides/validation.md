@@ -22,7 +22,7 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 | Per-block sufficient statistics and one M-step | vs Fortran | bit-exact ($\sim\!10^{-15}$) |
 | Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | LL within ~0.0005 of $-3.6993$; correlation 0.998 |
 | Single-model solution (`do_newton=0`, bundled, $k\approx30$) | Amari distance vs Fortran | 0.006 |
-| Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | LL within 3.2e-5; correlation 0.9992; Amari distance 0.004, for all three (measured before issue #333's `doscaling` change; see [the per-backend rows](#parity-rows-per-backend)) |
+| Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | from independent starts: LL within 2.8e-4 (the reference's own seed-to-seed standard deviation is 2.6e-4), correlation 0.9991, Amari distance 0.004, for all three; from a shared start: LL within 1.6e-6, correlation 0.99999993 ([per-backend rows](#parity-rows-per-backend)) |
 | Multi-model solution | distributional similarity over 20-run ensembles | indistinguishable from Fortran's own run-to-run spread ($p = 0.96$) |
 | Device and precision invariance | same independent components across CPU/CUDA/MPS/MLX, float32/float64, Linux/macOS | identical (1.000) across all eight torch/MLX combinations |
 | Cross-backend log-likelihood | converged LL across every backend | agree to ~3 significant digits (max pairwise ~0.003) |
@@ -70,11 +70,7 @@ falling back, with a warning, to the bundled macOS x86_64 `amica15mac`, which ca
 
 ### Parity rows per backend
 
-These rows predate epic #324 Phase 7 (issue #333),
-which changed `doscaling` from normalizing stored columns to normalizing components, as the reference does;
-they will be re-measured before the epic merges.
-
-Measured on 2026-09-22 on an Apple M4 Pro (14 cores, 64 GB, macOS 27; MLX 0.32.0, PyTorch 2.12.1, NumPy 2.5.0)
+Measured on 2026-09-23 with the code of epic #324 (issue #351) on an Apple M4 Pro (14 cores, 64 GB, macOS 27; MLX 0.32.0, PyTorch 2.12.1, NumPy 2.5.0)
 against the v0.3.3 release native engine (`amica15-macos-arm64`, SHA-256 `c8b2ac7f...`), with the harness defaults:
 
 ```bash
@@ -90,9 +86,9 @@ so on a machine that fetched an earlier release the default can run an older bin
 | Backend | Precision | Final LL | LL difference from Fortran | Mean matched correlation | Min matched correlation | Amari distance | Runtime (s) | Expected bar |
 |---|---|---:|---:|---:|---:|---:|---:|---|
 | Fortran (reference) | float64 | -3.411274 | | | | | 10.0 | the reference |
-| PyTorch (`AMICA`) | float64 | -3.411245 | 0.000029 | 0.9992 | 0.9935 | 0.0037 | 17.7 | correlation > 0.95, Amari < 0.05, LL difference < 0.005 |
-| NumPy (`AMICA_NumPy`) | float64 | -3.411246 | 0.000029 | 0.9992 | 0.9934 | 0.0037 | 32.8 | the PyTorch bar, and final LL within 1e-5 of PyTorch's |
-| MLX (`AMICA(backend="mlx")`) | float32 | -3.411242 | 0.000032 | 0.9992 | 0.9935 | 0.0037 | 3.4 | the PyTorch bar, and final LL within 1e-4 of PyTorch's |
+| PyTorch (`AMICA`) | float64 | -3.411003 | 0.000271 | 0.9991 | 0.9918 | 0.0038 | 18.1 | correlation > 0.95, Amari < 0.05, LL difference < 0.005 |
+| NumPy (`AMICA_NumPy`) | float64 | -3.411003 | 0.000272 | 0.9991 | 0.9917 | 0.0038 | 32.6 | the PyTorch bar, and final LL within 1e-5 of PyTorch's |
+| MLX (`AMICA(backend="mlx")`) | float32 | -3.410998 | 0.000276 | 0.9991 | 0.9917 | 0.0038 | 3.0 | the PyTorch bar, and final LL within 1e-4 of PyTorch's |
 
 Every backend meets its bar.
 All four runs stop at the 100-iteration budget, so the rows compare matched trajectories rather than converged optima;
@@ -102,6 +98,35 @@ MLX computes in float32 (about seven significant digits per operation), so its b
 it lands within about five significant digits of the float64 likelihood, which is float32 consistency, not float64 parity.
 Runtime is one run's wall-clock time for the fit alone and varies by about a third between runs on the same host;
 the reference's includes process start-up and is single-threaded.
+Epic #324 left the runtimes unchanged: the code before it (e38aa11), run in the same session, took 10.1, 17.9, 32.5 and 3.2 seconds.
+
+**The log-likelihood difference in these rows is set by the two starting points, not by the update rule.**
+The harness starts each side from its own draw: numpy's `RandomState(42)` for pamica, gfortran's generator seeded with 42 for the reference.
+After 100 iterations the final log-likelihood still depends on where a fit started.
+Over eight seeds, the reference's own final log-likelihood has a standard deviation of 2.6e-4 and a range of 8.0e-4 (pamica's: 2.7e-4 and 8.0e-4),
+and over the 64 pairs of a pamica start and a reference start the median difference is 3.5e-4 (range 1.7e-5 to 8.2e-4).
+The 2.7e-4 in the table is one draw from that spread.
+Before epic #324 the same run showed 2.9e-5, which was a cancellation for this one pair of starts, not tighter parity:
+from a shared start, the code before the epic lagged the reference by 2.4e-4 after 100 iterations, and that lag happened to offset the difference between the two starts.
+
+The update rule itself is compared from a shared start:
+pamica's seed-42 initialization is written into the reference's `load_*` files, and both sides run the harness settings for 100 iterations, the reference on one thread
+(`.context/issue-351/harness_gap.py`).
+
+| Code | LL difference | Mean matched correlation | Amari distance |
+|---|---:|---:|---:|
+| before epic #324 (e38aa11) | 2.4e-4 | 0.99999 | 5.8e-4 |
+| epic #324 | 1.6e-6 | 0.99999993 | 3.9e-5 |
+
+The earlier row starts from that code's own initialization, which predates the component-row layout (issue #334) and the normalized initial mixing matrix (issue #341);
+from each code's seeded state, the reference's first-iteration log-likelihood matches pamica's to 9e-16, so the state was written in the orientation the reference reads.
+Against the bundled `amicaout` output (200 reference iterations with the `input.param` settings, from its own unseeded start),
+the three backends are within 1.3e-4 to 1.4e-4 in log-likelihood, with mean matched correlation 0.9983 (minimum 0.982 to 0.983) and Amari distance 4.8e-3.
+
+The float32 MLX backend and the float64 PyTorch backend draw their start from the same generator, so they can be compared from the same start directly.
+With the harness settings, after 100 iterations they differ by 5.0e-6 in log-likelihood, with mean matched correlation 0.99999991 (minimum 0.9999994) and Amari distance 5.0e-5;
+after 200 iterations by 2.4e-6, 0.9999998 and 6.3e-5 (`.context/issue-351/precision_agreement.py`).
+
 The same bars are pinned by `test_backend_meets_its_parity_bar_against_fortran` in `pamica/tests/test_fortran_param_forwarding.py`,
 which runs when `AMICA_RUN_FORTRAN=1` is set (as the weekly macOS job does).
 
