@@ -1463,15 +1463,37 @@ def test_keep_best_inactive_under_reject():
     """The safeguard is disabled under ``do_reject`` (the good-sample set, hence
     the LL normalization, changes across iterations, so per-iteration LLs are not
     comparable): ``final_ll_`` is exactly the last trajectory value, no restore
-    fires (issue #51)."""
-    data = _load_real_data()
-    m = AMICATorchNG(
-        n_channels=NW, n_models=2, n_mix=NMIX, seed=SEED, device="cpu",
-        dtype=torch.float64, block_size=512, do_reject=True, rejsig=2.0,
-        rejstart=2, rejint=3, maxrej=2, keep_best=True,
+    fires (issue #51).
+
+    Non-vacuous on both counts: the recipe (the aggressive-Newton overshoot
+    recipe of ``test_ng_convergence.py``, ``_OVERSHOOT_KWARGS``, with its
+    loosened ``min_dll`` stop) restores without
+    ``do_reject`` (peak at iteration 70, stop at 71, 1.9e-4 below the peak),
+    and with ``do_reject`` its own trajectory also ends below an earlier peak
+    (iteration 57, stop at 59, 2.2e-4 below), so a restore would fire if the
+    safeguard were active. The previous config (``lrate=0.1`` natural
+    gradient, 12 iterations) was monotone, so it could not have failed.
+    """
+    x = _load_real_data()[:, :4096]
+    kwargs: dict[str, Any] = dict(
+        n_channels=NW, n_models=2, n_mix=NMIX, seed=0, device="cpu",
+        dtype=torch.float64, block_size=1024, do_newton=True, newt_start=1,
+        lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-4, maxincs=2,
+        use_grad_norm=False, keep_best=True,
     )  # fmt: skip
-    m.fit(data, max_iter=12, verbose=False)
+    plain = AMICATorchNG(**kwargs)
+    plain.fit(x, max_iter=150, verbose=False)
+    assert plain.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS
+    assert max(plain.ll_history) - plain.ll_history[-1] > _KEEP_BEST_TOL
+    assert plain.final_ll_ == max(plain.ll_history) > plain.ll_history[-1]
+
+    m = AMICATorchNG(
+        **kwargs, do_reject=True, rejsig=3.0, rejstart=5, rejint=5, maxrej=1
+    )
+    m.fit(x, max_iter=150, verbose=False)
+    assert m.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS
     assert m.numrej >= 1  # rejection actually fired, so the good set changed
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL
     assert m.final_ll_ == m.ll_history[-1]  # no best-iterate restore under reject
 
 
