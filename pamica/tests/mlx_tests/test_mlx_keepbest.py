@@ -15,10 +15,11 @@ on the same config PyTorch's float64 one does):
 
 * ``_FORCED_RESTORE_KWARGS`` (real EEG, first 4096 samples, ``max_iter=150``):
   ``n_models=2, n_mix=3, seed=0, block_size=1024, do_newton=True,
-  newt_start=1, lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-4,
+  newt_start=2, lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-4,
   maxincs=2, use_grad_norm=False`` -- the same aggressive-Newton config
   ``test_ng_convergence.py::test_keep_best_restores_genuine_overshoot_under_min_dll_stop``
-  uses on PyTorch, and it reproduces a genuine overshoot here too: the fit
+  uses on PyTorch (``newt_start`` counts from 1 since issue #335, so ``2`` is
+  the run measured as ``newt_start=1`` before it), and it reproduces a genuine overshoot here too: the fit
   stops via ``min_dll`` at iteration 64 (65 recorded LLs), peaks at
   ``ll_history[63]``, and ends ``best_ll - ll_history[-1] ~= 4.24e-4`` below
   that peak (measured on an Apple M4 Pro; the exact float32 value is

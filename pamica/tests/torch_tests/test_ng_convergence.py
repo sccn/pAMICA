@@ -468,12 +468,13 @@ def test_grad_norm_floor_stop_leaves_wrapper_usable(real_data, tmp_path):
 
 # The genuine-overshoot recipe (real 2-model data, aggressive Newton): it peaks
 # and then stops via the loosened min_dll a couple of iterations later (see
-# test_keep_best_restores_genuine_overshoot_under_min_dll_stop).
+# test_keep_best_restores_genuine_overshoot_under_min_dll_stop). newt_start
+# counts from 1 since issue #335, so 2 is the trajectory measured as 1 before.
 _OVERSHOOT_KWARGS: dict[str, Any] = dict(
     n_models=2,
     seed=0,
     do_newton=True,
-    newt_start=1,
+    newt_start=2,
     lrate=0.5,
     newtrate=3.0,
     block_size=1024,
@@ -710,7 +711,8 @@ def test_min_dll_stop_reachable_at_shipped_default_threshold(real_data):
     particular iteration, so both the budget and the bound track the budget
     rather than a constant fitted to one machine.
     """
-    ng = _fresh_ng(seed=1, n_mix=1, do_newton=True, newt_start=5, block_size=1024)
+    # newt_start=6 counts from 1 (issue #335): the run measured as 5 before.
+    ng = _fresh_ng(seed=1, n_mix=1, do_newton=True, newt_start=6, block_size=1024)
     ng.fit(real_data[:, :4096], max_iter=2000, verbose=False)
     assert ng.stop_reason == "min_dll"
     # A real early stop rather than exhausting the budget. Bound against the

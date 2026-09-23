@@ -238,11 +238,13 @@ def test_keep_best_inactive_reason_prefers_do_reject_when_both_are_on(
 
 # The aggressive-Newton recipe that genuinely overshoots on this backend
 # (test_mlx_keepbest.py's module docstring), plus a single rejection pass.
+# newt_start and rejstart count from 1 since issue #335: 2 and 6 are the run
+# measured as 1 and 5 before.
 _OVERSHOOT_KWARGS: dict[str, Any] = dict(
     n_models=2,
     seed=0,
     do_newton=True,
-    newt_start=1,
+    newt_start=2,
     lrate=0.5,
     newtrate=3.0,
     use_min_dll=True,
@@ -251,7 +253,7 @@ _OVERSHOOT_KWARGS: dict[str, Any] = dict(
     use_grad_norm=False,
 )
 _REJECT_KWARGS: dict[str, Any] = dict(
-    do_reject=True, rejsig=3.0, rejstart=5, rejint=5, maxrej=1
+    do_reject=True, rejsig=3.0, rejstart=6, rejint=5, maxrej=1
 )
 _OVERSHOOT_MAX_ITER = 150
 
