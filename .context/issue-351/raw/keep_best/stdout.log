@@ -1,0 +1,93 @@
+{'seed': 0, 'fortran_ll100_separate_minus_prefix': 0.0, 'ng_history_prefix_max_abs_diff': 0.0, 'ng_keep_best_off_final_minus_prefix_last': 0.0, 'ng_keep_best_on_final_minus_prefix_best': 0.0, 'restored_at_100': False}
+{'seed': 1, 'fortran_ll100_separate_minus_prefix': 0.0, 'ng_history_prefix_max_abs_diff': 0.0, 'ng_keep_best_off_final_minus_prefix_last': 0.0, 'ng_keep_best_on_final_minus_prefix_best': 0.0, 'restored_at_100': False}
+seed 0: Fortran LL[300]=-3.3449 NG iters=300 last=-3.3394 final=-3.3394 stop=max_iter fallbacks=0 (163s)
+seed 1: Fortran LL[300]=-3.3363 NG iters=300 last=-3.3398 final=-3.3398 stop=max_iter fallbacks=0 (329s)
+seed 2: Fortran LL[300]=-3.3379 NG iters=300 last=-3.3406 final=-3.3406 stop=max_iter fallbacks=0 (487s)
+seed 3: Fortran LL[300]=-3.3450 NG iters=300 last=-3.3404 final=-3.3404 stop=max_iter fallbacks=0 (649s)
+seed 4: Fortran LL[300]=-3.3367 NG iters=300 last=-3.3406 final=-3.3406 stop=max_iter fallbacks=0 (808s)
+seed 5: Fortran LL[300]=-3.3350 NG iters=300 last=-3.3392 final=-3.3392 stop=max_iter fallbacks=0 (992s)
+seed 6: Fortran LL[300]=-3.3409 NG iters=300 last=-3.3411 final=-3.3411 stop=max_iter fallbacks=0 (1163s)
+seed 7: Fortran LL[300]=-3.3394 NG iters=300 last=-3.3398 final=-3.3398 stop=max_iter fallbacks=0 (1346s)
+seed 8: Fortran LL[300]=-3.3362 NG iters=300 last=-3.3373 final=-3.3373 stop=max_iter fallbacks=0 (1525s)
+seed 9: Fortran LL[300]=-3.3407 NG iters=300 last=-3.3428 final=-3.3428 stop=max_iter fallbacks=0 (1721s)
+seed 10: Fortran LL[300]=-3.3364 NG iters=300 last=-3.3369 final=-3.3369 stop=max_iter fallbacks=0 (1894s)
+seed 11: Fortran LL[300]=-3.3408 NG iters=300 last=-3.3363 final=-3.3363 stop=max_iter fallbacks=0 (2068s)
+seed 12: Fortran LL[300]=-3.3380 NG iters=300 last=-3.3368 final=-3.3368 stop=max_iter fallbacks=0 (2229s)
+seed 13: Fortran LL[300]=-3.3391 NG iters=300 last=-3.3371 final=-3.3371 stop=max_iter fallbacks=0 (2389s)
+seed 14: Fortran LL[300]=-3.3378 NG iters=300 last=-3.3380 final=-3.3380 stop=max_iter fallbacks=0 (2682s)
+seed 15: Fortran LL[300]=-3.3391 NG iters=300 last=-3.3403 final=-3.3403 stop=max_iter fallbacks=0 (2865s)
+seed 16: Fortran LL[300]=-3.3377 NG iters=300 last=-3.3384 final=-3.3384 stop=max_iter fallbacks=0 (3019s)
+seed 17: Fortran LL[300]=-3.3418 NG iters=300 last=-3.3413 final=-3.3413 stop=max_iter fallbacks=0 (3168s)
+seed 18: Fortran LL[300]=-3.3403 NG iters=300 last=-3.3352 final=-3.3352 stop=max_iter fallbacks=0 (3318s)
+seed 19: Fortran LL[300]=-3.3408 NG iters=300 last=-3.3415 final=-3.3415 stop=max_iter fallbacks=0 (3455s)
+{
+  "n": 20,
+  "keep_best_tol": 1e-09,
+  "budgets": {
+    "100": {
+      "fortran_mean": -3.35503721537913,
+      "fortran_sd": 0.002902508714644331,
+      "return_last_mean": -3.3542282783344946,
+      "return_last_sd": 0.002895896178028667,
+      "keep_best_mean": -3.3542282783344946,
+      "keep_best_sd": 0.002895896178028667,
+      "sd_ratio_return_last": 0.9977217857840354,
+      "sd_ratio_keep_best": 0.9977217857840354,
+      "gap_return_last": 0.0008089370446353605,
+      "gap_keep_best": 0.0008089370446353605,
+      "ks_p_keep_best": 0.8319696107963263,
+      "ks_p_return_last": 0.8319696107963263,
+      "tost_p_keep_best": 7.482078444204207e-23,
+      "n_restored": 0,
+      "restored_seeds": [],
+      "max_restore_gain": 0.0
+    },
+    "200": {
+      "fortran_mean": -3.3418448453873153,
+      "fortran_sd": 0.002960879790217216,
+      "return_last_mean": -3.3416384843303377,
+      "return_last_sd": 0.002220142292228306,
+      "keep_best_mean": -3.3416384843303377,
+      "keep_best_sd": 0.002220142292228306,
+      "sd_ratio_return_last": 0.74982520383424,
+      "sd_ratio_keep_best": 0.74982520383424,
+      "gap_return_last": 0.00020636105697757756,
+      "gap_keep_best": 0.00020636105697757756,
+      "ks_p_keep_best": 0.571336004933722,
+      "ks_p_return_last": 0.571336004933722,
+      "tost_p_keep_best": 4.382251121317329e-31,
+      "n_restored": 0,
+      "restored_seeds": [],
+      "max_restore_gain": 0.0
+    },
+    "300": {
+      "fortran_mean": -3.3392473308579143,
+      "fortran_sd": 0.0026565681804202193,
+      "return_last_mean": -3.3391461730474417,
+      "return_last_sd": 0.001984933047167868,
+      "keep_best_mean": -3.339145964447732,
+      "keep_best_sd": 0.0019848062301341036,
+      "sd_ratio_return_last": 0.7471794105634016,
+      "sd_ratio_keep_best": 0.7471316733983256,
+      "gap_return_last": 0.00010115781047259631,
+      "gap_keep_best": 0.00010136641018210213,
+      "ks_p_keep_best": 0.9831368772656193,
+      "ks_p_return_last": 0.9831368772656193,
+      "tost_p_keep_best": 5.280723043692209e-39,
+      "n_restored": 1,
+      "restored_seeds": [
+        3
+      ],
+      "max_restore_gain": 4.1719941843432196e-06
+    }
+  },
+  "keep_best_gap_to_fortran_at_100": {
+    "100": 0.0008089370446353605,
+    "200": 0.01339873104879219,
+    "300": 0.01589125093139776
+  },
+  "ng_stop_reasons": [
+    "max_iter"
+  ],
+  "ng_newton_fallbacks_total": 0
+}
