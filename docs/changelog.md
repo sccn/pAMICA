@@ -27,6 +27,16 @@ Release notes are also published on the
     (`_CONSUMED_KEYS`/`_CANONICAL_TO_NUMPY_KEY`),
     and the unsupported-option list is derived from `AMICATorchNG`'s own constructor signature,
     so neither can drift from what the constructor actually reads.
+  - **Review follow-up:** `files`/`data_dim`/`field_dim` (data-location metadata) now work as keyword
+    arguments directly, with the same meaning as in `params_file`, instead of passing the check but
+    staying silently inert; `n_models`/`n_mix` (`AMICATorchNG`'s spelling of this backend's own
+    `num_models`/`num_mix`) get a message naming the correct spelling rather than the generic
+    (and here wrong) "use `AMICA(backend='torch')`" message; `n_channels` gets its own message, since
+    it is inferred from the data passed to `fit()` on every backend, not a constructor keyword on any
+    of them; and every offending keyword in one call is now named in a single error, however many
+    different kinds are mixed together (a first version named only the first category it found).
+    The `AMICA` wrapper's own `backend='mlx'` keyword check had the same single-category drop and is
+    fixed the same way.
 
 - **Fix: tests no longer make a full clone shallow (issue #343).**
   Tests that load historical code ran `git fetch origin <sha> --depth 1` to reach the pinned commit;
