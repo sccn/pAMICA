@@ -68,6 +68,9 @@ SEED = 42
 # component-column layout (Phase 7's doscaling fix and Phase 9's schedule
 # gates included, so the two sides differ by this phase alone).
 PRE_CHANGE_COMMIT = "0930c0e68ec9e2bbef3d20d51cff4c03029248f2"
+# The epic head before issue #344 (Phase 13): component rows, but the exact
+# rho == 2 normalizer instead of the reference's single-precision one.
+PRE_344_COMMIT = "027cb0731dbaaa8e7a5795166af95ba7ff52c2cd"
 
 pytestmark = pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
 
@@ -83,6 +86,14 @@ def pre(tmp_path_factory) -> Any:
     """The pamica package at ``PRE_CHANGE_COMMIT``, imported beside the live one."""
     return load_pre_change_package(
         PRE_CHANGE_COMMIT, "pamica_pre334", tmp_path_factory.mktemp("pre334")
+    )
+
+
+@pytest.fixture(scope="module")
+def pre344(tmp_path_factory) -> Any:
+    """The pamica package at ``PRE_344_COMMIT``, imported beside the live one."""
+    return load_pre_change_package(
+        PRE_344_COMMIT, "pamica_pre344", tmp_path_factory.mktemp("pre344")
     )
 
 
@@ -803,15 +814,11 @@ def test_load_results_refuses_a_truncated_A(real_data, tmp_path, keep):
 
 # --- 4. seeded native reference oracle from a MERGED state (opt-in) -------------
 # The reference's input.param optimizer, natural gradient only (the Newton start
-# is issue #335), with the block size pinned on both sides. ``maxrho`` sits just
-# below 2 so no mixture reaches the reference's exact-Gaussian branch
-# (``rho == 2``, amica15.f90:1309-1313), whose normalizer is a single-precision
-# literal, ``log(dble(1.772453851))``, 3.0e-8 away from ``log(sqrt(pi))``: once a
-# warm fit clamps a mixture there, every sample's log-density differs from
-# pamica's exact one by that much times its responsibility, which is unrelated
-# to the mixing layout and would swamp the round-off this test measures. (The
-# Laplace branch, ``rho == 1``, is exact in both.) Whether pamica adopts the
-# single-precision value is issue #344.
+# is issue #335), with the block size pinned on both sides. The warm state has
+# mixtures clamped at ``maxrho = 2``, so the E-step takes the reference's
+# exact-Gaussian branch (``rho == 2``, amica15.f90:1309-1313), whose normalizer
+# is the single-precision literal ``log(dble(1.772453851))``; every backend uses
+# that value since issue #344. (Until then this oracle held ``maxrho`` at 1.99.)
 _OPT: Dict[str, Any] = dict(
     block_size=512,
     lrate=0.05,
@@ -820,7 +827,7 @@ _OPT: Dict[str, Any] = dict(
     rholratefact=0.5,
     rho0=1.5,
     minrho=1.0,
-    maxrho=1.99,  # below the reference's single-precision rho == 2 branch (#344)
+    maxrho=2.0,
     invsigmin=0.0,
     invsigmax=100.0,
     do_newton=False,
@@ -841,12 +848,16 @@ _ORACLE_WARM_ITERS = 100
 # as test_doscaling_rows.py's oracle. Measured maxima over both backends and
 # both doscaling settings, from the merged state (the same state with no merge
 # in brackets, PyTorch, doscaling on):
-#   1 iteration:  A 1.3e-15, mu 2.3e-11, sbeta 1.4e-14, LL 8.9e-16
-#                 [A 1.1e-15, mu 2.3e-11, sbeta 1.3e-14, LL 1.8e-15]
-#   3 iterations: A 1.5e-12, mu 3.7e-9,  sbeta 1.8e-11, LL 4.7e-14
-#                 [A 1.9e-12, mu 1.4e-8,  sbeta 1.9e-10, LL 8.0e-15]
-# The column semantics from the same merged state is off by A 0.204 and 0.21 and
-# LL 3.5e-4 and 4.3e-4 (doscaling on and off) after 3 iterations.
+#   1 iteration:  A 1.3e-15, mu 1.7e-12, sbeta 1.3e-14, LL 2.2e-15
+#                 [A 1.1e-15, mu 1.7e-12, sbeta 1.2e-14, LL 0]
+#   3 iterations: A 3.8e-13, mu 5.7e-9,  sbeta 2.9e-11, LL 1.6e-13
+#                 [A 5.1e-14, mu 3.3e-9,  sbeta 1.9e-12, LL 1.3e-14]
+# The column semantics from the same merged state is off by A 0.203 and 0.209 and
+# LL 3.5e-4 and 4.3e-4 (doscaling on and off) after 3 iterations. The code
+# before issue #344, with the exact rho == 2 normalizer, is off by A 2.6e-10,
+# mu 1.8e-8, sbeta 5.0e-9 and LL 2.8e-9 after 1 iteration, and by A 3.4e-8,
+# mu 8.4e-3, sbeta 2.6e-6 and LL 1.2e-8 after 3 (maxima over doscaling on and
+# off).
 _MERGED_ORACLE_TOL = {
     1: {"A": 1e-13, "mu": 1e-9, "sbeta": 1e-12, "LL": 1e-13},
     3: {"A": 1e-10, "mu": 1e-6, "sbeta": 1e-8, "LL": 1e-11},
@@ -881,9 +892,9 @@ def merged_seed(real_data) -> Dict[str, Any]:
         for k in ("A", "mu", "beta", "rho", "alpha", "gm", "mean", "sphere")
     }
     seed.update(default=default, merged=merged, cos=float(cos[i, ii]))
-    # No mixture sits at rho == 2, where the reference's normalizer is a
-    # single-precision literal (see _OPT).
-    assert seed["rho"].max() < 2.0
+    # Mixtures sit at rho == 2, where the reference's normalizer is a
+    # single-precision literal (see _OPT), so the oracle exercises that branch.
+    assert (seed["rho"] == 2.0).any()
     return seed
 
 
@@ -963,7 +974,7 @@ def _mixing_error(
 )
 @pytest.mark.parametrize("doscaling", [True, False], ids=["scale", "noscale"])
 def test_updates_from_a_merged_state_match_the_seeded_reference(
-    pre, merged_seed, real_data, doscaling, tmp_path
+    pre, pre344, merged_seed, real_data, doscaling, tmp_path
 ):
     """The reference's own scan is unrunnable (its ``Spinv2`` is never
     allocated), but its ``load_comp_list`` seeds a merged ``comp_list``, and
@@ -1042,6 +1053,21 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
             print(f"merged oracle doscaling={doscaling} {name} k={k}: {errs}")
             over = {q: e for q, e in errs.items() if not e <= tol[q]}
             assert not over, f"{name}, {k} iteration(s): {over} (bounds {tol})"
+
+        # The code before issue #344 from the same state: pamica's exact rho == 2
+        # normalizer against the reference's single-precision one, the gap the
+        # maxrho = 1.99 workaround hid.
+        old344 = torch_model(pre344.torch_impl.core.AMICATorchNG)
+        ll, mixing, mu, sbeta = _seeded_run(old344, "torch", seed, real_data, k, True)
+        errs = {
+            "A": _mixing_error(mixing, ref.A, seed["merged"]),
+            "mu": np.abs(mu[:, used] - ref.mu[:, used]).max(),
+            "sbeta": np.abs(sbeta[:, used] - ref.sbeta[:, used]).max(),
+            "LL": np.abs(ll - ref.LL).max(),
+        }
+        print(f"merged oracle doscaling={doscaling} before #344 k={k}: {errs}")
+        assert all(errs[q] > tol[q] for q in errs), errs
+        assert errs["LL"] > 10 * tol["LL"]
 
         if k == 3:
             old = torch_model(pre.torch_impl.core.AMICATorchNG)
