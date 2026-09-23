@@ -689,9 +689,13 @@ class AMICATorchNG:
         Explicit per-restart seeds; must have exactly ``n_restarts`` entries.
         When omitted the seeds are ``seed, seed + 1, ..., seed + n_restarts - 1``.
     device : str or torch.device, optional
-        Compute device for the block loop. Preprocessing (mean/cov/eigh) is
-        always done in float64 on CPU regardless of device, since eigh is
-        not reliably supported on MPS.
+        Compute device for the block loop. ``None`` picks MPS, then CUDA,
+        then CPU, whichever is available first; MPS has no float64, so with
+        the default ``dtype`` on an Apple machine the constructor raises
+        ``ValueError`` and ``device="cpu"`` must be passed (the
+        :class:`~pamica.AMICA` wrapper redirects an automatic MPS pick to CPU
+        itself). Preprocessing (mean/cov/eigh) is always done in float64 on
+        CPU regardless of device, since eigh is not reliably supported on MPS.
     dtype : torch.dtype, default=torch.float64
         Parameter/computation dtype. float64 is the parity default (Fortran
         bit-parity) and ~4.5x on CUDA over CPU (issue #63). float32 converges on
