@@ -32,6 +32,8 @@ Reference facts this relies on (``amica15.f90``):
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +47,16 @@ from pamica.native.engine import _DEFAULT_PARAMS, _render_param
 # The release whose native binary the seeded oracles run (resolver cache, else a
 # verified download); PAMICA_NATIVE_BINARY overrides it with a local build.
 REFERENCE_VERSION = "v0.3.3"
+
+# Every output file :func:`run_seeded_reference` reads back.
+_OUTPUT_FILES = ("A", "mu", "sbeta", "rho", "alpha", "gm", "c", "comp_list", "LL", "S")
+# stdout lines of a run that did not carry the seeded state to the end
+# (amica15.f90): an "Error: ..." before a bare ``stop``, which exits with
+# status 0 (:264, :2452, :3077, ...), a NaN exit (:1054), or a NaN restart,
+# which draws a fresh ``A`` and so discards the seed (:1021-1046, printed as
+# "Reinitializaing"). A gfortran runtime error goes to stderr.
+_STDOUT_FAILURE = re.compile(r"\berror\b|Got NaN|Reinitiali", re.IGNORECASE)
+_STDERR_FAILURE = re.compile(r"Fortran runtime error", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -148,8 +160,13 @@ def run_seeded_reference(
     ``data_file`` is the raw float32 column-major recording
     (``nx x n_samples``) the pamica side fitted; it is linked into ``workdir``.
     ``params`` override the engine defaults by Fortran name (``do_newton``,
-    ``doscaling``, ``block_size``, ...). Raises ``RuntimeError`` with the
-    binary's output tail if it fails or writes no ``A``.
+    ``doscaling``, ``block_size``, ...).
+
+    A reused ``workdir`` is safe: its ``out`` and ``init`` directories are
+    removed first, so every file read back was written by this run. Raises
+    ``RuntimeError`` with the tails of the binary's stdout and stderr if it
+    exits nonzero, prints a failure line (see ``_STDOUT_FAILURE``), or leaves
+    any output file this helper reads unwritten.
     """
     nw, num_comps = state.A.shape
     num_mix = state.mu.shape[0]
@@ -160,7 +177,13 @@ def run_seeded_reference(
 
     workdir.mkdir(parents=True, exist_ok=True)
     indir = workdir / "init"
-    indir.mkdir(exist_ok=True)
+    out = workdir / "out"
+    # Old output or seed files from an earlier run must never be read back;
+    # the binary creates ``out`` itself (amica15.f90:82).
+    for stale in (out, indir):
+        if stale.exists():
+            shutil.rmtree(stale)
+    indir.mkdir()
     _write_f64(indir / "A", state.A)
     _write_f64(indir / "mean", state.mean)
     _write_f64(indir / "mu", state.mu)
@@ -226,10 +249,13 @@ def run_seeded_reference(
         timeout=timeout,
         env=env,
     )
-    out = workdir / "out"
-    if proc.returncode != 0 or not (out / "A").exists():
+    missing = [name for name in _OUTPUT_FILES if not (out / name).is_file()]
+    failure = _STDOUT_FAILURE.search(proc.stdout) or _STDERR_FAILURE.search(proc.stderr)
+    if proc.returncode != 0 or missing or failure:
         raise RuntimeError(
-            f"native AMICA failed (exit {proc.returncode}).\n"
+            f"native AMICA failed (exit {proc.returncode}; "
+            f"missing output: {', '.join(missing) or 'none'}; "
+            f"failure line: {failure.group(0) if failure else 'none'}).\n"
             f"stdout tail:\n{proc.stdout[-2000:]}\nstderr tail:\n{proc.stderr[-2000:]}"
         )
     comp_list = np.fromfile(out / "comp_list", dtype="<i4")[: nw * num_models]
