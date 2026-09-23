@@ -559,8 +559,14 @@ def test_family_matches_the_seeded_reference(
         assert not over, f"pdftype={pdftype}, {k} iteration(s): {over} (bounds {tol})"
 
         # The pre-change code: the same trajectory, its log-likelihood shifted
-        # by the literal's rounding (pamica's log-density was higher by it).
-        old = torch_model(pre344.torch_impl.core.AMICATorchNG)
+        # by the literal's rounding (pamica's log-density was higher by it). It
+        # predates the normalized initial A of issue #341, so it starts from
+        # the live one, as the reference here does (the seeded state).
+        old = torch_model(
+            pre_change.with_normalized_initial_mixing(
+                pre344.torch_impl.core.AMICATorchNG
+            )
+        )
         old.fit(X, max_iter=k, verbose=False)
         assert np.all(old.pdtype.numpy() == pdftype) and old.n_kurt_done == 0
         shift = np.asarray(old.ll_history) - ref.LL
