@@ -464,13 +464,13 @@ def test_doscaling_off_is_byte_identical_to_the_pre_fix_code(
     them, on every backend. The live backend runs with the density constants it
     had before issue #344, which the pre-fix code predates (the two-model fits
     reach ``rho == 2``)."""
-    use_pre_344_constants(monkeypatch, backend)
     new_cls: Any
     if backend == "mlx":
-        new_cls = _mlx_core().AMICAMLXNG
+        new_cls = _mlx_core().AMICAMLXNG  # skips without MLX
     else:
         new_cls = AMICATorchNG if backend == "torch" else AMICA_NumPy
     old_cls = _pre_fix_class(pre_fix, backend)
+    use_pre_344_constants(monkeypatch, backend)
 
     old = _fit_unscaled(old_cls, backend, n_models, real_slice, tmp_path / "old")
     new = _fit_unscaled(new_cls, backend, n_models, real_slice, tmp_path / "new")

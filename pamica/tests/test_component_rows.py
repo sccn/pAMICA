@@ -287,8 +287,8 @@ def test_unshared_fits_are_byte_identical_to_the_column_layout(
     by the fifth iteration, and the Gaussian and cosh families use their
     normalizers on every one.
     """
+    old_cls, new_cls = _classes(backend, pre)  # skips MLX without MLX
     use_pre_344_constants(monkeypatch, backend)
-    old_cls, new_cls = _classes(backend, pre)
     X = real_data[:, :_BYTE_ID_SAMPLES]
     old = _fit_arrays(backend, old_cls, n_models, cfg, X, tmp_path / "old")
     new = _fit_arrays(backend, new_cls, n_models, cfg, X, tmp_path / "new")
