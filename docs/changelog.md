@@ -38,7 +38,7 @@ Release notes are also published on the
     The byte-identity tests that pin earlier changes against older commits now start the older code from the new initial `A`
     (`pamica.tests.pre_change.with_normalized_initial_mixing`), and still pass bit for bit.
     Data-driven tests whose trajectories moved were re-searched or re-recorded:
-    the MLX `pdftype=1` restore recipe, the MLX fit-path canary, the seed of the `doscaling` native oracle, and the early-merge collapse oracle.
+    the MLX `pdftype=1` restore recipe, the MLX MIR restore test, the MLX fit-path canary, the seed of the `doscaling` native oracle, and the early-merge collapse oracle.
 
 - **Phase 11 of epic #324: every backend follows the reference's iteration order (issues #339 and #345).**
   Each iteration of every backend (PyTorch, NumPy and MLX) now runs in the reference's order (amica15.f90:949-1142,
