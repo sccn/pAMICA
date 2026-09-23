@@ -549,6 +549,15 @@ and every backend's fitting follows the Fortran reference more closely.
 
 ### Documentation
 
+- **Parity figures re-measured with the finished epic** (issue #351, epic #324 Phase 15).
+  The validation guide, the differences guide, ADR 0003 and the paper quote measurements of this release's code against the pinned v0.3.3 native binary;
+  the run records are in `.context/issue-351/`.
+  - The harness's independent-start log-likelihood difference is now 2.7e-4 (it was 2.9e-5),
+    within the reference's own seed-to-seed spread at 100 iterations (standard deviation 2.6e-4 over eight seeds);
+    from a shared start the difference is 1.6e-6 (2.4e-4 with the code before the epic).
+  - The multi-model ensemble's log-likelihood matches the reference's (-3.3541 against -3.3543, Kolmogorov-Smirnov p = 0.83), where it trailed by 0.009;
+    `keep_best` restored one of 20 seeded fits, at the 300-iteration budget only.
+  - The `share_comps` example fit merges one pair (it merged three), and the early scans merge 30 and 17 components at iteration 8 (they merged 32 and 24).
 - **The documentation describes the finished epic** (issue #352, epic #324 Phase 16).
   The concept pages walk one iteration in the reference's order
   (E-step, the likelihood-decrease response and the stopping checks, the exit before any update, then the update,
