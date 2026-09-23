@@ -221,3 +221,45 @@ def test_mlx_and_torch_export_the_same_basis(mlx_keep, torch_keep):
         np.testing.assert_allclose(
             p_m[rows].T @ p_m[rows], p_t[rows].T @ p_t[rows], atol=1e-10
         )
+
+
+# --- a genuinely degenerate fit ---------------------------------------------------
+# AMICAICA.fit rejects non-finite input, so the divergence comes through a fit
+# keyword instead: invsigmin forces every source density's inverse scale to at
+# least 1e6 on unit-variance sphered data, the densities collapse (the next
+# log-likelihood is about -4e8) and the real fit path diverges. Measured over
+# seeds 0/1/2/42, 4096 samples and the full recording, with and without
+# pcakeep=20, max_iter=10: torch stops on nan_ll at iteration 3 and MLX on
+# nan_params at iteration 2, 16 of 16 runs each.
+INVSIGMIN, INVSIGMAX = 1e6, 1e7
+
+
+@pytest.mark.parametrize("backend", ["torch", "mlx"])
+def test_degenerate_fit_builds_no_basis_and_refuses_export(raw, backend):
+    kwargs = {"device": "cpu"} if backend == "torch" else {}
+    if backend == "mlx":
+        _require_mlx()
+    ica = AMICAICA(random_state=SEED, verbose=False, backend=backend, **kwargs)
+    ica.fit(
+        raw,
+        stop=4096,
+        max_iter=10,
+        pcakeep=N_KEEP,
+        invsigmin=INVSIGMIN,
+        invsigmax=INVSIGMAX,
+    )
+
+    assert ica.amica_ is not None and ica.amica_.model_ is not None
+    assert ica.stop_reason_ in ica.amica_.model_._DEGENERATE_STOP_REASONS
+    assert ica.converged_ is False
+    # Kept for inspection, but never exported, so no basis was built.
+    assert ica.pca_components_ is None
+    assert ica.pca_explained_variance_ is None
+    assert repr(ica) == (
+        f"<AMICAICA (degenerate fit, stop_reason={ica.stop_reason_!r}, "
+        f"backend={backend!r}, n_models=1, n_mix=3, raw)>"
+    )
+    with pytest.raises(RuntimeError, match="degenerate"):
+        ica.to_mne_ica()
+    with pytest.raises(RuntimeError, match="degenerate"):
+        ica.get_sources(raw)
