@@ -14,6 +14,17 @@ uv run pytest --cov              # with coverage
 uv run pytest pamica/tests/torch_tests/   # PyTorch-vs-Fortran parity tests
 ```
 
+## Working directory
+
+The suite runs from a temporary working directory, not the repository:
+a session-scoped autouse fixture in `pamica/tests/conftest.py` switches to one per session (per worker under `pytest-xdist`),
+so anything a test writes to a relative path lands there instead of in the repository.
+A test that needs a repository path resolves it from `__file__`
+(for example `Path(__file__).resolve().parent.parent / "sample_data"`),
+or, when a relative path inside a file must resolve against the repository root
+(such as `sample_params.json`'s `files`), changes into the root explicitly with `monkeypatch.chdir`.
+Coverage reports still land in the repository root.
+
 ## Layout
 
 - `pamica/tests/` — end-to-end and interface tests.
