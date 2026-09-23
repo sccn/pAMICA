@@ -2794,15 +2794,18 @@ class AMICA:
         this iteration's M-step. See :meth:`_llt_arrays` for that ordering and
         its Fortran citation.
         """
-        # A is written (Fortran output omits it; loadmodout derives A from W and
-        # S) only so load_results can restore it directly for the viz helpers.
-        # The Fortran 'nd' file (per-component weight-change history) is a
-        # different quantity from pamica's scalar self.nd, so it is not emitted
-        # (loadmodout treats 'nd' as optional).
+        # A is written in the reference's layout, as the binary writes it
+        # (loadmodout derives A from W and S instead); load_results reads it
+        # back for the viz helpers. The Fortran 'nd' file (per-component
+        # weight-change history) is a different quantity from pamica's scalar
+        # self.nd, so it is not emitted (loadmodout treats 'nd' as optional).
         from .load import write_amicaout
 
-        assert self.outdir is not None, "_write_results needs an outdir"
-        assert self.A is not None, "_write_results needs a fitted A"
+        # Raises rather than asserts: ``assert`` is stripped under ``python -O``.
+        if self.outdir is None:
+            raise RuntimeError("_write_results needs an outdir")
+        if self.A is None:
+            raise RuntimeError("_write_results needs a fitted A; call fit() first")
         Lht, Lt = self._llt_arrays()
 
         write_amicaout(
