@@ -99,7 +99,7 @@ from .. import blocktune
 from .. import restarts
 from .. import schedule
 from ..fortran_params import read_params_file
-from ..initialization import initial_mixing
+from ..initialization import initial_mixing, validate_supplied_mixing
 from ..rank import (
     MINEIG,
     MINEIG_REL,
@@ -1732,13 +1732,22 @@ class AMICA:
     def _initialize_parameters(self):
         """Initialize all model parameters."""
         assert self.data_dim is not None
+        # Initialize component assignments
+        self.comp_list = np.zeros((self.data_dim, self.num_models), dtype=int)
+        self.comp_used = np.ones(self.num_comps, dtype=bool)
+        for h in range(self.num_models):
+            self.comp_list[:, h] = np.arange(h * self.data_dim, (h + 1) * self.data_dim)
+
         # Initialize mixing/unmixing matrices. A holds one component per row
         # (issue #334, pamica.component_layout): model h's block is rows
-        # h*data_dim..(h+1)*data_dim-1 under the default comp_list below. A
+        # h*data_dim..(h+1)*data_dim-1 under the default comp_list above. A
         # drawn A is normalized to unit-norm components as the reference does
         # (issue #341, pamica.initialization), here and in the restart after a
-        # non-finite likelihood, which redraws through this method; an A
-        # supplied before fit() is used as is, like the reference's loaded A.
+        # non-finite likelihood, which redraws through this method. An A
+        # supplied before fit() (or left by a previous fit on this instance) is
+        # used as is, like the reference's loaded A, once it is checked: a
+        # wrong shape, a non-finite entry or a singular model block raises
+        # ValueError here instead of failing deep in the fit.
         if self.A is None:
             drawn = initial_mixing(
                 self.rng,
@@ -1748,12 +1757,13 @@ class AMICA:
             )
             self.A = np.zeros((self.num_comps, self.data_dim))
             self.A[: drawn.shape[0], :] = drawn
-
-        # Initialize component assignments
-        self.comp_list = np.zeros((self.data_dim, self.num_models), dtype=int)
-        self.comp_used = np.ones(self.num_comps, dtype=bool)
-        for h in range(self.num_models):
-            self.comp_list[:, h] = np.arange(h * self.data_dim, (h + 1) * self.data_dim)
+        else:
+            validate_supplied_mixing(
+                self.A,
+                (self.num_comps, self.data_dim),
+                self.comp_list,
+                owner="AMICA_NumPy",
+            )
 
         # Outlier-rejection state (do_reject): start with every sample good
         # (good_idx = all indices), mirroring AMICATorchNG. num_good_samples

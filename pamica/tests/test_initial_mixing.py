@@ -24,7 +24,10 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
    ``027cb07``, loaded from git), whose components are off by more than 1e-3;
 3. a supplied or loaded ``A`` is used bit for bit (a NumPy ``A`` set before
    ``fit``, a NumPy refit, a PyTorch ``state_dict``, an MLX save): only a
-   drawn ``A`` is normalized;
+   drawn ``A`` is normalized; and a supplied NumPy ``A`` that no fit could
+   start from (wrong shape, a non-finite entry, a singular model block) is
+   refused at fit start (the PyTorch and MLX backends take an ``A`` only
+   through their validated saves);
 4. the NumPy restart after a non-finite likelihood redraws unit-norm
    components from the running generator (the sanctioned error-injection
    pattern of ``.rules/testing.md`` poisons one real likelihood);
@@ -414,6 +417,50 @@ def test_an_mlx_save_restores_A_as_is(X, tmp_path):
     path = tmp_path / "model.npz"
     m.save(str(path))
     assert _np(cls.load(str(path)).A).tobytes() == fitted.tobytes()
+
+
+def _supplied_misfits(fitted: np.ndarray) -> Dict[str, Tuple[np.ndarray, str]]:
+    """Supplied two-model ``A`` values no fit can start from, each with the
+    message it must raise: a component-column ``A`` (the layout before issue
+    #334), a NaN entry, and an all-zero component row."""
+    nan = fitted.copy()
+    nan[3, 7] = np.nan
+    zero = fitted.copy()
+    zero[NW + 5, :] = 0.0
+    return {
+        "columns": (
+            np.ascontiguousarray(fitted.T),
+            r"has shape \(32, 64\), expected \(64, 32\)",
+        ),
+        "nan": (nan, r"non-finite entries in component row\(s\) \[3\]"),
+        "zero-row": (
+            zero,
+            r"model 1's block .* numerically singular \(rank 31 of 32\)",
+        ),
+    }
+
+
+@pytest.mark.parametrize("case", ["columns", "nan", "zero-row"])
+def test_numpy_refuses_a_supplied_A_no_fit_can_start_from(
+    case, fitted_unscaled, X, tmp_path, monkeypatch
+):
+    """Checked at fit start, before any E-step, with ``ValueError`` naming the
+    problem instead of a ``LinAlgError`` or a non-finite likelihood deep in the
+    fit. The valid ``A`` they are made from fits (test above)."""
+    A, message = _supplied_misfits(fitted_unscaled["A"])[case]
+    model = _numpy_model(tmp_path)
+    model.A = A
+    steps: List[int] = []
+    forward = model._get_updates_and_likelihood
+
+    def spy():
+        steps.append(model.iter)
+        return forward()
+
+    monkeypatch.setattr(model, "_get_updates_and_likelihood", spy)
+    with pytest.raises(ValueError, match=message):
+        model.fit(X)
+    assert steps == [] and model.ll == []
 
 
 # --- 4. the NumPy restart after a non-finite likelihood -----------------------

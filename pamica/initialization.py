@@ -103,3 +103,57 @@ def initial_mixing(
         else:
             A[rows, :] = normalize_components(draw_initial_block(rng, n))
     return A
+
+
+def validate_supplied_mixing(
+    A: np.ndarray, shape: tuple, comp_list: np.ndarray, *, owner: str
+) -> None:
+    """Refuse an initial ``A`` that a fit could not start from.
+
+    A backend that honors a supplied initial ``A`` uses it as is, like the
+    reference's loaded ``A`` (amica15.f90:793-802), so it is checked here
+    instead: at fit start, with a message naming the problem, rather than as
+    a ``LinAlgError`` or a non-finite likelihood deep in the fit.
+
+    Parameters
+    ----------
+    A : array_like
+        The supplied initial mixing matrix, one component per row.
+    shape : tuple of int
+        The shape the fit needs, ``(n_comps, n)``.
+    comp_list : ndarray of int, shape (n, n_models)
+        The component each source of each model uses; model ``h``'s block is
+        ``A[comp_list[:, h], :]``.
+    owner : str
+        The class name the messages name.
+
+    Raises
+    ------
+    ValueError
+        If ``A`` has the wrong shape, holds a non-finite entry, or a model's
+        block is numerically singular (``numpy.linalg.matrix_rank`` below its
+        size), so that its unmixing matrix cannot be computed.
+    """
+    A = np.asarray(A)
+    if A.shape != tuple(shape):
+        raise ValueError(
+            f"{owner}: the supplied initial A has shape {A.shape}, expected "
+            f"{tuple(shape)}: one row per component, each as long as the kept "
+            "channel count (a mixing matrix stored with components as columns "
+            "must be transposed)"
+        )
+    bad_rows = np.flatnonzero(~np.isfinite(A).all(axis=1))
+    if bad_rows.size:
+        raise ValueError(
+            f"{owner}: the supplied initial A has non-finite entries in "
+            f"component row(s) {bad_rows.tolist()}"
+        )
+    n = comp_list.shape[0]
+    for h in range(comp_list.shape[1]):
+        rank = int(np.linalg.matrix_rank(A[comp_list[:, h], :]))
+        if rank < n:
+            raise ValueError(
+                f"{owner}: model {h}'s block of the supplied initial A (component "
+                f"rows {comp_list[:, h].tolist()}) is numerically singular "
+                f"(rank {rank} of {n}), so its unmixing matrix cannot be computed"
+            )
