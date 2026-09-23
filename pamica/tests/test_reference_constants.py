@@ -20,7 +20,8 @@ always run; the MLX checks skip individually without MLX or an Apple GPU):
    each one is (a density normalizer, an initialization scale, a sentinel, a
    default of an ``input.param`` key, or a declared variable nothing reads);
 3. no backend keeps a copy of any of these constants;
-4. every backend's ``rho == 2`` log-density uses the reference's normalizer;
+4. every backend's ``rho == 2`` log-density uses the reference's normalizer,
+   and the NumPy plotting helper draws the density the fit uses;
 5. (opt-in, ``AMICA_RUN_FORTRAN=1``) the native reference binary, seeded from
    pamica's initialization for the Gaussian and the two cosh families, matches
    PyTorch to float64 round-off after one and three iterations, where the code
@@ -48,6 +49,7 @@ import torch
 
 import pamica.reference_constants as rc
 from pamica.numpy_impl.core import AMICA as AMICA_NumPy
+from pamica.numpy_impl.pdf import compute_pdf
 from pamica.tests.pre_change import load_pre_change_package
 from pamica.torch_impl.core import AMICATorchNG, _log_pdf_and_deriv, _log_pdf_only
 from pamica.torch_impl.utils import load_eeglab_data
@@ -304,6 +306,15 @@ def test_torch_and_numpy_rho2_log_density_is_the_references():
     numpy_model = AMICA_NumPy(use_tqdm=False)
     lp_numpy, _ = numpy_model._compute_log_pdf(_Y, 2.0)
     np.testing.assert_array_equal(lp_numpy, expected)
+
+
+@pytest.mark.parametrize("rho", [1.0, 1.5, 2.0])
+def test_the_plotted_density_is_the_fits(rho):
+    """``viz.plot_pdf_fits`` draws ``compute_pdf``, which must be the density
+    the fit uses, including the reference's normalizer at ``rho == 2``."""
+    fit_log_pdf, _ = AMICA_NumPy(use_tqdm=False)._compute_log_pdf(_Y, rho)
+    plotted, _ = compute_pdf(_Y, rho)
+    np.testing.assert_allclose(plotted, np.exp(fit_log_pdf), rtol=1e-13, atol=0)
 
 
 def test_mlx_rho2_normalizer_is_the_references():

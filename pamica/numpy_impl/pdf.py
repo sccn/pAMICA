@@ -1,8 +1,16 @@
 """
-Probability Density Function (PDF) implementations for AMICA.
+Source densities for plotting a fitted model.
 
-This module implements various probability density functions used in the AMICA
-algorithm for modeling source distributions. The supported PDFs are:
+This is a plotting helper, not a fit path: :func:`compute_pdf` evaluates a
+fitted source density in linear space for ``viz.plot_pdf_fits``. The fit itself
+uses the log-space density in ``core.py`` (``AMICA._compute_log_pdf``), and the
+generalized Gaussian here draws the same density: its normalizers come from
+:mod:`pamica.reference_constants`, which every backend uses, including the
+reference's single-precision ``sqrt(pi)`` at ``rho == 2`` (issue #344).
+
+The ``pdftype`` codes below are this module's legacy numbering, not the
+reference's ``pdftype``: here 1 is the generalized Gaussian (the reference's 0),
+and 2, 3 and 4 are densities no backend fits. The supported PDFs are:
 
 1. Generalized Gaussian Distribution (GGD):
    p(x) = exp(-|x|^ρ) / (2Γ(1+1/ρ))
@@ -29,6 +37,8 @@ functionality to automatically select appropriate PDFs based on data statistics.
 import numpy as np
 from scipy import special
 
+from ..reference_constants import LOG2, LOG_SQRT_2PI, LOG_SQRT_PI
+
 
 def compute_pdf(
     y: np.ndarray, rho: float, pdftype: int = 1
@@ -37,10 +47,8 @@ def compute_pdf(
     Compute PDF value and its derivative for given activation values.
 
     For each supported PDF type, computes both the probability density p(y)
-    and its derivative dp(y)/dy. These are used in the AMICA algorithm for:
-    1. Computing data likelihood during model fitting
-    2. Gradient calculations for parameter updates
-    3. Estimating component responsibilities
+    and its derivative dp(y)/dy, for plotting (see the module docstring; the
+    fit uses ``AMICA._compute_log_pdf``).
 
     The shape parameter ρ controls the distribution's properties:
     - For GGD: Controls tail heaviness (1=Laplace, 2=Gaussian)
@@ -54,7 +62,7 @@ def compute_pdf(
     rho : float
         Shape parameter
     pdftype : int
-        PDF type:
+        PDF type, in this module's legacy numbering (not the reference's):
         1: Generalized Gaussian
         2: Logistic
         3: Generalized Logistic
@@ -70,12 +78,13 @@ def compute_pdf(
     if pdftype == 1:
         # Generalized Gaussian
         if rho == 1.0:
-            # Laplace distribution
-            pdf = np.exp(-np.abs(y)) / 2.0
+            # Laplace distribution, the fit's exp(-|y| - log 2)
+            pdf = np.exp(-np.abs(y) - LOG2)
             dpdf = -np.sign(y) * pdf
         elif rho == 2.0:
-            # Gaussian distribution
-            pdf = np.exp(-y * y) / np.sqrt(np.pi)
+            # Gaussian distribution, with the reference's single-precision
+            # normalizer log(dble(1.772453851)) (amica15.f90:1313), as in the fit
+            pdf = np.exp(-y * y - LOG_SQRT_PI)
             dpdf = -2 * y * pdf
         else:
             # General case: p(y) = exp(-|y|^rho) / (2 * Gamma(1 + 1/rho)).
@@ -106,9 +115,9 @@ def compute_pdf(
         dpdf = pdf * (1 - (rho + 1) * exp_y / (1 + exp_y))
 
     elif pdftype == 4:
-        # Gaussian mixture
-        pdf1 = np.exp(-0.5 * y * y) / np.sqrt(2 * np.pi)
-        pdf2 = np.exp(-0.5 * y * y / rho) / np.sqrt(2 * np.pi * rho)
+        # Gaussian mixture, with the log sqrt(2*pi) the Gaussian family uses
+        pdf1 = np.exp(-0.5 * y * y - LOG_SQRT_2PI)
+        pdf2 = np.exp(-0.5 * y * y / rho - LOG_SQRT_2PI - 0.5 * np.log(rho))
         pdf = 0.5 * (pdf1 + pdf2)
         dpdf = -0.5 * (y * pdf1 + y * pdf2 / rho)
 
