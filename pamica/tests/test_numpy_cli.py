@@ -100,3 +100,19 @@ def test_load_params_maps_canonical_keys_for_fortran_text(tmp_path):
     assert "maxdecs" not in params
     assert "min_nd" not in params
     assert "share_iter" not in params
+
+
+def test_cli_without_outdir_still_writes_to_output(tmp_path, monkeypatch):
+    """The library default no longer writes files (``outdir=None``), but the
+    CLI's own ``--outdir`` default is ``output``, so a CLI run without the flag
+    still writes its results to ``./output`` as before."""
+    from pamica.numpy_impl import cli
+
+    dest = _json_with_tiny_iters(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.chdir(run_dir)
+    monkeypatch.setattr(sys, "argv", ["cli.py", str(dest), "--seed", "0"])
+    cli.main()
+    for name in ("out.txt", "W", "S", "LL"):
+        assert (run_dir / "output" / name).exists(), name

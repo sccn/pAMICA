@@ -1,7 +1,7 @@
 """MIR/PMI diagnostics on the MLX backend -- issue #137, epic #278 Phase
-3/#289 (port of ``AMICATorchNG.mir``/``pmi``, torch_impl/core.py:2929-3036,
-and the ``fit(mir_step=...)`` waypoint machinery, torch_impl/core.py's
-issue #161 tests in ``test_ng_convergence.py``/``test_amica_ng_wrapper.py``).
+3/#289 (port of ``AMICATorchNG.mir``/``pmi``, and the ``fit(mir_step=...)``
+waypoint machinery, torch_impl/core.py's issue #161 tests in
+``test_ng_convergence.py``/``test_amica_ng_wrapper.py``).
 
 MLX-only mechanics: the composition pin (against ``pamica.metrics.mir``
 directly, order-independent of any other backend), the ``mir_step``
@@ -210,7 +210,7 @@ def test_max_iter_zero_raises(real_data):
 
 
 def test_mir_step_zero_matches_omitted_argument(real_data):
-    """mir_step=0 (explicit) must leave fit() behaviour byte-for-byte
+    """mir_step=0 (explicit) must leave fit() behavior byte-for-byte
     identical to not passing mir_step at all."""
     default_m = _fit(real_data, max_iter=3, keep_best=False)
     explicit_m = AMICAMLXNG(

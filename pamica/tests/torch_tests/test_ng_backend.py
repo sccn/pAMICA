@@ -1153,7 +1153,7 @@ def test_state_dict_snapshots_not_aliases():
 
 @pytest.mark.slow
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
-def test_end_to_end_correlation_vs_fortran():
+def test_end_to_end_correlation_vs_fortran(tmp_path):
     """Epic definition-of-done: Hungarian-matched component correlation vs the
     Fortran binary > 0.95 on the sample data.
 
@@ -1177,8 +1177,7 @@ def test_end_to_end_correlation_vs_fortran():
     data, params = load_sample_data()
     params = dict(params)
     params["max_iter"] = 100
-    out = root / "pamica" / "tests" / "torch_tests" / "_ng_e2e_tmp"
-    out.mkdir(parents=True, exist_ok=True)
+    out = tmp_path
     fortran = run_fortran_amica(data, params, out, SEED)
     assert fortran is not None, "Fortran binary run failed"
 
@@ -1208,7 +1207,7 @@ def test_end_to_end_correlation_vs_fortran():
 
 @pytest.mark.slow
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
-def test_end_to_end_correlation_vs_fortran_from_sample_params_json():
+def test_end_to_end_correlation_vs_fortran_from_sample_params_json(tmp_path):
     """Same correctness bar as ``test_end_to_end_correlation_vs_fortran``, but
     built the way a user actually reproduces the paper's Table 1 numbers: via
     ``run_pytorch_amica``, which maps ``sample_data/sample_params.json`` onto
@@ -1260,8 +1259,7 @@ def test_end_to_end_correlation_vs_fortran_from_sample_params_json():
         "whitening instead of symmetric ZCA sphering)"
     )
 
-    out = root / "pamica" / "tests" / "torch_tests" / "_ng_e2e_json_tmp"
-    out.mkdir(parents=True, exist_ok=True)
+    out = tmp_path
     fortran = run_fortran_amica(data, params, out, SEED)
     assert fortran is not None, "Fortran binary run failed"
 
@@ -1504,7 +1502,7 @@ class _NaNAfterIteration(AMICATorchNG):
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
 def test_keep_best_does_not_rescue_a_diverged_fit_that_peaked_earlier():
     """The end-of-fit restore guard's ``stop_reason not in
-    _DEGENERATE_STOP_REASONS`` exclusion (core.py:2725) had zero coverage:
+    _DEGENERATE_STOP_REASONS`` exclusion (``AMICATorchNG._fit_once``) had zero coverage:
     every existing keep_best test either never diverges or diverges on
     iteration 0 (no ``best_snapshot`` yet to wrongly rescue). This forces a
     fit to run ``_DEGENERATE_NAN_AFTER`` real iterations -- so a genuine,

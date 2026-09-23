@@ -104,7 +104,7 @@ def _llt_invariant(Lt: np.ndarray, n_good: int, nw: int) -> float:
     record at once, so they can differ by a summation ULP. The quantity being
     discriminated -- one M-step of movement -- is ~1e-4 here, eight orders of
     magnitude above that, so the tests below pair the tolerance with an
-    explicit check that a neighbouring iterate is far outside it.
+    explicit check that a neighboring iterate is far outside it.
     """
     return float(Lt.sum()) / (n_good * nw)
 
@@ -124,7 +124,7 @@ def test_fortran_reference_llt_is_the_last_estep():
     of its own ``LL`` trajectory -- i.e. it is the E-step that produced that LL,
     taken before the final ``update_params``. On the machine this was written
     the residual is exactly 0.0; the assertion allows a summation ULP so it
-    cannot fail on a different BLAS, and the neighbouring-iterate check below
+    cannot fail on a different BLAS, and the neighboring-iterate check below
     shows the tolerance is nowhere near wide enough to match the wrong entry.
 
     This is the evidence for the write convention issue #157 adopts, measured

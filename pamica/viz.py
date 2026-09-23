@@ -10,7 +10,7 @@ crash". ``numpy_impl/viz.py`` is left untouched; this module is not a
 replacement for it.
 
 Both plots mirror ``postAmicaUtility``'s ``modprobplot``/``pop_modPMI`` MATLAB
-behaviour, observed by running the real GPL-licensed functions and reading
+behavior, observed by running the real GPL-licensed functions and reading
 their rendered output and ``help`` text, never their source, per the project's
 clean-room posture for GPL code. Every quantity they draw is pinned to a MATLAB
 oracle; see ``.context/issue-136/matlab_viz_verification.md``.
@@ -68,7 +68,7 @@ def plot_pmi_heatmap(
     mask_diagonal : bool, default True
         `pairwise_mi`'s diagonal is each component's self-entropy (~2.83 on
         real data), not a mutual information -- an order of magnitude above
-        the ~0.06 off-diagonal values. Left unmasked it blows out the colour
+        the ~0.06 off-diagonal values. Left unmasked it blows out the color
         scale and hides all off-diagonal structure, so this defaults to True.
         Deliberate divergence: MATLAB instead zeroes its diagonal. Masking is
         the closer analogue here because our diagonal is not a small value, it
@@ -160,7 +160,7 @@ def plot_model_probability(
     Top panel: `softmax(Lht)` over models, one line per model ("Probability of
     Model Being Active"). Bottom panel: the per-sample log-likelihood of the
     single most probable model at each timepoint (``Lht.max(axis=0)``), not
-    the total ``Lt``, matching the observed MATLAB behaviour.
+    the total ``Lt``, matching the observed MATLAB behavior.
 
     Provide exactly one source of ``Lht``: a written ``out`` (an
     :class:`AmicaOutput`), or a live ``lht`` array (for example from
@@ -278,7 +278,7 @@ def plot_model_probability(
         # SMOOTHED LOG-LIKELIHOOD correlates at 0.9939 (1 s window) / 0.9836
         # (5 s), while the PROBABILITIES it becomes after the softmax below
         # correlate at 0.9886 / 0.9594. Both are recorded in
-        # `.context/issue-136/matlab_viz_verification.md`; an unlabelled 0.994
+        # `.context/issue-136/matlab_viz_verification.md`; an unlabeled 0.994
         # here previously read as a stale copy of the 0.9886 figure (#136).
         #
         # Known, accepted divergence: MATLAB additionally pins its first/last

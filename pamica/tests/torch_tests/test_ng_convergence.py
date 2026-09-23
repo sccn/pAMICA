@@ -270,7 +270,7 @@ def test_lrate_floor_still_reachable_without_grad_norm(real_data):
     assert ng.lrate <= ng.minlrate
     # The exact crossing iteration (23 on macOS-arm64) is a snapshot, not an
     # invariant: the same claim elsewhere in this file varied 326 -> 1076 across
-    # BLAS implementations. Assert the behaviour, which is that the stop fired
+    # BLAS implementations. Assert the behavior, which is that the stop fired
     # before the budget was exhausted, not the iteration it happened on.
     assert len(ng.ll_history) < 30
 

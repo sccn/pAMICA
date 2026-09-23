@@ -25,7 +25,7 @@ pamica/
 ├── sample_data/             # Sample EEG data + Fortran binary (amica15mac)
 └── tests/                   # Tests, incl. tests/torch_tests/ (vs-Fortran parity)
 
-validate_implementations.py  # Runs both implementations, Hungarian component matching, reports
+validate_implementations.py  # Runs each backend vs Fortran (--backend), Hungarian matching, reports
 ```
 Module names are topic-based (`core`/`pdf`/`data`/... under `numpy_impl/`,
 `core`/`utils` under `torch_impl/`); the old `pamica.py`/`amica_*.py`/`amica_torch_ng.py`
@@ -112,10 +112,12 @@ have no float64).
   end: fit, `from_params_file`, `pcakeep`, the #50 degenerate-fit contract, `.pt` save/load (wrapper
   `format_version` 2 records the backend; version 1 still loads as torch), EEGLAB export and MNE `apply`.
   `device`/`dtype` are torch-only; the default stays `"torch"`.
-- `validate_implementations.py` runs the PyTorch (NG) backend against the Fortran binary and matches
-  components via the Hungarian algorithm; it does not exercise the NumPy or MLX backends. NumPy-vs-
-  Fortran parity lives in pytest (`test_sample_data_numpy_vs_fortran`), and MLX validation lives in
-  `mlx_tests/` plus the cross-backend suites (extending the harness itself is tracked as issue #315).
+- `validate_implementations.py --backend {torch,numpy,mlx}` (a comma-separated list, or `all`; default
+  `torch`, whose report is unchanged) runs each backend against one Fortran reference run with the same
+  settings and matches components via the Hungarian algorithm (#315). All three meet the Fortran bar on
+  the bundled sample (LL within 3.2e-5, correlation 0.9992, Amari 0.004; rows and bars in
+  `docs/guides/validation.md`), pinned by the `AMICA_RUN_FORTRAN`-gated test in
+  `test_fortran_param_forwarding.py`.
 - Newton and exact-EM updates are implemented in `AMICATorchNG` and the legacy NumPy `numpy_impl/core.py`
   (both Fortran-faithful). Adaptive PDF (#26) is DONE (all five `pdftype` families + ext-Infomax
   switcher); full multi-model matching (#27) is validated by distributional equivalence.

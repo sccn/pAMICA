@@ -24,10 +24,6 @@ enhanced_test_output/
 coverage.xml
 htmlcov/
 
-# Temp output from NG e2e test (Fortran run artifacts)
-pamica/tests/torch_tests/_ng_e2e_tmp/
-pamica/tests/torch_tests/_ng_e2e_json_tmp/
-
 # Benchmark run artifacts
 benchmarks/results/
 # Real EEG benchmark data (fetched from OpenNeuro, not committed) + result JSONs

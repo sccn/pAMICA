@@ -39,7 +39,7 @@ def raw():
 
 @pytest.fixture(scope="module")
 def mixed_type_raw(raw):
-    """Real EEG relabelled as two channel types on MEG-like unit scales.
+    """Real EEG relabeled as two channel types on MEG-like unit scales.
 
     Half the channels become magnetometers (~1e-13 T), half gradiometers
     (~1e-11 T/m). The signals are the recording's own; only the declared type and

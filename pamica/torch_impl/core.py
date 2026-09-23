@@ -1562,8 +1562,8 @@ class AMICATorchNG:
     def _newton_direction(self, dA_h, sigma2_h, lambda_h, kappa_h):
         """Per-model Newton direction ``H`` from the natural gradient ``dA_h``.
 
-        Vectorized port of the per-source-pair 2x2 solve (amica17.f90:1817-1832,
-        pamica.py:802-813):
+        Vectorized port of the per-source-pair 2x2 solve (amica17.f90:1817-1832;
+        the NumPy backend's loop in ``AMICA_NumPy._update_parameters``):
 
             H[i,i] = dA_h[i,i] / lambda[i]
             sk1 = sigma2[i]*kappa[k];  sk2 = sigma2[k]*kappa[i]   (i != k)
@@ -2381,7 +2381,7 @@ class AMICATorchNG:
             If > 0, compute MIR (issue #137) from the current ``W``/``sphere``
             every ``mir_step`` iterations and append it to ``mir_history_`` as
             ``(iteration, mir_nats, variance)``. ``0`` (default) disables the
-            waypoints and leaves fit behaviour byte-for-byte unchanged.
+            waypoints and leaves fit behavior byte-for-byte unchanged.
             ``mir_history_`` is a true trajectory like ``ll_history``: a
             ``keep_best`` (issue #51) restore does not rewrite it, so the
             fit-end MIR is ``self.mir(X)`` on the returned parameters, not
@@ -2429,7 +2429,7 @@ class AMICATorchNG:
         * Without a keep-best restore, ``final_ll_`` is ``ll_history[-1]``, the
           LL of the parameters as they stood *before* the last M-step -- so the
           exported ``LLt`` is one M-step older than the exported ``W``/``A``.
-          That is the reference's own behaviour (Fortran fills ``modloglik``
+          That is the reference's own behavior (Fortran fills ``modloglik``
           during iteration i's E-step, ``update_params`` then moves the
           parameters, and ``write_output`` writes both -- amica15.f90:996,
           1122, 1124-1127), adopted deliberately so pamica's on-disk ``LLt`` is

@@ -34,7 +34,7 @@ multiplies `mu[:, comp_list[i, h]]` by the row's norm and divides `beta[:, comp_
 The rule is identical in the three backends (`_rescale_components`) and runs where the reference runs it (after the `A` update, before the unmixing matrices are rebuilt, and before a share merge).
 The reference parses `scalestep` but never reads it and rescales every iteration; pamica keeps `scalestep` as an extension,
 now counted from 1 like the reference's other cadences (iterations `scalestep`, `2*scalestep`, ...), so the default of 1 is the reference
-(row 13 of `docs/guides/amica-differences.md`).
+(row 14 of `docs/guides/amica-differences.md`).
 
 Epic #324 Phase 8 (issue #334) then changes the storage itself to component rows, `A` of shape `(n_comps, n)` with `comp_list` indexing rows,
 so a stored row is a component in every configuration, including merged ones.

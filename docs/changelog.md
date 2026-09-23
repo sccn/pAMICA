@@ -26,11 +26,61 @@ Release notes are also published on the
     Saved models load unchanged; refit only to compare parameters element by element with the reference.
   - `scalestep`, which the reference parses but never reads (it rescales every iteration), stays a pamica extension
     but now counts from 1: the rescale runs on iterations `scalestep`, `2*scalestep`, and so on, instead of 1, `1+scalestep`, and so on.
-    The default of 1 is unaffected (row 13 of the differences page).
+    The default of 1 is unaffected (row 14 of the differences page).
     With `doscaling` on, every backend's constructor now raises `ValueError` for a `scalestep` that is not an integer of at least 1;
     `scalestep=0` used to fail mid-fit with a bare `ZeroDivisionError`.
   - New test helper `pamica/tests/native_oracle.py` seeds the native binary from a pamica state through its `load_*` files,
     for element-wise oracle tests (opt-in with `AMICA_RUN_FORTRAN=1`).
+- **Fix: the EEGLAB export wrote an asymmetric sphere transposed (Phase 10 of epic #324, issue #336).**
+  `write_amicaout` (`pamica/numpy_impl/load.py`), the shared writer called from `write_amica_output` on
+  `AMICATorchNG`, `AMICAMLXNG` and the `AMICA` wrapper, and from the NumPy backend's own `_write_results`,
+  wrote the square sphere matrix `S` in C order,
+  while the Fortran reference and both readers
+  (EEGLAB's `loadmodout15.m` and pamica's `loadmodout`) read it column-major.
+  The default symmetric zero-phase component analysis (ZCA) sphere is its own transpose to about 1e-17,
+  so the bug moved only that many bytes there;
+  with `do_approx_sphere=False` the sphere is genuinely asymmetric,
+  and the exported sphere came back exactly transposed
+  (measured on the bundled sample, torch, 3 iterations:
+  before the fix `max|S_loaded - S| = 0.51`, `max|S_loaded - S.T| = 0.0`;
+  after, `max|S_loaded - S| = 0.0`, `max|S_loaded - S.T| = 0.51`).
+  `S` is now written column-major in both the square and rank-reduced branches,
+  and `load_results` reads a square sphere the same way.
+  **Action needed for existing output:** a full-rank directory written with `do_approx_sphere=False`
+  by an earlier pamica holds a C-order `S`.
+  EEGLAB always read that transposed (this fix does not change EEGLAB's own reading, only pamica's),
+  and pamica's corrected `loadmodout`/`load_results` now also read it transposed, with no error raised.
+  Regenerate any such directory by re-running the fit and `write_amica_output` again;
+  there is no on-disk version marker to detect the old layout, and this repo carries no
+  compatibility shim to read it automatically.
+  Directories from the default (symmetric) sphere and from a rank-reduced (`pcakeep`) fit are unaffected.
+- **Phase 6 of epic #324: the validation harness covers every backend (issue #315).**
+  `validate_implementations.py --backend {torch,numpy,mlx}` (or a comma-separated list, or `all`)
+  compares each backend against one Fortran reference run with the same settings;
+  the default remains `torch` and prints the same report as before.
+  NumPy receives the settings through its own key-translation table, PyTorch and MLX through `AMICA(backend=...)`;
+  an explicit `--backend` also prints and saves a one-row-per-backend summary with runtimes (`parity_summary.md`),
+  and `--backend mlx` without MLX exits with status 2 and the install hint.
+  On the bundled sample all three backends meet the reference bar (log-likelihood within 3.2e-5, matched correlation 0.9992, Amari distance 0.004);
+  the rows and each backend's expected bar are in the validation guide, pinned by an `AMICA_RUN_FORTRAN`-gated test.
+  - The getting-started page gains a short Apple Silicon (MLX) route that links to the backends guide's full workflow,
+    and the differences page records two existing divergences:
+    `do_sphere=False` fits unscaled data where the reference divides each channel by its standard deviation (issue #328),
+    and a second `fit` on the same `AMICA_NumPy` instance continues from the first (related to issue #312).
+  - **Behavior change (legacy NumPy backend):** `AMICA_NumPy` writes files only when given an `outdir`.
+    Its default was `./output`, so every fit wrote `out.txt` at construction, `writestep` checkpoints and its final results into the caller's working directory.
+    The default is now `outdir=None`, which writes nothing, as the PyTorch and MLX backends never do unless asked.
+    An explicit `outdir` (keyword, params file, or the command-line interface's `--outdir`, which still defaults to `output`) writes exactly what it did before.
+  - **Fix:** `AMICA_NumPy.get_sensor_mixing_matrix` returned `pinv(sphere)` times the stored mixing matrix without the transpose the PyTorch and MLX backends apply,
+    so its columns were the rows of the true mixing matrix rather than the components' sensor maps
+    (about 10% away from the PyTorch backend's maps after five iterations on the bundled sample, and not an inverse of `get_weights() @ sphere`).
+    It now matches the PyTorch backend to round-off (4.6e-12 relative), pinned by a cross-backend test.
+    The NumPy backend's fit, `transform`, `get_weights` and EEGLAB export were not affected.
+  - **Fix:** the legacy plotting helpers in `pamica.numpy_impl.viz` had the same orientation slip.
+    `plot_components` drew rows of the mixing matrix as mixing vectors, and it and `plot_pdf_fits` formed activations from the raw data with no mean removal, no sphere and no transpose;
+    `plot_model_comparison` skipped the sphere.
+    They now plot the model's own sensor maps and sources (what `get_sensor_mixing_matrix` and `transform` return), checked against those accessors on a real fit.
+    `load_results` also reads a rank-reduced fit's zero-padded sphere, which it used to reject.
 - **Phase 4 of epic #324: backend selection in `AMICA` and `AMICAICA` (issue #313).**
   `AMICA` and `AMICAICA` gain a `backend` parameter:
   `"torch"` (the default, `AMICATorchNG`, float64 Fortran parity) or `"mlx"` (`AMICAMLXNG`, Apple GPU, float32 only).

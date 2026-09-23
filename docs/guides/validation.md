@@ -22,6 +22,7 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 | Per-block sufficient statistics and one M-step | vs Fortran | bit-exact ($\sim\!10^{-15}$) |
 | Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | LL within ~0.0005 of $-3.6993$; correlation 0.998 |
 | Single-model solution (`do_newton=0`, bundled, $k\approx30$) | Amari distance vs Fortran | 0.006 |
+| Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | LL within 3.2e-5; correlation 0.9992; Amari distance 0.004, for all three |
 | Multi-model solution | distributional similarity over 20-run ensembles | indistinguishable from Fortran's own run-to-run spread ($p = 0.96$) |
 | Device and precision invariance | same independent components across CPU/CUDA/MPS/MLX, float32/float64, Linux/macOS | identical (1.000) across all eight torch/MLX combinations |
 | Cross-backend log-likelihood | converged LL across every backend | agree to ~3 significant digits (max pairwise ~0.003) |
@@ -30,12 +31,75 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 
 ## The validation harness
 
-`validate_implementations.py` runs the implementations on real sample EEG,
+`validate_implementations.py` runs pamica's backends and the Fortran reference binary on the bundled sample EEG,
 matches components across implementations with the Hungarian algorithm,
 and reports log-likelihood and per-component correlation. It always uses real sample data and the Fortran binary, never synthetic data.
 Conformity with Fortran is measured with two metrics used throughout this page: Hungarian-matched component correlation,
 and the Amari distance (`amari_distance` in `validate_implementations.py`),
 a standard unmixing-matrix comparison metric (Amari, Cichocki & Yang, 1996) that is permutation- and scale-invariant by construction and so needs no assignment step.
+
+### Running it per backend
+
+`--backend` selects which pamica backends are compared against the reference (issue #315):
+
+```bash
+uv run python validate_implementations.py                  # PyTorch only (the default)
+uv run python validate_implementations.py --backend numpy  # the legacy NumPy backend
+uv run python validate_implementations.py --backend mlx    # Apple Silicon; needs `uv sync --extra mlx`
+uv run python validate_implementations.py --backend all    # torch, numpy and mlx
+```
+
+A comma-separated list such as `--backend torch,mlx` also works.
+Every backend gets the same settings: `sample_params.json` read through the shared canonical reader (`block_size=512`, Newton on from iteration 50),
+plus `--max-iter` (default 100) and `--seed` (default 42).
+The reference runs once, with the same settings, the seed pinned and one thread, and each backend is compared against that one run.
+NumPy receives the settings under its own key names, through the backend's own translation table;
+PyTorch and MLX both run through `AMICA(backend=...)`, whose constructors share the canonical names.
+A setting a backend cannot apply is named in a warning rather than dropped silently.
+
+Each backend gets its own report: `validation_report.txt` for PyTorch (the name the default run has always used),
+and `validation_report_numpy.txt` or `validation_report_mlx.txt` for the others.
+Passing `--backend` explicitly also prints a one-row-per-backend summary with runtimes and saves it as `parity_summary.md`;
+the default run prints exactly the report it always has.
+`--backend mlx` on a host without MLX stops before running anything, with exit status 2 and the install hint.
+
+The reference binary is resolved as before:
+by default the native engine (`PAMICA_NATIVE_BINARY`, or the release binary for the host, cached after the first download),
+falling back, with a warning, to the bundled macOS x86_64 `amica15mac`, which cannot be seeded;
+`--fortran-binary PATH` runs a specific binary.
+
+### Parity rows per backend
+
+Measured on 2026-09-22 on an Apple M4 Pro (14 cores, 64 GB, macOS 27; MLX 0.32.0, PyTorch 2.12.1, NumPy 2.5.0)
+against the v0.3.3 release native engine (`amica15-macos-arm64`, SHA-256 `c8b2ac7f...`), with the harness defaults:
+
+```bash
+uv run python -c "from pamica.native import resolver; print(resolver.resolve(version='v0.3.3'))"
+uv run python validate_implementations.py --backend all \
+  --fortran-binary ~/.cache/pamica/bin/v0.3.3/amica15-macos-arm64
+```
+
+The reference is pinned to that explicit release binary (the first line downloads it and verifies its checksum) rather than to the default resolution,
+because the resolver caches its `latest` download without refreshing it,
+so on a machine that fetched an earlier release the default can run an older binary than the one these rows were measured with.
+
+| Backend | Precision | Final LL | LL difference from Fortran | Mean matched correlation | Min matched correlation | Amari distance | Runtime (s) | Expected bar |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| Fortran (reference) | float64 | -3.411274 | | | | | 10.0 | the reference |
+| PyTorch (`AMICA`) | float64 | -3.411245 | 0.000029 | 0.9992 | 0.9935 | 0.0037 | 17.7 | correlation > 0.95, Amari < 0.05, LL difference < 0.005 |
+| NumPy (`AMICA_NumPy`) | float64 | -3.411246 | 0.000029 | 0.9992 | 0.9934 | 0.0037 | 32.8 | the PyTorch bar, and final LL within 1e-5 of PyTorch's |
+| MLX (`AMICA(backend="mlx")`) | float32 | -3.411242 | 0.000032 | 0.9992 | 0.9935 | 0.0037 | 3.4 | the PyTorch bar, and final LL within 1e-4 of PyTorch's |
+
+Every backend meets its bar.
+All four runs stop at the 100-iteration budget, so the rows compare matched trajectories rather than converged optima;
+the converged single-model evidence is in the next section.
+The two float64 backends agree with each other to about 1e-6 in log-likelihood.
+MLX computes in float32 (about seven significant digits per operation), so its bar against PyTorch is looser:
+it lands within about five significant digits of the float64 likelihood, which is float32 consistency, not float64 parity.
+Runtime is one run's wall-clock time for the fit alone and varies by about a third between runs on the same host;
+the reference's includes process start-up and is single-threaded.
+The same bars are pinned by `test_backend_meets_its_parity_bar_against_fortran` in `pamica/tests/test_fortran_param_forwarding.py`,
+which runs when `AMICA_RUN_FORTRAN=1` is set (as the weekly macOS job does).
 
 ## Single-model parity
 
@@ -293,9 +357,13 @@ files (`gm`, `W`, `S`, `mean`, `c`, `alpha`, `mu`, `sbeta`, `rho`, `comp_list`, 
 
 The round-trip is verified two ways:
 
-- **Byte-level:** for a single model the written files are an exact float64 serialization of the fitted
-  parameters. `W` and the symmetric zero-phase component analysis (ZCA) sphere are byte-identical in C order; the non-square mixture
-  parameters and `c`/`comp_list` are column-major (Fortran layout), matching the reference `amicaout` files.
+- **Byte-level:** for a single model the written files are an exact float64 serialization of the fitted parameters.
+  `W` is byte-identical in C order;
+  the sphere `S` and the non-square mixture parameters and `c`/`comp_list` are column-major (Fortran layout),
+  matching the reference `amicaout` files.
+  The default symmetric zero-phase component analysis (ZCA) sphere happens to be its own transpose to about 1e-17,
+  which is why an earlier column-major/C-order mismatch in the square-sphere write path went unnoticed,
+  until it was measured against an asymmetric (`do_approx_sphere=False`) sphere (issue #336).
 - **Reader-level:** the directory loads through `loadmodout15.m` (and its NumPy port `loadmodout`) with the
   expected shapes and the correct column-major layout. The MATLAB round-trip during development is what caught,
   and fixed, a column-major format bug in the mixture-parameter arrays.
@@ -434,8 +502,9 @@ guarded to a no-op so the parity results above stay byte-for-byte unchanged.
 | Component sharing (`share_comps`, #60) | off by default | Fortran `identify_shared_comps` ported; no bit-exact oracle (`Spinv2` is unrunnable), behavior-validated; byte-identical when unshared |
 | Outlier rejection (`do_reject`, #123) | off by default | `good_idx` mechanism on all three backends (NumPy, PyTorch, MLX -- the last landed epic #278 Phase 3, #289); MLX/NumPy ports validated vs the PyTorch backend |
 | Degenerate-fit contract (#50) | always | the `AMICA` wrapper refuses a NaN or singular fit (`converged_` / `stop_reason_`); `transform`/`get_*`/`save` raise through the wrapper instead of returning NaN sources. This is a wrapper-level contract, not a raw-backend one -- calling a raw `AMICATorchNG`/`AMICAMLXNG`/`AMICA_NumPy` instance's `transform`/`get_*`/`save` directly, bypassing the wrapper, is not gated (tracked as issue #306). `write_amica_output` is the one exception: both the PyTorch and MLX backends gained the same degenerate/non-finite refusal directly on the raw class in this epic, since it has no wrapper equivalent to gate it. |
+| End-to-end workflow (#315) | always, PyTorch and MLX | average-referenced sample EEG with `pcakeep = n_channels - 1` through `AMICAICA`: 31 components, `get_sources` equal to `transform`, an exclusion that removes exactly one back-projection and keeps the residual, the EEGLAB export reloaded by `loadmodout`, `save`/`load`, an `input.param`-driven fit, and the two backends' sources Hungarian-matched with a minimum correlation of at least 0.999 (measured 0.999999999) |
 
-Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests/test_ng_sharing.py`, `torch_tests/test_amica_ng_wrapper.py`, and `test_numpy_reject.py`.
+Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests/test_ng_sharing.py`, `torch_tests/test_amica_ng_wrapper.py`, `test_numpy_reject.py`, and `mne_tests/test_end_to_end_workflow.py`.
 
 ## Which convergence criterion actually stops a fit
 
@@ -532,13 +601,14 @@ tier: below $k\approx60$ the decomposition is under-determined and backends dive
 reasons, so a faster variant would reproduce a noisier number and invite the misreading this section
 exists to prevent.
 
-Two general checks remain useful and are much quicker, but note that neither reproduces a specific
-table row: `validate_implementations.py` defaults to a single seed at 100 iterations with `do_newton`
-read from `sample_params.json`, and `pytest` runs the parity and behaviour suite.
+Two general checks remain useful and are much quicker, but note that neither reproduces a row of
+the paper's table: `validate_implementations.py` defaults to a single seed at 100 iterations with `do_newton`
+read from `sample_params.json` (it reproduces the [per-backend harness rows](#parity-rows-per-backend) above),
+and `pytest` runs the parity and behavior suite.
 
 ```bash
-uv run python validate_implementations.py     # single- and multi-model parity report
-uv run pytest                                  # the full parity/behavior test suite
+uv run python validate_implementations.py --backend all  # single-model parity report, every backend
+uv run pytest                                             # the full parity/behavior test suite
 ```
 
 The multi-model ensemble and Amari detail regenerate from saved fits (no re-fitting) with

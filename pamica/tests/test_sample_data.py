@@ -159,8 +159,11 @@ def test_amicaoutput_sources_contract_and_c_subtraction():
     strict=True,
     raises=AssertionError,
 )
-def test_sample_data_scikit(tmp_path):
+def test_sample_data_scikit(tmp_path, monkeypatch):
     """Test pamica using scikit-learn style API."""
+    # fit() with no data loads sample_params.json's `files`, which is relative
+    # to the repository root (the suite otherwise runs outside it, conftest.py).
+    monkeypatch.chdir(Path(__file__).resolve().parents[2])
     # Load original results for comparison
     orig_results = loadmodout(amicaout_dir)
 
@@ -208,7 +211,7 @@ def test_sample_data_scikit(tmp_path):
     "bar and passes.",
     strict=True,
 )
-def test_sample_data_cli():
+def test_sample_data_cli(tmp_path):
     """Full CLI-vs-Fortran integration test (issue #30 format + #39/#41 stability).
 
     Runs the real cli entrypoint for the full 2000-iter sample config and
@@ -222,51 +225,45 @@ def test_sample_data_cli():
     import sys
 
     # cli.py uses relative imports, so it must be run as a module
-    # (see its module docstring), not as a direct script path.
-    test_outdir = Path("test_output")
+    # (see its module docstring), not as a direct script path. It runs from the
+    # repository root because sample_params.json's `files` entry is relative to
+    # it, and writes under tmp_path rather than into the repository.
+    test_outdir = tmp_path / "test_output"
 
-    try:
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pamica.numpy_impl.cli",
-                sample_params_file,
-                "--outdir",
-                str(test_outdir),
-                "--seed",
-                "0",
-            ],
-            check=True,
-            cwd=Path(__file__).parent.parent.parent,
-        )
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pamica.numpy_impl.cli",
+            sample_params_file,
+            "--outdir",
+            str(test_outdir),
+            "--seed",
+            "0",
+        ],
+        check=True,
+        cwd=Path(__file__).parent.parent.parent,
+    )
 
-        # Load and compare results
-        orig_results = loadmodout(amicaout_dir)
-        test_results = loadmodout(test_outdir)
+    # Load and compare results
+    orig_results = loadmodout(amicaout_dir)
+    test_results = loadmodout(test_outdir)
 
-        correlations = np.zeros((32, 32))
-        for i in range(32):
-            for j in range(32):
-                correlations[i, j] = abs(
-                    np.corrcoef(test_results.W[i, :, 0], orig_results.W[j, :, 0])[0, 1]
-                )
+    correlations = np.zeros((32, 32))
+    for i in range(32):
+        for j in range(32):
+            correlations[i, j] = abs(
+                np.corrcoef(test_results.W[i, :, 0], orig_results.W[j, :, 0])[0, 1]
+            )
 
-        # Verify results
-        max_correlations = np.max(correlations, axis=1)
-        assert np.all(max_correlations > 0.8), (
-            "Some components don't match original results"
-        )
+    # Verify results
+    max_correlations = np.max(correlations, axis=1)
+    assert np.all(max_correlations > 0.8), (
+        "Some components don't match original results"
+    )
 
-        best_matches = np.argmax(correlations, axis=1)
-        assert len(np.unique(best_matches)) == 32, "Some components are duplicated"
-
-    finally:
-        # Cleanup
-        if test_outdir.exists():
-            import shutil
-
-            shutil.rmtree(test_outdir)
+    best_matches = np.argmax(correlations, axis=1)
+    assert len(np.unique(best_matches)) == 32, "Some components are duplicated"
 
 
 @pytest.mark.xfail(

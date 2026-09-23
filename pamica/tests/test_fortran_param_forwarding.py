@@ -1,13 +1,18 @@
-"""Parity-harness parameter forwarding (issue #228).
+"""Parity harness (``validate_implementations.py``): parameter forwarding
+(issue #228) and per-backend dispatch (issue #315).
 
 Both arms of a parity run must be configured identically. The writer previously
 rewrote six hardcoded keys and left everything else at the template's value while
 the Python side honored it, which silently makes the comparison uncontrolled.
+The same holds across backends: each one the harness runs must receive the same
+settings, which the dispatch tests below pin.
 """
 
+import os
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -182,3 +187,259 @@ def test_env_override_selects_the_native_engine(tmp_path, monkeypatch):
     from validate_implementations import default_reference_binary
 
     assert default_reference_binary(download=False) == fake.resolve()
+
+
+# --- per-backend dispatch (issue #315) ---------------------------------------
+#
+# The harness runs torch, NumPy and MLX against the same reference. These are
+# the cheap checks (a couple of iterations on a slice of the real sample, no
+# Fortran binary): argument parsing, that every runner maps the same canonical
+# params onto its backend, and that the report/summary files land where the
+# docs say. The Fortran-backed comparison is the AMICA_RUN_FORTRAN-gated test
+# at the end of this module.
+
+_DISPATCH_SAMPLES = 4096
+
+
+def _mlx_or_skip():
+    """Skip unless MLX imports and sees an Apple GPU, like the MLX suites."""
+    mx = pytest.importorskip("mlx.core")
+    if mx.default_device().type != mx.DeviceType.gpu:
+        pytest.skip("no Apple GPU")
+
+
+@pytest.fixture(scope="module")
+def dispatch_input():
+    """The harness's own data and params, capped at two iterations."""
+    from validate_implementations import load_sample_data
+
+    data, params = load_sample_data()
+    params["max_iter"] = 2
+    return data[:, :_DISPATCH_SAMPLES], params
+
+
+@pytest.fixture(scope="module")
+def dispatch_out(tmp_path_factory):
+    """The ``output_dir`` every dispatch run below is handed."""
+    return tmp_path_factory.mktemp("dispatch")
+
+
+@pytest.fixture(scope="module")
+def dispatch_results(dispatch_input, dispatch_out):
+    """One two-iteration run per available backend, shared by the checks below."""
+    from validate_implementations import BACKENDS, mlx_unavailable_reason, run_backend
+
+    data, params = dispatch_input
+    return {
+        name: run_backend(name, data, dict(params), dispatch_out, 42)
+        for name in BACKENDS
+        if name != "mlx" or mlx_unavailable_reason() is None
+    }
+
+
+def test_backend_flag_parses_names_lists_and_all():
+    from validate_implementations import BACKENDS, build_parser, parse_backends
+
+    assert parse_backends("torch") == ["torch"]
+    assert parse_backends("all") == list(BACKENDS)
+    # Order is the caller's, duplicates dropped, whitespace tolerated.
+    assert parse_backends("mlx, torch,mlx") == ["mlx", "torch"]
+    parser = build_parser()
+    assert parser.parse_args([]).backend is None  # the historical torch-only run
+    assert parser.parse_args(["--backend", "numpy,torch"]).backend == [
+        "numpy",
+        "torch",
+    ]
+
+
+@pytest.mark.parametrize("value", ["cuda", "torch,", "", "ALL"])
+def test_backend_flag_rejects_unknown_names(value, capsys):
+    from validate_implementations import build_parser
+
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--backend", value])
+    assert exc.value.code == 2
+    assert "choose from torch, numpy, mlx" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
+def test_every_backend_returns_the_comparison_contract(backend, dispatch_results):
+    """Each runner returns what compare_results reads, in the Fortran layout:
+    ``W`` the true unmixing and ``A`` the true mixing, so ``A @ W == I`` for a
+    full-rank single-model fit (a transposed ``A`` would fail this)."""
+    if backend == "mlx":
+        _mlx_or_skip()
+    res = dispatch_results[backend]
+    assert res["final_iter"] == 2 == len(res["ll_history"])
+    assert np.isfinite(res["final_ll"])
+    assert res["W"].shape == res["A"].shape == (32, 32)
+    assert res["W"].dtype == res["A"].dtype == np.float64
+    atol = 1e-5 if backend == "mlx" else 1e-10
+    np.testing.assert_allclose(res["A"] @ res["W"], np.eye(32), atol=atol)
+    assert res["runtime_s"] > 0
+
+
+def test_torch_and_numpy_runners_apply_the_same_params(dispatch_results):
+    """Anti-drift: the two float64 backends are the same trajectory to ~1e-13,
+    so any setting one runner maps and the other drops shows up here."""
+    torch_res, numpy_res = dispatch_results["torch"], dispatch_results["numpy"]
+    np.testing.assert_allclose(
+        numpy_res["ll_history"], torch_res["ll_history"], rtol=1e-10
+    )
+    np.testing.assert_allclose(numpy_res["W"], torch_res["W"], atol=1e-10)
+
+
+def test_mlx_runner_applies_the_same_params_as_torch(dispatch_results):
+    """The same anti-drift check for the float32 MLX runner, at float32
+    tolerance (measured 4e-7 on the likelihood, 8e-7 on ``W``)."""
+    _mlx_or_skip()
+    torch_res, mlx_res = dispatch_results["torch"], dispatch_results["mlx"]
+    np.testing.assert_allclose(
+        mlx_res["ll_history"], torch_res["ll_history"], atol=1e-5
+    )
+    np.testing.assert_allclose(mlx_res["W"], torch_res["W"], atol=1e-5)
+
+
+def test_numpy_runner_writes_under_the_output_dir(dispatch_results, dispatch_out):
+    """The runner hands AMICA_NumPy the run's own output directory, so its
+    ``out.txt`` log and final model files sit next to the reports (the backend
+    writes nothing without an ``outdir``)."""
+    assert "numpy" in dispatch_results
+    assert (dispatch_out / "numpy_run" / "out.txt").exists()
+    assert (dispatch_out / "numpy_run" / "W").exists()
+
+
+def test_main_writes_one_report_per_backend_and_a_summary(tmp_path):
+    """``main`` end to end without the reference: the PyTorch report keeps its
+    historical name, other backends get their own, and an explicit
+    ``--backend`` adds the one-row-per-backend summary."""
+    from validate_implementations import main
+
+    out = tmp_path / "out"
+    argv = ["--backend", "torch,numpy", "--skip-fortran", "--max-iter", "1"]
+    assert main([*argv, "--output-dir", str(out)]) == 0
+    assert (out / "validation_report.txt").exists()
+    assert (out / "validation_report_numpy.txt").exists()
+    summary = (out / "parity_summary.md").read_text()
+    assert "| PyTorch | float64 | 1 |" in summary
+    assert "| NumPy | float64 | 1 |" in summary
+
+
+def test_default_run_is_the_historical_torch_only_run(tmp_path):
+    """No ``--backend``: exactly the run the harness has always made, one
+    PyTorch report under its historical name and no summary table."""
+    from validate_implementations import main
+
+    out = tmp_path / "out"
+    argv = ["--skip-fortran", "--max-iter", "1", "--output-dir", str(out)]
+    assert main(argv) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["validation_report.txt"]
+
+
+def test_parity_summary_renders_every_numeric_column(dispatch_results):
+    """``format_parity_summary`` with populated rows, from two real backend
+    runs and no binary: the float64 PyTorch run stands in for the reference
+    and the NumPy run is compared with it through ``compare_results``, so
+    every column holds a number (they are the same trajectory, so the values
+    are known too)."""
+    from validate_implementations import compare_results, format_parity_summary
+
+    reference, numpy_res = dispatch_results["torch"], dispatch_results["numpy"]
+    comparison = compare_results(reference, numpy_res, "NumPy")
+    table = format_parity_summary(reference, [("numpy", numpy_res, comparison)])
+    header, rule, ref_row, numpy_row = table.splitlines()
+    assert header.count("|") == rule.count("|") == ref_row.count("|") == 10
+
+    ref_cells = [c.strip() for c in ref_row.strip("|").split("|")]
+    assert ref_cells[:3] == ["Fortran (reference)", "float64", "2"]
+    assert float(ref_cells[3]) == pytest.approx(reference["final_ll"], abs=1e-6)
+    assert ref_cells[4:8] == ["", "", "", ""]
+    assert float(ref_cells[8]) >= 0
+
+    cells = [c.strip() for c in numpy_row.strip("|").split("|")]
+    assert cells[:3] == ["NumPy", "float64", "2"]
+    ll, ll_diff, mean_corr, min_corr, amari, runtime = map(float, cells[3:])
+    assert ll == pytest.approx(numpy_res["final_ll"], abs=1e-6)
+    assert ll_diff == 0.0  # 1e-13 in fact, rendered to six decimals
+    assert mean_corr == min_corr == 1.0
+    assert amari == 0.0
+    assert runtime == pytest.approx(numpy_res["runtime_s"], abs=0.05)
+
+
+@pytest.mark.parametrize("backend", ["torch,mlx", "all"])
+def test_mlx_backend_without_mlx_exits_with_the_install_hint(
+    backend, tmp_path, monkeypatch, capsys
+):
+    """Any request that includes MLX (``torch,mlx`` or ``all``) on a host
+    without MLX stops before any work, naming the extra to install. Where MLX
+    is installed, the ImportError its absence raises is reproduced at the real
+    import site (``None`` in ``sys.modules``); the harness code path itself is
+    unmodified."""
+    from validate_implementations import main
+
+    try:
+        import pamica.mlx_impl  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        monkeypatch.setitem(sys.modules, "pamica.mlx_impl", None)
+    out = tmp_path / "never"
+    assert main(["--backend", backend, "--output-dir", str(out)]) == 2
+    err = capsys.readouterr().err
+    assert "--backend mlx" in err and "uv sync --extra mlx" in err
+    assert not out.exists(), "nothing may run before the MLX check"
+
+
+# --- Fortran-backed per-backend parity (issue #315) --------------------------
+#
+# Opt-in, like test_ng_pdf_families.py's converged-LL parity test: it runs the
+# reference binary (resolved the way the harness resolves it) and every
+# available backend at the harness's default settings, then holds each to the
+# bars docs/guides/validation.md records for the harness rows.
+
+
+@pytest.fixture(scope="module")
+def fortran_parity_rows(tmp_path_factory):
+    from validate_implementations import (
+        BACKENDS,
+        compare_results,
+        load_sample_data,
+        mlx_unavailable_reason,
+        run_backend,
+        run_fortran_amica,
+    )
+
+    data, params = load_sample_data()
+    params["max_iter"] = 100
+    out = tmp_path_factory.mktemp("fortran_parity")
+    fortran = run_fortran_amica(data, params, out, seed=42)
+    assert fortran is not None and "W" in fortran, "reference run failed"
+    rows = {}
+    for name in BACKENDS:
+        if name == "mlx" and mlx_unavailable_reason() is not None:
+            continue
+        res = run_backend(name, data, dict(params), out, 42)
+        rows[name] = (res, compare_results(fortran, res))
+    return rows
+
+
+@pytest.mark.skipif(
+    os.environ.get("AMICA_RUN_FORTRAN") != "1",
+    reason="opt-in Fortran-binary integration test (set AMICA_RUN_FORTRAN=1)",
+)
+@pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
+def test_backend_meets_its_parity_bar_against_fortran(backend, fortran_parity_rows):
+    if backend == "mlx":
+        _mlx_or_skip()
+    res, cmp = fortran_parity_rows[backend]
+    assert cmp["mean_correlation"] > 0.95
+    assert cmp["amari_distance"] < 0.05
+    assert cmp["ll_difference"] < 0.005
+    if backend != "torch" and "torch" in fortran_parity_rows:
+        # Every backend also lands on the float64 PyTorch likelihood: to the
+        # ~1e-5 a full float64 NumPy fit is documented to track it at
+        # (test_full_fit_parity_numpy_vs_ng), and to about five significant
+        # digits for float32 MLX.
+        torch_ll = fortran_parity_rows["torch"][0]["final_ll"]
+        tol = 1e-4 if backend == "mlx" else 1e-5
+        assert abs(res["final_ll"] - torch_ll) < tol

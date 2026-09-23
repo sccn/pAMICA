@@ -167,18 +167,22 @@ def test_variance_order_requires_fit():
 
 def test_write_amica_output_bytes(fitted_ng, tmp_path):
     """The written files are the model's exact float64 parameters: the on-disk
-    EEGLAB directory is a lossless serialization, not a lossy export (#92). W and
-    the symmetric sphere are byte-identical in C order; the non-square mixture
-    params and c/comp_list are column-major (Fortran layout), so read order="F".
+    EEGLAB directory is a lossless serialization, not a lossy export (#92). W is
+    byte-identical in C order; S is column-major (Fortran layout, issue #336 --
+    the default zero-phase component analysis (ZCA) sphere is symmetric to
+    about 1e-17 so this was invisible before the fix); the non-square mixture
+    params and c/comp_list are column-major too, so read order="F".
     """
     outdir = tmp_path / "amicaout"
     fitted_ng.write_amica_output(str(outdir))
     ng = fitted_ng.model_
 
-    for name, attr in [("gm", ng.gm), ("W", ng.W), ("S", ng.sphere),
+    for name, attr in [("gm", ng.gm), ("W", ng.W),
                        ("mean", ng.mean)]:  # fmt: skip
         got = np.fromfile(outdir / name).reshape(attr.shape)  # C order
         np.testing.assert_array_equal(got, attr.cpu().numpy(), err_msg=name)
+    got_s = np.fromfile(outdir / "S").reshape(ng.sphere.shape, order="F")
+    np.testing.assert_array_equal(got_s, ng.sphere.cpu().numpy(), err_msg="S")
     for name, attr in [("c", ng.c), ("alpha", ng.alpha), ("mu", ng.mu),
                        ("sbeta", ng.beta), ("rho", ng.rho)]:  # fmt: skip
         got = np.fromfile(outdir / name).reshape(attr.shape, order="F")
@@ -854,7 +858,7 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
     mid-fit is a transient the natural gradient can pass through (the training
     path only warns about it). Before this guard, that ValueError propagated
     straight out of `fit()` and threw away the whole fit -- turning on a
-    waypoint could lose hours of training over a condition the optimiser was
+    waypoint could lose hours of training over a condition the optimizer was
     about to recover from.
 
     Forcing the raise via monkeypatch is deliberate and is not mocked data: the
@@ -912,7 +916,7 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
 
 
 def test_mir_step_zero_matches_omitted_argument(real_data):
-    """mir_step=0 (explicit) must leave fit() behaviour byte-for-byte identical
+    """mir_step=0 (explicit) must leave fit() behavior byte-for-byte identical
     to not passing mir_step at all."""
     X = real_data[:, :4096]
     default_model = AMICA(n_models=1, n_mix=3, device="cpu", verbose=False)
