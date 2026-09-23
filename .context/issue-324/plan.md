@@ -227,3 +227,48 @@ Six implementers (one per phase; at most three concurrent), plus one pr-review-t
 
 Each phase's gate tests above, run by the implementer and re-run by the lead before merge (the lead also spot-checks cited lines and keystone numbers).
 Epic PR: full suite on the epic branch, `validate_implementations.py` for every backend, pr-review-toolkit review, then user approval of the final merge.
+
+## Phases 7-9: component orientation (added 2026-09-22)
+
+A read-only investigation during Phase 6 found that pamica stores each model's mixing block transposed relative to the reference
+(issue #24 convention: `get_mixing_matrix` returns `A[:, comp_list[:, h]].T`),
+so component `i` of model `h` is row `i` of the stored block,
+while `doscaling`, the share metric and the share merge act on stored columns.
+Lead verification: a compensated rescale of stored row 5 changes the log-likelihood by exactly 0.0; of stored column 5, by -3.9e-2.
+The user chose to fold the fixes into this epic (decision 2026-09-22).
+Evidence and prototypes: #333, #334, #335 and the investigation scratch scripts
+(`rowng.py` torch prototype, `fortran_oracle.py`, `merged_oracle.py`, `newt_offbyone.py`).
+
+| # | Slug | Issue | Wave | Depends on |
+|---|---|---|---|---|
+| 7 | doscaling-rows | #333 | 4 | epic head |
+| 9 | newton-start | #335 | 4 | epic head (parallel with 7) |
+| 8 | component-rows | #334 | 5 | Phase 7 merged |
+
+### Phase 7: doscaling-rows (#333)
+
+Decided: normalize each model block's component rows (with the matching `mu`/`beta` rescale), identically in torch, NumPy and MLX, as one shared decision;
+no layout change in this phase.
+Gates: a gated native-binary oracle (seeded, `doscaling` on, `do_newton` off, a few iterations) matching `A`/`mu`/`sbeta` to float64 round-off;
+an always-on exact-invariance test (one doscaling pass leaves the log-likelihood unchanged);
+`doscaling=False` trajectories byte-identical;
+ADR amending ADR 0001; changelog (default trajectories change, scale-blind results do not).
+
+### Phase 9: newton-start (#335)
+
+Decided: first confirm, site by site against amica15.f90, every 1-based schedule gate (Newton switch, lrate ramp, rholrate ratchet, and the other `*_start` schedules);
+fix every confirmed offset identically in all three backends; record any deliberate difference.
+Gates: a gated native oracle on the first Newton iterations; an always-on test of the schedule arithmetic.
+
+### Phase 8: component-rows (#334)
+
+Decided: store `A` as `(n_comps, n)` with components as rows and `comp_list` indexing rows;
+each per-model block keeps today's `n x n` matrix, so every configuration without sharing stays byte-identical (including Phase 7's doscaling);
+the share metric uses `pinv(sphere) @ A.T` and the merge ties rows; all three backends.
+Persistence: bump the torch and MLX state format versions and convert unmerged multi-model payloads losslessly; refuse merged ones with a message to refit.
+The EEGLAB `A` export becomes the reference layout for `n_models > 1`.
+Gates: grouped sources have identical component maps; a planted duplicate is merged with log-likelihood, transform and maps unchanged;
+the metric vector equals `get_sensor_mixing_matrix(h)[:, i]`; a gated native oracle from a merged `load_comp_list` state;
+byte-identity of every non-sharing configuration against the pre-change code.
+
+After Phase 8: re-run `validate_implementations.py --backend all` and update the parity rows in docs/guides/validation.md.
