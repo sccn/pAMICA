@@ -72,3 +72,11 @@ is now the sole PyTorch backend, and the public `AMICA` interface wraps it direc
 (the `backend=` selector and the basic-backend-only `debug`/`output_dir` fit args
 were dropped). The Context/Alternatives sections above describe the pre-removal state
 and are retained as the historical record.
+
+## Addendum (2026-09-22, issue #333)
+
+The #24 fix left `A` stored with each model's block equal to the TRANSPOSE of the reference's per-model mixing matrix
+(`get_mixing_matrix(h)` returns `A[:, comp_list[:, h]].T`), so a component is a ROW of its block, not a stored column.
+[ADR 0006](0006-component-orientation.md) states that convention precisely,
+records the `doscaling` defect it caused (stored columns were normalized; fixed in epic #324 Phase 7)
+and the planned move to a component-row layout for `share_comps` (Phase 8, issue #334).

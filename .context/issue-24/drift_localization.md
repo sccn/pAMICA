@@ -10,7 +10,8 @@ per-iteration M-step bug, not init-basin). This doc localizes the drifting term(
 The `-3.46` descent is a **transpose + multiply-side error in the natural-gradient A-update**,
 proven to machine precision and fixed. See `root_cause_Aupdate.py` (self-contained repro).
 
-- The prototype stores `A` as **Fortran's A^T** (its "true unmixing = inv(A).T" convention). So
+- The prototype stores `A` as **Fortran's A^T** (its "true unmixing = inv(A).T" convention; its
+  consequence, components are ROWS of each stored block, is ADR 0006, issue #333). So
   Fortran's step `A_fort <- A_fort - lr*A_fort@(I - G/dgm)` (G = g^T b) must become, transposed,
   `A <- A - lr*(I - G^T/dgm) @ A` (LEFT-multiply, TRANSPOSED direction). The prototype instead does
   `A <- A - lr*A @ (I - G/dgm)` (right-multiply, untransposed) -- wrong on **both** counts.
