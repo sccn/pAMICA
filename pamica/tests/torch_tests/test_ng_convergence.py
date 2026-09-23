@@ -103,20 +103,22 @@ def _predict_grad_norm_stop(nd_history: list, min_nd: float) -> Optional[int]:
 
 
 def _fit_with_nd_history(ng: AMICATorchNG, data: np.ndarray, **fit_kwargs) -> list:
-    """Fit ``ng``, recording ``ndtmpsum`` after every ``_update_parameters``
-    call. This is an observational spy on the real method (calls straight
-    through via ``side_effect``, does not replace or bypass any computation)
-    -- the same pattern ``test_ng_backend.py`` already uses to inspect
-    intermediate state (e.g. ``test_newton_finalize_uses_preupdate_mu``)."""
+    """Fit ``ng``, recording ``ndtmpsum`` after every ``_update_direction``
+    call, the one that computes it, every iteration the fit runs (including
+    the one a stop ends on, which takes no update). This is an observational
+    spy on the real method (calls straight through via ``side_effect``, does
+    not replace or bypass any computation) -- the same pattern
+    ``test_ng_backend.py`` already uses to inspect intermediate state (e.g.
+    ``test_newton_finalize_uses_preupdate_mu``)."""
     nd_history: list = []
-    original = ng._update_parameters
+    original = ng._update_direction
 
-    def spy(acc, n):
-        result = original(acc, n)
+    def spy(acc):
+        result = original(acc)
         nd_history.append(ng._ndtmpsum)
         return result
 
-    with mock.patch.object(ng, "_update_parameters", side_effect=spy):
+    with mock.patch.object(ng, "_update_direction", side_effect=spy):
         ng.fit(data, verbose=False, **fit_kwargs)
     return nd_history
 
@@ -356,14 +358,14 @@ def test_a_frozen_window_still_computes_fresh_grad_norm(real_data):
     # it would be if this iteration took no gradient step at all.
     probe = _fresh_ng(n_models=2)
 
-    def spy(acc, n):
+    def spy(acc, n, step):
         assert ng.A is not None and ng.mu is not None and ng.beta is not None
         assert ng.comp_list is not None
         frozen = ng._a_frozen()
         probe.A, probe.mu, probe.beta = ng.A.clone(), ng.mu.clone(), ng.beta.clone()
         probe.comp_list = ng.comp_list.clone()
         probe._rescale_components()
-        result = original(acc, n)
+        result = original(acc, n, step)
         trace.append(
             {
                 "frozen": frozen,

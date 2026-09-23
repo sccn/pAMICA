@@ -50,7 +50,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -313,6 +313,21 @@ def _log_pdf_only(
         ),
     )
     return log_pdf, az_rho
+
+
+class _UpdateStep(NamedTuple):
+    """The mixing-matrix step one E-step implies, computed before the
+    iteration's stopping checks and applied after them.
+
+    The reference builds it in ``accum_updates_and_likelihood``
+    (amica15.f90:1749-1761), beside ``LL(iter)`` and the gradient norm
+    ``ndtmpsum``, before ``update_params`` (:1782) takes the step. See
+    :meth:`AMICATorchNG._update_direction`.
+    """
+
+    dAk: torch.Tensor  # (n_comps, n_channels), before the lrate scaling
+    newton_active: bool  # the Newton schedule is on this iteration
+    no_newt: bool  # some model failed the positive-definiteness guard
 
 
 class AMICATorchNG:
@@ -1653,9 +1668,125 @@ class AMICATorchNG:
         posdef = bool(valid[offdiag].all().item())
         return H, posdef
 
-    def _update_parameters(self, acc: Dict[str, torch.Tensor], n_samples: int):
+    def _update_direction(self, acc: Dict[str, torch.Tensor]) -> _UpdateStep:
+        """The natural-gradient or Newton step for ``A`` from this iteration's
+        sufficient statistics, and its norm, without changing any parameter.
+
+        The reference computes both in ``accum_updates_and_likelihood``
+        (amica15.f90:1666-1761), with ``LL(iter)``, before the likelihood-
+        decrease response and the stopping checks read ``ndtmpsum`` and before
+        ``update_params`` applies the step; :meth:`fit` calls this first and
+        hands the result to :meth:`_update_parameters` once the checks have
+        run. Sets ``self._ndtmpsum``, the norm those checks read.
+
+        Everything here reads the parameters as the E-step saw them: the Newton
+        curvature folds in the pre-update ``mu`` (as the reference does during
+        accumulation, amica15.f90:1666-1680), and ``dAk`` weights the models by
+        the pre-update ``gm`` (the reference does not reassign ``gm`` until
+        ``update_params``, :1788; issue #219).
+        """
+        assert (
+            self.mu is not None
+            and self.A is not None
+            and self.comp_list is not None
+            and self.gm is not None
+        )
+        # Finalize the Newton curvature with the PRE-update mu. Fortran folds the
+        # mu^2 term into lambda during E-step accumulation, before the M-step
+        # moves mu (amica17.f90:1762-1774), and the NumPy port bakes it in at
+        # accumulation time. Nothing has moved mu yet when this runs.
+        newton_active = schedule.newton_active(
+            self.do_newton, self.iteration, self.newt_start
+        )
+        if newton_active:
+            sigma2, lambda_, kappa = self._finalize_newton_stats(acc)
+
+        # A is stored as Fortran's A^T (one component per row, issue #334; the
+        # true unmixing is W^T = inv(block)^T), so Fortran's per-model
+        # A_fort(:, comp_list(:,h)) @ dir becomes, transposed,
+        # dir^T @ A[comp_list[:, h], :] (LEFT-multiply by the TRANSPOSED
+        # direction). The direction ``dir`` (natural gradient I - <g b^T>/dgm,
+        # or its Newton precondition) is built in Fortran's untransposed
+        # convention. Getting this wrong (right-multiply by the untransposed
+        # dir) is invisible at the fixed point but sends the free-running fit
+        # downhill -- issue #24 root cause
+        # (.context/issue-24/root_cause_Aupdate.py, machine-exact check).
+        #
+        # Computed every iteration, including one on which A is held: Fortran
+        # computes dAk and ndtmpsum in accum_updates_and_likelihood
+        # (amica15.f90:1749-1761), before and apart from the guarded A step in
+        # update_params (:1803), and the grad-norm stop needs the true gradient
+        # magnitude every iteration (issue #207).
+        eye = torch.eye(self.n_channels, dtype=self.dtype, device=self.device)
+        directions = []
+        no_newt = False
+        for h in range(self.n_models):
+            dA_h = -acc["dWtmp"][:, :, h] / acc["dgm"][h] + eye  # I - <g b^T>/dgm
+            if newton_active:
+                H, posdef = self._newton_direction(
+                    dA_h, sigma2[:, h], lambda_[:, h], kappa[:, h]
+                )
+                if posdef:
+                    directions.append(H)
+                else:
+                    no_newt = True
+                    directions.append(dA_h)  # fall back to natural gradient
+            else:
+                directions.append(dA_h)
+
+        # Accumulate each model's natural-gradient/Newton contribution per
+        # COMPONENT (a row of A) as a gm-WEIGHTED AVERAGE (Fortran dAk/zeta,
+        # amica15.f90:1749-1761): dAk = sum_h gm[h]*dir_h^T@block_h scattered
+        # into the rows comp_list names, zeta = sum_h gm[h] per component, then
+        # dAk /= zeta. For the default disjoint comp_list every component has
+        # exactly one contributor, so gm cancels (dAk = dir) and single-model
+        # (gm=[1]) is byte-for-byte unchanged; for a SHARED component (issue
+        # #60) the step is Fortran's responsibility-weighted average of the
+        # models' steps for that one mixing vector, NOT a raw sum (a raw sum
+        # would over-step by the contributor count and destabilize the fit). A
+        # merged-away component has no contributor, so its zeta is 0 and its
+        # dAk is 0/tiny = 0: its row takes no step. gm is still the pre-update
+        # weight here (see the docstring).
+        dAk = torch.zeros_like(self.A)
+        zeta = torch.zeros(self.n_comps, dtype=self.dtype, device=self.device)
+        for h in range(self.n_models):
+            idx = self.comp_list[:, h]
+            dAk.index_add_(0, idx, self.gm[h] * (directions[h].T @ self.A[idx, :]))
+            zeta.index_add_(0, idx, self.gm[h].expand(idx.shape[0]))
+        dAk = dAk / zeta.clamp_min(torch.finfo(self.dtype).tiny).unsqueeze(1)
+
+        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1760-1761):
+        # ``sqrt(sum(dAk**2, mask=comp_used) / (nw*count(comp_used)))``, one
+        # squared norm per component row, as the reference sums each
+        # component's column (``nd(iter,:) = sum(dAk*dAk,1)``). Read by fit()'s
+        # convergence checks (issue #207); the comp_used mask matters only when
+        # share_comps has merged components away (all-True otherwise, so
+        # ``comp_used_mask`` covers every component and this is a plain RMS over
+        # dAk).
+        comp_used_mask = self.comp_used
+        n_used = int(comp_used_mask.sum().item())
+        nd = (dAk**2).sum(dim=1)  # (n_comps,)
+        self._ndtmpsum = float(
+            torch.sqrt(
+                nd[comp_used_mask].sum() / (self.n_channels * max(n_used, 1))
+            ).item()
+        )
+        return _UpdateStep(dAk, newton_active, no_newt)
+
+    def _update_parameters(
+        self,
+        acc: Dict[str, torch.Tensor],
+        n_samples: int,
+        step: Optional[_UpdateStep] = None,
+    ):
         """Apply the M-step parameter update, matching
         ``pamica.AMICA._update_parameters`` (natural-gradient and Newton).
+
+        ``step`` is the mixing-matrix step :meth:`_update_direction` computed
+        from the same ``acc``: :meth:`fit` passes the one its stopping checks
+        already read, so nothing is computed twice. A direct call may omit it,
+        and the step is then computed here first, from the parameters as they
+        stand.
 
         ``n_samples`` is the number of samples that fed the accumulators (the
         good-sample count when ``do_reject`` is active), so ``gm`` and the
@@ -1680,16 +1811,10 @@ class AMICATorchNG:
             and self.A is not None
             and self.comp_list is not None
         )
-        # Fortran builds dAk from the previous iteration's model weights: gm is
-        # not reassigned until update_params (amica15.f90:1788+), after the
-        # dAk/zeta accumulation in accum_updates_and_likelihood (:1749-1761).
-        # Snapshot before overwriting so
-        # dAk -- which both drives the A-update below and reports ndtmpsum, unlike
-        # numpy_impl where it is only the diagnostic -- weights the way Fortran
-        # does (the ordering question raised by issue #219). Cloned rather than aliased: gm is only ever rebound
-        # today, but an in-place write elsewhere would silently corrupt this.
-        assert self.gm is not None
-        gm_prev = self.gm.clone()
+        if step is None:
+            step = self._update_direction(acc)
+        # The step was built with the pre-update gm (_update_direction), so gm
+        # can be reassigned now.
         self.gm = acc["dgm"] / n_samples
 
         # Per-model data-space bias (Fortran's `update_c` flag, amica17.f90:1423-
@@ -1730,17 +1855,6 @@ class AMICATorchNG:
         self.alpha = torch.where(
             used, acc["dalpha_n"] / acc["dalpha_n"].sum(dim=0, keepdim=True), self.alpha
         )
-
-        # Finalize the Newton curvature with the PRE-update mu. Fortran folds the
-        # mu^2 term into lambda during E-step accumulation, before the M-step
-        # moves mu (amica17.f90:1762-1774), and the NumPy port bakes it in at
-        # accumulation time. Do it here, before self.mu is reassigned below, so
-        # lambda uses this iteration's mu rather than the updated one.
-        newton_active = schedule.newton_active(
-            self.do_newton, self.iteration, self.newt_start
-        )
-        if newton_active:
-            sigma2, lambda_, kappa = self._finalize_newton_stats(acc)
 
         # Exact-EM mixture location/scale (Fortran :1978/:1993). No lrate.
         # ``used`` masks merged-away components (no-op for the default comp_list).
@@ -1800,92 +1914,12 @@ class AMICATorchNG:
                 used, torch.clamp(new_rho, self.minrho, self.maxrho), self.rho
             )
 
-        # --- A / W update: natural gradient, optionally Newton-preconditioned.
-        # A is stored as Fortran's A^T (one component per row, issue #334; the
-        # true unmixing is W^T = inv(block)^T), so Fortran's per-model
-        # A_fort(:, comp_list(:,h)) @ dir becomes, transposed,
-        # dir^T @ A[comp_list[:, h], :] (LEFT-multiply by the TRANSPOSED
-        # direction). The direction ``dir`` (natural gradient I - <g b^T>/dgm,
-        # or its Newton precondition) is built in Fortran's untransposed
-        # convention. Getting this wrong (right-multiply by the untransposed
-        # dir) is invisible at the fixed point but sends the free-running fit
-        # downhill -- issue #24 root cause
-        # (.context/issue-24/root_cause_Aupdate.py, machine-exact check).
-        # (newton_active / sigma2 / lambda_ / kappa were finalized above.)
-        #
-        # The direction/dAk/gradient-norm computation below runs UNCONDITIONALLY,
-        # not gated on _a_frozen(): Fortran computes dAk and ndtmpsum every
-        # iteration in accum_updates_and_likelihood (amica15.f90:1749-1761),
-        # strictly before the LATER, separate update_A block (amica15.f90:1803)
-        # that actually steps A and is guarded by the share-freeze window. Only
-        # the step itself -- and the lrate ramp / Newton-fallback bookkeeping
-        # that Fortran nests inside that same guarded block -- are conditional on
-        # ``not self._a_frozen()`` (issue #207: the grad-norm stop needs
-        # ndtmpsum to reflect the true gradient magnitude every iteration, not
-        # just the iterations where A actually moves). _a_frozen() is always
-        # False when sharing is off, so the default path recomputes exactly what
-        # it always did, just with the gate narrowed.
-        eye = torch.eye(self.n_channels, dtype=self.dtype, device=self.device)
-        directions = []
-        no_newt = False
-        for h in range(self.n_models):
-            dA_h = -acc["dWtmp"][:, :, h] / acc["dgm"][h] + eye  # I - <g b^T>/dgm
-            if newton_active:
-                H, posdef = self._newton_direction(
-                    dA_h, sigma2[:, h], lambda_[:, h], kappa[:, h]
-                )
-                if posdef:
-                    directions.append(H)
-                else:
-                    no_newt = True
-                    directions.append(dA_h)  # fall back to natural gradient
-            else:
-                directions.append(dA_h)
-
-        # Accumulate each model's natural-gradient/Newton contribution per
-        # COMPONENT (a row of A) as a gm-WEIGHTED AVERAGE (Fortran dAk/zeta,
-        # amica15.f90:1749-1761): dAk = sum_h gm[h]*dir_h^T@block_h scattered
-        # into the rows comp_list names, zeta = sum_h gm[h] per component, then
-        # dAk /= zeta. For the default disjoint comp_list every component has
-        # exactly one contributor, so gm cancels (dAk = dir) and single-model
-        # (gm=[1]) is byte-for-byte unchanged; for a SHARED component (issue
-        # #60) the step is Fortran's responsibility-weighted average of the
-        # models' steps for that one mixing vector, NOT a raw sum (a raw sum
-        # would over-step by the contributor count and destabilize the fit). A
-        # merged-away component has no contributor, so its zeta is 0 and its
-        # dAk is 0/tiny = 0: its row takes no step.
-        dAk = torch.zeros_like(self.A)
-        zeta = torch.zeros(self.n_comps, dtype=self.dtype, device=self.device)
-        for h in range(self.n_models):
-            idx = self.comp_list[:, h]
-            dAk.index_add_(0, idx, gm_prev[h] * (directions[h].T @ self.A[idx, :]))
-            zeta.index_add_(0, idx, gm_prev[h].expand(idx.shape[0]))
-        dAk = dAk / zeta.clamp_min(torch.finfo(self.dtype).tiny).unsqueeze(1)
-
-        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1760-1761):
-        # ``sqrt(sum(dAk**2, mask=comp_used) / (nw*count(comp_used)))``, one
-        # squared norm per component row, as the reference sums each
-        # component's column (``nd(iter,:) = sum(dAk*dAk,1)``). Read by fit()'s
-        # convergence checks (issue #207); the comp_used mask matters only when
-        # share_comps has merged components away (all-True otherwise, so
-        # ``comp_used_mask`` covers every component and this is a plain RMS over
-        # dAk). Named distinctly from the ``used`` (1, n_comps) broadcast mask
-        # above (alpha/mu/beta/rho updates) to avoid shadowing it.
-        comp_used_mask = self.comp_used
-        n_used = int(comp_used_mask.sum().item())
-        nd = (dAk**2).sum(dim=1)  # (n_comps,)
-        self._ndtmpsum = float(
-            torch.sqrt(
-                nd[comp_used_mask].sum() / (self.n_channels * max(n_used, 1))
-            ).item()
-        )
-
         # A-update. When sharing holds A this iteration (the post-merge settle
         # window, Fortran amica15.f90:1803), skip the step -- lrate ramp,
         # Newton-fallback bookkeeping, and the DAXPY itself -- so a discarded
         # Newton direction cannot pollute the fallback counter.
         if not self._a_frozen():
-            if newton_active and no_newt:
+            if step.newton_active and step.no_newt:
                 # Fortran prints "Hessian not positive definite, using natural
                 # gradient" (amica15.f90:1809-1811). Surface the same signal so an
                 # all-fallback run (issue #21) is visible without re-instrumenting.
@@ -1898,7 +1932,7 @@ class AMICATorchNG:
             # Learning-rate ramp: toward newtrate while Newton is active and
             # stable, otherwise toward lrate0 (Fortran amica15.f90:1804-1815).
             # Ramped after mu/beta/rho (exact-EM, lrate-free) and before A.
-            if newton_active and not no_newt:
+            if step.newton_active and not step.no_newt:
                 self.lrate = min(
                     self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
                 )
@@ -1907,7 +1941,7 @@ class AMICATorchNG:
                     self.lrate_cap, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
                 )
 
-            self.A = self.A - self.lrate * dAk
+            self.A = self.A - self.lrate * step.dAk
 
         # The reference rescales every iteration (it parses ``scalestep`` but
         # never reads it, amica15.f90:1843/3686); pamica keeps ``scalestep`` as
@@ -2712,7 +2746,8 @@ class AMICATorchNG:
             else:
                 reject_ll = None
 
-            self._update_parameters(acc, n_use)
+            step = self._update_direction(acc)
+            self._update_parameters(acc, n_use, step)
 
             # Extended-Infomax adaptive PDF switch (Fortran do_choose_pdfs). Runs
             # on the kurt_start/num_kurt/kurt_int schedule using the just-updated

@@ -88,7 +88,7 @@ from scipy.special import digamma
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 from tqdm import tqdm
 from .. import blocktune
 from .. import restarts
@@ -108,6 +108,20 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _UpdateStep(NamedTuple):
+    """The mixing-matrix step one E-step implies, computed before the
+    iteration's stopping checks and applied after them (the reference's
+    ``dAk`` and ``ndtmpsum``, built in ``accum_updates_and_likelihood``,
+    amica15.f90:1749-1761, before ``update_params``, :1782). See
+    :meth:`AMICA._update_direction`."""
+
+    dAk: np.ndarray  # (num_comps, data_dim), before the lrate scaling
+    newton_active: bool  # the Newton schedule is on this iteration
+    no_newt: bool  # some model failed the positive-definiteness guard
+    nd: float  # the weight-gradient norm ndtmpsum
+
 
 # Data-location keys: not AMICA hyperparameters, so they are excluded from
 # load_default_params()'s return value. AMICA.__init__ reads files/data_dim/
@@ -1969,7 +1983,149 @@ class AMICA:
             return None, None
         return self._llt_logv.T, self._llt_ll
 
-    def _update_parameters(self, updates: Dict):
+    def _update_direction(self, updates: Dict) -> _UpdateStep:
+        """The natural-gradient or Newton step for ``A`` from this iteration's
+        sufficient statistics, and its norm, without changing ``A`` or any
+        density parameter.
+
+        The reference computes both in ``accum_updates_and_likelihood``
+        (amica15.f90:1666-1761), with ``LL(iter)``, before the likelihood-
+        decrease response and the stopping checks read ``ndtmpsum`` and before
+        ``update_params`` applies the step. This records the iteration's
+        likelihood and gradient norm (``self.ll``/``self.nd``) and finalizes
+        the Newton curvature (``sigma2``/``lambda_``/``kappa``) as it goes;
+        :meth:`_optimize` calls it first and hands the result to
+        :meth:`_update_parameters` once the checks have run.
+        """
+        assert (
+            self.data_dim is not None
+            and self.gm is not None
+            and self.comp_list is not None
+            and self.A is not None
+        )
+        used = (
+            self.comp_used
+            if self.comp_used is not None
+            else np.ones(self.num_comps, dtype=bool)
+        )
+        newton_active = schedule.newton_active(
+            self.do_newton, self.iter, self.newt_start
+        )
+        if newton_active:
+            # Finalize Newton curvature statistics (Fortran amica17.f90:1762-1776).
+            # The dsigma2/dkappa/dlambda accumulators already carry the sbeta^2
+            # and baralpha-weighted mu^2 factors, so finalization is a plain
+            # division by the model mass dgm = sum_t v_h.
+            #
+            # dgm is (num_models,) and the accumulators are (data_dim,
+            # num_models), so the model mass broadcasts along the LAST axis
+            # (issue #267). The old ``[:, None]`` made it (num_models, 1), which
+            # only happens to broadcast when num_models == 1: every multi-model
+            # Newton fit raised "operands could not be broadcast together with
+            # shapes (data_dim, num_models) (num_models, 1)". Same as the torch
+            # backend's ``dgm.unsqueeze(0)`` (``AMICATorchNG._finalize_newton_stats``).
+            dgm = updates["dgm"][None, :]
+            self.sigma2 = updates["dsigma2"] / dgm
+            self.lambda_ = updates["dlambda"] / dgm
+            self.kappa = updates["dkappa"] / dgm
+
+        # Per-model direction: Newton H if the model is positive definite,
+        # otherwise natural gradient. Matching Fortran (amica17.f90:1814-1837),
+        # if any off-diagonal pair fails sk1*sk2 > 1 the whole model falls
+        # back to the natural gradient and the ramp targets lrate0, not newtrate.
+        directions = []
+        no_newt = False
+        for h in range(self.num_models):
+            dA = -updates["dWtmp"][:, :, h] / updates["dgm"][h]
+            dA[np.diag_indices_from(dA)] += 1
+
+            if newton_active:
+                assert (
+                    self.lambda_ is not None
+                    and self.sigma2 is not None
+                    and self.kappa is not None
+                )
+                H = np.zeros_like(dA)
+                posdef = True
+                for i in range(self.data_dim):
+                    for j in range(self.data_dim):
+                        if i == j:
+                            H[i, i] = dA[i, i] / self.lambda_[i, h]
+                        else:
+                            sk1 = self.sigma2[i, h] * self.kappa[j, h]
+                            sk2 = self.sigma2[j, h] * self.kappa[i, h]
+                            if sk1 * sk2 > 1.0:
+                                H[i, j] = (sk1 * dA[i, j] - dA[j, i]) / (
+                                    sk1 * sk2 - 1.0
+                                )
+                            else:
+                                posdef = False
+                if posdef:
+                    directions.append(H)
+                else:
+                    no_newt = True
+                    directions.append(dA)
+            else:
+                directions.append(dA)
+
+        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1749-1761). Computed
+        # HERE, before the A step and before rescaling, because Fortran builds dAk
+        # inside accum_updates_and_likelihood (:1731-1743) strictly before
+        # update_params applies it (:1789). Using the post-update, post-rescale A
+        # would measure a different quantity. Computed every iteration, including
+        # a frozen one, because Fortran computes it in the accumulation pass that
+        # runs unconditionally -- the grad-norm stop needs the true gradient
+        # magnitude, not just the magnitude on iterations where A moves.
+        #
+        # dAk is the gm-weighted average of the per-model directions mapped
+        # through A (Fortran dAk/zeta, amica15.f90:1749-1761): each contributing
+        # model adds gm[h]/zeta of its step to the shared component's row, where
+        # zeta = sum of gm over the models that reference the component. Weighted
+        # by the PRE-update model weights (gm is not reassigned until
+        # _update_parameters), because Fortran builds dAk before update_params
+        # reassigns gm (issue #219).
+        #
+        # The weights are normalized per model (gm[h]/zeta) rather than summed and
+        # then divided (Fortran's literal sum-then-divide, and AMICATorchNG's):
+        # mathematically the same average, but a component with a single
+        # contributor then has weight exactly gm[h]/gm[h] == 1.0, so the step is
+        # bit-identical to the pre-#242 per-model update instead of drifting by
+        # the ULP that a multiply-then-divide round trip can introduce. Every
+        # component has exactly one contributor unless share_comps merged one,
+        # so this keeps the default multi-model trajectory byte-for-byte.
+        #
+        # ndtmpsum is then the RMS of the used rows of dAk:
+        # ||dAk[used, :]|| / sqrt(nw * n_used), with NO lrate factor. Fortran
+        # measures the gradient direction before the step, not the applied update
+        # lrate*dAk, and does not divide by lrate either (amica15.f90:1760-1761) --
+        # there is no missing factor here.
+        zeta = np.zeros(self.num_comps)
+        for h in range(self.num_models):
+            zeta[self.comp_list[:, h]] += self.gm[h]
+        dAk = np.zeros_like(self.A)
+        for h in range(self.num_models):
+            # comp_list[:, h] holds distinct indices within a model
+            # (identify_shared_components never merges two components that
+            # appear in the same model), so buffered `+=` on fancy indices cannot
+            # drop a contribution here. Row i of the model's step is source i's
+            # component, comp_list[i, h] (issue #334).
+            idx = self.comp_list[:, h]
+            weight = self.gm[h] / np.maximum(zeta[idx], np.finfo(np.float64).tiny)
+            dAk[idx, :] += weight[:, None] * np.dot(directions[h].T, self.A[idx, :])
+        nd_value = float(
+            np.sqrt(np.sum(dAk[used, :] ** 2) / (self.data_dim * int(used.sum())))
+        )
+
+        # Record LL(iter) and nd(iter) here, where the reference's accumulation
+        # pass produces them (amica15.f90:1760-1770). _check_convergence uses the
+        # norm as the gradient floor in the decrease-stop condition regardless
+        # of use_grad_norm; the flag only gates the separate final
+        # gradient-norm stop.
+        self.ll.append(updates["ll"])
+        self.nd.append(nd_value)
+        return _UpdateStep(dAk, newton_active, no_newt, nd_value)
+
+    def _update_parameters(self, updates: Dict, step: Optional[_UpdateStep] = None):
         """
         Update model parameters using computed updates.
 
@@ -1977,6 +2133,12 @@ class AMICA:
         ----------
         updates : dict
             Dictionary containing parameter updates
+        step : _UpdateStep, optional
+            The mixing-matrix step :meth:`_update_direction` computed from the
+            same ``updates``: :meth:`_optimize` passes the one its stopping
+            checks already read, so nothing is computed twice. A direct call
+            may omit it, and it is then computed (and the iteration's
+            likelihood and gradient norm recorded) here first.
         """
         assert (
             self.data_dim is not None
@@ -1989,12 +2151,11 @@ class AMICA:
             and self.comp_list is not None
             and self.A is not None
         )
-        # Fortran builds dAk from the model weights of the *previous* iteration:
-        # gm is not reassigned until update_params (amica15.f90:1788+), which runs
-        # after accum_updates_and_likelihood (:1731-1743). Snapshot it here so the
-        # nd block below weights by the same gm Fortran would (issue #219).
-        assert self.gm is not None
-        gm_prev = self.gm.copy()
+        if step is None:
+            step = self._update_direction(updates)
+        # The step was built with the pre-update gm (_update_direction), so gm
+        # can be reassigned now (Fortran reassigns it in update_params,
+        # amica15.f90:1788, after accum_updates_and_likelihood; issue #219).
 
         # Update model weights, normalizing by the number of samples the E-step
         # actually summed over: the good set under do_reject, else all samples.
@@ -2114,114 +2275,6 @@ class AMICA:
                 new_rho = np.where(nan_mask, self.rho0, new_rho)
             self.rho[:, cols] = np.clip(new_rho, self.minrho, self.maxrho)
 
-        # Update unmixing matrices
-        newton_active = schedule.newton_active(
-            self.do_newton, self.iter, self.newt_start
-        )
-        if newton_active:
-            # Finalize Newton curvature statistics (Fortran amica17.f90:1762-1776).
-            # The dsigma2/dkappa/dlambda accumulators already carry the sbeta^2
-            # and baralpha-weighted mu^2 factors, so finalization is a plain
-            # division by the model mass dgm = sum_t v_h.
-            #
-            # dgm is (num_models,) and the accumulators are (data_dim,
-            # num_models), so the model mass broadcasts along the LAST axis
-            # (issue #267). The old ``[:, None]`` made it (num_models, 1), which
-            # only happens to broadcast when num_models == 1: every multi-model
-            # Newton fit raised "operands could not be broadcast together with
-            # shapes (data_dim, num_models) (num_models, 1)". Same as the torch
-            # backend's ``dgm.unsqueeze(0)`` (``AMICATorchNG._finalize_newton_stats``).
-            dgm = updates["dgm"][None, :]
-            self.sigma2 = updates["dsigma2"] / dgm
-            self.lambda_ = updates["dlambda"] / dgm
-            self.kappa = updates["dkappa"] / dgm
-
-        # Per-model direction: Newton H if the model is positive definite,
-        # otherwise natural gradient. Matching Fortran (amica17.f90:1814-1837),
-        # if any off-diagonal pair fails sk1*sk2 > 1 the whole model falls
-        # back to the natural gradient and the ramp targets lrate0, not newtrate.
-        directions = []
-        no_newt = False
-        for h in range(self.num_models):
-            dA = -updates["dWtmp"][:, :, h] / updates["dgm"][h]
-            dA[np.diag_indices_from(dA)] += 1
-
-            if newton_active:
-                assert (
-                    self.lambda_ is not None
-                    and self.sigma2 is not None
-                    and self.kappa is not None
-                )
-                H = np.zeros_like(dA)
-                posdef = True
-                for i in range(self.data_dim):
-                    for j in range(self.data_dim):
-                        if i == j:
-                            H[i, i] = dA[i, i] / self.lambda_[i, h]
-                        else:
-                            sk1 = self.sigma2[i, h] * self.kappa[j, h]
-                            sk2 = self.sigma2[j, h] * self.kappa[i, h]
-                            if sk1 * sk2 > 1.0:
-                                H[i, j] = (sk1 * dA[i, j] - dA[j, i]) / (
-                                    sk1 * sk2 - 1.0
-                                )
-                            else:
-                                posdef = False
-                if posdef:
-                    directions.append(H)
-                else:
-                    no_newt = True
-                    directions.append(dA)
-            else:
-                directions.append(dA)
-
-        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1749-1761). Computed
-        # HERE, before the A step and before rescaling, because Fortran builds dAk
-        # inside accum_updates_and_likelihood (:1731-1743) strictly before
-        # update_params applies it (:1789). Using the post-update, post-rescale A
-        # would measure a different quantity. Computed every iteration, including
-        # a frozen one, because Fortran computes it in the accumulation pass that
-        # runs unconditionally -- the grad-norm stop needs the true gradient
-        # magnitude, not just the magnitude on iterations where A moves.
-        #
-        # dAk is the gm-weighted average of the per-model directions mapped
-        # through A (Fortran dAk/zeta, amica15.f90:1749-1761): each contributing
-        # model adds gm[h]/zeta of its step to the shared component's row, where
-        # zeta = sum of gm over the models that reference the component. Weighted
-        # by gm_prev, the PRE-update model weights, because Fortran builds dAk
-        # before update_params reassigns gm (issue #219).
-        #
-        # The weights are normalized per model (gm[h]/zeta) rather than summed and
-        # then divided (Fortran's literal sum-then-divide, and AMICATorchNG's):
-        # mathematically the same average, but a component with a single
-        # contributor then has weight exactly gm[h]/gm[h] == 1.0, so the step is
-        # bit-identical to the pre-#242 per-model update instead of drifting by
-        # the ULP that a multiply-then-divide round trip can introduce. Every
-        # component has exactly one contributor unless share_comps merged one,
-        # so this keeps the default multi-model trajectory byte-for-byte.
-        #
-        # ndtmpsum is then the RMS of the used rows of dAk:
-        # ||dAk[used, :]|| / sqrt(nw * n_used), with NO lrate factor. Fortran
-        # measures the gradient direction before the step, not the applied update
-        # lrate*dAk, and does not divide by lrate either (amica15.f90:1760-1761) --
-        # there is no missing factor here.
-        zeta = np.zeros(self.num_comps)
-        for h in range(self.num_models):
-            zeta[self.comp_list[:, h]] += gm_prev[h]
-        dAk = np.zeros_like(self.A)
-        for h in range(self.num_models):
-            # comp_list[:, h] holds distinct indices within a model
-            # (identify_shared_components never merges two components that
-            # appear in the same model), so buffered `+=` on fancy indices cannot
-            # drop a contribution here. Row i of the model's step is source i's
-            # component, comp_list[i, h] (issue #334).
-            idx = self.comp_list[:, h]
-            weight = gm_prev[h] / np.maximum(zeta[idx], np.finfo(np.float64).tiny)
-            dAk[idx, :] += weight[:, None] * np.dot(directions[h].T, self.A[idx, :])
-        nd_value = float(
-            np.sqrt(np.sum(dAk[used, :] ** 2) / (self.data_dim * int(used.sum())))
-        )
-
         # A is stored as Fortran's A^T, one component per row (issue #334; true
         # unmixing = W^T = inv(block)^T), so the Fortran step on a model's block
         # A_fort(:, comp_list(:,h)) @ dir becomes dir^T @ A[comp_list[:, h], :]
@@ -2242,7 +2295,7 @@ class AMICA:
         # the same guarded block (amica15.f90:1803), so a discarded Newton
         # direction cannot ratchet the learning rate.
         if not self._a_frozen():
-            if newton_active and no_newt:
+            if step.newton_active and step.no_newt:
                 # Fortran prints this whenever a model is not positive definite
                 # (amica17.f90:1911-1913); surface it rather than falling back
                 # silently.
@@ -2251,7 +2304,7 @@ class AMICA:
                     self.iter,
                 )
 
-            if newton_active and not no_newt:
+            if step.newton_active and not step.no_newt:
                 self.lrate = min(
                     self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
                 )
@@ -2260,7 +2313,7 @@ class AMICA:
                     self.lrate0, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
                 )
 
-            self.A = self.A - self.lrate * dAk
+            self.A = self.A - self.lrate * step.dAk
 
         # (c was updated above, before the mixture/A updates, from dc_numer/dgm.)
 
@@ -2274,15 +2327,6 @@ class AMICA:
 
         # Update unmixing matrices
         self._update_unmixing_matrices()
-
-        # Store likelihood
-        self.ll.append(updates["ll"])
-
-        # The weight-gradient norm is computed above, before the A step, matching
-        # Fortran's ordering. _check_convergence uses it as the gradient floor in
-        # the decrease-stop condition regardless of use_grad_norm; the flag only
-        # gates the separate final gradient-norm stop.
-        self.nd.append(nd_value)
 
     def _component_sensor_maps(self) -> np.ndarray:
         """Every component's mixing vector in input-channel (sensor) space.
@@ -2429,7 +2473,8 @@ class AMICA:
                 updates = self._get_updates_and_likelihood()
 
                 # Update parameters
-                self._update_parameters(updates)
+                step = self._update_direction(updates)
+                self._update_parameters(updates, step)
 
                 # Restart-on-NaN (Fortran amica15.f90:1022-1050): an early
                 # non-finite LL usually means an unlucky init, so redraw A and
