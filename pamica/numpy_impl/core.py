@@ -85,6 +85,8 @@ References
 import numpy as np
 from scipy import linalg
 from scipy.special import digamma
+import difflib
+import inspect
 import logging
 import time
 from pathlib import Path
@@ -101,6 +103,7 @@ from ..rank import (
     numerical_rank,
     validate_pca_reduction,
 )
+from ..torch_impl.core import AMICATorchNG
 from .utils import (
     gammaln,
     identify_shared_components,
@@ -200,6 +203,113 @@ _CONSUMED_KEYS = frozenset(
         "field_dim",
     }
 )
+
+# The canonical spelling of the three settings _CANONICAL_TO_NUMPY_KEY renames
+# (min_nd, maxdecs, share_iter -- AMICATorchNG's own constructor spelling, and
+# the name a params file's JSON_ALIAS_TO_CANONICAL/FORTRAN_TO_PAMICA_KEY
+# resolve to). The params-file route already accepts either spelling and
+# lands on the same setting (_read_numpy_keyed_params translates it); a
+# keyword argument now does too (issue #346), so passing the canonical name
+# directly -- as AMICATorchNG itself spells it -- is not treated as unknown.
+# Passing both spellings of the same setting at once is ambiguous, so
+# __init__ rejects that the same way fortran_params._apply_json_aliases
+# rejects it for a params file (see _translate_canonical_kwargs).
+_CANONICAL_ALIAS_KWARGS = frozenset(_CANONICAL_TO_NUMPY_KEY)
+
+# This constructor's own explicit (non-**kwargs) parameters. They can never
+# actually land inside **kwargs when spelled correctly -- Python binds a
+# matching keyword to the named parameter directly -- but are included in
+# _ACCEPTED_KWARGS below so a typo of one (e.g. ``verbos=True``) is named and
+# gets a "did you mean" suggestion instead of silently vanishing into the
+# ignored params dict, which is exactly the failure mode issue #346 is about.
+_CONSTRUCTOR_ONLY_KWARGS = frozenset({"params_file", "use_tqdm", "verbose"})
+
+# Every keyword name AMICA_NumPy(**kwargs) accepts (issue #346). Derived from
+# the same _CONSUMED_KEYS/_CANONICAL_TO_NUMPY_KEY the params-file routing
+# uses, plus this constructor's own named parameters, so the kwargs-accepted
+# set and the params-file-accepted set cannot drift apart.
+_ACCEPTED_KWARGS = _CONSUMED_KEYS | _CANONICAL_ALIAS_KWARGS | _CONSTRUCTOR_ONLY_KWARGS
+
+# Constructor keywords AMICATorchNG accepts that _ACCEPTED_KWARGS does not
+# cover: options implemented on the PyTorch backend (keep_best, device,
+# dtype, the kurtosis-switch schedule kurt_start/num_kurt/kurt_int, and the
+# n_channels/n_models/n_mix sizing parameters, which this backend instead
+# infers from the data / spells num_models/num_mix) that the legacy NumPy
+# backend does not implement. Computed from AMICATorchNG's own signature
+# rather than hand-listed, so it stays in sync with that constructor instead
+# of drifting as options are added there.
+_TORCH_ONLY_OPTIONS = frozenset(inspect.signature(AMICATorchNG).parameters) - (
+    _ACCEPTED_KWARGS
+)
+
+
+def _reject_unknown_kwargs(kwargs: Dict) -> None:
+    """Reject keyword arguments ``AMICA_NumPy(**kwargs)`` does not recognize
+    (issue #346), before any other constructor processing runs.
+
+    Two error shapes, both ``TypeError`` (matching the ``AMICA.fit`` cross-
+    backend keyword check in ``pamica/amica.py``, which raises ``TypeError``
+    for a name no backend's constructor recognizes at all; that same function
+    raises ``ValueError`` only for its own always-present ``device``/``dtype``
+    parameters used with the wrong backend selector, a different situation --
+    here every unrecognized name is a keyword argument this callable does not
+    accept, which is what ``TypeError`` means in Python's own calling
+    convention). This is distinct from the existing ``pdftype != 0``
+    ``NotImplementedError`` (a *value* of an accepted keyword this backend
+    cannot honor, not an unrecognized keyword).
+
+    A name that exactly matches an option implemented on the PyTorch backend
+    but not this one (``_TORCH_ONLY_OPTIONS``) gets a message naming it and
+    pointing to ``AMICA(backend='torch')``. Anything else gets a generic
+    "unexpected keyword argument" message, with a close-match suggestion
+    (``difflib.get_close_matches``) against every name this constructor does
+    accept, when one exists.
+    """
+    unknown = sorted(set(kwargs) - _ACCEPTED_KWARGS)
+    if not unknown:
+        return
+    torch_only = [name for name in unknown if name in _TORCH_ONLY_OPTIONS]
+    if torch_only:
+        raise TypeError(
+            f"AMICA_NumPy does not support {torch_only}: implemented on the "
+            "PyTorch backend (AMICATorchNG) but not the legacy NumPy "
+            "backend. Use AMICA(backend='torch') for these options."
+        )
+    remaining = [name for name in unknown if name not in _TORCH_ONLY_OPTIONS]
+    hints = []
+    for name in remaining:
+        match = difflib.get_close_matches(name, _ACCEPTED_KWARGS, n=1)
+        if match:
+            hints.append(f"{name!r} (did you mean {match[0]!r}?)")
+    message = f"AMICA_NumPy got unexpected keyword argument(s): {remaining}"
+    if hints:
+        message += "; " + "; ".join(hints)
+    raise TypeError(message)
+
+
+def _translate_canonical_kwargs(kwargs: Dict) -> Dict:
+    """Map a keyword argument spelled with the canonical name
+    (``min_nd``/``maxdecs``/``share_iter``) to this backend's own attribute
+    name (``_CANONICAL_TO_NUMPY_KEY``), the same translation
+    ``_read_numpy_keyed_params`` already applies to a params file.
+
+    Passing both spellings of the same setting at once is ambiguous -- which
+    one would silently win is an arbitrary choice -- so, mirroring
+    ``fortran_params._apply_json_aliases``'s identical guard for a params
+    file, this raises rather than picking one.
+    """
+    conflicts = sorted(
+        (canonical, numpy_key)
+        for canonical, numpy_key in _CANONICAL_TO_NUMPY_KEY.items()
+        if canonical in kwargs and numpy_key in kwargs
+    )
+    if conflicts:
+        names = ", ".join(f"{c!r}/{n!r}" for c, n in conflicts)
+        raise TypeError(
+            f"AMICA_NumPy got both the canonical and this backend's own "
+            f"spelling of the same setting ({names}); keep only one."
+        )
+    return {_CANONICAL_TO_NUMPY_KEY.get(k, k): v for k, v in kwargs.items()}
 
 
 def _read_numpy_keyed_params(params_file: Optional[Union[str, Path]]) -> Dict:
@@ -343,7 +453,32 @@ class AMICA:
             writes no files at all, like the PyTorch and MLX backends; set it
             (here, in a params file, or with the CLI's ``--outdir``) to get the
             reference's on-disk output.
+
+            ``min_nd``, ``maxdecs`` and ``share_iter`` -- the canonical
+            spelling of ``min_grad_norm``, ``max_decs`` and ``share_int``
+            (this backend's own names), which matches ``AMICATorchNG``'s
+            constructor and the spelling a params file already resolves
+            either way -- are also accepted here directly (issue #346) and
+            translated to this backend's own attribute. Passing both
+            spellings of the same setting at once raises ``TypeError``
+            rather than silently picking one.
+
+        Raises
+        ------
+        TypeError
+            If ``**kwargs`` holds a name this constructor does not recognize
+            (issue #346): a name implemented on the PyTorch backend but not
+            this one (e.g. ``keep_best``, ``device``, ``dtype``) names the
+            option and points to ``AMICA(backend='torch')``; anything else is
+            a generic "unexpected keyword argument" error, with a
+            ``difflib``-based "did you mean" suggestion when one exists.
+            Checked before any other keyword is applied, so a typo (e.g.
+            ``max_iters=50``) can no longer construct silently.
         """
+        # Reject an unrecognized keyword before anything else runs (issue
+        # #346): a typo or a cross-backend-only option used to construct
+        # silently and have no effect.
+        _reject_unknown_kwargs(kwargs)
         # Store progress bar settings
         self.use_tqdm = use_tqdm
         self.verbose = verbose
@@ -369,8 +504,12 @@ class AMICA:
                 unconsumed,
             )
 
-        # Override with any provided parameters
-        params.update(kwargs)
+        # Override with any provided parameters. A canonical-spelling kwarg
+        # (min_nd/maxdecs/share_iter) is translated to this backend's own
+        # name first, exactly as a params file's setting already is (issue
+        # #346), so it takes effect instead of landing under a key nothing
+        # reads.
+        params.update(_translate_canonical_kwargs(kwargs))
 
         # Store parameters
         self.num_models = params.get("num_models", 1)
