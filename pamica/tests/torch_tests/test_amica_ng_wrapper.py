@@ -167,18 +167,22 @@ def test_variance_order_requires_fit():
 
 def test_write_amica_output_bytes(fitted_ng, tmp_path):
     """The written files are the model's exact float64 parameters: the on-disk
-    EEGLAB directory is a lossless serialization, not a lossy export (#92). W and
-    the symmetric sphere are byte-identical in C order; the non-square mixture
-    params and c/comp_list are column-major (Fortran layout), so read order="F".
+    EEGLAB directory is a lossless serialization, not a lossy export (#92). W is
+    byte-identical in C order; S is column-major (Fortran layout, issue #336 --
+    the default ZCA sphere is symmetric to about 1e-17 so this was invisible
+    before the fix); the non-square mixture params and c/comp_list are
+    column-major too, so read order="F".
     """
     outdir = tmp_path / "amicaout"
     fitted_ng.write_amica_output(str(outdir))
     ng = fitted_ng.model_
 
-    for name, attr in [("gm", ng.gm), ("W", ng.W), ("S", ng.sphere),
+    for name, attr in [("gm", ng.gm), ("W", ng.W),
                        ("mean", ng.mean)]:  # fmt: skip
         got = np.fromfile(outdir / name).reshape(attr.shape)  # C order
         np.testing.assert_array_equal(got, attr.cpu().numpy(), err_msg=name)
+    got_s = np.fromfile(outdir / "S").reshape(ng.sphere.shape, order="F")
+    np.testing.assert_array_equal(got_s, ng.sphere.cpu().numpy(), err_msg="S")
     for name, attr in [("c", ng.c), ("alpha", ng.alpha), ("mu", ng.mu),
                        ("sbeta", ng.beta), ("rho", ng.rho)]:  # fmt: skip
         got = np.fromfile(outdir / name).reshape(attr.shape, order="F")
