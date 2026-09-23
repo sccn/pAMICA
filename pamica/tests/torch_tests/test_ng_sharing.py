@@ -42,9 +42,11 @@ def real_data() -> np.ndarray:
 
 
 def _controlled_ng(A: torch.Tensor, n_channels: int, n_models: int) -> AMICATorchNG:
-    """An NG with a fixed identity sphere and default comp_list, whose A is the
-    given (n_channels, n_channels*n_models) matrix -- so the sharing metric is a
-    plain cosine similarity on A's columns. No fit needed."""
+    """An NG with a fixed identity sphere and default comp_list, whose
+    component ``k`` has column ``k`` of the given (n_channels,
+    n_channels*n_models) matrix as its mixing vector -- stored as row ``k`` of
+    ``A`` (issue #334) -- so the sharing metric is a plain cosine similarity on
+    the given matrix's columns. No fit needed."""
     ng = AMICATorchNG(
         n_channels=n_channels,
         n_models=n_models,
@@ -60,7 +62,7 @@ def _controlled_ng(A: torch.Tensor, n_channels: int, n_models: int) -> AMICATorc
     for h in range(n_models):
         cl[:, h] = np.arange(h * n_channels, (h + 1) * n_channels)
     ng.comp_list = torch.from_numpy(cl)
-    ng.A = A.to(torch.float64)
+    ng.A = A.T.contiguous().to(torch.float64)
     return ng
 
 
@@ -326,7 +328,13 @@ def test_two_model_share_fit_survives_merge(real_data):
 
 def test_sharing_reduces_unique_count_without_degrading_ll(real_data):
     """Enabling sharing on matched config strictly reduces the unique-component
-    count and does not materially degrade the log-likelihood."""
+    count and does not materially degrade the log-likelihood.
+
+    ``comp_thresh=0.99`` (five merges at iteration 8, one at 18): since issue
+    #334 the metric compares the two models' true component maps, which are
+    still near-identical at iteration 8, so the earlier ``comp_thresh=0.9``
+    merged most of them and the losing model's remaining components collapsed
+    to a non-finite log-likelihood."""
     x = real_data[:, :4096]
     common: dict[str, Any] = dict(
         n_channels=NW,
@@ -340,7 +348,7 @@ def test_sharing_reduces_unique_count_without_degrading_ll(real_data):
     base = AMICATorchNG(**common)
     base.fit(x, max_iter=40)
     shared = AMICATorchNG(
-        **common, share_comps=True, share_start=8, share_iter=10, comp_thresh=0.9
+        **common, share_comps=True, share_start=8, share_iter=10, comp_thresh=0.99
     )
     shared.fit(x, max_iter=40)
     assert int(base.comp_used.sum()) == base.n_comps
@@ -362,15 +370,20 @@ def _assert_share_result_consistent(ng: AMICATorchNG) -> None:
     cl = ng.comp_list.cpu().numpy()
     assert cl.shape == (ng.n_channels, ng.n_models)
     assert cl.min() >= 0 and cl.max() < ng.n_comps
-    assert tuple(ng.A.shape) == (ng.n_channels, ng.n_comps)
+    assert tuple(ng.A.shape) == (ng.n_comps, ng.n_channels)
     used = int(ng.comp_used.sum())
     assert used == len(np.unique(cl))
 
     groups = ng.shared_components()
     for group in groups:
-        cols = {int(cl[i, h]) for h, i in group}
-        assert len(cols) == 1, "a shared group must reference exactly one column"
+        ids = {int(cl[i, h]) for h, i in group}
+        assert len(ids) == 1, "a shared group must reference exactly one component"
         assert len({h for h, _ in group}) >= 2, "sharing is across models"
+        # One component, so one mixing vector (issue #334): every grouped
+        # source has the same column in its model's mixing matrix.
+        vecs = [ng.get_mixing_matrix(h)[:, i] for h, i in group]
+        for vec in vecs[1:]:
+            np.testing.assert_array_equal(vec, vecs[0])
     if ng.n_models == 2:
         # With two models the within-model guard caps a group at one source per
         # model, so every merge folds exactly one column away into one new pair.
@@ -525,7 +538,7 @@ def test_pinv_matches_inv_on_a_fitted_full_rank_sphere(real_data):
     ng.fit(real_data[:, :4096], max_iter=10)
     assert ng.sphere is not None and ng.A is not None
     delta = (
-        (torch.linalg.pinv(ng.sphere) @ ng.A - torch.linalg.inv(ng.sphere) @ ng.A)
+        (torch.linalg.pinv(ng.sphere) @ ng.A.T - torch.linalg.inv(ng.sphere) @ ng.A.T)
         .abs()
         .max()
         .item()

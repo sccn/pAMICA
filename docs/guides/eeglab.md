@@ -27,6 +27,7 @@ This writes the raw binary files EEGLAB's AMICA loader reads:
 | `mean` | data mean |
 | `c` | per-model centers |
 | `alpha`, `mu`, `sbeta`, `rho` | source mixture-density parameters |
+| `A` | mixing matrix in sphered space, one column per component (the reference's layout, for any number of models) |
 | `comp_list` | component ids (for component sharing) |
 | `LL` | log-likelihood per iteration |
 | `LLt` | per-timepoint, per-model log-likelihood, plus the per-timepoint total |
@@ -37,6 +38,10 @@ A directory written with `do_approx_sphere=False` (a full-rank, genuinely
 asymmetric `S`) by a pamica older than issue #336's fix has `S` transposed;
 re-run `write_amica_output` to regenerate it (the default symmetric sphere and
 a rank-reduced fit were unaffected).
+`loadmodout15.m` does not read `A`; pamica's own `load_results` does,
+and refuses an `A` that does not invert the `W` beside it.
+A multi-model directory written by a pamica older than issue #334 stored `A` in another layout
+and must be written again to load there (a single-model `A` was already in the reference layout).
 
 The MLX backend writes the same directory: an Apple-Silicon fit exports to
 EEGLAB directly, with no torch round trip (epic #278). The export is

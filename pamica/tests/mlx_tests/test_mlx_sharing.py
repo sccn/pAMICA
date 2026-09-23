@@ -84,7 +84,7 @@ def _force_merged_column(model):
     cl = np.array(model.comp_list)
     kept, dead = int(cl[0, 0]), int(cl[0, 1])
     a_np = np.array(model.A)
-    a_np[:, dead] = a_np[:, kept]
+    a_np[dead, :] = a_np[kept, :]  # the retired component row (issue #334)
     model.A = mx.array(a_np)
     cl[cl == dead] = kept
     model.comp_list = mx.array(cl)
@@ -210,16 +210,21 @@ def _assert_share_result_consistent(model):
     cl = np.array(model.comp_list)
     assert cl.shape == (model.n_channels, model.n_models)
     assert cl.min() >= 0 and cl.max() < model.n_comps
-    assert np.array(model.A).shape == (model.n_channels, model.n_comps)
+    assert np.array(model.A).shape == (model.n_comps, model.n_channels)
     used = int(np.array(model.comp_used).sum())
     assert used == np.unique(cl).size
 
     for group in model.shared_components():
-        cols = {int(cl[i, h]) for h, i in group}
-        assert len(cols) == 1, "a shared group must reference exactly one column"
+        ids = {int(cl[i, h]) for h, i in group}
+        assert len(ids) == 1, "a shared group must reference exactly one component"
         assert len({h for h, _ in group}) >= 2, "sharing is across models"
         for h, i in group:
             assert 0 <= h < model.n_models and 0 <= i < model.n_channels
+        # One component, so one mixing vector (issue #334): every grouped
+        # source has the same column in its model's mixing matrix.
+        vecs = [model.get_mixing_matrix(h)[:, i] for h, i in group]
+        for vec in vecs[1:]:
+            np.testing.assert_array_equal(vec, vecs[0])
 
 
 def test_merge_on_the_final_iteration_completes():
@@ -395,20 +400,29 @@ def test_second_identify_call_does_not_resurrect_merged_columns():
 # --- (d) merged-away columns are frozen --------------------------------------
 
 
+def _component_values(model, name, ids):
+    """The values of components ``ids``: rows of ``A`` (issue #334), columns
+    of the density parameters."""
+    value = np.array(getattr(model, name))
+    return value[ids, :] if name == "A" else value[:, ids]
+
+
 def test_merged_away_columns_keep_their_last_finite_value():
-    """A column no model references receives no sufficient statistics, so its
-    mixture update would be 0/0 and its ``dAk`` is exactly zero. It must freeze
-    at its last finite value rather than go NaN (which ``fit``'s ``nan_params``
-    guard would then -- correctly -- abort on). ``doscaling`` is off so the
-    comparison is exact: the rescale pass renormalizes every column, dead ones
-    included, by a norm that is 1.0 only to within a ULP.
+    """A component no model references receives no sufficient statistics, so
+    its mixture update would be 0/0 and its ``dAk`` row is exactly zero. It
+    must freeze at its last finite value rather than go NaN (which ``fit``'s
+    ``nan_params`` guard would then -- correctly -- abort on). The rescale runs
+    (``doscaling`` on, the default): it gives a merged-away row, which is in no
+    model's block, a scale of exactly 1, so the comparison is exact. (Before
+    issue #334 this test turned ``doscaling`` off, because the rescale then
+    renormalized such a stored column at ULP scale.)
     """
-    model, x_t = _warm_model(warmup=3, doscaling=False)
+    model, x_t = _warm_model(warmup=3)
     _force_merged_column(model)
     dead = ~np.array(model.comp_used)
-    assert dead.any(), "setup failed: no column was merged away"
+    assert dead.any(), "setup failed: no component was merged away"
     before = {
-        name: np.array(getattr(model, name))[:, dead]
+        name: _component_values(model, name, dead)
         for name in ("A", "mu", "alpha", "beta", "rho")
     }
     live_mu_before = np.array(model.mu)[:, ~dead]
@@ -419,8 +433,10 @@ def test_merged_away_columns_keep_their_last_finite_value():
     mx.eval(model.A, model.mu, model.alpha, model.beta, model.rho)
 
     for name, expected in before.items():
-        actual = np.array(getattr(model, name))[:, dead]
-        assert np.all(np.isfinite(actual)), f"{name} went non-finite on a dead column"
+        actual = _component_values(model, name, dead)
+        assert np.all(np.isfinite(actual)), (
+            f"{name} went non-finite on a dead component"
+        )
         np.testing.assert_array_equal(actual, expected, err_msg=name)
     # The live columns did keep moving, so "unchanged" above means frozen, not
     # "nothing happened in these three iterations".

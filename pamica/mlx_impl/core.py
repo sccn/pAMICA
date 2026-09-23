@@ -83,7 +83,12 @@ same defaults, same ``stop_reason`` strings (``"min_dll"``, ``"grad_norm"``,
 ``"grad_norm_floor"``), so a configuration moved from the PyTorch backend does the
 same work here. The gradient norm ``ndtmpsum`` is computed every iteration and
 masked by ``comp_used`` (Fortran amica15.f90:1761); without component sharing
-every column is used, so the mask is all-True and drops out exactly.
+every component is used, so the mask is all-True and drops out exactly.
+
+``A`` stores one component per ROW, shape ``(n_comps, n_channels)`` (issue
+#334, :mod:`pamica.component_layout`, ADR 0007), exactly as in AMICATorchNG:
+row ``k`` is the reference's column ``A(:, k)`` and model ``h``'s block is
+``A[comp_list[:, h], :]``.
 """
 
 from __future__ import annotations
@@ -104,6 +109,7 @@ from scipy.special import digamma, gamma, gammaln
 from .. import blocktune
 from .. import restarts
 from .. import schedule
+from ..component_layout import rows_from_legacy_columns
 from ..metrics import mir as mir_metric
 from ..metrics import model_probability_from_loglik, pairwise_mi
 from ..numpy_impl.utils import identify_shared_components
@@ -133,11 +139,12 @@ PDFTYPE_NAMES = {
 
 _LOG2 = math.log(2.0)
 _LOG4 = math.log(4.0)  # logistic-family normalizer (amica15.f90:1346)
-# Log-normalizers for the non-GG density families, using Fortran's exact literal
-# constants (amica15.f90:1333/1359/1371) so the log-density matches the reference
-# binary bit-for-bit: 2.506628274 = sqrt(2*pi) (Gaussian, pdtype 2); 4.132731354 /
-# 1.858073988 = the sub-/super-Gaussian cosh normalizers (pdtype 4 / 1). Ported
-# verbatim from the same-named ``pamica.torch_impl.core`` constants (policy 1).
+# Log-normalizers for the non-GG density families, ported verbatim from the
+# same-named ``pamica.torch_impl.core`` constants (policy 1): the double-precision
+# values of the reference's decimal literals (amica15.f90:1333/1359/1371), which
+# the binary reads in single precision, so its log-normalizers differ from these
+# by 3.7e-10, 2.0e-8 and -2.1e-8 (docs/guides/amica-differences.md row 16;
+# whether to adopt the single-precision values is issue #344).
 _LOG_SQRT_2PI = math.log(2.506628274)
 _LOG_NORM_COSH_SUB = math.log(4.132731354)
 _LOG_NORM_COSH_SUP = math.log(1.858073988)
@@ -374,12 +381,14 @@ class AMICAMLXNG:
         Enable multi-model component sharing (Fortran ``share_comps`` /
         ``identify_shared_comps``, amica15.f90:1916): components that are
         near-collinear across different models are merged so they share one
-        mixing column and one density. Requires ``n_models >= 2`` (a model
-        cannot share with itself); accepted but inert otherwise. OFF by default,
-        so default fits are unchanged. There is no bit-exact oracle -- the
+        mixing vector (one row of ``A``) and one density. Requires
+        ``n_models >= 2`` (a model cannot share with itself); accepted but
+        inert otherwise. OFF by default, so default fits are unchanged. The
         reference's similarity metric is never initialized (like the dead
-        ``do_choose_pdfs``, #26) -- so this implements the intended algorithm,
-        validated by real-data behavior and against the PyTorch backend. A
+        ``do_choose_pdfs``, #26), so it has no bit-exact oracle; this implements
+        the intended algorithm on the component rows (issue #334), validated
+        against the PyTorch backend, whose update from a merged state matches
+        the reference. A
         merge that fires on the LAST fit iteration is reflected in the
         returned model but trails in ``final_ll_``; see that attribute's
         comment (issue #269).
@@ -391,7 +400,8 @@ class AMICAMLXNG:
         never consumes the whole cycle, and ``share_start`` must be ``>= 1``.
     ``comp_thresh`` (0.99)
         Cosine-similarity cutoff, in the de-sphered (sensor-space) metric, above
-        which two mixing columns are identified and merged. Must be in
+        which two components' mixing vectors are identified and merged. Must be
+        in
         ``(0, 1]``. The de-sphering uses ``pinv(sphere)``, so sharing also works
         on rank-reduced and rank-deficient fits (issues #253, #221); see
         :meth:`_identify_shared_comps`.
@@ -574,8 +584,8 @@ class AMICAMLXNG:
     defaults, validation and semantics:
 
     ``doscaling`` (True)
-        Rescale each component's mixing vector (a row of its model's stored
-        ``A`` block) to unit norm, with the matching ``mu``/``beta`` rescale,
+        Rescale each component's mixing vector (a row of the stored ``A``) to
+        unit norm, with the matching ``mu``/``beta`` rescale,
         an exact change of scale (see :meth:`_rescale_components`).
     ``scalestep`` (1)
         Run the rescale on iterations ``scalestep``, ``2*scalestep``, ...
@@ -1039,13 +1049,14 @@ class AMICAMLXNG:
         rng = np.random.RandomState(self.seed)
         n, m, ncomp, nmix = self.n_channels, self.n_models, self.n_comps, self.n_mix
 
-        # Per-model mixing blocks + comp_list mapping each (channel, model) to its
-        # column in A (identical RNG draw order to AMICATorchNG; for m=1 the loop
-        # runs once, so single-model init stays byte-for-byte).
-        A_np = np.zeros((n, ncomp))
+        # Per-model mixing blocks + comp_list mapping each (source, model) to its
+        # component, a row of A (issue #334; identical RNG draw order to
+        # AMICATorchNG; for m=1 the loop runs once, so single-model init stays
+        # byte-for-byte).
+        A_np = np.zeros((ncomp, n))
         comp_list_np = np.zeros((n, m), dtype=np.int64)
         for h in range(m):
-            A_np[:, h * n : (h + 1) * n] = np.eye(n) + 0.01 * (0.5 - rng.rand(n, n))
+            A_np[h * n : (h + 1) * n, :] = np.eye(n) + 0.01 * (0.5 - rng.rand(n, n))
             comp_list_np[:, h] = np.arange(h * n, (h + 1) * n)
 
         mu_np = np.zeros((nmix, ncomp))
@@ -1059,8 +1070,8 @@ class AMICAMLXNG:
 
         self.A = mx.array(A_np.astype(np.float32))
         self.comp_list = mx.array(comp_list_np)  # (n_channels, n_models) int
-        # Every column is referenced by the default block comp_list; reset here
-        # (not only in __init__) so a re-fit cannot inherit a merged mask.
+        # Every component is referenced by the default block comp_list; reset
+        # here (not only in __init__) so a re-fit cannot inherit a merged mask.
         self._comp_used_arr = mx.array(np.ones(ncomp, dtype=bool))
         self.mu = mx.array(mu_np.astype(np.float32))
         self.alpha = mx.array(alpha_np.astype(np.float32))
@@ -1096,7 +1107,7 @@ class AMICAMLXNG:
         self._lgamma_table = mx.array(gammaln(1.0 + 1.0 / rho_np).astype(np.float32))
 
     def _update_unmixing_matrices(self):
-        """Per-model ``W_h = inv(A[:, comp_list[:, h]])`` and the LL Jacobian
+        """Per-model ``W_h = inv(A[comp_list[:, h], :])`` and the LL Jacobian
         ``log|det W_h|``, on the CPU stream (MLX linalg is CPU-only), hoisted to
         once per iteration. ``W`` is ``(n_models, n, n)`` and ``_logdet_W`` is
         ``(n_models,)``. For n_models=1 this is ``inv(A)`` unchanged.
@@ -1151,14 +1162,14 @@ class AMICAMLXNG:
         assert self.A is not None and self.comp_list is not None
         ws, logdets = [], []
         for h in range(self.n_models):
-            A_h = self.A[:, self.comp_list[:, h]]
+            A_h = self.A[self.comp_list[:, h], :]
             a_h_np = np.array(A_h, dtype=np.float32, copy=False)
             finite_mask = np.isfinite(a_h_np)
             # A matrix with ZERO finite entries carries no signal to check --
             # this is exactly the observed shape of a dead-model corruption
             # (a zero-responsibility model dividing by dgm==0 propagates
             # NaN/inf through the WHOLE per-model direction matrix, so all
-            # comp_list columns for that model go non-finite together, not
+            # of that model's component rows go non-finite together, not
             # just one entry -- confirmed on a real fitted 2-model dead-model
             # state). Skipping here reproduces the pre-guard behavior exactly:
             # mx.linalg.inv on a wholly non-finite A does not abort -- it
@@ -1217,7 +1228,7 @@ class AMICAMLXNG:
                     self.stop_reason = restarts.ERROR_STOP_REASON
                     raise RuntimeError(
                         f"Singular unmixing matrix for model {h} at iteration "
-                        f"{self.iteration}: cond(A[:, comp_list[:, {h}]]) = "
+                        f"{self.iteration}: cond(A[comp_list[:, {h}], :]) = "
                         f"{cond:.3e} exceeds the float32 threshold "
                         f"{_INV_COND_THRESHOLD:.1e} (MLX's CPU-stream inv "
                         "would otherwise abort the process instead of "
@@ -1751,22 +1762,21 @@ class AMICAMLXNG:
                 used, mx.clip(new_rho, self.minrho, self.maxrho), self.rho
             )
 
-        # Natural-gradient A-update. A is stored as Fortran's A^T, so the update
-        # is a LEFT-multiply by the transposed direction (as in
-        # ``AMICATorchNG._update_parameters``, #24 root cause). Each model's direction
-        # is scattered into its mixing columns as a gm-weighted average (Fortran
-        # dAk/zeta) using the PREVIOUS iteration's gm (gm_prev, see the snapshot above):
-        # for the default disjoint comp_list every column has one contributor, so
-        # gm cancels and n_models=1 is byte-for-byte the old `A - lrate*(dA.T@A)`;
-        # a SHARED column (#263) takes Fortran's responsibility-weighted average,
-        # NOT a raw sum (a raw sum would over-step by the contributor count). A
-        # merged-away column needs no special case: nothing scatters into it, so
-        # its zeta is 0 and its dAk is 0/tiny = 0, i.e. it takes no step. The
-        # rescale below does not touch it either: it normalizes the rows of each
-        # model's block, and a merged-away column is in no model's block.
-        # (test_merged_away_columns_keep_their_last_finite_value disables
-        # doscaling; the column rule this replaced, issue #333, renormalized
-        # such a column at ULP scale.)
+        # Natural-gradient A-update. A is stored as Fortran's A^T, one component
+        # per row (issue #334), so the update is a LEFT-multiply by the
+        # transposed direction (as in ``AMICATorchNG._update_parameters``, #24
+        # root cause). Each model's step is scattered into its component rows as
+        # a gm-weighted average (Fortran dAk/zeta) using the PREVIOUS iteration's
+        # gm (gm_prev, see the snapshot above): for the default disjoint
+        # comp_list every component has one contributor, so gm cancels and
+        # n_models=1 is byte-for-byte the old `A - lrate*(dA.T@A)`; a SHARED
+        # component (#263) takes Fortran's responsibility-weighted average of the
+        # models' steps for its one mixing vector, NOT a raw sum (a raw sum would
+        # over-step by the contributor count). A merged-away component needs no
+        # special case: nothing scatters into its row, so its zeta is 0 and its
+        # dAk is 0/tiny = 0, i.e. it takes no step. The rescale below does not
+        # touch it either: it rescales the rows of each model's block, and a
+        # merged-away row is in no model's block.
         #
         # The direction/dAk/gradient-norm computation below runs
         # UNCONDITIONALLY, not gated on _a_frozen(): Fortran computes dAk and
@@ -1805,9 +1815,9 @@ class AMICAMLXNG:
         zeta = mx.zeros((self.n_comps,), dtype=mx.float32)
         for h in range(self.n_models):
             idx = self.comp_list[:, h]
-            dAk = dAk.at[:, idx].add(gm_prev[h] * (directions[h].T @ self.A[:, idx]))
+            dAk = dAk.at[idx, :].add(gm_prev[h] * (directions[h].T @ self.A[idx, :]))
             zeta = zeta.at[idx].add(gm_prev[h] + mx.zeros((self.n_channels,)))
-        dAk = dAk / mx.maximum(zeta, tiny)
+        dAk = dAk / mx.maximum(zeta, tiny)[:, None]
 
         # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1760-1761):
         # ``sqrt(sum(dAk**2, mask=comp_used) / (nw*count(comp_used)))``, built
@@ -1815,20 +1825,21 @@ class AMICAMLXNG:
         # applies it, exactly as Fortran does in accum_updates_and_likelihood
         # (:1749-1761) ahead of update_params' A step (:1803-1815). Read by
         # fit()'s two grad-norm checks (AMICATorchNG._update_parameters computes
-        # the same quantity). The comp_used mask matters only once share_comps
-        # has merged columns away: without sharing it is all-True, so the select
-        # returns nd unchanged and the count is n_comps, leaving this bit-for-bit
-        # the plain RMS over dAk. Kept as a lazy scalar (no .item() here) so it
-        # rides fit()'s single per-iteration mx.eval.
+        # the same quantity). One squared norm per component row, as the
+        # reference sums each component's column. The comp_used mask matters
+        # only once share_comps has merged components away: without sharing it
+        # is all-True, so the select returns nd unchanged and the count is
+        # n_comps, leaving this the plain RMS over dAk. Kept as a lazy scalar
+        # (no .item() here) so it rides fit()'s single per-iteration mx.eval.
         #
         # SELECT, not multiply-by-mask: 0*NaN is NaN, so a single non-finite
-        # column would poison the whole reduction, and a NaN ndtmpsum silently
+        # row would poison the whole reduction, and a NaN ndtmpsum silently
         # disables BOTH grad-norm stops (NaN <= min_nd is False), burning the
         # entire iteration budget with no diagnostic. mx.where drops the masked
-        # lanes structurally instead. Unreachable today (a merged-away column's
+        # lanes structurally instead. Unreachable today (a merged-away row's
         # dAk is exactly 0), but Phase 3's Newton direction feeds this same dAk.
         used_f = self._comp_used_arr.astype(mx.float32)
-        nd = (dAk**2).sum(axis=0)  # (n_comps,)
+        nd = (dAk**2).sum(axis=1)  # (n_comps,)
         nd = mx.where(self._comp_used_arr, nd, mx.zeros_like(nd))
         self._nd_arr = mx.sqrt(
             nd.sum() / (self.n_channels * mx.maximum(used_f.sum(), 1.0))
@@ -1885,25 +1896,21 @@ class AMICAMLXNG:
     def _rescale_components(self) -> None:
         """Rescale every component to a unit-norm mixing vector (Fortran
         ``doscaling``, amica15.f90:1843-1851), an exact change of scale; the
-        same rule, order and zero-norm guard as
+        same rule, norms, order and zero-norm guard as
         ``AMICATorchNG._rescale_components``.
 
-        Source ``i`` of model ``h`` is ROW ``i`` of the stored block
-        ``A[:, comp_list[:, h]]`` (issue #24 convention), so that row is divided
-        by its norm while ``mu``/``beta`` at ``comp_list[i, h]`` are multiplied/
-        divided by it, leaving the log-likelihood unchanged (the column rule
-        this replaced, issue #333, was not a change of scale). A zero-norm row
-        keeps its values: the scale is 1 there, so ``A``/``mu``/``beta`` are
-        unchanged rather than ``mu`` being zeroed. The new values are written
-        with ``mx.put_along_axis`` (an exact scatter), rebinding each attribute
-        to a new array as the rest of the M-step does, never mutating in place.
-
-        Models are rescaled in order, one vectorized pass per model. Their
-        blocks are disjoint unless ``share_comps`` merged a column; a shared
-        stored column then belongs to rows of several blocks, where this
-        per-block rule is not well defined. It is applied uniformly anyway: the
-        component-row layout of epic #324 Phase 8 (issue #334) replaces it.
-        ADR 0006 records the convention.
+        Component ``k`` is row ``k`` of ``A`` (issue #334, ADR 0007), so that
+        row is divided by its norm while ``mu[:, k]``/``beta[:, k]`` are
+        multiplied/divided by it, leaving the log-likelihood unchanged (the
+        column rule issue #333 replaced was not a change of scale). A zero-norm
+        (or NaN-norm) row keeps its values: the scale is 1 there, so
+        ``A``/``mu``/``beta`` are unchanged rather than ``mu`` being zeroed.
+        Each component is rescaled exactly once, including one that
+        ``share_comps`` merged into several models, and a merged-away row
+        (in no model's block) keeps its scale of 1. The norms come from each
+        model's block ``A[comp_list[:, h], :]``, the same gathers as before
+        issue #334, and every attribute is rebound to a new array as the rest
+        of the M-step does, never mutated in place.
         """
         assert (
             self.A is not None
@@ -1911,21 +1918,15 @@ class AMICAMLXNG:
             and self.beta is not None
             and self.comp_list is not None
         )
-        n = self.n_channels
+        scale = mx.ones((self.n_comps,), dtype=mx.float32)
         for h in range(self.n_models):
             idx = self.comp_list[:, h]
-            block = self.A[:, idx]  # row i = source i of model h
-            norm = mx.sqrt((block**2).sum(axis=1))  # (n_channels,)
-            scale = mx.where(norm > 0, norm, mx.ones_like(norm))
-            a_cols = mx.broadcast_to(idx[None, :], (n, n))
-            self.A = mx.put_along_axis(self.A, a_cols, block / scale[:, None], axis=1)
-            d_cols = mx.broadcast_to(idx[None, :], (self.n_mix, n))
-            self.mu = mx.put_along_axis(
-                self.mu, d_cols, self.mu[:, idx] * scale, axis=1
-            )
-            self.beta = mx.put_along_axis(
-                self.beta, d_cols, self.beta[:, idx] / scale, axis=1
-            )
+            norm = mx.sqrt((self.A[idx, :] ** 2).sum(axis=1))  # (n_channels,)
+            # A shared row gets the same norm from every block that holds it.
+            scale[idx] = mx.where(norm > 0, norm, mx.ones_like(norm))
+        self.A = self.A / scale[:, None]
+        self.mu = self.mu * scale
+        self.beta = self.beta / scale
 
     # ------------------------------------------------------------------
     # Adaptive PDF switch (issue #265; AMICATorchNG's #26 port)
@@ -2207,15 +2208,26 @@ class AMICAMLXNG:
             return False
         return schedule.share_freeze(self.iteration, self.share_start, self.share_iter)
 
+    def _component_sensor_maps(self) -> np.ndarray:
+        """Every component's mixing vector in input-channel (sensor) space.
+
+        ``pinv(sphere) @ A.T`` on the host in float64, shape ``(n_channels_in,
+        n_comps)``: column ``comp_list[i, h]`` is column ``i`` of
+        :meth:`get_sensor_mixing_matrix` for model ``h`` (issue #334). These
+        are the vectors the share metric compares.
+        """
+        assert self.A is not None
+        return self._pinv_sphere() @ np.array(self.A, dtype=np.float64).T
+
     def _identify_shared_comps(self) -> None:
-        """Merge near-collinear mixing columns across models (Fortran
+        """Merge near-collinear components across models (Fortran
         ``identify_shared_comps``, amica15.f90:1916).
 
         Two components (model ``h`` source ``i`` and model ``hh`` source ``ii``,
-        ``h < hh``) are identified when the angle between their mixing columns,
-        measured in the original (de-sphered) data space, is below the
-        ``comp_thresh`` cutoff; on a match ``cj`` is folded into ``ci``, so the
-        two share one mixing column and one density.
+        ``h < hh``) are identified when the angle between their mixing vectors
+        (rows of ``A``, issue #334), measured in the original (de-sphered) data
+        space, is below the ``comp_thresh`` cutoff; on a match ``cj`` is folded
+        into ``ci``, so the two share one mixing vector and one density.
 
         The decision itself is NOT reimplemented here: it runs
         :func:`pamica.numpy_impl.utils.identify_shared_components` on host
@@ -2228,21 +2240,23 @@ class AMICAMLXNG:
         materialized by fit's per-iteration ``mx.eval``, so the host pull is
         cheap.
 
-        No bit-exact oracle: the reference's ``Spinv2`` metric is *declared* but
-        never *allocated* in ``amica15.f90``, so invoking the routine there would
-        read an unallocated array -- it is effectively unrunnable (cf. the dead
-        ``do_choose_pdfs`` switch, #26). This implements the intended algorithm
-        and is validated on real data, not against byte parity.
+        No bit-exact oracle for the metric: the reference's ``Spinv2`` is
+        *declared* but never *allocated* in ``amica15.f90``, so the routine
+        there reads an unallocated array, every similarity comes out NaN and it
+        never merges (cf. the dead ``do_choose_pdfs`` switch, #26). The merged
+        state it produces is checked against the reference through
+        ``load_comp_list`` on the float64 backends, and this backend is pinned
+        to AMICATorchNG.
         """
         if self.n_models < 2:
             return
         assert self.A is not None and self.comp_list is not None
         # _pinv_sphere raises on a non-finite sphere, so the metric below can
         # only be garbage if A itself is (guarded per-pair inside the kernel).
-        atil = self._pinv_sphere() @ np.array(self.A, dtype=np.float64)
+        atil = self._component_sensor_maps()
         cl = np.array(self.comp_list)
         new_cl, new_used = identify_shared_components(atil, cl, self.comp_thresh)
-        # Each fold removes exactly one column from the referenced set, so the
+        # Each fold removes exactly one component from the referenced set, so the
         # drop in unique count IS the merge count (the kernel does not report it).
         merged = int(np.unique(cl).size - np.unique(new_cl).size)
         if merged:
@@ -2302,8 +2316,9 @@ class AMICAMLXNG:
         """Boolean mask (n_comps,) of components still referenced by comp_list.
 
         A component drops out of use when it is folded into another by
-        :meth:`_identify_shared_comps`; unused columns receive no gradient and
-        are never read by the E-step.
+        :meth:`_identify_shared_comps`; an unused component (its row of ``A``
+        and its density columns) receives no update and is never read by the
+        E-step.
 
         CACHED (set all-True at init, rewritten by each merge) rather than
         derived from ``comp_list`` on every read, which is how
@@ -2323,14 +2338,17 @@ class AMICAMLXNG:
         """Components shared across models by ``share_comps`` (issue #263).
 
         ``share_comps`` folds near-collinear components of different models onto
-        one shared mixing column + density, recorded as a repeated index in
-        ``comp_list``. Returns one group per shared column: a list of
-        ``(model_idx, source_idx)`` pairs that all reference it. Empty when no
-        component is shared across two or more models (always for one model, and
-        for a default multi-model fit with ``share_comps`` off).
+        one shared component (one row of ``A`` and one density), recorded as a
+        repeated index in ``comp_list``. Returns one group per shared
+        component: a list of ``(model_idx, source_idx)`` pairs that all
+        reference it, whose columns of :meth:`get_sensor_mixing_matrix` are
+        therefore identical. Empty when no component is shared across two or
+        more models (always for one model, and for a default multi-model fit
+        with ``share_comps`` off).
 
-        Note that a merge synchronizes only the mixture parameters routed
-        through ``comp_list`` (``mu``/``alpha``/``beta``/``rho``); the
+        Note that a merge synchronizes only the parameters routed through
+        ``comp_list`` (the mixing vector and ``mu``/``alpha``/``beta``/``rho``);
+        the
         per-source density *family* code ``pdtype`` is a separate array and is
         not synchronized (issue #265, matching ``AMICATorchNG.shared_components``),
         so under the adaptive switcher (``pdftype=1``) a shared pair can still
@@ -2847,7 +2865,7 @@ class AMICAMLXNG:
 
             # Component sharing (Fortran identify_shared_comps schedule,
             # amica15.f90:1856): once per share_iter cycle from share_start,
-            # merge near-collinear mixing columns across models using the
+            # merge near-collinear components across models using the
             # just-updated A. Fortran runs identify_shared_comps BEFORE
             # get_unmixing_matrices (amica15.f90:1858,1863), so rebuild W from
             # the merged comp_list -- otherwise the next E-step would read a
@@ -3264,8 +3282,10 @@ class AMICAMLXNG:
         return codes
 
     def get_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
-        """True mixing matrix ``A_fort`` = (stored A)^T (issue #24 convention;
-        issue #287 port of ``AMICATorchNG.get_mixing_matrix``)."""
+        """True mixing matrix of model ``model_idx``: the reference's
+        ``A(:, comp_list(:, h))``, i.e. that model's component rows of the
+        stored ``A`` transposed (issue #24 convention; issue #334 layout; issue
+        #287 port of ``AMICATorchNG.get_mixing_matrix``)."""
         if self.A is None or self.comp_list is None:
             raise RuntimeError(
                 "AMICAMLXNG.get_mixing_matrix() requires a fitted model; call "
@@ -3273,7 +3293,7 @@ class AMICAMLXNG:
             )
         self._check_model_idx(model_idx)
         self._check_usable("get the mixing matrix")
-        return np.array(self.A[:, self.comp_list[:, model_idx]].T)
+        return np.array(self.A[self.comp_list[:, model_idx], :].T)
 
     @property
     def n_channels_in(self) -> int:
@@ -3311,7 +3331,7 @@ class AMICAMLXNG:
             )
         self._check_model_idx(model_idx)
         self._check_usable("get the sensor mixing matrix")
-        A = np.array(self.A[:, self.comp_list[:, model_idx]].T, dtype=np.float64)
+        A = np.array(self.A[self.comp_list[:, model_idx], :].T, dtype=np.float64)
         return self._pinv_sphere() @ A
 
     def get_unmixing_matrix(self, model_idx: int = 0) -> np.ndarray:
@@ -3865,7 +3885,9 @@ class AMICAMLXNG:
             rho=np.array(self.rho),
             comp_list=np.array(self.comp_list),
             ll=ll,
-            A=np.array(self.A),
+            # The reference layout, (nw, num_comps) with component k in column
+            # k: the component-row A transposed (issue #334).
+            A=np.array(self.A).T,
             Lht=Lht,
             Lt=Lt,
         )
@@ -3913,10 +3935,15 @@ class AMICAMLXNG:
     )  # fmt: skip
 
     # This backend owns its own format_version, independent of AMICATorchNG's
-    # (currently 3): the two payloads are never interchangeable (different
+    # (currently 4): the two payloads are never interchangeable (different
     # param layouts, no dtype/device fields here), so there is no reason for
-    # the version numbers to track each other.
-    _SAVE_FORMAT_VERSION = 1
+    # the version numbers to track each other. Version 2 (issue #334) stores A
+    # with one component per row, shape (n_comps, n_channels); a version 1
+    # payload stored it as (n_channels, n_comps) and is converted on load when
+    # unmerged, refused when share_comps had merged components
+    # (pamica.component_layout, ADR 0007).
+    _SAVE_FORMAT_VERSION = 2
+    _COLUMN_LAYOUT_FORMAT_VERSION = 1
 
     def state_dict(self) -> dict:
         """Serialize the fitted model to a plain, framework-agnostic dict.
@@ -4091,12 +4118,20 @@ class AMICAMLXNG:
 
         Unlike ``AMICATorchNG.from_state_dict`` there is no ``device``
         argument: this backend always runs on ``mx.default_device()``.
+
+        A ``format_version`` 1 state (components as columns of ``A``, before
+        issue #334) loads unchanged in every other respect: its ``A`` is
+        converted to component rows without loss, unless ``share_comps`` had
+        merged components, which raises ``ValueError`` asking for a refit
+        (:func:`pamica.component_layout.rows_from_legacy_columns`).
         """
         version = state.get("format_version")
-        if version != cls._SAVE_FORMAT_VERSION:
+        if version not in (cls._SAVE_FORMAT_VERSION, cls._COLUMN_LAYOUT_FORMAT_VERSION):
             raise ValueError(
                 f"unsupported AMICAMLXNG state format_version: {version!r} "
-                f"(expected {cls._SAVE_FORMAT_VERSION})"
+                f"(expected {cls._SAVE_FORMAT_VERSION}, or "
+                f"{cls._COLUMN_LAYOUT_FORMAT_VERSION} from before the "
+                "component-row layout)"
             )
         for section in ("config", "params", "extra"):
             if section not in state:
@@ -4120,6 +4155,19 @@ class AMICAMLXNG:
                 f"AMICAMLXNG constructor ({exc}); the payload may be "
                 "truncated or from an incompatible version."
             ) from exc
+        if version == cls._COLUMN_LAYOUT_FORMAT_VERSION:
+            params = state["params"]
+            missing = [name for name in ("A", "comp_list") if name not in params]
+            if missing:
+                raise ValueError(
+                    f"malformed AMICAMLXNG state: missing params {missing}"
+                )
+            A_rows = rows_from_legacy_columns(
+                np.asarray(params["A"]),
+                np.asarray(params["comp_list"]),
+                owner="AMICAMLXNG",
+            )
+            state = {**state, "params": {**params, "A": A_rows}}
         obj._load_params(state)
         return obj
 
@@ -4162,7 +4210,7 @@ class AMICAMLXNG:
         # is the true input count, which a refit validates X against.
         self._n_input_channels = int(n_channels_in)
         expected_shapes = {
-            "A": (n, ncomp),
+            "A": (ncomp, n),
             "W": (m, n, n),
             "c": (n, m),
             "mu": (nmix, ncomp),
@@ -4330,7 +4378,8 @@ class AMICAMLXNG:
         whose central directory or a member's compressed bytes were cut off)
         each raise a named ``ValueError`` naming what is wrong, rather than
         raising an opaque ``zipfile``/``numpy`` error or loading a silently
-        partial model.
+        partial model. A ``format_version`` 1 file (before issue #334) is
+        converted or refused exactly as :meth:`from_state_dict` describes.
         """
         # Eagerly materialize every array the archive actually contains
         # INSIDE this try, so any corruption -- an unreadable zip (raised by
@@ -4356,10 +4405,12 @@ class AMICAMLXNG:
                     f"{section!r} (the file may be truncated or corrupted)."
                 )
         version = int(raw["format_version"])
-        if version != cls._SAVE_FORMAT_VERSION:
+        if version not in (cls._SAVE_FORMAT_VERSION, cls._COLUMN_LAYOUT_FORMAT_VERSION):
             raise ValueError(
                 f"unsupported AMICAMLXNG save format_version: {version!r} "
-                f"(expected {cls._SAVE_FORMAT_VERSION})"
+                f"(expected {cls._SAVE_FORMAT_VERSION}, or "
+                f"{cls._COLUMN_LAYOUT_FORMAT_VERSION} from before the "
+                "component-row layout)"
             )
         config = json.loads(raw["config"].item())
         extra = json.loads(raw["extra"].item())

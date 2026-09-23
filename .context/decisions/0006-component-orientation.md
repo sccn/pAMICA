@@ -1,6 +1,6 @@
 # ADR 0006: Components are rows of each stored mixing block
 
-**Status:** accepted
+**Status:** accepted; the storage part amended by [ADR 0007](0007-component-row-layout.md)
 **Date:** 2026-09-22
 **Owner:** Seyed Yahya Shirazi
 
@@ -44,11 +44,12 @@ pamica keeps `scalestep` as an extension,
 now counted from 1 like the reference's other cadences (iterations `scalestep`, `2*scalestep`, ...),
 so the default of 1 is the reference (row 14 of `docs/guides/amica-differences.md`).
 
-Epic #324 Phase 8 (issue #334) then changes the storage itself to component rows,
+Epic #324 Phase 8 (issue #334, [ADR 0007](0007-component-row-layout.md)) then changed the storage itself to component rows,
 `A` of shape `(n_comps, n)` with `comp_list` indexing rows,
-so a stored row is a component in every configuration, including merged ones.
-Until then, a column merged by `share_comps` belongs to rows of several blocks, where the per-block rule is not a change of scale;
-it is applied uniformly, model by model, and Phase 8 replaces it.
+so a stored row is a component in every configuration, including merged ones,
+and the rescale acts on each component row once.
+Until then, a column merged by `share_comps` belonged to rows of several blocks, where the per-block rule is not a change of scale;
+it was applied uniformly, model by model.
 
 ## Consequences
 
@@ -75,7 +76,7 @@ it is applied uniformly, model by model, and Phase 8 replaces it.
 - Remaining known difference: pamica does not normalize its drawn initial `A`
   (the reference normalizes a drawn one, amica15.f90:818-819, but not a loaded one).
   The two draws come from different random generators anyway, and the first iteration's rescale normalizes every component.
-  Epic #324 Phase 8 (issue #334) aligns it with the reference while it rewrites the storage layout and the initialization.
+  Aligning it changes default trajectories, so it is its own change, issue #341, not part of the layout change of Phase 8.
 
 ## Alternatives considered
 

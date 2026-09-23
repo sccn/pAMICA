@@ -5,6 +5,50 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Fix: tests no longer make a full clone shallow (issue #343).**
+  Tests that load historical code ran `git fetch origin <sha> --depth 1` to reach the pinned commit;
+  in a full clone that records a shallow boundary, after which `git gc` can prune history.
+  Every such test now goes through `pamica/tests/pre_change.py`, which only reads the repository:
+  when the pinned commit is missing it fails under `CI` and otherwise skips,
+  naming the command that fetches it (`git fetch origin <sha>`, or `git fetch --unshallow origin` in a shallow clone).
+  `pamica/tests/test_pre_change_loader.py` runs the loader behind a logging `git` wrapper and asserts that nothing is fetched.
+
+- **Phase 8 of epic #324: `share_comps` compares and merges components (issue #334).**
+  Every backend (PyTorch, NumPy and MLX) now stores the mixing matrix with one component per row,
+  `A` of shape `(n_comps, n_channels)`, the reference's `A` transposed ([ADR 0007](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0007-component-row-layout.md)).
+  A component id in `comp_list` now names the same component in `A` as in the density parameters,
+  so the share metric compares the components' scalp maps (`get_sensor_mixing_matrix`)
+  and a merge ties the two components' mixing vectors and densities, as the reference's `identify_shared_comps` does.
+  Before, both steps used stored columns of each model's block, which are not components.
+  - **Behavior change: fits with `share_comps=True` in which a merge fires now differ.**
+    Refit them.
+    Seeded with a merged `comp_list` through the reference's `load_comp_list`,
+    the PyTorch and NumPy updates match the native binary to float64 round-off
+    (after 3 iterations, worst of `doscaling` on and off: `A` 1.5e-12, `mu` 3.7e-9, log-likelihood 4.7e-14),
+    where the previous code was off by 0.21 in `A` and 4.3e-4 in log-likelihood.
+    On the bundled sample (2 models, 300 iterations, `share_start=100`, `comp_thresh=0.95`)
+    the scan now merges three pairs whose maps agree (|cos| 0.956 to 0.971), ending at log-likelihood -3.3416,
+    where it merged pairs whose maps did not (|cos| 0.06, 0.35 and 0.55) and ended at -3.3484 (-3.3387 with sharing off).
+    Because the metric now sees how similar the two models still are early in a fit, a scan in the first iterations merges most components,
+    and a model left with few components of its own can then collapse.
+    The reference behaves the same way: its similarity on its own early state merges the same pairs,
+    and its update from the same merged states collapses in step (its own scan never merges, because its similarity is NaN).
+    The reference's default `share_start=100` avoids that.
+  - Every fit without a merge is byte-identical to before on every backend, sharing off or scheduled but not firing,
+    with one exception at float round-off: the weight-gradient norm (`ndtmpsum`), which now sums per component like the reference.
+  - **Persistence:** the PyTorch `state_dict` is now `format_version` 4 and the MLX save format 2.
+    An older save loads unchanged in content, converted without loss, unless `share_comps` had merged components:
+    such a save raises `ValueError` asking for a refit, because its merges were computed under the old semantics.
+    `AMICA.save` files (still `format_version` 2) go through the same conversion and refusal.
+  - **EEGLAB export:** the `A` file is now the reference's `A(nw, num_comps)` in column-major order for any number of models
+    (EEGLAB's `loadmodout15.m` ignores it; single-model files are byte-identical to before).
+    `pamica.numpy_impl.data.load_results` reads it in that layout
+    and refuses a multi-model directory written by an earlier version, whose `A` does not invert the `W` beside it;
+    write such a directory again from the fitted or reloaded model.
+  - Row 16 of the differences page records that the reference's density normalizers are single-precision literals:
+    in the exact-Gaussian branch (`rho == 2`) 3.0e-8 away from the one pamica uses, and up to 2.1e-8 in the `pdftype` 1, 2 and 4 families.
+    Issue #344 decides whether to adopt them; the comments that called pamica's constants bit-for-bit with the binary are corrected.
+
 - **Phase 7 of epic #324: `doscaling` rescales components, as the reference does (issue #333).**
   **Behavior change:** default fits on every backend (PyTorch, NumPy and MLX) now follow the reference's trajectory,
   so their fitted parameters differ from those of earlier versions.

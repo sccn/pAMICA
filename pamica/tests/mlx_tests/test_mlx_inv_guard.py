@@ -199,7 +199,7 @@ def test_purely_nonfinite_a_flows_to_nan_params_not_abort():
     mx.eval(model.A, model.W, model._logdet_W)
 
     cl = np.array(model.comp_list)
-    a_h1 = np.array(model.A)[:, cl[:, 1]]
+    a_h1 = np.array(model.A)[cl[:, 1], :]  # model 1's component rows (#334)
     assert not np.any(np.isfinite(a_h1)), "model 1's A should be wholly non-finite"
 
     w1 = np.array(model.W)[1]
@@ -217,9 +217,10 @@ def test_second_model_singular_names_model_one():
     model, _ = _warm_model(n_models=2)
     cl = np.array(model.comp_list)
     a_np = np.array(model.A)
-    # Duplicate two columns WITHIN model 1's own comp_list selection.
+    # Duplicate two component rows WITHIN model 1's own comp_list selection
+    # (A holds one component per row, issue #334).
     rows = cl[:, 1]
-    a_np[:, rows[1]] = a_np[:, rows[0]]
+    a_np[rows[1], :] = a_np[rows[0], :]
     model.A = mx.array(a_np)
     model.iteration = 2
 
@@ -242,7 +243,7 @@ def test_guard_is_bit_identical_on_healthy_state():
 
     ws_ref, logdets_ref = [], []
     for h in range(model.n_models):
-        wh = mx.linalg.inv(model.A[:, model.comp_list[:, h]], stream=_CPU)
+        wh = mx.linalg.inv(model.A[model.comp_list[:, h], :], stream=_CPU)
         ws_ref.append(wh)
         logdets_ref.append(mx.linalg.slogdet(wh, stream=_CPU)[1])
     w_ref = mx.stack(ws_ref, axis=0)

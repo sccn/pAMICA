@@ -1144,7 +1144,10 @@ class AMICA:
         The file records which backend built the model (``format_version``
         2), and the model comes back on that backend. A ``format_version`` 1
         file, written before backend selection existed (issue #313), holds a
-        PyTorch model by construction and still loads.
+        PyTorch model by construction and still loads. A backend payload
+        saved before issue #334 (components as columns of ``A``) is converted
+        on load, or refused with a request to refit when ``share_comps`` had
+        merged components (see ``AMICATorchNG.from_state_dict``).
 
         Parameters
         ----------
@@ -1165,7 +1168,8 @@ class AMICA:
         ------
         ValueError
             If the file's ``format_version`` is not 1 or 2, a section is
-            missing, or ``device`` is set for an MLX model.
+            missing, ``device`` is set for an MLX model, or the model was
+            saved before issue #334 with merged components.
         ImportError
             If the file holds an MLX model and MLX is not installed.
         """

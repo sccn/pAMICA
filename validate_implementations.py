@@ -588,9 +588,10 @@ def run_numpy_amica(
         "final_iter": len(model.ll),
         "W": W,
         # get_weights() is the stored W transposed (issue #24 convention), so
-        # the true mixing is the stored A's model-0 columns transposed, the
-        # same composition AMICATorchNG.get_mixing_matrix returns.
-        "A": model.A[:, model.comp_list[:, 0]].T,
+        # the true mixing is the stored A's model-0 component rows transposed
+        # (issue #334 layout), the same composition
+        # AMICATorchNG.get_mixing_matrix returns.
+        "A": model.A[model.comp_list[:, 0], :].T,
         "ll_history": list(model.ll),
         "runtime_s": runtime_s,
     }

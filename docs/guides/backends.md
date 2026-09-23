@@ -44,6 +44,8 @@ Everything the wrappers offer works on both backends:
   and names any setting that backend cannot take in its "not applied" warning.
 - `save` records the backend (`format_version` 2), so `AMICA.load` restores the model on the backend that fit it.
   Files written before backend selection (version 1) still load, as PyTorch models.
+  The backend payload inside the file carries its own format version (see [the differences guide](amica-differences.md#component-sharing-compares-and-ties-components-issue-334)):
+  a model saved before issue #334 loads unchanged unless `share_comps` had merged components, in which case `load` asks for a refit.
   Loading an MLX model needs MLX installed and takes no `device`.
 
 The raw classes stay available for direct use (`from pamica.mlx_impl import AMICAMLXNG`),

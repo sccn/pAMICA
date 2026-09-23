@@ -47,23 +47,21 @@ what remains as of the v0.1.0 preparation.
   `stop_reason_`; `transform` / `get_mixing_matrix` / `get_unmixing_matrix` / `save` raise a clear
   degenerate error instead of returning NaN sources.
 
-### Component sharing (issue #60)
-- `share_comps` ported to `AMICATorchNG`: on the `share_start`/`share_iter` schedule, components
-  that are near-collinear across different models (cosine angle of their de-sphered mixing columns
-  above `comp_thresh`) are merged into one shared mixing column and density, with an A-freeze for
-  ~6 iterations after each merge (Fortran `identify_shared_comps`, amica15.f90:1898).
-- The M-step already sums sufficient statistics through `comp_list` (index_add), so shared
-  components update jointly; the A-update was refactored to accumulate columns as Fortran's
-  `gm`-weighted average (`dAk/zeta`, so shared columns are averaged, not summed) -- byte-identical
-  to the per-model update when unshared.
+### Component sharing (issues #60, #334)
+- `share_comps` runs on all three backends. Since #334 (ADR 0007) `A` stores one component per row,
+  so the metric compares de-sphered component mixing vectors (rows of `A` through `pinv(sphere)`,
+  the scalp maps) across models, and a merge above `comp_thresh` ties the two components: `comp_list`
+  is re-pointed and they share one mixing vector and density, with an A-freeze for 6 iterations
+  after each merge (Fortran `identify_shared_comps`, amica15.f90:1916).
+- The `gm`-weighted `dAk/zeta` step averages a shared component over its models; byte-identical to
+  the per-model update when no merge fires.
 - `keep_best` (#51) is disabled under sharing (a merge changes the parameter count, so pre-/post-merge
   LLs are not comparable and restoring an earlier snapshot would revert the merge); `fit` returns the
   last, merged iterate like Fortran.
-- OFF by default, and a no-op for `n_models=1`, so single-model (#24) and default multi-model (#27)
-  results are byte-for-byte unchanged (verified by the full torch suite). No bit-exact oracle: the
-  reference's `Spinv2` similarity metric is *declared but never allocated* (unrunnable, like the dead
-  `do_choose_pdfs`, #26), so the intended algorithm is implemented and behavior-validated. See
-  `tests/torch_tests/test_ng_sharing.py`.
+- OFF by default, and a no-op for `n_models=1`. The reference binary's own scan never merges
+  (`Spinv2` is never allocated, so every similarity is NaN), but the update from a merged state
+  seeded through `load_comp_list` matches PyTorch and NumPy to float64 round-off
+  (`pamica/tests/test_component_rows.py`, opt-in with `AMICA_RUN_FORTRAN=1`).
 
 ### Structure and infrastructure
 - Module rename into `numpy_impl/` and `torch_impl/` with topic-based names (issue #34); the public

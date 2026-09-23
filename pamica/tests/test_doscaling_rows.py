@@ -2,8 +2,9 @@
 Phase 7).
 
 pamica stores each model's mixing block transposed relative to the reference
-(issue #24 convention, ADR 0006), so source ``i`` of model ``h`` is ROW ``i`` of
-``A[:, comp_list[:, h]]``, with its density at ``mu[:, comp_list[i, h]]``. The
+(issue #24 convention, ADR 0006), so source ``i`` of model ``h`` is a ROW of its
+block, with its density at ``mu[:, comp_list[i, h]]``; since issue #334 (ADR
+0007) ``A`` holds one component per row, ``A[comp_list[i, h], :]``. The
 reference's ``doscaling`` (amica15.f90:1843-1851) divides each component's
 mixing vector by its norm and multiplies/divides that component's ``mu``/``sbeta``
 by it: an exact change of scale that leaves the log-likelihood unchanged. Before
@@ -20,11 +21,12 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
    at unit norm, while the old column rule on the same state moves the
    log-likelihood by far more (so these tests catch the bug);
 2. the three backends rescale one shared state identically, including a
-   permuted ``comp_list`` and a merged one, where the per-block rule is applied
-   uniformly until the component-row layout of Phase 8 (issue #334) replaces
-   it; a zero- or NaN-norm row is left untouched, as in the reference;
-3. ``doscaling=False`` is byte-identical to the pre-fix code: each backend class
-   at commit ``fb13d76`` is loaded from git and fitted in the same process;
+   permuted ``comp_list`` and a merged one, where the shared component row is
+   rescaled once (issue #334); a zero- or NaN-norm row is left untouched, as in
+   the reference;
+3. ``doscaling=False`` is byte-identical to the pre-fix code: the package at
+   commit ``fb13d76`` is loaded from git and each backend fitted in the same
+   process, its ``A`` mapped onto the component rows issue #334 introduced;
 4. ``scalestep``, a pamica extension the reference parses but never reads,
    counts iterations from 1, so its default of 1 is the reference's
    every-iteration rescale, and every constructor rejects a ``scalestep`` that
@@ -39,11 +41,9 @@ Real bundled sample EEG only, no synthetic data or mocks (``.rules/testing.md``)
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import os
-import subprocess
-import sys
 import tempfile
-import types
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -53,6 +53,8 @@ import torch
 from scipy.special import logsumexp
 
 from pamica import AMICA_NumPy
+from pamica.component_layout import rows_from_legacy_columns
+from pamica.tests.pre_change import load_pre_change_package
 from pamica.torch_impl.core import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
 
@@ -107,11 +109,27 @@ def _mlx_core():
 
 
 def _row_norm_dev(A: np.ndarray, comp_list: np.ndarray) -> float:
-    """Largest ``| ||row i of block h|| - 1 |`` over every component."""
-    norms = [
-        np.linalg.norm(A[:, comp_list[:, h]], axis=1) for h in range(comp_list.shape[1])
-    ]
-    return float(np.abs(np.concatenate(norms) - 1.0).max())
+    """Largest ``| ||A[k, :]|| - 1 |`` over every component ``k`` a model uses
+    (one component per row, issue #334)."""
+    norms = np.linalg.norm(A[np.unique(comp_list), :], axis=1)
+    return float(np.abs(norms - 1.0).max())
+
+
+def _column_rule(
+    A: np.ndarray, mu: np.ndarray, beta: np.ndarray, comp_list: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The pre-#333 rule: normalize every stored column of the pre-#334
+    component-column layout, scaling ``mu``/``beta`` of the component id that
+    indexes the column to match -- a compensated rescale of vectors that are not
+    components. Takes and returns component-row arrays (an unmerged
+    ``comp_list``); the column layout is rebuilt block by block and converted
+    back with the persistence conversion."""
+    A_cols = np.empty((A.shape[1], A.shape[0]), dtype=A.dtype)
+    for h in range(comp_list.shape[1]):
+        A_cols[:, comp_list[:, h]] = A[comp_list[:, h], :]
+    scale = np.sqrt(np.sum(A_cols**2, axis=0))
+    A_rows = rows_from_legacy_columns(A_cols / scale, comp_list, owner="test")
+    return A_rows, mu * scale, beta / scale
 
 
 def _mean_ll(lht: np.ndarray, n_channels: int) -> float:
@@ -156,10 +174,9 @@ def test_torch_rescale_is_an_exact_change_of_scale(real_slice, n_models, newton)
     assert _row_norm_dev(m.A.numpy(), comp_list) <= 1e-14
 
     # The pre-#333 rule (normalize stored columns) on the same state.
-    for k, v in saved.items():
-        setattr(m, k, v.clone())
-    scale = torch.sqrt((m.A**2).sum(dim=0))
-    m.A, m.mu, m.beta = m.A / scale, m.mu * scale, m.beta / scale
+    A0, mu0, beta0 = (saved[k].numpy() for k in ("A", "mu", "beta"))
+    cols = _column_rule(A0, mu0, beta0, comp_list)
+    m.A, m.mu, m.beta = (torch.from_numpy(x) for x in cols)
     m._update_unmixing_matrices()
     assert abs(_mean_ll(m.model_loglik(real_slice), NW) - ll0) > COLUMN_RULE_MIN_DLL
 
@@ -197,8 +214,7 @@ def test_numpy_rescale_is_an_exact_change_of_scale(
     assert m.A is not None
     assert _row_norm_dev(m.A, comp_list) <= 1e-14
 
-    scale = np.sqrt(np.sum(A0**2, axis=0))
-    m.A, m.mu, m.beta = A0 / scale, mu0 * scale, beta0 / scale
+    m.A, m.mu, m.beta = _column_rule(A0, mu0, beta0, comp_list)
     m._update_unmixing_matrices()
     assert abs(m._get_updates_and_likelihood()["ll"] - ll0) > COLUMN_RULE_MIN_DLL
 
@@ -230,10 +246,9 @@ def test_mlx_rescale_is_an_exact_change_of_scale(real_slice, n_models, newton):
     assert _row_norm_dev(np.array(m.A, dtype=np.float64), comp_list) <= 1e-6
 
     # MLX rebinds (never mutates) these arrays, so the saved ones are intact.
-    for k, v in saved.items():
-        setattr(m, k, v)
-    scale = mx.sqrt((m.A**2).sum(axis=0))
-    m.A, m.mu, m.beta = m.A / scale, m.mu * scale, m.beta / scale
+    A0, mu0, beta0 = (np.array(saved[k]) for k in ("A", "mu", "beta"))
+    cols = _column_rule(A0, mu0, beta0, comp_list)
+    m.A, m.mu, m.beta = (mx.array(x) for x in cols)
     m._update_unmixing_matrices()
     assert abs(_mean_ll(m.model_loglik(real_slice), NW) - ll0) > COLUMN_RULE_MIN_DLL
 
@@ -272,14 +287,13 @@ def unscaled_state(real_slice) -> State:
     params=["disjoint", "permuted", "merged"],
 )
 def two_model_state(request, unscaled_state) -> State:
-    """``permuted`` shuffles each model's ``comp_list`` column, so the stored
-    columns of a block are neither contiguous nor in order (a general index
-    pattern for every backend's scatter). ``merged`` plants a share merge
-    (model 1's source 3 folded onto model 0's source 5 column, the way
-    ``identify_shared_comps`` folds a pair): the shared column then sits in
-    rows of both blocks, the one configuration where the per-block rule is not
-    a change of scale. Every backend must still apply it the same way (models
-    in order) until Phase 8 (issue #334) replaces it.
+    """``permuted`` shuffles each model's ``comp_list`` column, so the rows of
+    a block are neither contiguous nor in order (a general index pattern for
+    every backend's gather and scale). ``merged`` plants a share merge (model
+    1's source 3 folded onto model 0's source 5 component, the way
+    ``identify_shared_comps`` folds a pair): the shared component row then sits
+    in both blocks and must be rescaled exactly once, and the merged-away row
+    not at all (issue #334).
     """
     A, mu, beta, comp_list = unscaled_state
     comp_list = comp_list.copy()
@@ -352,7 +366,7 @@ def test_a_zero_or_nan_norm_row_is_left_untouched(unscaled_state, backend, bad):
     h, i = 1, 7  # source 7 of model 1: a block other than the first
     k = comp_list[i, h]
     planted = A.copy()
-    planted[i, comp_list[:, h]] = bad
+    planted[k, :] = bad  # component k is row k (issue #334)
     dtype = np.float32 if backend == "mlx" else np.float64
     before = tuple(np.asarray(x, dtype) for x in (planted, mu, beta))
 
@@ -360,7 +374,7 @@ def test_a_zero_or_nan_norm_row_is_left_untouched(unscaled_state, backend, bad):
     clean_A, clean_mu, clean_beta, _ = _rescaled(backend, unscaled_state)
 
     rows = np.zeros(A.shape, dtype=bool)
-    rows[i, comp_list[:, h]] = True
+    rows[k, :] = True
     assert got_A[rows].tobytes() == before[0][rows].tobytes()
     assert got_mu[:, k].tobytes() == before[1][:, k].tobytes()
     assert got_beta[:, k].tobytes() == before[2][:, k].tobytes()
@@ -371,10 +385,9 @@ def test_a_zero_or_nan_norm_row_is_left_untouched(unscaled_state, backend, bad):
     assert got_beta[:, others].tobytes() == clean_beta[:, others].tobytes()
     # ...and those rows are unit norm, so the rescale really ran on them.
     unit = 1e-6 if backend == "mlx" else 1e-14
-    for hh in range(comp_list.shape[1]):
-        norms = np.linalg.norm(got_A[:, comp_list[:, hh]].astype(np.float64), axis=1)
-        keep = np.arange(NW) != i if hh == h else np.ones(NW, dtype=bool)
-        assert np.abs(norms[keep] - 1.0).max() <= unit
+    norms = np.linalg.norm(got_A.astype(np.float64), axis=1)
+    others_rows = np.arange(A.shape[0]) != k
+    assert np.abs(norms[others_rows] - 1.0).max() <= unit
 
 
 # --- 3. doscaling=False is byte-identical to the pre-fix code ---------------
@@ -382,68 +395,32 @@ def test_a_zero_or_nan_norm_row_is_left_untouched(unscaled_state, backend, bad):
 # column rule. A later phase that deliberately changes the doscaling=False
 # trajectory moves this pin to its own base commit.
 _PRE_FIX_COMMIT = "fb13d76de145419da9c89db94438d60aafbff444"
-_BACKEND_MODULES = {
-    "torch": ("pamica/torch_impl/core.py", "pamica.torch_impl", "AMICATorchNG"),
-    "numpy": ("pamica/numpy_impl/core.py", "pamica.numpy_impl", "AMICA"),
-    "mlx": ("pamica/mlx_impl/core.py", "pamica.mlx_impl", "AMICAMLXNG"),
-}
 
 
-def _pre_fix_class(backend: str) -> Any:
-    """The backend class as it was at ``_PRE_FIX_COMMIT``, read with ``git
-    show`` and executed as a sibling module of the live package, so its
-    relative imports resolve against the live helper modules (this phase
-    changes none of them). The same construction as
-    ``mlx_tests/test_mlx_fit_noop.py``: both classes then run in one process on
-    one machine, so the comparison is exact without recorded constants."""
-    path, package, cls_name = _BACKEND_MODULES[backend]
-    repo_root = Path(__file__).resolve().parents[2]
-    # A shallow clone may lack the commit: fetch just that object first (best
-    # effort, e.g. no network), and let `git show` be the real check.
-    subprocess.run(
-        ["git", "fetch", "origin", _PRE_FIX_COMMIT, "--depth", "1"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
+@pytest.fixture(scope="module")
+def pre_fix(tmp_path_factory) -> Any:
+    """The pamica package at ``_PRE_FIX_COMMIT``, imported beside the live one
+    (``pamica/tests/pre_change.py``): both then fit in one process on one
+    machine, so the comparison is exact without recorded constants."""
+    return load_pre_change_package(
+        _PRE_FIX_COMMIT, "pamica_pre333", tmp_path_factory.mktemp("pre333")
     )
-    result = subprocess.run(
-        ["git", "show", f"{_PRE_FIX_COMMIT}:{path}"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        reason = (
-            f"git object {_PRE_FIX_COMMIT[:7]} is not reachable in this checkout; "
-            f"git show stderr: {result.stderr.strip()!r}"
-        )
-        # A skip in CI would silently drop this regression guard, and the CI
-        # jobs check out full history (fetch-depth: 0), so there it fails.
-        # Only a local shallow clone skips.
-        if os.environ.get("CI"):
-            pytest.fail(reason)
-        pytest.skip(reason)
-    name = f"{package}._pre_issue_333_core"
-    module = types.ModuleType(name)
-    module.__package__ = package
-    # The live path, so a data file read next to the module (NumPy's
-    # params.json, unchanged by this phase) resolves; the code object names
-    # the commit it came from.
-    module.__file__ = str(repo_root / path)
-    sys.modules[name] = module  # dataclasses look the module up while building
-    try:
-        code = compile(result.stdout, f"<git {_PRE_FIX_COMMIT[:7]} {path}>", "exec")
-        exec(code, module.__dict__)
-    finally:
-        del sys.modules[name]
-    return getattr(module, cls_name)
+
+
+def _pre_fix_class(pre_fix: Any, backend: str) -> Any:
+    if backend == "torch":
+        return pre_fix.torch_impl.core.AMICATorchNG
+    if backend == "numpy":
+        return pre_fix.numpy_impl.core.AMICA
+    return importlib.import_module(f"{pre_fix.__name__}.mlx_impl.core").AMICAMLXNG
 
 
 def _fit_unscaled(
     cls: Any, backend: str, n_models: int, X: np.ndarray, outdir: Path
 ) -> Dict[str, np.ndarray]:
     """A short ``doscaling=False`` fit of ``cls``; its trajectory and every
-    fitted array, as float64/int numpy arrays."""
+    fitted array, as float64/int numpy arrays, ``A`` as component rows (a
+    pre-#334 class's is converted the way a pre-#334 save is)."""
     if backend == "numpy":
         model = cls(
             num_models=n_models,
@@ -472,13 +449,15 @@ def _fit_unscaled(
     for k in ("A", "W", "mu", "beta", "alpha", "rho", "gm", "c", "comp_list"):
         v = getattr(model, k)
         out[k] = v.cpu().numpy() if isinstance(v, torch.Tensor) else np.array(v)
+    if out["A"].shape[0] != out["comp_list"].size:
+        out["A"] = rows_from_legacy_columns(out["A"], out["comp_list"], owner="test")
     return out
 
 
 @pytest.mark.parametrize("n_models", [1, 2])
 @pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
 def test_doscaling_off_is_byte_identical_to_the_pre_fix_code(
-    real_slice, backend, n_models, tmp_path
+    pre_fix, real_slice, backend, n_models, tmp_path
 ):
     """``doscaling=False`` never enters the rescale, so this fix must leave its
     trajectory and every fitted array bit for bit where the pre-fix code put
@@ -488,7 +467,7 @@ def test_doscaling_off_is_byte_identical_to_the_pre_fix_code(
         new_cls = _mlx_core().AMICAMLXNG
     else:
         new_cls = AMICATorchNG if backend == "torch" else AMICA_NumPy
-    old_cls = _pre_fix_class(backend)
+    old_cls = _pre_fix_class(pre_fix, backend)
 
     old = _fit_unscaled(old_cls, backend, n_models, real_slice, tmp_path / "old")
     new = _fit_unscaled(new_cls, backend, n_models, real_slice, tmp_path / "new")
@@ -712,7 +691,7 @@ def test_doscaling_matches_the_seeded_reference(n_models, tmp_path):
         }
         for name, (A, mu, beta, ll) in fits.items():
             errs = {
-                "A": np.abs(reference_mixing(A, comp_list) - ref.A).max(),
+                "A": np.abs(reference_mixing(A) - ref.A).max(),
                 "mu": np.abs(mu - ref.mu).max(),
                 "sbeta": np.abs(beta - ref.sbeta).max(),
                 "LL": np.abs(np.asarray(ll) - ref.LL).max(),

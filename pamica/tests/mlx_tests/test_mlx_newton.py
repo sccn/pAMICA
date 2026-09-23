@@ -676,10 +676,10 @@ def test_sharing_and_newton_fit_completes():
     """``share_comps`` and Newton together: merges land inside the Newton phase
     and the fit stays finite.
 
-    A merged-away column receives no sufficient statistic, but the Newton
-    curvature is indexed by (model, SOURCE) rather than by mixing column, so it
+    A merged-away component receives no sufficient statistic, but the Newton
+    curvature is indexed by (model, SOURCE) rather than by mixing vector, so it
     never sees the 0/0 that the mixture updates mask -- both models' sources keep
-    full responsibility mass whichever column they point at. This drives that
+    full responsibility mass whichever component they point at. This drives that
     claim through a real fit at the shipped ``comp_thresh`` default, where a
     couple of genuinely near-collinear pairs merge.
 
