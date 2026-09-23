@@ -98,7 +98,7 @@ MLX computes in float32 (about seven significant digits per operation), so its b
 it lands within about five significant digits of the float64 likelihood, which is float32 consistency, not float64 parity.
 Runtime is one run's wall-clock time for the fit alone and varies by about a third between runs on the same host;
 the reference's includes process start-up and is single-threaded.
-Epic #324 left the runtimes unchanged: the code before it (e38aa11), run in the same session, took 10.1, 17.9, 32.5 and 3.2 seconds.
+Epic #324 left the runtimes unchanged: the code before its changes to the fit (e38aa11), run in the same session, took 10.1, 17.9, 32.5 and 3.2 seconds.
 
 **The log-likelihood difference in these rows mostly reflects the two starting points.**
 The harness starts each side from its own draw: numpy's `RandomState(42)` for pamica, gfortran's generator seeded with 42 for the reference.
@@ -106,8 +106,8 @@ After 100 iterations the final log-likelihood still depends on where a fit start
 Over eight seeds, the reference's own final log-likelihood has a standard deviation of 2.6e-4 and a range of 8.0e-4 (pamica's: 2.7e-4 and 8.0e-4),
 and over the 64 pairs of a pamica start and a reference start the median difference is 3.5e-4 (range 1.7e-5 to 8.2e-4).
 The 2.7e-4 in the table lies within that spread.
-Before epic #324 the same run showed 2.9e-5, which reflected this particular pair of starts:
-from a shared start, the code before the epic trailed the reference by 2.4e-4 after 100 iterations, which offset most of the difference between the two starts.
+Before those changes the same run showed 2.9e-5, which reflected this particular pair of starts:
+from a shared start, that code trailed the reference by 2.4e-4 after 100 iterations, which offset most of the difference between the two starts.
 
 The update rule itself is compared from a shared start:
 pamica's seed-42 initialization is written into the reference's `load_*` files, and both sides run the harness settings for 100 iterations, the reference on one thread
@@ -115,8 +115,8 @@ pamica's seed-42 initialization is written into the reference's `load_*` files, 
 
 | Code | LL difference | Mean matched correlation | Amari distance |
 |---|---:|---:|---:|
-| before epic #324 (e38aa11) | 2.4e-4 | 0.99999 | 5.8e-4 |
-| epic #324 | 1.6e-6 | 0.99999993 | 3.9e-5 |
+| before epic #324's changes to the fit (e38aa11) | 2.4e-4 | 0.99999 | 5.8e-4 |
+| with them | 1.6e-6 | 0.99999993 | 3.9e-5 |
 
 The earlier row starts from that code's own initialization, which predates the component-row layout (issue #334) and the normalized initial mixing matrix (issue #341);
 from each code's seeded state, the reference's first-iteration log-likelihood matches pamica's to 9e-16, so the state was written in the orientation the reference reads.
@@ -531,7 +531,7 @@ two float64 runs of the same code on CPU and CUDA differ by 2.3e-4, the backends
 and adding 1e-9 µV to one sample changes the torch-CPU value by 1.3e-15 after one iteration and 4.4e-4 after 25
 (the trajectory has a likelihood decrease on its 25th iteration).
 The 70-channel differences are of the same size as that sensitivity,
-and the code before epic #324 shows the same growth.
+and the code before epic #324's changes to the fit (e38aa11) shows the same growth.
 NumPy is called without a seed here, so it starts from its own draw, which is why its column sits apart (by up to 4.2e-3 at 70 channels).
 The component-level float32 comparison is in [the per-backend rows](#parity-rows-per-backend):
 from a shared start, MLX float32 and PyTorch float64 agree to a mean matched correlation of 0.99999991 after 100 iterations.
