@@ -74,9 +74,14 @@ Measured on 2026-09-22 on an Apple M4 Pro (14 cores, 64 GB, macOS 27; MLX 0.32.0
 against the v0.3.3 release native engine (`amica15-macos-arm64`, SHA-256 `c8b2ac7f...`), with the harness defaults:
 
 ```bash
+uv run python -c "from pamica.native import resolver; print(resolver.resolve(version='v0.3.3'))"
 uv run python validate_implementations.py --backend all \
   --fortran-binary ~/.cache/pamica/bin/v0.3.3/amica15-macos-arm64
 ```
+
+The reference is pinned to that explicit release binary (the first line downloads it and verifies its checksum) rather than to the default resolution,
+because the resolver caches its `latest` download without refreshing it,
+so on a machine that fetched an earlier release the default can run an older binary than the one these rows were measured with.
 
 | Backend | Precision | Final LL | LL difference from Fortran | Mean matched correlation | Min matched correlation | Amari distance | Runtime (s) | Expected bar |
 |---|---|---:|---:|---:|---:|---:|---:|---|
