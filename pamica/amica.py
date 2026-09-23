@@ -286,11 +286,17 @@ class AMICA:
         docstring for the full explanation).
     ll_history_ : list
         Log-likelihood history during training (the true per-iteration
-        trajectory; may dip below its peak on a late overshoot)
+        trajectory; may dip below its peak on a late overshoot): entry ``i`` is
+        the likelihood of the parameters iteration ``i`` started from, recorded
+        before that iteration's checks and update.
     final_ll_ : float
         Log-likelihood of the *fitted* parameters (issue #51). Use this, not
         ``ll_history_[-1]``, as the model's log-likelihood: with the best-iterate
         safeguard the returned parameters can be an earlier, higher-LL iterate.
+        Exact after a convergence stop, which exits before that iteration's
+        update, as the reference does (issue #339); after ``max_iter`` it is
+        the likelihood one update before the returned parameters, also as in
+        the reference.
     mir_history_ : list
         Mutual Information Reduction (MIR) waypoint trajectory (issue #137),
         populated when ``fit`` is called
@@ -1072,10 +1078,12 @@ class AMICA:
         #155) for a model that was just fit in this process, taken from the
         E-step stash (issue #157); a model restored via :meth:`load` carries no
         stash, so ``LLt`` is omitted for it (a warning is logged). As in the
-        reference, ``LLt`` is the E-step that produced ``final_ll_`` and is
-        therefore one M-step older than the ``W``/``A`` written beside it --
-        see ``docs/guides/amica-differences.md``. Use :meth:`model_loglik` for
-        the log-likelihood of the written parameters.
+        reference, ``LLt`` is the E-step that produced ``final_ll_``: after a
+        fit that ran to ``max_iter`` it is therefore one M-step older than the
+        ``W``/``A`` written beside it, and after a convergence stop, which
+        exits before that iteration's update, it belongs to them -- see
+        ``docs/guides/amica-differences.md``. Use :meth:`model_loglik` for the
+        log-likelihood of the written parameters.
 
         Parameters
         ----------

@@ -747,8 +747,13 @@ class AMICAMLXNG:
         self.rho0 = rho0
         self.minrho = minrho
         self.maxrho = maxrho
+        # Working rho rate and its ceiling, as AMICATorchNG keeps them (the
+        # reference's rholrate/rholrate0, amica15.f90:1063-1068, 1806/1813):
+        # a decrease scales the working rate, a maxdecs ratchet the ceiling, and
+        # every A update resets the working rate to the ceiling.
         self.rholrate0 = rholrate
         self.rholrate = rholrate
+        self.rholrate_cap = rholrate
         self.rholratefact = rholratefact
 
         # Source-density family selection (issue #265, porting AMICATorchNG's
@@ -871,11 +876,14 @@ class AMICAMLXNG:
         # index-aligned with ll_history: the entry for iteration i is
         # computed AFTER that iteration's _update_parameters, while
         # ll_history[i] is the likelihood of the parameters BEFORE it, so
-        # the two describe states one update apart (issue #161).
+        # the two describe states one update apart (issue #161). An
+        # iteration that ends the fit on a stop records no waypoint.
         self.mir_history_: list[tuple[int, float, float]] = []
         # Log-likelihood of the returned parameters, set by fit() to
         # ll_history[-1], or to the best iterate's LL if the keep_best
-        # safeguard (issue #51) restores it -- see _fit_once. Under
+        # safeguard (issue #51) restores it -- see _fit_once, which also says
+        # when that is exact (a convergence stop) and when it trails the
+        # returned parameters by one update (max_iter, issue #339). Under
         # share_comps, if a merge fires on the LAST fit iteration, the
         # returned A/W/comp_list are already post-merge but final_ll_ still
         # reports the pre-merge log-likelihood -- the merge runs after that
@@ -928,10 +936,10 @@ class AMICAMLXNG:
             None  # scalar: log|det W|, refreshed per iter
         )
         # Weight-gradient norm (Fortran ndtmpsum), recomputed every iteration by
-        # _update_parameters and read by fit()'s two grad-norm checks. Held as
+        # _update_direction and read by fit()'s two grad-norm checks. Held as
         # the unevaluated MLX scalar rather than a Python float (AMICATorchNG's
-        # eager ``_ndtmpsum`` float) so materializing it joins fit()'s single
-        # per-iteration mx.eval instead of adding a second sync; the
+        # eager ``_ndtmpsum`` float) so materializing it joins fit()'s
+        # per-iteration likelihood sync instead of adding one; the
         # ``_ndtmpsum`` property below is the float view the checks and
         # cross-backend tests read.
         self._nd_arr: Optional[mx.array] = None
@@ -967,9 +975,10 @@ class AMICAMLXNG:
     @property
     def _ndtmpsum(self) -> Optional[float]:
         """Latest weight-gradient norm as a host float (AMICATorchNG's
-        ``_ndtmpsum``), or None before the first M-step. Cheap after fit()'s
-        mx.eval has materialized it; forces evaluation otherwise, so a direct
-        ``_update_parameters`` call still reads the current iteration's value."""
+        ``_ndtmpsum``), or None before the first step is built. Cheap after
+        fit()'s mx.eval has materialized it; forces evaluation otherwise, so a
+        direct ``_update_direction``/``_update_parameters`` call still reads the
+        current iteration's value."""
         if self._nd_arr is None:
             return None
         return float(self._nd_arr.item())
@@ -1100,13 +1109,15 @@ class AMICAMLXNG:
         self.n_kurt_done = 0
 
         # Reset the mutable optimization state to the pristine constructor values
-        # (lrate_cap, newtrate and rholrate are ratcheted down during fit, and
-        # n_newton_fallbacks counts one fit), so a re-fit starts fresh --
-        # AMICATorchNG does the same in ``_initialize_parameters``/``_fit_once``.
+        # (lrate/lrate_cap, newtrate and rholrate/rholrate_cap are annealed or
+        # ratcheted down during fit, and n_newton_fallbacks counts one fit), so
+        # a re-fit starts fresh -- AMICATorchNG does the same in
+        # ``_initialize_parameters``/``_fit_once``.
         self.lrate = self.lrate0
         self.lrate_cap = self.lrate0
         self.newtrate = self.newtrate0
         self.rholrate = self.rholrate0
+        self.rholrate_cap = self.rholrate0
         self.n_newton_fallbacks = 0
         self.iteration = 0
         self._refresh_lgamma_table()
@@ -1835,6 +1846,45 @@ class AMICAMLXNG:
             self.alpha,
         )
 
+        # The A branch, where the reference has it: after gm/alpha/c and before
+        # mu/sbeta/rho (amica15.f90:1803-1816; ``AMICATorchNG._update_parameters``).
+        # On an iteration the reference holds A
+        # (:func:`pamica.schedule.share_freeze`), everything inside it is skipped
+        # together: the Newton-fallback bookkeeping (so a discarded Newton
+        # direction cannot pollute the fallback counter), the lrate ramp, the
+        # reset of the working rho rate to its ceiling, and the step itself. The
+        # step was built by _update_direction from the parameters the E-step
+        # saw, so taking it before the mixture updates changes nothing they read.
+        if not self._a_frozen():
+            if step.newton_active and step.no_newt:
+                # Fortran prints "Hessian not positive definite, using natural
+                # gradient" (amica15.f90:1809-1811). Surface the same signal so
+                # an all-fallback run is visible without re-instrumenting.
+                self.n_newton_fallbacks += 1
+                logger.warning(
+                    "Newton not positive definite at iter %d; using natural gradient.",
+                    self.iteration,
+                )
+
+            # Learning-rate ramp: toward newtrate while Newton is active and
+            # stable, otherwise toward lrate_cap (Fortran amica15.f90:1803-1816),
+            # from this iteration's lrate, which a likelihood decrease has
+            # already halved (fit runs the response first, issue #339).
+            if step.newton_active and not step.no_newt:
+                self.lrate = min(
+                    self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
+                )
+            else:
+                self.lrate = min(
+                    self.lrate_cap, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
+                )
+            # rho moves at the ceiling (``rholrate = rholrate0``, :1806/:1813),
+            # so a decrease's scaling of the working rate reaches it only on a
+            # held iteration.
+            self.rholrate = self.rholrate_cap
+
+            self.A = self.A - self.lrate * step.dAk
+
         self.mu = mx.where(used, self.mu + acc["dmu_n"] / acc["dmu_d"], self.mu)
         self.beta = mx.where(
             used,
@@ -1884,34 +1934,6 @@ class AMICAMLXNG:
             self.rho = mx.where(
                 used, mx.clip(new_rho, self.minrho, self.maxrho), self.rho
             )
-
-        # A-update. When sharing holds A this iteration (the post-merge settle
-        # window, Fortran amica15.f90:1803), skip the step -- the lrate ramp, the
-        # Newton-fallback bookkeeping, and the step itself -- so a discarded
-        # Newton direction cannot pollute the fallback counter.
-        if not self._a_frozen():
-            if step.newton_active and step.no_newt:
-                # Fortran prints "Hessian not positive definite, using natural
-                # gradient" (amica15.f90:1809-1811). Surface the same signal so
-                # an all-fallback run is visible without re-instrumenting.
-                self.n_newton_fallbacks += 1
-                logger.warning(
-                    "Newton not positive definite at iter %d; using natural gradient.",
-                    self.iteration,
-                )
-
-            # Learning-rate ramp: toward newtrate while Newton is active and
-            # stable, otherwise toward lrate_cap (Fortran amica15.f90:1803-1816).
-            if step.newton_active and not step.no_newt:
-                self.lrate = min(
-                    self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
-                )
-            else:
-                self.lrate = min(
-                    self.lrate_cap, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
-                )
-
-            self.A = self.A - self.lrate * step.dAk
 
         # The reference rescales every iteration (it parses ``scalestep`` but
         # never reads it, amica15.f90:1843/3686); pamica keeps ``scalestep`` as
@@ -2431,7 +2453,7 @@ class AMICAMLXNG:
         # ... the schedule/counters a fit mutates ...
         "iteration", "ll_history", "final_ll_", "stop_reason",
         "n_newton_fallbacks", "n_kurt_done",
-        "lrate", "lrate_cap", "newtrate", "rholrate",
+        "lrate", "lrate_cap", "newtrate", "rholrate", "rholrate_cap",
         # ... the LLt stash and its materialized arrays (issue #157, epic
         # #278 Phase 3/#289) ...
         "_llt_logv", "_llt_ll", "_llt_lht", "_llt_lt",
@@ -2583,6 +2605,22 @@ class AMICAMLXNG:
         """Run one fit (one initialization, one EM loop) -- what :meth:`fit`
         calls once per restart. ``X`` is ``(n_channels, n_samples)``.
 
+        Iteration order (issue #339), as in ``AMICATorchNG._fit_once``: each
+        iteration runs the E-step (its likelihood is appended to
+        ``ll_history``, and the step for ``A`` and its norm are built), then
+        the likelihood-decrease response and the stopping checks, and only
+        then, unless a check fired, the parameter update with the rates just
+        set. ``iteration`` is the 0-based index of the last iteration whose
+        E-step ran. A convergence stop (``"min_dll"``, ``"grad_norm"``,
+        ``"grad_norm_floor"``, ``"lrate_floor"``) takes no update on the
+        stopping iteration, so ``final_ll_`` (without a keep-best restore) is
+        exactly the log-likelihood of the returned parameters; a fit that runs
+        to ``max_iter`` takes the last iteration's update, so its
+        ``final_ll_ == ll_history[-1]`` is the likelihood one update before the
+        returned parameters, as in the reference. A ``"nan_params"`` stop
+        records its iteration's (finite) likelihood before the update that
+        went non-finite.
+
         Under ``share_comps``, if a merge fires on the LAST iteration, the
         returned ``A``/``W``/``comp_list`` are already post-merge but
         ``final_ll_`` still reports the pre-merge log-likelihood; see that
@@ -2592,12 +2630,12 @@ class AMICAMLXNG:
         ``LLt`` (``_llt_lht``/``_llt_lt``, written by
         :meth:`write_amica_output`) is the per-sample log-likelihood stashed
         by the E-step that produced ``final_ll_``, never a separate post-fit
-        forward pass -- so it is one M-step older than the returned ``W``/
-        ``A`` (Fortran's own convention; see ``docs/guides/amica-differences.md``'s
-        "one M-step older" section) unless the ``keep_best`` safeguard
-        restored an earlier iterate, in which case the restored stash and the
-        restored parameters come from the same point in the loop and there is
-        no staleness at all.
+        forward pass -- so after a fit that ran to ``max_iter`` it is one
+        M-step older than the returned ``W``/``A`` (Fortran's own convention;
+        see ``docs/guides/amica-differences.md``'s "one M-step older"
+        section). After a convergence stop, or a ``keep_best`` restore of an
+        earlier iterate, the stash and the returned parameters come from the
+        same point in the loop and there is no staleness at all.
 
         ``mir_step`` (issue #137, epic #278 Phase 3/#289), if > 0, computes
         MIR from the current ``W``/``sphere`` every ``mir_step`` iterations
@@ -2609,7 +2647,9 @@ class AMICAMLXNG:
         parameters, not ``mir_history_[-1]``. Not index-aligned with
         ``ll_history``: entry ``i`` is computed after iteration ``i``'s
         parameter update, while ``ll_history[i]`` is the likelihood of the
-        parameters before it, so the two are one update apart (issue #161).
+        parameters before it, so the two are one update apart (issue #161);
+        an iteration that ends the fit on a stop takes no update and records
+        no waypoint.
         Incompatible with PCA reduction, same as :meth:`mir` itself, and
         gated exactly as ``AMICATorchNG._fit_once`` gates it (issue #323):
         an explicit reduction request, ``pcakeep < n_channels`` or any
@@ -2742,17 +2782,29 @@ class AMICAMLXNG:
             except ImportError:
                 pass
 
+        # One iteration follows the reference's main loop (amica15.f90:949-1142,
+        # issue #339; ``AMICATorchNG._fit_once``): the E-step with LL(iter), the
+        # step and its norm; the likelihood-decrease response and the stopping
+        # checks; an exit BEFORE any parameter moves if a check fired; otherwise
+        # the update with the rates the response just set, then the remaining
+        # hooks and rejection.
         for it in rng:
             self.iteration = it
             X_use = X_t[:, self.good_idx] if self.do_reject else X_t
             n_use = X_use.shape[1]
             acc = self._accumulate_blocks(X_use, stash_llt=True)
+            # The step and its norm come from the same E-step and are read by
+            # the checks below (the reference builds both in
+            # accum_updates_and_likelihood, amica15.f90:1749-1761). Built lazily
+            # here so the sync below materializes them with the likelihood, one
+            # sync as before; a non-finite likelihood simply discards them.
+            step = self._update_direction(acc)
 
             ll_arr = acc["ll"] / (n_use * self.n_channels)
             # The stash scatter (_accumulate_blocks) is part of the same lazy
             # graph as ll_arr, so materializing both here costs exactly the
             # one sync this line already paid -- not a second one (issue #157).
-            mx.eval(ll_arr, self._llt_logv, self._llt_ll)
+            mx.eval(ll_arr, self._llt_logv, self._llt_ll, step.dAk, self._nd_arr)
             ll = float(ll_arr.item())
             if not math.isfinite(ll):
                 self.stop_reason = "nan_ll" if math.isnan(ll) else "singular_ll"
@@ -2763,10 +2815,141 @@ class AMICAMLXNG:
 
             # Best-iterate safeguard (issue #51): remember the parameters that
             # produced this LL when it is the best seen, so a later overshoot
-            # does not leave the returned model below this peak.
+            # does not leave the returned model below this peak. Nothing has
+            # moved them since the E-step, so the snapshot pairs them with ll.
             if track_best and ll > best_ll:
                 best_ll = ll
                 best_snapshot = self._snapshot_params()
+
+            self.ll_history.append(ll)
+
+            # Learning-rate control (Fortran amica15.f90:1051-1097): anneal the
+            # working lrate (and the working rho rate) on an LL decrease; ratchet
+            # the ceilings after maxdecs persistent decreases. All of it runs
+            # before this iteration's update, as in the reference, so the update
+            # below already uses the new rates.
+            #
+            # The working rho rate is scaled on every decrease, as the
+            # reference's is (:1063), but every update of A resets it to its
+            # ceiling before rho moves (_update_parameters, amica15.f90:1806/
+            # 1813), so the scaling only reaches rho on an iteration on which A
+            # is held. It is not a monotone decay (the issue #195 collapse):
+            # nothing but the maxdecs ratchet lowers the ceiling.
+            #
+            # have_prev mirrors Fortran's outer ``if (iter > 1)``
+            # (amica15.f90:1051), which wraps the decrease branch AND the two
+            # stops below, so none of the three can fire on the first iteration.
+            #
+            # PRECEDENCE NOTE (mirroring the same note in AMICATorchNG.fit): the
+            # three blocks are independent -- none is gated on ``leave`` already
+            # being True from an earlier block this same iteration, matching
+            # Fortran's own structure of independent ``leave = .true.``
+            # assignments with no declared precedence. Whichever block runs LAST
+            # and finds its condition true wins the reported stop_reason, so with
+            # this source order the standalone grad_norm block always has final
+            # say; under the shipped use_grad_norm=True default that makes the
+            # decrease branch's "grad_norm_floor" unreachable as the FINAL reason
+            # (its condition is strictly narrower). Deliberately not restructured
+            # into an explicit precedence, to keep this a direct port of
+            # amica15.f90:1051-1098.
+            have_prev = len(self.ll_history) > 1
+            leave = False
+            if have_prev and ll < self.ll_history[-2]:
+                if self.lrate <= self.minlrate:
+                    logger.warning(
+                        "lrate floor (%g) reached at iter %d; stopping.",
+                        self.minlrate,
+                        it,
+                    )
+                    self.stop_reason = "lrate_floor"
+                    leave = True
+                elif self._ndtmpsum is not None and self._ndtmpsum <= self.min_nd:
+                    # Fortran amica15.f90:1058's ``.or. (ndtmpsum .le. min_nd)``
+                    # half of the decrease stop (issue #207 gap 3, #248 here):
+                    # the same per-iteration value use_grad_norm reads below, so
+                    # a run whose lrate oscillates instead of annealing still
+                    # stops instead of burning the whole budget.
+                    logger.warning(
+                        "gradient-norm floor (%g) reached at iter %d on a "
+                        "likelihood decrease; stopping.",
+                        self.min_nd,
+                        it,
+                    )
+                    self.stop_reason = "grad_norm_floor"
+                    leave = True
+                else:
+                    self.lrate *= self.lratefact
+                    self.rholrate *= self.rholratefact
+                    numdecs += 1
+                    if numdecs >= self.maxdecs:
+                        self.lrate_cap *= self.lratefact
+                        if schedule.past_newton_start(it, self.newt_start):
+                            self.rholrate_cap *= self.rholratefact
+                        if self.do_newton and schedule.past_newton_start(
+                            it, self.newt_start
+                        ):
+                            # The Newton ceiling ratchets on the same maxdecs
+                            # cadence as lrate_cap/rholrate_cap (Fortran
+                            # amica15.f90:1056-1077), so a run that keeps
+                            # overshooting at newtrate anneals instead of
+                            # oscillating there.
+                            self.newtrate *= self.lratefact
+                        numdecs = 0
+
+            # Small-likelihood-increase stop (Fortran amica15.f90:1078-1090,
+            # use_min_dll/min_dll/maxincs). Independent of the decrease branch
+            # above: it runs every iteration once have_prev, including iterations
+            # where the LL just decreased (a decrease is always "less than" a
+            # positive min_dll, so it also increments numincs there, matching
+            # Fortran exactly). numincs resets to 0 on any gain >= min_dll; stops
+            # only after MORE than maxincs *consecutive* small gains.
+            if have_prev and self.use_min_dll:
+                if ll - self.ll_history[-2] < self.min_dll:
+                    numincs += 1
+                    if numincs > self.maxincs:
+                        logger.warning(
+                            "likelihood increasing by less than %g for more than "
+                            "%d iterations; stopping at iter %d.",
+                            self.min_dll,
+                            self.maxincs,
+                            it,
+                        )
+                        self.stop_reason = "min_dll"
+                        leave = True
+                else:
+                    numincs = 0
+
+            # Weight-gradient-norm stop (Fortran amica15.f90:1091-1097,
+            # use_grad_norm/min_nd). Also independent of the decrease branch:
+            # this is the unconditional every-iteration check, as opposed to the
+            # decrease-gated grad_norm_floor above.
+            if (
+                have_prev
+                and self.use_grad_norm
+                and self._ndtmpsum is not None
+                and self._ndtmpsum <= self.min_nd
+            ):
+                logger.warning(
+                    "norm of weight gradient <= %g at iter %d; stopping.",
+                    self.min_nd,
+                    it,
+                )
+                self.stop_reason = "grad_norm"
+                leave = True
+
+            # Switching Newton on changes the step direction, so the decrease
+            # counter accumulated during the natural-gradient phase no longer
+            # describes the schedule now running: Fortran clears it on the
+            # switch-on iteration (amica15.f90:1099-1102,
+            # ``AMICATorchNG._fit_once``).
+            if schedule.newton_switches_on(self.do_newton, it, self.newt_start):
+                numdecs = 0
+
+            # Stop before this iteration's update, as the reference does
+            # (amica15.f90:1111, ahead of update_params at :1122): the returned
+            # parameters are the ones whose LL was just recorded.
+            if leave:
+                break
 
             # Whether rejection fires this iteration (Fortran schedule,
             # amica15.f90:1136, with rejstart counted from 1 as the reference
@@ -2795,15 +2978,13 @@ class AMICAMLXNG:
             else:
                 reject_ll = None
 
-            step = self._update_direction(acc)
             self._update_parameters(acc, n_use, step)
             # One eval per iteration bounds the lazy graph to a single iteration's
             # worth of ops (the updated params feed the next accumulate). gm/c are
             # included so their dependency chain is materialized each iteration too
             # (c depends on the prior iteration's c), not left to grow unbounded.
-            # _nd_arr (the grad-norm stops' input) rides along here rather than
-            # being materialized inside _update_parameters, so reading it below
-            # costs no extra sync.
+            # _nd_arr (the grad-norm stops' input) was materialized with the
+            # likelihood above, before the checks read it.
             mx.eval(
                 self.A,
                 self.W,
@@ -2813,7 +2994,6 @@ class AMICAMLXNG:
                 self.rho,
                 self.gm,
                 self.c,
-                self._nd_arr,
                 self._logdet_W,
             )
 
@@ -2913,17 +3093,15 @@ class AMICAMLXNG:
             # stale W (pre-merge comp_list) while indexing the densities by the
             # merged comp_list. No-op when share_comps is off or n_models == 1.
             #
-            # This runs AFTER ``ll`` (this iteration's LL) was captured above,
+            # This runs AFTER ``ll`` (this iteration's LL) was recorded above,
             # so a merge on the final iteration lands in the returned
-            # A/W/comp_list but not in the ``ll_history``/``final_ll_`` value
-            # appended just below -- see final_ll_'s comment (issue #269).
+            # A/W/comp_list but not in ``ll_history``/``final_ll_`` -- see
+            # final_ll_'s comment (issue #269).
             if self.share_comps and schedule.periodic_due(
                 it, self.share_start, self.share_iter
             ):
                 self._identify_shared_comps()
                 self._update_unmixing_matrices()
-
-            self.ll_history.append(ll)
 
             # MIR waypoint (issue #137), following AMICATorchNG's idiom.
             # Computed from the CURRENT W/sphere (just rebuilt above by
@@ -2978,131 +3156,6 @@ class AMICAMLXNG:
                     mir_waypoints_disabled = True
                 else:
                     self.mir_history_.append((it, mir_nats, mir_var))
-
-            # Learning-rate control (Fortran amica17.f90:1062-1108): anneal on an
-            # LL decrease; ratchet the ceilings after maxdecs persistent decreases.
-            #
-            # rholrate is a maxdecs-ratcheted CEILING, not a per-decrease-annealed
-            # working rate. Fortran resets rholrate=rholrate0 every iteration before
-            # the rho update (amica15.f90:1806/1813) and only tightens the rholrate0
-            # ceiling at maxdecs (amica15.f90:1068, gated on iter > newt_start), so
-            # its per-decrease rholrate*=rholratefact (:1045) never reaches the rho
-            # update. rho has no ramp, so self.rholrate carries that ceiling directly
-            # (reset to rholrate0 at fit start, nothing re-inflates it) and must
-            # ratchet ONLY at maxdecs. The previous per-decrease decay collapsed the
-            # rho rate to ~1e-5 within a few hundred iterations and froze rho at a
-            # stale shape (issue #195, mirroring the torch/numpy fix in #193/#194).
-            #
-            # have_prev mirrors Fortran's outer ``if (iter > 1)``
-            # (amica15.f90:1051), which wraps the decrease branch AND the two
-            # stops below, so none of the three can fire on the first iteration.
-            #
-            # PRECEDENCE NOTE (mirroring the same note in AMICATorchNG.fit): the
-            # three blocks are independent -- none is gated on ``leave`` already
-            # being True from an earlier block this same iteration, matching
-            # Fortran's own structure of independent ``leave = .true.``
-            # assignments with no declared precedence. Whichever block runs LAST
-            # and finds its condition true wins the reported stop_reason, so with
-            # this source order the standalone grad_norm block always has final
-            # say; under the shipped use_grad_norm=True default that makes the
-            # decrease branch's "grad_norm_floor" unreachable as the FINAL reason
-            # (its condition is strictly narrower). Deliberately not restructured
-            # into an explicit precedence, to keep this a direct port of
-            # amica15.f90:1051-1098.
-            have_prev = len(self.ll_history) > 1
-            leave = False
-            if have_prev and ll < self.ll_history[-2]:
-                if self.lrate <= self.minlrate:
-                    logger.warning(
-                        "lrate floor (%g) reached at iter %d; stopping.",
-                        self.minlrate,
-                        it,
-                    )
-                    self.stop_reason = "lrate_floor"
-                    leave = True
-                elif self._ndtmpsum is not None and self._ndtmpsum <= self.min_nd:
-                    # Fortran amica15.f90:1058's ``.or. (ndtmpsum .le. min_nd)``
-                    # half of the decrease stop (issue #207 gap 3, #248 here):
-                    # the same per-iteration value use_grad_norm reads below, so
-                    # a run whose lrate oscillates instead of annealing still
-                    # stops instead of burning the whole budget.
-                    logger.warning(
-                        "gradient-norm floor (%g) reached at iter %d on a "
-                        "likelihood decrease; stopping.",
-                        self.min_nd,
-                        it,
-                    )
-                    self.stop_reason = "grad_norm_floor"
-                    leave = True
-                else:
-                    self.lrate *= self.lratefact
-                    numdecs += 1
-                    if numdecs >= self.maxdecs:
-                        self.lrate_cap *= self.lratefact
-                        if schedule.past_newton_start(it, self.newt_start):
-                            self.rholrate *= self.rholratefact
-                        if self.do_newton and schedule.past_newton_start(
-                            it, self.newt_start
-                        ):
-                            # The Newton ceiling ratchets on the same maxdecs
-                            # cadence as lrate_cap/rholrate (Fortran
-                            # amica15.f90:1056-1077), so a run that keeps
-                            # overshooting at newtrate anneals instead of
-                            # oscillating there.
-                            self.newtrate *= self.lratefact
-                        numdecs = 0
-
-            # Small-likelihood-increase stop (Fortran amica15.f90:1078-1090,
-            # use_min_dll/min_dll/maxincs). Independent of the decrease branch
-            # above: it runs every iteration once have_prev, including iterations
-            # where the LL just decreased (a decrease is always "less than" a
-            # positive min_dll, so it also increments numincs there, matching
-            # Fortran exactly). numincs resets to 0 on any gain >= min_dll; stops
-            # only after MORE than maxincs *consecutive* small gains.
-            if have_prev and self.use_min_dll:
-                if ll - self.ll_history[-2] < self.min_dll:
-                    numincs += 1
-                    if numincs > self.maxincs:
-                        logger.warning(
-                            "likelihood increasing by less than %g for more than "
-                            "%d iterations; stopping at iter %d.",
-                            self.min_dll,
-                            self.maxincs,
-                            it,
-                        )
-                        self.stop_reason = "min_dll"
-                        leave = True
-                else:
-                    numincs = 0
-
-            # Weight-gradient-norm stop (Fortran amica15.f90:1091-1097,
-            # use_grad_norm/min_nd). Also independent of the decrease branch:
-            # this is the unconditional every-iteration check, as opposed to the
-            # decrease-gated grad_norm_floor above.
-            if (
-                have_prev
-                and self.use_grad_norm
-                and self._ndtmpsum is not None
-                and self._ndtmpsum <= self.min_nd
-            ):
-                logger.warning(
-                    "norm of weight gradient <= %g at iter %d; stopping.",
-                    self.min_nd,
-                    it,
-                )
-                self.stop_reason = "grad_norm"
-                leave = True
-
-            # Switching Newton on changes the step direction, so the decrease
-            # counter accumulated during the natural-gradient phase no longer
-            # describes the schedule now running: Fortran clears it on the
-            # switch-on iteration (amica15.f90:1099-1102,
-            # ``AMICATorchNG._fit_once``).
-            if schedule.newton_switches_on(self.do_newton, it, self.newt_start):
-                numdecs = 0
-
-            if leave:
-                break
 
             # Outlier rejection, after the parameter update (Fortran order,
             # amica15.f90:1141-1146) but using the pre-update per-sample LL
@@ -3824,8 +3877,9 @@ class AMICAMLXNG:
         Also writes ``LLt`` (the per-sample/per-model log-likelihood, issue
         #155) for a model that was just :meth:`fit` in this process, from the
         stash the training E-step filled (issue #157) -- so, exactly as in
-        the reference, ``LLt`` is the E-step of the returned iterate and is
-        one M-step older than the ``W``/``A`` written beside it (see
+        the reference, ``LLt`` is the E-step of the returned iterate: one
+        M-step older than the ``W``/``A`` written beside it after a fit that ran
+        to ``max_iter``, their own after a convergence stop (see
         :meth:`_fit_once`'s docstring). A model restored via
         :meth:`from_state_dict`/:meth:`load` carries no stash, so ``LLt`` is
         omitted for it (a warning is logged) -- the rest of the output is
@@ -4125,6 +4179,7 @@ class AMICAMLXNG:
             "lrate_cap": float(self.lrate_cap),
             "newtrate": float(self.newtrate),
             "rholrate": float(self.rholrate),
+            "rholrate_cap": float(self.rholrate_cap),
             # Per-restart records (issue #198): which seeds ran, what each
             # returned, and why each stopped.
             "restart_seeds_": list(self.restart_seeds_),
@@ -4352,6 +4407,10 @@ class AMICAMLXNG:
         self.lrate_cap = extra["lrate_cap"]
         self.newtrate = extra["newtrate"]
         self.rholrate = extra["rholrate"]
+        # Additive-only (issue #339), NOT in _EXTRA_KEYS: a payload written
+        # before it kept one rho rate, the ceiling, under "rholrate", and a fit
+        # that never held A ends with the working rate equal to it.
+        self.rholrate_cap = extra.get("rholrate_cap", extra["rholrate"])
         self.restart_seeds_ = list(extra["restart_seeds_"])
         self.restart_lls_ = list(extra["restart_lls_"])
         self.restart_stop_reasons_ = list(extra["restart_stop_reasons_"])
