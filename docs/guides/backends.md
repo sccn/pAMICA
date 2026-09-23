@@ -77,20 +77,21 @@ import mne
 from pamica import AMICA
 from pamica.mne_compat import AMICAICA
 
-# X is (n_channels, n_samples)
+# X is your own (n_channels, n_samples) array
 model = AMICA(backend="mlx").fit(X, pcakeep=X.shape[0] - 1, seed=42)
 sources = model.transform(X)                # float32, (n_channels - 1, n_samples)
 maps = model.get_sensor_mixing_matrix()     # scalp maps, (n_channels, n_channels - 1)
 model.write_amica_output("amicaout")        # EEGLAB: loadmodout15('amicaout')
 
-model.save("session01.pt")                  # records backend="mlx"
-model = AMICA.load("session01.pt")          # back on the MLX backend
+model.save("model.pt")                      # records backend="mlx"
+model = AMICA.load("model.pt")              # back on the MLX backend
 
-# The same settings from a Fortran input.param or a JSON params file:
-model = AMICA.from_params_file("input.param", backend="mlx").fit(X)
+# The same settings from your own Fortran input.param or JSON params file:
+model = AMICA.from_params_file("/path/to/input.param", backend="mlx").fit(X)
 
 # MNE: fit from a Raw, then remove a component (the PCA residual is kept).
-raw = mne.io.read_raw_eeglab("session01.set", preload=True)
+# Replace the path with your own raw EEGLAB recording (.set).
+raw = mne.io.read_raw_eeglab("/path/to/your_recording.set", preload=True)
 n_eeg = len(mne.pick_types(raw.info, eeg=True))  # good EEG channels
 ica = AMICAICA(backend="mlx", random_state=42)
 ica.fit(raw, picks="eeg", pcakeep=n_eeg - 1)
