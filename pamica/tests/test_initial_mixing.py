@@ -23,11 +23,12 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
    the first update; the same checks fail on the pre-change code (commit
    ``027cb07``, loaded from git), whose components are off by more than 1e-3;
 3. a supplied or loaded ``A`` is used bit for bit (a NumPy ``A`` set before
-   ``fit``, a NumPy refit, a PyTorch ``state_dict``, an MLX save): only a
-   drawn ``A`` is normalized; and a supplied NumPy ``A`` that no fit could
-   start from (wrong shape, a non-finite entry, a singular model block) is
-   refused at fit start (the PyTorch and MLX backends take an ``A`` only
-   through their validated saves);
+   ``fit``, a NumPy refit, a PyTorch ``state_dict``, a saved ``AMICA`` wrapper,
+   an MLX save): only a drawn ``A`` is normalized; the NumPy backend's
+   ``fix_init`` starts from the identity and draws nothing; and a supplied
+   NumPy ``A`` that no fit could start from (wrong shape, a non-finite entry,
+   a singular model block) is refused at fit start (the PyTorch and MLX
+   backends take an ``A`` only through their validated saves);
 4. the NumPy restart after a non-finite likelihood redraws unit-norm
    components from the running generator (the sanctioned error-injection
    pattern of ``.rules/testing.md`` poisons one real likelihood);
@@ -64,7 +65,7 @@ import numpy as np
 import pytest
 import torch
 
-from pamica import AMICA_NumPy
+from pamica import AMICA, AMICA_NumPy
 from pamica.initialization import (
     draw_initial_block,
     initial_mixing,
@@ -417,6 +418,41 @@ def test_an_mlx_save_restores_A_as_is(X, tmp_path):
     path = tmp_path / "model.npz"
     m.save(str(path))
     assert _np(cls.load(str(path)).A).tobytes() == fitted.tobytes()
+
+
+def test_a_wrapper_save_restores_A_as_is(X, tmp_path):
+    """The ``AMICA`` wrapper's ``save``/``load`` restores the fitted PyTorch
+    ``A`` bit for bit."""
+    m = AMICA(n_models=2, n_mix=NMIX, device="cpu", verbose=False)
+    m.fit(X, max_iter=3, seed=SEED, doscaling=False, keep_best=False)
+    assert m.model_ is not None
+    fitted = _np(m.model_.A)
+    assert _row_norm_dev(fitted) > 1e-2
+    path = tmp_path / "model.pt"
+    m.save(str(path))
+    loaded = AMICA.load(str(path), device="cpu")
+    assert loaded.model_ is not None
+    assert _np(loaded.model_.A).tobytes() == fitted.tobytes()
+
+
+def test_numpy_fix_init_starts_from_the_identity(X, tmp_path, monkeypatch):
+    """The NumPy backend's ``fix_init`` starts every model from the identity,
+    whose components already have unit norm, and draws nothing: not ``A``,
+    and not ``mu`` or ``beta`` either (amica15.f90:754, :767, :806-810). It is
+    an attribute, not a constructor keyword or a params-file key (neither
+    accepts it, issue #346 and ``FORTRAN_UNSUPPORTED_KEYS``)."""
+    with pytest.raises(TypeError, match="fix_init"):
+        _numpy_model(tmp_path, fix_init=True)
+    model = _numpy_model(tmp_path)
+    model.fix_init = True
+    records = _record_starts(model, monkeypatch)
+    model.fit(X)
+    assert len(records) == 1
+    _, start, first_update = records[0]
+    identity = np.vstack([np.eye(NW)] * 2)
+    assert start.tobytes() == identity.tobytes()
+    assert first_update.tobytes() == identity.tobytes()
+    assert model.rng.rand() == np.random.RandomState(SEED).rand()
 
 
 def _supplied_misfits(fitted: np.ndarray) -> Dict[str, Tuple[np.ndarray, str]]:
