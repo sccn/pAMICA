@@ -14,17 +14,18 @@ cross-backend file the phase plan calls for, so both anti-drift agreement
 pins ride here together.
 
 1. **do_reject agreement**: same real data, same config, ``AMICATorchNG``
-   (float64) and ``AMICAMLXNG`` (float32) must reject the SAME sample set.
-   This is the load-bearing evidence for the phase's design decision: MLX
-   reads the rejection statistic FROM the LLt stash instead of a second
-   forward pass (the NumPy backend's design, pre-empting AMICATorchNG's
-   open follow-up #298) -- if that were not mathematically equivalent to
-   torch's own ``_sample_ll`` forward-pass statistic, the two backends
-   would drift apart on which samples they drop. They do not, at a
-   generous margin (measured: identical rejected-sample sets at rejsig in
-   {2.0, 2.5, 3.0}, single- and 2-model), so the config below is chosen
-   with clear headroom rather than right at a borderline threshold (the
-   Phase 1/2 flakiness lesson).
+   (float64) and ``AMICAMLXNG`` (float32) must make the same rejection
+   decision on every sample that is not within float32 rounding of the
+   threshold. This is the load-bearing evidence for the phase's design
+   decision: MLX reads the rejection statistic FROM the LLt stash instead of
+   a second forward pass (the NumPy backend's design, pre-empting
+   AMICATorchNG's open follow-up #298) -- if that were not mathematically
+   equivalent to torch's own ``_sample_ll`` forward-pass statistic, the two
+   backends would drift apart on which samples they drop. Exact agreement of
+   the whole rejected set is not a property of float32, so the check is per
+   pass and explains every disagreement by the rounding measured on that
+   pass (issue #333 moved the trajectories enough to flip one borderline
+   sample of the earlier exact-set pin).
 
 2. **do_reject x pdftype=1 agreement**: a PR review regression
    (``_choose_pdfs`` was called with the FULL sphered dataset on MLX,
@@ -81,55 +82,206 @@ def _real_data(n_samples: int = 4096) -> np.ndarray:
     return data[:, :n_samples].astype(np.float64)
 
 
-# --- do_reject: the same sample set, at a config with a clear margin -------
-@pytest.mark.parametrize("n_models", [1, 2])
-def test_reject_same_sample_set_across_backends(n_models):
-    """Both backends reject exactly the same sample indices, from the same
-    seed/data/schedule.
+# --- do_reject: the same decisions, up to float32 rounding at the threshold -
+class _RecordingTorch(AMICATorchNG):
+    """Records the input of each rejection pass, then runs the real pass.
 
-    rejsig=2.5 since issue #333 (2.0 before). Exact agreement of the rejected
-    set is a property of the config, not a guarantee: the float32 and float64
-    per-sample log-likelihoods differ by up to ~1e-2 by the second rejection
-    pass (iteration 5), more than the smallest distance of any sample to the
-    threshold at every rejsig measured, before and after #333. Once #333's
-    component rescale moved the trajectories, one two-model sample sat on the
-    rejsig=2.0 threshold (1 of 357 rejected); rejsig=2.5 (smallest distance
-    to the threshold 4.9e-3 at the second pass) agrees for both model counts,
-    as it did before #333."""
+    A pass-through spy, not a stub: ``_reject_outliers`` itself runs unchanged
+    on the real statistic, so the fit is exactly the production fit. It only
+    keeps what the backend decided on: the good set before the pass (sample
+    indices) and the per-sample log-likelihood over it, in the same order.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.passes: list[tuple[np.ndarray, np.ndarray]] = []
+
+    def _reject_outliers(self, ll_vec: torch.Tensor) -> None:
+        assert self.good_idx is not None
+        self.passes.append((self.good_idx.numpy().copy(), ll_vec.numpy().copy()))
+        super()._reject_outliers(ll_vec)
+
+
+class _RecordingMLX(AMICAMLXNG):
+    """The MLX twin of :class:`_RecordingTorch` (float32 statistic)."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.passes: list[tuple[np.ndarray, np.ndarray]] = []
+
+    def _reject_outliers(self, ll_vec: np.ndarray) -> None:
+        assert self.good_idx is not None
+        self.passes.append((np.array(self.good_idx), np.array(ll_vec).copy()))
+        super()._reject_outliers(ll_vec)
+
+
+def _torch_threshold(ll: np.ndarray, rejsig: float) -> float:
+    """``mean - rejsig * std`` (population std) in float64, with the same
+    torch operations as ``AMICATorchNG._reject_outliers``."""
+    t = torch.from_numpy(ll)
+    mean = t.mean()
+    std = torch.sqrt((t.pow(2).mean() - mean.pow(2)).clamp_min(0.0))
+    return float(mean - rejsig * std)
+
+
+def _mlx_threshold(ll: np.ndarray, rejsig: float) -> float:
+    """The same threshold with the float32 numpy operations of
+    ``AMICAMLXNG._reject_outliers``."""
+    mean = float(ll.mean())
+    std = float(np.sqrt(max(float(np.mean(ll**2) - mean**2), 0.0)))
+    return mean - rejsig * std
+
+
+# A float32 statistic can flip a decision only for samples within its own
+# rounding of the threshold, so the band that explains a disagreement is
+# measured per pass (below). These caps are what make a REAL divergence fail
+# instead of being absorbed into a band it inflated: an orientation or
+# trajectory bug makes the two per-sample log-likelihoods differ by the order
+# of their spread, and a threshold bug moves the threshold by a sizable
+# fraction of it. Measured over seeds 0-5, 7 and 8, one and two models,
+# rejsig 2.0, 2.5 and 3.0 (Apple M4 Pro): the band was at most 3.6e-2 of the
+# per-sample log-likelihood's standard deviation, held at most 14 samples
+# (0.36% of a pass), and at most 1 sample ended up rejected by one backend and
+# kept by the other (the band's worst sample, a two-model fit's second pass).
+_MAX_BAND_OVER_STD = 0.1
+_MAX_BORDERLINE_FRACTION = 0.01
+_MAX_DISAGREEMENTS = 3
+
+
+def _rejection_violations(
+    m64: _RecordingTorch, m32: _RecordingMLX, rejsig64: float, rejsig32: float
+) -> list[str]:
+    """Every way the two backends' rejections differ by more than float32
+    rounding at the threshold (empty when they agree up to that rounding)."""
+    assert m64.good_idx is not None and m32.good_idx is not None
+    final64 = m64.good_idx.numpy()
+    final32 = np.array(m32.good_idx)
+    problems: list[str] = []
+    if len(m64.passes) != len(m32.passes):
+        return [f"pass counts differ: {len(m64.passes)} vs {len(m32.passes)}"]
+    explained: set[int] = set()
+    for p, ((g64, l64), (g32, l32)) in enumerate(zip(m64.passes, m32.passes)):
+        after64 = m64.passes[p + 1][0] if p + 1 < len(m64.passes) else final64
+        after32 = m32.passes[p + 1][0] if p + 1 < len(m32.passes) else final32
+        t64 = _torch_threshold(l64, rejsig64)
+        t32 = _mlx_threshold(l32, rejsig32)
+        # The thresholds recomputed here are the ones each backend applied.
+        for name, g, ll, t, after in (
+            ("torch", g64, l64, t64, after64),
+            ("mlx", g32, l32, t32, after32),
+        ):
+            if not np.array_equal(g[ll >= t], after):
+                problems.append(f"pass {p}: {name} did not apply mean - rejsig*std")
+
+        common, i64, i32 = np.intersect1d(g64, g32, return_indices=True)
+        x64 = l64[i64]
+        diff = np.abs(x64 - l32[i32].astype(np.float64))
+        # Measured on this pass: the largest float32-vs-float64 difference of
+        # a per-sample log-likelihood, plus the resulting threshold difference.
+        band = float(diff.max()) + abs(t64 - t32)
+        spread = float(np.std(x64))
+        if band > _MAX_BAND_OVER_STD * spread:
+            problems.append(
+                f"pass {p}: the backends' statistics differ by {band:.3g}, "
+                f"{band / spread:.2g} of their spread (cap {_MAX_BAND_OVER_STD})"
+            )
+        borderline = np.abs(x64 - t64) <= band
+        if borderline.mean() > _MAX_BORDERLINE_FRACTION:
+            problems.append(
+                f"pass {p}: {int(borderline.sum())} of {common.size} samples lie "
+                f"within {band:.3g} of the threshold"
+            )
+        disagree = (l64[i64] >= t64) != (l32[i32] >= t32)
+        # Every decision outside the band is identical on both backends.
+        if (disagree & ~borderline).any():
+            far = common[disagree & ~borderline]
+            problems.append(f"pass {p}: samples {far.tolist()} disagree off the band")
+        explained |= set(common[disagree].tolist())
+
+    rejected_by_one = set(final64.tolist()) ^ set(final32.tolist())
+    if not rejected_by_one <= explained:
+        problems.append(
+            f"samples {sorted(rejected_by_one - explained)} differ in the final "
+            "good sets without a disagreeing pass decision"
+        )
+    if len(rejected_by_one) > _MAX_DISAGREEMENTS:
+        problems.append(
+            f"{len(rejected_by_one)} samples rejected by one backend only "
+            f"(cap {_MAX_DISAGREEMENTS})"
+        )
+    return problems
+
+
+def _reject_fits(
+    n_models: int, seed: int, rejsig32: float = 2.0, seed32: int | None = None
+) -> tuple[_RecordingTorch, _RecordingMLX]:
     X = _real_data()
     kwargs: dict[str, Any] = dict(
         n_channels=NW,
         n_models=n_models,
         n_mix=NMIX,
-        seed=7,
         block_size=BLOCK,
         do_reject=True,
-        rejsig=2.5,
         rejstart=2,
         rejint=3,
         maxrej=2,
         keep_best=True,
     )
-
-    mlx_model = AMICAMLXNG(**kwargs)
-    mlx_model.fit(X, max_iter=10, verbose=False)
-
-    torch_kwargs: dict[str, Any] = dict(kwargs, device="cpu", dtype=torch.float64)
-    torch_model = AMICATorchNG(**torch_kwargs)
-    torch_model.fit(X, max_iter=10, verbose=False)
-
-    assert mlx_model.good_idx is not None and torch_model.good_idx is not None
-    mlx_set = set(np.array(mlx_model.good_idx).tolist())
-    torch_set = set(torch_model.good_idx.numpy().tolist())
-
-    n_total = X.shape[1]
-    assert len(mlx_set) < n_total, "test setup: MLX rejected nothing"
-    assert len(torch_set) < n_total, "test setup: torch rejected nothing"
-    assert mlx_model.numrej == torch_model.numrej
-    assert mlx_set == torch_set, (
-        f"rejected-sample sets diverged: {len(mlx_set ^ torch_set)} samples "
-        "differ between backends"
+    m32 = _RecordingMLX(
+        **kwargs, rejsig=rejsig32, seed=seed if seed32 is None else seed32
     )
+    m32.fit(X, max_iter=10, verbose=False)
+    m64 = _RecordingTorch(
+        **kwargs, rejsig=2.0, seed=seed, device="cpu", dtype=torch.float64
+    )
+    m64.fit(X, max_iter=10, verbose=False)
+    return m64, m32
+
+
+@pytest.mark.parametrize("seed", [7, 8])
+@pytest.mark.parametrize("n_models", [1, 2])
+def test_reject_decisions_agree_up_to_float32_rounding(n_models, seed):
+    """Both backends make the same rejection decision on every sample, except
+    samples within float32 rounding of the threshold.
+
+    Exact agreement of the rejected SET is not a property of the backends: the
+    float32 and float64 per-sample log-likelihoods differ by up to ~1e-1 by
+    the second pass (iteration 5), and a sample that close to the threshold
+    can land on either side. It held at rejsig=2.0 on seed 7 only until issue
+    #333 moved the trajectories, after which one two-model sample (of 357
+    rejected) flipped. So each pass is checked on its own terms
+    (:func:`_rejection_violations`): the recomputed threshold is the one each
+    backend applied; every disagreement lies within the band measured on that
+    pass (the largest per-sample difference plus the threshold difference),
+    so every decision outside it is identical; the band is narrow and holds
+    few samples; and at most a few samples end up rejected by only one
+    backend. Seed 8's two-model fit is the widest band measured (14
+    borderline samples, one disagreement). A threshold or trajectory
+    divergence fails it (``test_reject_agreement_check_catches_a_divergence``).
+    """
+    m64, m32 = _reject_fits(n_models, seed)
+    assert len(m64.passes) == 2, "test setup: both rejection passes should run"
+    assert m64.good_idx is not None
+    assert m64.good_idx.numel() < 4096, "test setup: torch rejected nothing"
+    assert m32.numrej == m64.numrej
+    assert not _rejection_violations(m64, m32, 2.0, 2.0)
+
+
+@pytest.mark.parametrize(
+    "divergence", ["threshold", "trajectory"], ids=["threshold", "trajectory"]
+)
+def test_reject_agreement_check_catches_a_divergence(divergence):
+    """The rounding allowance above cannot absorb a real divergence: a
+    threshold 0.2 standard deviations off (MLX at rejsig=2.2), or a
+    different trajectory (MLX from another seed, standing in for an
+    orientation or update bug), each violates it."""
+    if divergence == "threshold":
+        m64, m32 = _reject_fits(2, 7, rejsig32=2.2)
+        problems = _rejection_violations(m64, m32, 2.0, 2.2)
+    else:
+        m64, m32 = _reject_fits(2, 7, seed32=8)
+        problems = _rejection_violations(m64, m32, 2.0, 2.0)
+    assert problems, "the agreement check accepted a real divergence"
 
 
 def test_reject_x_pdftype1_kurtosis_switch_matches_across_backends():
