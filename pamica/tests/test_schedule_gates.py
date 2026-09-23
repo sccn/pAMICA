@@ -435,60 +435,59 @@ def test_rho_rate_ratchet_opens_only_after_iteration_newt_start(backend, X, tmp_
 # --- the switch-on counter reset ---------------------------------------------
 
 
+# The switch-on reset is observable only when a likelihood decrease follows
+# the switch-on iteration while the counter is one short of ``maxdecs``, and on
+# this recording the first Newton step, when positive definite, has never been
+# seen to lower the likelihood. The search that found this configuration (PyTorch; one
+# model; 4096 and 8192 frames; seeds 0-3; lrate 0.3/0.5/0.6/0.8; maxdecs 2 and
+# 3; newt_ramp 10 and 1; newtrate 2 and 4; every newt_start in the first
+# 40 iterations whose natural-gradient prefix left the counter one short of maxdecs, probe runs of 60
+# iterations) turned up only runs like this one: natural gradient at
+# lrate=0.8 overshoots from the first iteration, ``newt_ramp=1`` restores the
+# rate after each halving, and the switch-on step's Hessian is not yet
+# positive definite, so it falls back to the natural gradient and lowers the
+# likelihood a third time. Decreases of 3.8e-3, 2.0e-2 and 3.0e-2, far above
+# round-off, and the same on seeds 0-5 and all three backends.
+_RESET_FRAMES = 4096
+_RESET: dict[str, Any] = dict(
+    do_newton=True,
+    newt_start=3,
+    newtrate=2.0,
+    newt_ramp=1,
+    lrate=0.8,
+    lratefact=0.5,
+    maxdecs=3,
+)
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_newton_switch_on_clears_the_decrease_counter(backend, X, tmp_path):
     """The decrease counter is cleared on the iteration Newton switches on
-    (``iter == newt_start``, amica15.f90:1099), so a count left partly filled by
-    the natural-gradient phase cannot ratchet the ceilings under Newton.
+    (``iter == newt_start``, amica15.f90:1099), not one iteration later.
 
-    The cross-backend form of ``mlx_tests/test_mlx_newton.py``'s
-    ``test_numdecs_resets_when_newton_switches_on``, with the same data-driven
-    construction: ``newt_start`` is the 1-based iteration at which the probe's
-    counter is partly filled; the smallest budget at which the reference's
-    reset and a no-reset replay predict different ratchet counts is found on
-    the Newton fit's own trajectory (the loop is causal, so a shorter budget
-    reproduces the prefix); and the fit truncated there must have ratcheted its
-    ``lrate`` ceiling exactly as the reference's reset predicts.
+    With ``newt_start=3`` and ``maxdecs=3`` this 4-iteration fit decreases the
+    likelihood on iterations 2, 3 and 4 (``ll`` indices 1-3). The reference
+    clears the count of two after iteration 3, so the decrease on iteration 4
+    starts a new count and nothing ratchets. Clearing it one iteration later,
+    as the 0-based comparison did before issue #335, lets that decrease
+    complete the cycle and ratchet the ``lrate`` ceiling. The fit's own
+    trajectory is replayed under both rules to confirm that they disagree
+    here, and the backend's ceiling must match the reference's.
     """
-    probe = _probe(backend, X, tmp_path)
-    maxdecs = _OVERSHOOT["maxdecs"]
-    numdecs, partial = 0, None
-    for i in range(1, len(probe.ll)):
-        if probe.ll[i] < probe.ll[i - 1]:
-            numdecs += 1
-            if numdecs >= maxdecs:
-                numdecs = 0
-        if 0 < numdecs < maxdecs:
-            partial = i
-            break
-    assert partial is not None, "the probe never left the counter partly filled"
-    newt_start = partial + 1  # the reset lands on ll index ``partial``
+    newt_start, maxdecs = _RESET["newt_start"], _RESET["maxdecs"]
+    run = _fit(backend, X[:, :_RESET_FRAMES], newt_start + 1, tmp_path, **_RESET)
 
-    cfg = dict(
-        do_newton=True,
-        newt_start=newt_start,
-        newtrate=_OVERSHOOT_NEWTRATE,
-        **_OVERSHOOT,
+    decreases = [i for i in range(1, len(run.ll)) if run.ll[i] < run.ll[i - 1]]
+    assert decreases == [1, 2, 3], (
+        f"decreases at ll indices {decreases}; the configuration no longer "
+        "produces the pattern that exposes the reset on this DATA"
     )
-    ll = _fit(backend, X, _NEWTON_ITERS, tmp_path, **cfg).ll
-    budget = next(
-        (
-            t
-            for t in range(2, len(ll) + 1)
-            if len(_ratchet_indices(ll[:t], maxdecs, newt_start))
-            != len(_ratchet_indices(ll[:t], maxdecs, None))
-        ),
-        None,
-    )
-    assert budget is not None, (
-        f"over {len(ll)} iterations the reset never changed a ratchet count at "
-        f"newt_start={newt_start}; the DATA did not decrease enough under Newton"
-    )
-
-    run = _fit(backend, X, budget, tmp_path, **cfg)
-    assert run.ll == ll[:budget], "the truncated fit left the full fit's trajectory"
-    expected = len(_ratchet_indices(run.ll, maxdecs, newt_start))
-    assert _ratchets(run.lrate_ceiling, run.lrate_ceiling0, 0.5) == expected
+    # _ratchet_indices resets where ``i + 1 == newt_start``; passing
+    # newt_start + 1 replays the pre-fix rule, one iteration later.
+    reference = len(_ratchet_indices(run.ll, maxdecs, newt_start))
+    one_late = len(_ratchet_indices(run.ll, maxdecs, newt_start + 1))
+    assert (reference, one_late) == (0, 1)
+    assert _ratchets(run.lrate_ceiling, run.lrate_ceiling0, 0.5) == reference
 
 
 # --- rejection ---------------------------------------------------------------

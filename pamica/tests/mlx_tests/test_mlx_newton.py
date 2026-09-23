@@ -462,68 +462,11 @@ def test_newtrate_never_ratchets_without_newton(natural_gradient_prefix):
     assert m.newtrate == m.newtrate0
 
 
-def test_numdecs_resets_when_newton_switches_on(natural_gradient_prefix):
-    """The decrease counter is cleared on the iteration Newton switches on
-    (Fortran amica15.f90:1099-1102), so a partially filled count from the
-    natural-gradient phase cannot ratchet the ceilings under the new schedule.
-
-    Made observable in three data-driven steps, none of them a hardcoded
-    trajectory. First ``newt_start`` is placed at the (1-based) iteration where
-    the probe shows the counter PARTIALLY filled -- that state is in the shared
-    prefix, so it holds on any machine. Then a full-budget fit at that ``newt_start`` is
-    scanned for the smallest budget at which the reset and no-reset replays
-    disagree; one exists as soon as the Newton phase decreases at all, because
-    the no-reset counter is strictly ahead and therefore completes its cycle
-    strictly earlier. Finally the fit is repeated at exactly that budget, where
-    the two hypotheses predict different ``lrate_cap`` values, and the observed
-    one has to match the reset prediction. Truncating is sound because the loop
-    is causal: iteration k depends only on the state after k-1, so a shorter
-    budget reproduces the same prefix.
-    """
-    partial = None
-    numdecs = 0
-    for i in range(1, len(natural_gradient_prefix)):
-        if natural_gradient_prefix[i] < natural_gradient_prefix[i - 1]:
-            numdecs += 1
-            if numdecs >= _SCHEDULE_MAXDECS:
-                numdecs = 0
-        if 0 < numdecs < _SCHEDULE_MAXDECS:
-            partial = i
-            break
-    assert partial is not None, (
-        "the sample recording never left the decrease counter partially filled "
-        "in the natural-gradient phase, so the reset has nothing to clear: the "
-        "DATA, not the config, is the problem here"
-    )
-
-    # The switch-on iteration, counted from 1: the reset lands on ll index
-    # ``partial``, where the shared prefix left the counter partially filled.
-    newt_start = partial + 1
-    full = _fit_schedule(newt_start)
-    ll = full.ll_history
-    budget = next(
-        (
-            t
-            for t in range(2, len(ll) + 1)
-            if len(_ratchet_iterations(ll[:t], full.maxdecs, newt_start=newt_start))
-            != len(_ratchet_iterations(ll[:t], full.maxdecs))
-        ),
-        None,
-    )
-    assert budget is not None, (
-        f"over {len(ll)} iterations the two counter hypotheses never predicted "
-        f"different ratchet counts at newt_start={newt_start}; the DATA did not "
-        "decrease often enough in the Newton phase to expose the reset"
-    )
-
-    m = _fit_schedule(newt_start, max_iter=budget)
-    assert len(m.ll_history) == budget, "the truncated fit stopped early"
-    with_reset = _ratchet_iterations(m.ll_history, m.maxdecs, newt_start=newt_start)
-    without_reset = _ratchet_iterations(m.ll_history, m.maxdecs)
-    assert len(with_reset) != len(without_reset), (
-        f"the reset is unobservable at budget {budget}: {with_reset} vs {without_reset}"
-    )
-    assert _ratchet_count(m.lrate_cap, m.lrate0, m.lratefact) == len(with_reset)
+# The switch-on counter reset (amica15.f90:1099) is pinned for MLX by the
+# cross-backend ``test_schedule_gates.py::
+# test_newton_switch_on_clears_the_decrease_counter``. A replay test that lived
+# here passed with the reset one iteration late too (issue #335 review): on the
+# schedule fixture's trajectory the two rules predicted the same ratchets.
 
 
 def test_grad_norm_floor_fires_under_newton():
