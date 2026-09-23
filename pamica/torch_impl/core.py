@@ -690,12 +690,13 @@ class AMICATorchNG:
         When omitted the seeds are ``seed, seed + 1, ..., seed + n_restarts - 1``.
     device : str or torch.device, optional
         Compute device for the block loop. ``None`` picks MPS, then CUDA,
-        then CPU, whichever is available first; MPS has no float64, so with
-        the default ``dtype`` on an Apple machine the constructor raises
-        ``ValueError`` and ``device="cpu"`` must be passed (the
-        :class:`~pamica.AMICA` wrapper redirects an automatic MPS pick to CPU
-        itself). Preprocessing (mean/cov/eigh) is always done in float64 on
-        CPU regardless of device, since eigh is not reliably supported on MPS.
+        then CPU, whichever is available first. MPS has no float64, so when
+        ``None`` picks MPS for a float64 run (the default ``dtype``) the
+        constructor uses the CPU instead and logs a warning; with
+        ``dtype=torch.float32``, ``None`` keeps MPS. An explicit
+        ``device="mps"`` with float64 raises ``ValueError``. Preprocessing
+        (mean/cov/eigh) is always done in float64 on CPU regardless of device,
+        since eigh is not reliably supported on MPS.
     dtype : torch.dtype, default=torch.float64
         Parameter/computation dtype. float64 is the parity default (Fortran
         bit-parity) and ~4.5x on CUDA over CPU (issue #63). float32 converges on
@@ -962,6 +963,16 @@ class AMICATorchNG:
 
         if device is None:
             device = setup_device()
+            # MPS has no float64, so an automatic MPS pick for a float64 run
+            # (the parity default) moves to the CPU instead of raising below.
+            # An explicit device="mps" is the caller's choice and still raises.
+            if device.type == "mps" and dtype == torch.float64:
+                logger.warning(
+                    "AMICATorchNG: auto-selected MPS cannot represent float64 "
+                    "(the parity default), so running on CPU. Pass "
+                    "dtype=torch.float32 with device='mps' to run on MPS."
+                )
+                device = torch.device("cpu")
         elif isinstance(device, str):
             device = torch.device(device)
         self.device = device

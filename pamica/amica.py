@@ -19,17 +19,12 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 import numpy as np
 import torch
 
-from .torch_impl import AMICATorchNG, setup_device
+from .torch_impl import AMICATorchNG
 
 if TYPE_CHECKING:
     from .mlx_impl import AMICAMLXNG
 
 logger = logging.getLogger(__name__)
-
-# AMICATorchNG's default parameter dtype, derived from its signature so the
-# wrapper's MPS/float64 fallback below stays in lockstep if that default ever
-# changes (rather than duplicating the literal).
-_NG_DEFAULT_DTYPE = inspect.signature(AMICATorchNG).parameters["dtype"].default
 
 # fit()'s own named parameters that a parameter-file dict can default.
 _FIT_NAMED_PARAMS = {"max_iter", "lrate", "do_mean", "do_sphere", "do_newton"}
@@ -247,12 +242,13 @@ class AMICA:
     n_mix : int, default=3
         Number of mixture components per source
     device : str or torch.device, optional
-        Device to use ('cuda', 'mps', 'cpu', or None for auto). With ``None``
-        (auto), an auto-selected MPS device is redirected to CPU because the
-        backend computes in float64 for Fortran parity and MPS cannot
-        represent it; pass ``dtype=torch.float32`` (with ``device="mps"``) to
-        run on MPS instead. PyTorch backend only: with ``backend="mlx"`` it
-        must stay ``None``.
+        Device to use ('cuda', 'mps', 'cpu', or None for auto), passed to
+        :class:`AMICATorchNG`. With ``None`` (auto), the backend moves an
+        auto-selected MPS device to the CPU with a logged warning, because it
+        computes in float64 for Fortran parity and MPS cannot represent it;
+        pass ``dtype=torch.float32`` (with ``device="mps"``) to run on MPS
+        instead. PyTorch backend only: with ``backend="mlx"`` it must stay
+        ``None``.
     verbose : bool, default=True
         Whether to show progress during fitting
     backend : {"torch", "mlx"}, default="torch"
@@ -404,32 +400,6 @@ class AMICA:
         # defaults (an explicitly passed fit()/backend kwarg always wins).
         # None for an instance built directly via AMICA(...).
         self._file_params: Optional[dict] = None
-
-    def _select_device(self, ng_dtype) -> Union[str, torch.device]:
-        """Resolve the torch compute device, applying the MPS/float64 fallback.
-
-        PyTorch backend only; MLX has no device choice. ``AMICATorchNG``
-        defaults to float64 for Fortran parity, which MPS cannot represent.
-        When the device was auto-selected (the user did not
-        pin one) and resolved to MPS for a float64 run, fall back to CPU so the
-        default config runs instead of crashing. CUDA supports float64, so only
-        MPS needs this. An explicit ``device="mps"`` is left untouched and
-        surfaces ``AMICATorchNG``'s own ValueError; users wanting MPS pass
-        ``dtype=torch.float32`` too.
-        """
-        device = setup_device() if self.device is None else self.device
-        dev_type = getattr(device, "type", device)
-        if self.device is None and dev_type == "mps" and ng_dtype == torch.float64:
-            device = torch.device("cpu")
-            msg = (
-                "AMICA uses float64 for Fortran parity; MPS lacks float64 "
-                "support, so falling back to CPU. Pass dtype=torch.float32 "
-                "with device='mps' to run on MPS."
-            )
-            logger.warning(msg)
-            if self.verbose:
-                print(msg)
-        return device
 
     def fit(
         self,
@@ -618,13 +588,12 @@ class AMICA:
             print(f"Fitting AMICA with {n_channels} channels, {n_samples} samples")
             print(f"Models: {self.n_models}, Mixture components: {self.n_mix}")
 
-        # Torch device (with the MPS/float64 parity fallback, see
-        # _select_device); MLX always runs on MLX's default device.
+        # The torch device as given (None picks one inside AMICATorchNG,
+        # which also moves an automatic MPS pick for a float64 fit to the
+        # CPU, issue #354); MLX always runs on MLX's default device.
         placement: dict[str, Any] = {}
         if self.backend == "torch":
-            placement["device"] = self._select_device(
-                kwargs.get("dtype", _NG_DEFAULT_DTYPE)
-            )
+            placement["device"] = self.device
 
         # Build and train the backend on a LOCAL reference first, and only
         # publish it to self (and derive the fitted-state attributes) once
@@ -1235,7 +1204,7 @@ class AMICA:
             Path to a file written by :meth:`save`.
         device : str or torch.device, optional
             Device to place a restored PyTorch model on. With ``None`` (auto),
-            the same MPS/float64 fallback as :meth:`fit` applies so a float64
+            the backend constructor chooses, as in :meth:`fit`, so a float64
             parity model never lands on MPS. An MLX model always loads onto
             MLX's default device, so it must stay ``None`` for one.
 
@@ -1301,11 +1270,9 @@ class AMICA:
         )
         state = payload["backend"]
         if backend == "torch":
-            # Resolve the device using the persisted backend dtype so the same
-            # MPS/float64 fallback as fit() applies to an auto-selected device.
-            ng_dtype = getattr(torch, state["config"]["dtype"])
-            resolved_device = model._select_device(ng_dtype)
-            model.model_ = AMICATorchNG.from_state_dict(state, device=resolved_device)
+            # device=None lets the constructor choose from the saved dtype, so
+            # a float64 model's automatic MPS pick moves to the CPU as in fit().
+            model.model_ = AMICATorchNG.from_state_dict(state, device=device)
         else:
             model.model_ = _mlx_backend_class().from_state_dict(
                 _mlx_state_from_payload(state, filepath)

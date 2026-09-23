@@ -466,8 +466,8 @@ def _run_wrapper_amica(backend: str, data: np.ndarray, params: Dict, seed: int) 
     ``"mlx"``) and collect results.
 
     The two backends take the same constructor keywords, so the canonical
-    params map onto both the same way; the wrapper's own ``fit`` resolves the
-    PyTorch device (with its MPS/float64 -> CPU fallback).
+    params map onto both the same way; ``AMICATorchNG`` resolves the PyTorch
+    device itself (with its MPS/float64 -> CPU fallback, issue #354).
     """
     if backend == "torch":
         backend_cls, short = AMICATorchNG, "NG"
