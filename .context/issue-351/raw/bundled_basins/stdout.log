@@ -1,0 +1,33 @@
+Fortran reference binary: /Users/yahya/.cache/pamica/bin/v0.3.3/amica15-macos-arm64 (native/v0.3.3)
+fortran seed 1: LL=-3.399644
+fortran seed 2: LL=-3.399446
+fortran seed 3: LL=-3.399640
+fortran seed 4: LL=-3.399612
+fortran seed 5: LL=-3.399563
+fortran seed 6: LL=-3.399554
+fortran seed 7: LL=-3.399618
+fortran seed 8: LL=-3.399583
+fortran seed 9: LL=-3.399808
+fortran seed 10: LL=-3.399841
+pamica seed 301: LL=-3.399722 iters=2000 stop=max_iter
+pamica seed 302: LL=-3.399559 iters=2000 stop=max_iter
+pamica seed 303: LL=-3.399677 iters=2000 stop=max_iter
+pamica seed 304: LL=-3.399519 iters=2000 stop=max_iter
+pamica seed 305: LL=-3.399432 iters=2000 stop=max_iter
+{
+  "fortran_seed1": -3.399644280997763,
+  "fortran_seed2": -3.399446053777136,
+  "fortran_seed3": -3.3996402544421502,
+  "fortran_seed4": -3.3996119263160636,
+  "fortran_seed5": -3.399563131051804,
+  "fortran_seed6": -3.3995541089444816,
+  "fortran_seed7": -3.399617603804792,
+  "fortran_seed8": -3.3995827076502567,
+  "fortran_seed9": -3.3998076574695872,
+  "fortran_seed10": -3.3998408175881214,
+  "pamica_seed301": -3.3997216530763565,
+  "pamica_seed302": -3.399558597670594,
+  "pamica_seed303": -3.3996768215064535,
+  "pamica_seed304": -3.399518642876667,
+  "pamica_seed305": -3.399432015696039
+}
