@@ -1,0 +1,68 @@
+{
+  "epic": {
+    "corr": {
+      "diff_between_minus_within_fortran": 0.006353741104652144,
+      "inside_pm_0.05": true,
+      "pairwise_tost_p_retired": 7.870934892230386e-39,
+      "run_bootstrap_90ci": [
+        -0.001620542183333956,
+        0.013584039734506483
+      ],
+      "run_bootstrap_90ci_inside_pm_0.05": true
+    },
+    "amari": {
+      "diff_between_minus_within_fortran": 0.005250350286082228,
+      "inside_pm_0.05": true,
+      "pairwise_tost_p_retired": 6.022688870443557e-162,
+      "run_bootstrap_90ci": [
+        0.0017433353384238724,
+        0.009241831154639021
+      ],
+      "run_bootstrap_90ci_inside_pm_0.05": true
+    }
+  },
+  "pre_epic_e38aa11": {
+    "corr": {
+      "diff_between_minus_within_fortran": 0.017115269613346862,
+      "inside_pm_0.05": true,
+      "pairwise_tost_p_retired": 2.5848991508815386e-24,
+      "run_bootstrap_90ci": [
+        0.008744046089008656,
+        0.024728234934179267
+      ],
+      "run_bootstrap_90ci_inside_pm_0.05": true
+    },
+    "amari": {
+      "diff_between_minus_within_fortran": -0.006185999147623633,
+      "inside_pm_0.05": true,
+      "pairwise_tost_p_retired": 1.9105708981926756e-185,
+      "run_bootstrap_90ci": [
+        -0.009394198264366046,
+        -0.0023177856345205686
+      ],
+      "run_bootstrap_90ci_inside_pm_0.05": true
+    }
+  },
+  "issue27_2026_07": {
+    "corr": {
+      "diff_between_minus_within_fortran": 0.010710885528479874,
+      "inside_pm_0.05": true,
+      "pairwise_tost_p_retired": 7.036653532145984e-27,
+      "run_bootstrap_90ci": [
+        -0.002246375834945718,
+        0.022055090189855832
+      ],
+      "run_bootstrap_90ci_inside_pm_0.05": true
+    },
+    "amari": {
+      "diff_between_minus_within_fortran": -0.011060832125423692,
+      "inside_pm_0.05": true,
+      "pairwise_tost_p_retired": 1.6322880293241592e-82,
+      "run_bootstrap_90ci": [
+        -0.01697131581609501,
+        -0.004339750305150138
+      ],
+      "run_bootstrap_90ci_inside_pm_0.05": true
+    }
+  }
+}
