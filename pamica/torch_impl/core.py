@@ -70,6 +70,18 @@ from ..rank import (
     pca_reduction_requested,
     validate_pca_reduction,
 )
+
+# The density normalizers and the rho-update guard, at the values the binary
+# uses: its single-precision literals widened to double (issue #344).
+from ..reference_constants import (
+    EPSDBLE,
+    LOG2,
+    LOG4,
+    LOG_NORM_COSH_SUB,
+    LOG_NORM_COSH_SUP,
+    LOG_SQRT_2PI,
+    LOG_SQRT_PI,
+)
 from .utils import setup_device
 
 logger = logging.getLogger(__name__)
@@ -85,25 +97,6 @@ PDFTYPE_NAMES = {
     4: "sub_gaussian_cosh",
 }
 
-_LOG2 = math.log(2.0)
-_LOG4 = math.log(4.0)  # logistic-family normalizer (amica15.f90:1346)
-_HALF_LOG_PI = 0.5 * math.log(math.pi)  # exact; the reference's differs (issue #344)
-# Log-normalizers for the non-GG density families, from the decimal literals the
-# reference writes (amica15.f90:1333/1359/1371): 2.506628274 = sqrt(2*pi)
-# (Gaussian, pdtype 2); 4.132731354 / 1.858073988 = the sub-/super-Gaussian cosh
-# normalizers (pdtype 4 / 1). These are the literals' double-precision values,
-# not the binary's: gfortran reads ``dble(2.506628274)`` as a single-precision
-# literal widened to double, so the binary's log-normalizers differ from these
-# by 3.7e-10, 2.0e-8 and -2.1e-8 (computed from the literals; the same kind of
-# literal in the rho == 2 branch, :1313, measurably moves the reference's
-# log-likelihood). Recorded in docs/guides/amica-differences.md (row 16);
-# whether to adopt the single-precision values is issue #344.
-_LOG_SQRT_2PI = math.log(2.506628274)
-_LOG_NORM_COSH_SUB = math.log(4.132731354)
-_LOG_NORM_COSH_SUP = math.log(1.858073988)
-# Fortran's epsdble (amica17_header.f90:73): the drho-numerator underflow guard
-# zeros the rho*ln|y| term when |y|^rho falls below this, matching amica17.f90:1570.
-_EPSDBLE = 1e-16
 
 # Best-iterate safeguard (issue #51). The lrate schedule is deliberately
 # non-monotone: both NG and Fortran anneal the rate only *after* an LL decrease,
@@ -161,7 +154,7 @@ def _component_rows_state(state: dict) -> dict:
 def _logcosh(x: torch.Tensor) -> torch.Tensor:
     """Numerically stable ``log cosh(x) = |x| - log2 + log1p(exp(-2|x|))``."""
     ax = x.abs()
-    return ax - _LOG2 + torch.log1p(torch.exp(-2.0 * ax))
+    return ax - LOG2 + torch.log1p(torch.exp(-2.0 * ax))
 
 
 def _log_pdf_and_deriv(
@@ -186,13 +179,13 @@ def _log_pdf_and_deriv(
     abs_y = y.abs()
     sign_y = torch.sign(y)
 
-    log_pdf_lap = -abs_y - _LOG2
+    log_pdf_lap = -abs_y - LOG2
     dpdf_lap = -sign_y * torch.exp(log_pdf_lap)
 
-    log_pdf_gau = -y * y - _HALF_LOG_PI
+    log_pdf_gau = -y * y - LOG_SQRT_PI
     dpdf_gau = -2.0 * y * torch.exp(log_pdf_gau)
 
-    log_pdf_gg = -abs_y.pow(rho) - _LOG2 - torch.lgamma(1.0 + 1.0 / rho)
+    log_pdf_gg = -abs_y.pow(rho) - LOG2 - torch.lgamma(1.0 + 1.0 / rho)
     dpdf_gg = -rho * abs_y.pow(rho - 1.0) * sign_y * torch.exp(log_pdf_gg)
 
     is_lap = rho == 1.0
@@ -207,11 +200,11 @@ def _log_pdf_and_deriv(
 
     # Non-GG families (amica15.f90:1327-1371). Each is `-cost - log_norm`, and
     # dpdf = -fp * exp(log_pdf).
-    log_pdf_2 = -0.5 * y * y - _LOG_SQRT_2PI  # Gaussian
-    log_pdf_3 = -2.0 * _logcosh(0.5 * y) - _LOG4  # logistic (sech^2)
+    log_pdf_2 = -0.5 * y * y - LOG_SQRT_2PI  # Gaussian
+    log_pdf_3 = -2.0 * _logcosh(0.5 * y) - LOG4  # logistic (sech^2)
     lc = _logcosh(y)
-    log_pdf_4 = -0.5 * y * y + lc - _LOG_NORM_COSH_SUB  # sub-Gaussian cosh+
-    log_pdf_1 = -0.5 * y * y - lc - _LOG_NORM_COSH_SUP  # super-Gaussian cosh-
+    log_pdf_4 = -0.5 * y * y + lc - LOG_NORM_COSH_SUB  # sub-Gaussian cosh+
+    log_pdf_1 = -0.5 * y * y - lc - LOG_NORM_COSH_SUP  # super-Gaussian cosh-
 
     log_pdf = torch.where(
         pdtype == 2,
@@ -287,20 +280,20 @@ def _log_pdf_only(
     abs_y = y.abs()
     az_rho = abs_y.pow(rho)  # |y|^rho, reused by the rho-update accumulator
 
-    log_pdf_lap = -abs_y - _LOG2
-    log_pdf_gau = -y * y - _HALF_LOG_PI
-    log_pdf_gg = -az_rho - _LOG2 - torch.lgamma(1.0 + 1.0 / rho)
+    log_pdf_lap = -abs_y - LOG2
+    log_pdf_gau = -y * y - LOG_SQRT_PI
+    log_pdf_gg = -az_rho - LOG2 - torch.lgamma(1.0 + 1.0 / rho)
     log_pdf = torch.where(
         rho == 2.0, log_pdf_gau, torch.where(rho == 1.0, log_pdf_lap, log_pdf_gg)
     )
     if pdtype is None:
         return log_pdf, az_rho
 
-    log_pdf_2 = -0.5 * y * y - _LOG_SQRT_2PI  # Gaussian
-    log_pdf_3 = -2.0 * _logcosh(0.5 * y) - _LOG4  # logistic (sech^2)
+    log_pdf_2 = -0.5 * y * y - LOG_SQRT_2PI  # Gaussian
+    log_pdf_3 = -2.0 * _logcosh(0.5 * y) - LOG4  # logistic (sech^2)
     lc = _logcosh(y)
-    log_pdf_4 = -0.5 * y * y + lc - _LOG_NORM_COSH_SUB  # sub-Gaussian cosh+
-    log_pdf_1 = -0.5 * y * y - lc - _LOG_NORM_COSH_SUP  # super-Gaussian cosh-
+    log_pdf_4 = -0.5 * y * y + lc - LOG_NORM_COSH_SUB  # sub-Gaussian cosh+
+    log_pdf_1 = -0.5 * y * y - lc - LOG_NORM_COSH_SUP  # super-Gaussian cosh-
     log_pdf = torch.where(
         pdtype == 2,
         log_pdf_2,
@@ -1486,7 +1479,7 @@ class AMICATorchNG:
             ay = y.abs()
             ayrho = azrho_list[h]  # |y|^rho reused from _forward (issue #63)
             logab = rho_h.unsqueeze(0) * torch.log(ay.clamp_min(tiny))  # rho*ln|y|
-            logab = torch.where(ayrho < _EPSDBLE, torch.zeros_like(logab), logab)
+            logab = torch.where(ayrho < EPSDBLE, torch.zeros_like(logab), logab)
             drho_n.index_add_(1, idx, (u * (ayrho * logab)).sum(0).T)
 
             g = (beta_h * ufp).sum(-1)  # g_i = sum_j sbeta*ufp (:1493)

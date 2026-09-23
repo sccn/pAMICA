@@ -280,7 +280,9 @@ def test_forward_ll_per_source_factorization_order():
         abs_y = np.abs(y)
         gg = -(abs_y ** rho[k][None, :]) - np.log(2.0) - sp.gammaln(1.0 + 1.0 / rho[k])
         lap = -abs_y - np.log(2.0)
-        gau = -y * y - 0.5 * np.log(np.pi)
+        # The reference's rho == 2 normalizer, log(dble(1.772453851)): the
+        # literal rounded to single precision (amica15.f90:1313, issue #344).
+        gau = -y * y - np.log(float(np.float32(1.772453851)))
         log_pdf = np.where(rho[k] == 2.0, gau, np.where(rho[k] == 1.0, lap, gg))
         z0[:, :, k] = np.log(alpha[k])[None, :] + np.log(beta[k])[None, :] + log_pdf
 
