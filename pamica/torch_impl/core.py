@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import logging
 import math
-import numbers
 import time
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -790,14 +789,10 @@ class AMICATorchNG:
 
         self.doscaling = doscaling
         self.scalestep = scalestep
-        if doscaling and (
-            isinstance(scalestep, bool)
-            or not isinstance(scalestep, numbers.Integral)
-            or scalestep < 1
-        ):
+        if doscaling:
             # A zero cadence divides by zero mid-fit; a fractional one fires on
             # no meaningful schedule. The reference never reads scalestep.
-            raise ValueError(f"scalestep must be an integer >= 1, got {scalestep!r}")
+            schedule.validate_iteration_setting("scalestep", scalestep, 1)
 
         # Component sharing (Fortran share_comps / identify_shared_comps trigger
         # amica15.f90:1856, subroutine :1916-1963): periodically merge mixing
@@ -1862,10 +1857,9 @@ class AMICATorchNG:
         # The reference rescales every iteration (it parses ``scalestep`` but
         # never reads it, amica15.f90:1843/3686); pamica keeps ``scalestep`` as
         # an extension counted from 1 like the reference's other cadences
-        # (iterations s, 2s, ...), so the default 1 is the reference. The
-        # 1-based rule moves to ``schedule.every`` when epic #324 Phase 9
-        # (issue #335) lands.
-        if self.doscaling and (self.iteration + 1) % self.scalestep == 0:
+        # (iterations s, 2s, ...; ``schedule.every``), so the default 1 is the
+        # reference.
+        if self.doscaling and schedule.every(self.iteration, self.scalestep):
             self._rescale_components()
 
         self._update_unmixing_matrices()

@@ -36,7 +36,8 @@ def validate_iteration_setting(name: str, value: object, minimum: int) -> None:
     """Raise ``ValueError`` unless ``value`` is an integer of at least ``minimum``.
 
     For the settings that name an iteration or an interval (``newt_start``,
-    ``rejstart``, ``restartiter``, ``maxrestarts``, ``histstep``): an integer in
+    ``rejstart``, ``restartiter``, ``maxrestarts``, ``histstep``,
+    ``scalestep``): an integer in
     the ``numbers.Integral`` sense, so numpy integers qualify, while ``bool``
     (which subclasses ``int``) and floats are rejected rather than coerced, as
     :func:`pamica.rank.validate_pca_reduction` does for ``pcakeep``.
@@ -139,8 +140,9 @@ def share_freeze(index: int, share_start: int, share_iter: int) -> bool:
 
 def every(index: int, step: int) -> bool:
     """Whether a ``mod(iter, step) == 0`` cadence fires on this iteration
-    (``writestep``/``histstep``, amica15.f90:1124/1130): the first time at
-    iteration ``step``, not after the first iteration."""
+    (``writestep``/``histstep``, amica15.f90:1124/1130; also pamica's
+    ``scalestep``, which the reference parses but never reads): the first time
+    at iteration ``step``, not after the first iteration."""
     _check_interval("every", "step", step)
     return reference_iteration(index) % step == 0
 
