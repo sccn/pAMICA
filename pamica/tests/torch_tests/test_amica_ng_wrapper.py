@@ -169,9 +169,9 @@ def test_write_amica_output_bytes(fitted_ng, tmp_path):
     """The written files are the model's exact float64 parameters: the on-disk
     EEGLAB directory is a lossless serialization, not a lossy export (#92). W is
     byte-identical in C order; S is column-major (Fortran layout, issue #336 --
-    the default ZCA sphere is symmetric to about 1e-17 so this was invisible
-    before the fix); the non-square mixture params and c/comp_list are
-    column-major too, so read order="F".
+    the default zero-phase component analysis (ZCA) sphere is symmetric to
+    about 1e-17 so this was invisible before the fix); the non-square mixture
+    params and c/comp_list are column-major too, so read order="F".
     """
     outdir = tmp_path / "amicaout"
     fitted_ng.write_amica_output(str(outdir))
