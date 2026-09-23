@@ -98,7 +98,14 @@ class _Run:
     n_newton_fallbacks: int | None  # NumPy does not count them
 
 
-def _fit(backend: str, x: np.ndarray, max_iter: int, tmp_path: Path, **cfg) -> _Run:
+def _fit(
+    backend: str,
+    x: np.ndarray,
+    max_iter: int,
+    tmp_path: Path,
+    seed: int = SEED,
+    **cfg: Any,
+) -> _Run:
     """One real fit on ``backend``; ``cfg`` uses the torch/MLX parameter names."""
     if backend == "numpy":
         cfg = dict(cfg)
@@ -107,7 +114,7 @@ def _fit(backend: str, x: np.ndarray, max_iter: int, tmp_path: Path, **cfg) -> _
         m = AMICA_NumPy(
             num_models=1,
             num_mix=NMIX,
-            seed=SEED,
+            seed=seed,
             block_size=BLOCK,
             max_iter=max_iter,
             use_tqdm=False,
@@ -135,7 +142,7 @@ def _fit(backend: str, x: np.ndarray, max_iter: int, tmp_path: Path, **cfg) -> _
         m = AMICATorchNG(
             n_channels=NW,
             n_mix=NMIX,
-            seed=SEED,
+            seed=seed,
             block_size=BLOCK,
             device="cpu",
             dtype=torch.float64,
@@ -146,7 +153,7 @@ def _fit(backend: str, x: np.ndarray, max_iter: int, tmp_path: Path, **cfg) -> _
         m = _mlx_class()(
             n_channels=NW,
             n_mix=NMIX,
-            seed=SEED,
+            seed=seed,
             block_size=BLOCK,
             keep_best=False,
             **cfg,
@@ -338,7 +345,9 @@ def test_newton_takes_its_first_step_on_iteration_newt_start(
     run twice.
     """
     max_iter = newt_start + 2
-    cfg = dict(lrate=0.05, newtrate=1.0, newt_ramp=10, newt_start=newt_start)
+    cfg: dict[str, Any] = dict(
+        lrate=0.05, newtrate=1.0, newt_ramp=10, newt_start=newt_start
+    )
     ng = _fit(backend, X, max_iter, tmp_path, do_newton=False, **cfg)
     nt = _fit(backend, X, max_iter, tmp_path, do_newton=True, **cfg)
 
@@ -376,7 +385,9 @@ def test_newt_start_zero_fits_exactly_as_one(backend, X, tmp_path):
     compare against. Checked on the overshooting configuration, so ratchets
     do fire later in the run and both of those gates are live.
     """
-    cfg = dict(do_newton=True, newtrate=_OVERSHOOT_NEWTRATE, **_OVERSHOOT)
+    cfg: dict[str, Any] = dict(
+        do_newton=True, newtrate=_OVERSHOOT_NEWTRATE, **_OVERSHOOT
+    )
     zero = _fit(backend, X, _ZERO_ONE_ITERS, tmp_path, newt_start=0, **cfg)
     one = _fit(backend, X, _ZERO_ONE_ITERS, tmp_path, newt_start=1, **cfg)
 
@@ -430,6 +441,51 @@ def test_rho_rate_ratchet_opens_only_after_iteration_newt_start(backend, X, tmp_
             f"{'must' if rho_ratchets else 'must not'} tighten the rho-rate ceiling"
         )
         assert run.newtrate == run.newtrate0  # do_newton=False never touches it
+
+
+# A natural-gradient run whose second maxdecs cycle completes on iteration 21,
+# one past the shipped default newt_start=20. Found by sweeping seeds 0-5,
+# lrate 0.5/0.6/0.8, maxdecs 2/3, newt_ramp 10/1 and 4096/8192 frames for a
+# ratchet at ll index 20; this one ratchets at indices 9 and 20 on all three
+# backends, the second on decreases of 5.1e-3 and 3.5e-3, far above round-off.
+_DEFAULT_GATE_FRAMES = 4096
+_DEFAULT_GATE_SEED = 4
+_DEFAULT_GATE: dict[str, Any] = dict(lrate=0.5, lratefact=0.5, maxdecs=2)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_rho_rate_ratchet_gate_at_the_shipped_default_newt_start(backend, X, tmp_path):
+    """The same gate at ``newt_start=20``, the default of every backend: a
+    ratchet on iteration 21 tightens the rho-rate ceiling, one on iteration 10
+    does not, and with ``newt_start=21`` neither does. This is the one
+    default-path behavior issue #335 changes (``do_newton=False``)."""
+    x = X[:, :_DEFAULT_GATE_FRAMES]
+    runs = {
+        newt_start: _fit(
+            backend,
+            x,
+            21,
+            tmp_path,
+            seed=_DEFAULT_GATE_SEED,
+            do_newton=False,
+            newt_start=newt_start,
+            rholratefact=0.5,
+            **_DEFAULT_GATE,
+        )
+        for newt_start in (20, 21)
+    }
+    hits = _ratchet_indices(runs[21].ll, _DEFAULT_GATE["maxdecs"], None)
+    assert hits and hits[-1] == 20, (
+        f"ratchets at ll indices {hits}; the configuration no longer completes a "
+        "cycle on iteration 21 on this DATA"
+    )
+    assert runs[20].ll == runs[21].ll  # nothing before the ratchet reads it
+    for newt_start, rho_ratchets in ((20, 1), (21, 0)):
+        run = runs[newt_start]
+        assert _ratchets(run.lrate_ceiling, run.lrate_ceiling0, 0.5) == len(hits)
+        assert _ratchets(run.rholrate, run.rholrate0, 0.5) == rho_ratchets, (
+            f"newt_start={newt_start}"
+        )
 
 
 # --- the switch-on counter reset ---------------------------------------------
@@ -501,7 +557,9 @@ def test_rejection_first_fires_on_iteration_rejstart(backend, X, tmp_path):
     keeps the modulo arm quiet before ``rejstart`` (``max(1, iter - rejstart)``
     is 1 there). Before issue #335 the 4-iteration fit had not rejected yet.
     """
-    cfg = dict(do_reject=True, rejstart=4, rejint=3, maxrej=1, rejsig=2.0)
+    cfg: dict[str, Any] = dict(
+        do_reject=True, rejstart=4, rejint=3, maxrej=1, rejsig=2.0
+    )
     before = _fit(backend, X, 3, tmp_path, **cfg)
     assert before.numrej == 0 and before.n_good == X.shape[1]
 
