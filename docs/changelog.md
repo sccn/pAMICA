@@ -24,7 +24,7 @@ Release notes are also published on the
   - The underflow guard of the rho update, `epsdble`, is likewise the reference's `1.0e-16` in single precision (1.0000000168623835e-16).
   - Row 16 of the differences page now records the one kind of single-precision literal pamica keeps at its decimal value:
     the compiled-in defaults of `input.param` keys, which the binary uses only when the key is missing
-    (then its `lrate` is 0.1000000015); a value given in `input.param` is read as double, and pamica's native engine gives every one.
+    (then its `comp_thresh` is 0.9900000095); a value given in `input.param` is read as double, and pamica's native engine gives every one.
   - Tests: `pamica/tests/test_reference_constants.py` pins every constant against the float32 rounding of its literal on the cited reference line,
     computed by exact rational arithmetic; pins the sweep of both reference sources; checks that no backend keeps its own copy;
     and (opt-in, `AMICA_RUN_FORTRAN=1`) seeds the native binary for `pdftype` 2, 4 and 1.
