@@ -5,6 +5,32 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 7 of epic #324: `doscaling` rescales components, as the reference does (issue #333).**
+  **Behavior change:** default fits on every backend (PyTorch, NumPy and MLX) now follow the reference's trajectory,
+  so their fitted parameters differ from those of earlier versions.
+  pamica stores each model's mixing block transposed relative to the reference (the issue #24 convention, now ADR 0006),
+  so a component is a row of the stored block,
+  but `doscaling` (on by default) normalized stored columns, which is not a change of scale of any component and perturbed every iteration.
+  It now divides each component's mixing vector by its norm and rescales that component's `mu` and `beta` to match,
+  an exact change of scale that leaves the log-likelihood unchanged.
+  - Seeded from pamica's initialization, `A`, `mu` and `sbeta` now match the native reference binary to float64 round-off
+    (after 1 iteration: `A` 5.0e-16, `mu` 7.8e-11, `sbeta` 1.1e-14, previously 7.2e-5, 6.6e-5 and 8.6e-5;
+    after 3: 2.7e-13, 8.6e-10 and 2.7e-11, previously 1.4e-3, 6.7e-3 and 2.2e-3).
+  - Fitted components now have unit norm, as in the reference;
+    previously, after 100 seeded iterations, norms ranged over [0.94, 1.07] with one model and [0.05, 1.97] with two.
+  - Scale-blind results barely move: against the bundled `amicaout` fixture after 200 iterations,
+    the log-likelihood goes from -3.401777 to -3.401673 (fixture: -3.401873),
+    the matched correlation from 0.99752 to 0.99740 and the Amari distance from 5.95e-3 to 6.14e-3.
+    Two-model fits improve most: after 100 seeded iterations, the matched correlation with the reference rises from 0.850 to 0.99998.
+  - `doscaling=False` is byte-identical to before on every backend.
+    Saved models load unchanged; refit only to compare parameters element by element with the reference.
+  - `scalestep`, which the reference parses but never reads (it rescales every iteration), stays a pamica extension
+    but now counts from 1: the rescale runs on iterations `scalestep`, `2*scalestep`, and so on, instead of 1, `1+scalestep`, and so on.
+    The default of 1 is unaffected (row 14 of the differences page).
+    With `doscaling` on, every backend's constructor now raises `ValueError` for a `scalestep` that is not an integer of at least 1;
+    `scalestep=0` used to fail mid-fit with a bare `ZeroDivisionError`.
+  - New test helper `pamica/tests/native_oracle.py` seeds the native binary from a pamica state through its `load_*` files,
+    for element-wise oracle tests (opt-in with `AMICA_RUN_FORTRAN=1`).
 - **Fix: the EEGLAB export wrote an asymmetric sphere transposed (Phase 10 of epic #324, issue #336).**
   `write_amicaout` (`pamica/numpy_impl/load.py`), the shared writer called from `write_amica_output` on
   `AMICATorchNG`, `AMICAMLXNG` and the `AMICA` wrapper, and from the NumPy backend's own `_write_results`,

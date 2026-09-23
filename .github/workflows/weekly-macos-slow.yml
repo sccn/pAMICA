@@ -65,6 +65,11 @@ jobs:
       AMICA_RUN_FORTRAN: "1"
     steps:
       - uses: actions/checkout@v4
+        # Full history: the byte-identity pins (test_doscaling_rows.py,
+        # mlx_tests/test_mlx_fit_noop.py) read older backend classes with
+        # `git show` and fail under CI when the commit is unreachable.
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"

@@ -29,6 +29,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from pamica.mlx_impl import AMICAMLXNG  # noqa: E402  (after the MLX importorskip)
+from pamica.mlx_impl.core import _KEEP_BEST_TOL  # noqa: E402
 from pamica.metrics import mir as mir_metric  # noqa: E402
 from pamica.metrics import pairwise_mi  # noqa: E402
 
@@ -358,28 +359,36 @@ def test_mir_history_survives_keep_best_restore(real_data):
     same forced-overshoot recipe as test_mlx_llt_stash.py, with
     mir_step=1 so a waypoint lands strictly inside the truncation window a
     buggy restore would damage (mirrors test_ng_convergence.py's
-    identically-named test and its mir_step=1 rationale)."""
+    identically-named test and its mir_step=1 rationale).
+
+    Seed 1 rather than the recipe's seed 0 since issue #333: both overshoot,
+    but seed 0's restored iterate sits so close to its last one that their MIR
+    differ by only 4.9e-5 relative, under the 1e-4 float32 margin below;
+    seed 1's differ by 7.5e-4."""
     m = AMICAMLXNG(
         n_channels=NW,
         n_models=2,
         n_mix=NMIX,
-        seed=0,
+        seed=1,
         block_size=BLOCK,
         do_newton=True,
         newt_start=1,
         lrate=0.5,
+        newtrate=3.0,  # overshoots since issue #333 (test_mlx_keepbest.py)
         use_min_dll=True,
         min_dll=1e-4,
         maxincs=2,
         use_grad_norm=False,
         keep_best=True,
     )
-    m.fit(real_data, max_iter=60, verbose=False, mir_step=1)
-    if m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS:
-        pytest.skip("aggressive run ended degenerate; not the case under test")
+    m.fit(real_data, max_iter=150, verbose=False, mir_step=1)
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS, (
+        "the overshoot recipe ended degenerate: retune it"
+    )
     assert m.final_ll_ is not None
-    if np.isclose(m.ll_history[-1], m.final_ll_):
-        pytest.skip("run was monotone; keep_best restore did not fire")
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
 
     assert m.mir_history_, "test setup: mir_step recorded nothing"
     final_it = len(m.ll_history) - 1

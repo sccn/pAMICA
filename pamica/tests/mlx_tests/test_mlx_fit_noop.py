@@ -19,8 +19,16 @@ literals (``test_mlx_transform.py``'s ``_NOOP_PIN_*`` module comment): MLX
 float32 is bit-reproducible run-to-run on ONE machine, so this needs no
 recorded constant at all, just the two classes agreeing with each other,
 here, now.
+
+Both fits run with ``doscaling=False``. Issue #333 (epic #324 Phase 7)
+deliberately changed the rescale from stored columns to component rows, so a
+``doscaling=True`` fit of the historical class no longer matches by design;
+with the rescale off, every other part of the fit path is still compared bit
+for bit against the pre-Phase-3 tip. The rescale itself is pinned by
+``pamica/tests/test_doscaling_rows.py``.
 """
 
+import os
 import subprocess
 import sys
 import types
@@ -75,14 +83,15 @@ def historical_amicamlxng():
     this test module and removed afterward, so it cannot leak into any
     other test's import cache.
 
-    CI runs from a shallow (depth-1) checkout, where ``_EPIC_TIP`` is not
-    a reachable object and a bare ``git show`` fails with "bad object" --
-    reproduced empirically on the macOS job. ``git fetch --depth 1`` that
-    one commit first (deepening the clone by exactly the object needed,
-    tolerating failure -- e.g. no network, or a remote that has since been
-    pruned) and only then read it; if the object is still unreachable,
-    skip loudly naming the shallow-clone cause rather than erroring the
-    whole module.
+    In a shallow (depth-1) clone ``_EPIC_TIP`` is not a reachable object
+    and a bare ``git show`` fails with "bad object" -- reproduced
+    empirically on the macOS job before the CI jobs checked out full
+    history (``fetch-depth: 0``). ``git fetch --depth 1`` that one commit
+    first (deepening the clone by exactly the object needed, tolerating
+    failure -- e.g. no network, or a remote that has since been pruned) and
+    only then read it; if the object is still unreachable, fail under CI
+    (the ``CI`` environment variable) and otherwise skip loudly naming the
+    shallow-clone cause rather than erroring the whole module.
     """
     repo_root = Path(__file__).resolve().parents[3]
     subprocess.run(
@@ -100,12 +109,18 @@ def historical_amicamlxng():
         text=True,
     )
     if result.returncode != 0:
-        pytest.skip(
+        reason = (
             f"git object {_EPIC_TIP} is not reachable in this checkout "
             f"(likely a shallow/depth-1 clone that the fetch above could "
             f"not deepen -- e.g. no network or the remote history was "
             f"pruned); git show stderr: {result.stderr.strip()!r}"
         )
+        # As in test_doscaling_rows.py: the CI jobs check out full history
+        # (fetch-depth: 0), so there an unreachable pin fails instead of
+        # silently dropping this regression guard.
+        if os.environ.get("CI"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     module = types.ModuleType(_HISTORICAL_MODULE_NAME)
     module.__package__ = "pamica.mlx_impl"
     module.__name__ = _HISTORICAL_MODULE_NAME
@@ -138,11 +153,16 @@ _PARAM_NAMES = (
 
 
 @pytest.mark.parametrize("n_models", [1, 2])
-def test_default_fit_is_bit_identical_to_the_pre_phase3_epic_tip(
+def test_unscaled_fit_is_bit_identical_to_the_pre_phase3_epic_tip(
     real_data, historical_amicamlxng, n_models
 ):
     kwargs: dict[str, Any] = dict(
-        n_channels=NW, n_models=n_models, n_mix=NMIX, seed=42, block_size=BLOCK
+        n_channels=NW,
+        n_models=n_models,
+        n_mix=NMIX,
+        seed=42,
+        block_size=BLOCK,
+        doscaling=False,  # the rescale changed deliberately (#333; docstring)
     )
 
     old = historical_amicamlxng(**kwargs)
@@ -162,13 +182,18 @@ def test_default_fit_is_bit_identical_to_the_pre_phase3_epic_tip(
         assert np.array_equal(a, b), f"{name}: diverged from the pre-phase-3 fit"
 
 
-def test_default_fit_with_keep_best_off_is_also_bit_identical(
+def test_unscaled_fit_with_keep_best_off_is_also_bit_identical(
     real_data, historical_amicamlxng
 ):
     """Same check with keep_best explicitly off, so the comparison does not
     depend on whichever safeguard branch a given seed happens to take."""
     kwargs: dict[str, Any] = dict(
-        n_channels=NW, n_mix=NMIX, seed=7, block_size=BLOCK, keep_best=False
+        n_channels=NW,
+        n_mix=NMIX,
+        seed=7,
+        block_size=BLOCK,
+        keep_best=False,
+        doscaling=False,  # the rescale changed deliberately (#333; docstring)
     )
     old = historical_amicamlxng(**kwargs)
     old.fit(real_data, max_iter=8, verbose=False)

@@ -330,13 +330,13 @@ def test_a_frozen_window_still_computes_fresh_grad_norm(real_data):
     (amica15.f90:1803). ``_update_parameters`` was refactored so the
     direction/dAk/ndtmpsum computation runs unconditionally too, with only
     the step itself gated on ``not self._a_frozen()``. This test proves both
-    halves of that refactor: the mixing matrix's per-column DIRECTION does not
-    move during a frozen iteration (only ``doscaling``'s unconditional
-    unit-norm rescale touches its magnitude -- that rescale is a separate,
-    non-frozen Fortran block, amica15.f90:1843-1854, so it is expected to
-    still apply), AND ndtmpsum is NOT a stale repeat of the pre-freeze value
-    across those same iterations (which would happen if the computation were
-    still skipped).
+    halves of that refactor: during a frozen iteration the mixing matrix takes
+    no gradient step -- it ends exactly where ``doscaling``'s unconditional
+    component rescale alone takes it (that rescale is a separate, non-frozen
+    Fortran block, amica15.f90:1843-1854, so it is expected to still apply),
+    while an unfrozen iteration does not -- AND ndtmpsum is NOT a stale repeat
+    of the pre-freeze value across those same iterations (which would happen if
+    the computation were still skipped).
     """
     ng = _fresh_ng(
         n_models=2,
@@ -352,23 +352,22 @@ def test_a_frozen_window_still_computes_fresh_grad_norm(real_data):
     )
     trace = []
     original = ng._update_parameters
+    # Applies the backend's own rescale to a copy of the pre-update A, i.e. A as
+    # it would be if this iteration took no gradient step at all.
+    probe = _fresh_ng(n_models=2)
 
     def spy(acc, n):
-        assert ng.A is not None
+        assert ng.A is not None and ng.mu is not None and ng.beta is not None
+        assert ng.comp_list is not None
         frozen = ng._a_frozen()
-        a_before = ng.A.clone()
+        probe.A, probe.mu, probe.beta = ng.A.clone(), ng.mu.clone(), ng.beta.clone()
+        probe.comp_list = ng.comp_list.clone()
+        probe._rescale_components()
         result = original(acc, n)
-        # Direction check robust to doscaling's per-column rescale: normalize
-        # both snapshots to unit columns before comparing, so only an actual
-        # gradient step (not a magnitude rescale) can fail this.
-        before_dir = a_before / a_before.norm(dim=0, keepdim=True)
-        after_dir = ng.A / ng.A.norm(dim=0, keepdim=True)
         trace.append(
             {
                 "frozen": frozen,
-                "direction_changed": not torch.allclose(
-                    before_dir, after_dir, atol=1e-12
-                ),
+                "stepped": not torch.equal(ng.A, probe.A),
                 "ndtmpsum": ng._ndtmpsum,
             }
         )
@@ -380,8 +379,10 @@ def test_a_frozen_window_still_computes_fresh_grad_norm(real_data):
     frozen_iters = [t for t in trace if t["frozen"]]
     assert frozen_iters, "test setup: no frozen iteration occurred in this run"
     for t in frozen_iters:
-        assert not t["direction_changed"]
+        assert not t["stepped"]
         assert t["ndtmpsum"] is not None and math.isfinite(t["ndtmpsum"])
+    # The check can fail: every unfrozen iteration does take a step.
+    assert all(t["stepped"] for t in trace if not t["frozen"])
     # Fresh per-iteration values, not the same stale number repeated.
     assert len({round(v, 15) for v in (t["ndtmpsum"] for t in frozen_iters)}) > 1
     # comp_used is exercised: the merge dropped at least one component.
@@ -465,6 +466,24 @@ def test_grad_norm_floor_stop_leaves_wrapper_usable(real_data, tmp_path):
 
 # --- keep_best / do_reject interaction (early stopping must not break them) -
 
+# The genuine-overshoot recipe (real 2-model data, aggressive Newton): it peaks
+# and then stops via the loosened min_dll a couple of iterations later (see
+# test_keep_best_restores_genuine_overshoot_under_min_dll_stop).
+_OVERSHOOT_KWARGS: dict[str, Any] = dict(
+    n_models=2,
+    seed=0,
+    do_newton=True,
+    newt_start=1,
+    lrate=0.5,
+    newtrate=3.0,
+    block_size=1024,
+    use_min_dll=True,
+    min_dll=1e-4,
+    maxincs=2,
+    use_grad_norm=False,
+)
+_OVERSHOOT_MAX_ITER = 150
+
 
 def test_keep_best_restores_genuine_overshoot_under_min_dll_stop(real_data):
     """keep_best (issue #51) must actually exercise its restore branch, not
@@ -477,25 +496,17 @@ def test_keep_best_restores_genuine_overshoot_under_min_dll_stop(real_data):
     This config is the known non-monotone recipe from
     ``test_write_amica_output_ll_matches_kept_iterate`` (issue #92,
     ``test_amica_ng_wrapper.py``: real 2-model data, aggressive
-    ``do_newton``/``lrate``), combined with a loosened ``min_dll`` so the run
-    stops via the NEW ``min_dll`` stop_reason a few iterations after its
-    peak, not via ``max_iter`` and not via a monotone approach to that peak.
+    ``do_newton``/``lrate``/``newtrate``), combined with a loosened ``min_dll``
+    so the run stops via the NEW ``min_dll`` stop_reason a few iterations
+    after its peak, not via ``max_iter`` and not via a monotone approach to
+    that peak. ``newtrate=3.0`` and the 150-iteration budget were added for
+    issue #333: with ``doscaling`` rescaling components (not stored columns)
+    the old ``newtrate=0.5``/60-iteration recipe runs monotone to
+    ``max_iter``; this one peaks at iteration 70 and stops at 71.
     """
     x = real_data[:, :4096]
-    ng = _fresh_ng(
-        n_models=2,
-        seed=0,
-        do_newton=True,
-        newt_start=1,
-        lrate=0.5,
-        block_size=1024,
-        use_min_dll=True,
-        min_dll=1e-4,
-        maxincs=2,
-        use_grad_norm=False,
-        keep_best=True,
-    )
-    ng.fit(x, max_iter=60, verbose=False)
+    ng = _fresh_ng(**_OVERSHOOT_KWARGS, keep_best=True)
+    ng.fit(x, max_iter=_OVERSHOOT_MAX_ITER, verbose=False)
     assert ng.stop_reason == "min_dll"
     assert ng.final_ll_ == max(ng.ll_history)
     assert ng.final_ll_ in ng.ll_history
@@ -678,17 +689,28 @@ def test_min_dll_stop_reachable_at_shipped_default_threshold(real_data):
     kind of seed/newt_start probing the other tests in this module already
     document doing), not a threshold change.
 
+    ``n_mix=1`` since issue #333. The three-component config this used before
+    stopped at iteration 326 only because the old ``doscaling`` normalized
+    stored columns, which perturbed every iteration; once it rescaled
+    components (an exact change of scale), that config kept gaining about 1e-8
+    to 1e-7 per iteration through 2000 iterations without ever posting six
+    consecutive gains below 1e-9, and the native reference binary, seeded
+    from the same initialization, did the same. The one-component config
+    stops at iteration 368 on macOS-arm64 with its last gains between 8e-11
+    and 9e-10, all far above the 7.6e-15 a raw, unnormalized comparison would
+    need (1e-9 / (4096 * 32)), so it still tells the two scales apart.
+
     The budget is deliberately generous. The iteration at which the stop fires
-    varies by more than 3x with the BLAS in use: measured at 326 on macOS-arm64,
-    412 on Linux-x86_64 with a CUDA-enabled torch build, and 1076 on the GitHub
-    Linux runner. An earlier version of this test used ``max_iter=500`` and
+    varies by more than 3x with the BLAS in use: measured (on the earlier
+    config) at 326 on macOS-arm64, 412 on Linux-x86_64 with a CUDA-enabled
+    torch build, and 1076 on the GitHub Linux runner. An earlier version of this test used ``max_iter=500`` and
     failed CI twice, first on the stop reason and then on a leftover
     ``len(ll_history) < 500`` bound (PR #213). The claim under test is that the
     default threshold is reachable at all, not that it is reached by any
     particular iteration, so both the budget and the bound track the budget
     rather than a constant fitted to one machine.
     """
-    ng = _fresh_ng(seed=1, do_newton=True, newt_start=5, block_size=1024)
+    ng = _fresh_ng(seed=1, n_mix=1, do_newton=True, newt_start=5, block_size=1024)
     ng.fit(real_data[:, :4096], max_iter=2000, verbose=False)
     assert ng.stop_reason == "min_dll"
     # A real early stop rather than exhausting the budget. Bound against the
@@ -775,20 +797,8 @@ def test_mir_history_survives_keep_best_restore(real_data):
     and the test would pass under the bug. Recording every iteration puts a
     waypoint strictly inside that window."""
     x = real_data[:, :4096]
-    ng = _fresh_ng(
-        n_models=2,
-        seed=0,
-        do_newton=True,
-        newt_start=1,
-        lrate=0.5,
-        block_size=1024,
-        use_min_dll=True,
-        min_dll=1e-4,
-        maxincs=2,
-        use_grad_norm=False,
-        keep_best=True,
-    )
-    ng.fit(x, max_iter=60, verbose=False, mir_step=1)
+    ng = _fresh_ng(**_OVERSHOOT_KWARGS, keep_best=True)
+    ng.fit(x, max_iter=_OVERSHOOT_MAX_ITER, verbose=False, mir_step=1)
     assert ng.stop_reason == "min_dll"
     assert ng.final_ll_ != ng.ll_history[-1]  # the restore branch fired
 

@@ -69,7 +69,8 @@ def real_data() -> np.ndarray:
 # overshoot on PyTorch (test_ng_convergence.py's forcing recipe) and,
 # independently verified, on MLX too (test_mlx_keepbest.py's module
 # docstring) -- but this module does not rely on that coincidence holding
-# forever, only on the CONTRACT below, which holds regardless.
+# forever, only on the CONTRACT below, which holds regardless. (newtrate=3.0
+# and the 150-iteration budget since issue #333, as in those recipes.)
 _AGGRESSIVE_KWARGS: dict[str, Any] = dict(
     n_models=2,
     n_mix=NMIX,
@@ -78,11 +79,13 @@ _AGGRESSIVE_KWARGS: dict[str, Any] = dict(
     do_newton=True,
     newt_start=1,
     lrate=0.5,
+    newtrate=3.0,
     use_min_dll=True,
     min_dll=1e-4,
     maxincs=2,
     use_grad_norm=False,
 )
+_MAX_ITER = 150
 
 
 def test_torch_keep_best_satisfies_the_max_contract(real_data):
@@ -93,14 +96,14 @@ def test_torch_keep_best_satisfies_the_max_contract(real_data):
         keep_best=True,
         **_AGGRESSIVE_KWARGS,
     )
-    ng.fit(real_data, max_iter=60, verbose=False)
+    ng.fit(real_data, max_iter=_MAX_ITER, verbose=False)
     assert ng.stop_reason not in ng._DEGENERATE_STOP_REASONS
     assert ng.final_ll_ == max(ng.ll_history)
 
 
 def test_mlx_keep_best_satisfies_the_max_contract(real_data):
     m = AMICAMLXNG(n_channels=NW, keep_best=True, **_AGGRESSIVE_KWARGS)
-    m.fit(real_data, max_iter=60, verbose=False)
+    m.fit(real_data, max_iter=_MAX_ITER, verbose=False)
     assert m.stop_reason not in m._DEGENERATE_STOP_REASONS
     assert m.final_ll_ == max(m.ll_history)
 
@@ -116,11 +119,11 @@ def test_both_backends_disable_the_safeguard_under_share_comps(real_data):
     ng = AMICATorchNG(
         n_channels=NW, device="cpu", dtype=torch.float64, keep_best=True, **kwargs
     )
-    ng.fit(real_data, max_iter=60, verbose=False)
+    ng.fit(real_data, max_iter=_MAX_ITER, verbose=False)
     assert ng.stop_reason not in ng._DEGENERATE_STOP_REASONS
     assert ng.final_ll_ == ng.ll_history[-1]
 
     m = AMICAMLXNG(n_channels=NW, keep_best=True, **kwargs)
-    m.fit(real_data, max_iter=60, verbose=False)
+    m.fit(real_data, max_iter=_MAX_ITER, verbose=False)
     assert m.stop_reason not in m._DEGENERATE_STOP_REASONS
     assert m.final_ll_ == m.ll_history[-1]
