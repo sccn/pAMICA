@@ -360,7 +360,7 @@ def test_multimodel_fixed_family():
     reason="opt-in Fortran-binary integration test (set AMICA_RUN_FORTRAN=1)",
 )
 @pytest.mark.parametrize("pdftype,n_mix", [(0, 3), (2, 3), (3, 3), (4, 1), (1, 1)])
-def test_family_converged_ll_matches_fortran(pdftype: int, n_mix: int):
+def test_family_converged_ll_matches_fortran(tmp_path, pdftype: int, n_mix: int):
     """Converged LL parity vs amica15mac with the optimizer matched (Newton on).
 
     Slow (runs the binary + a full NG fit per family); gated behind
@@ -374,9 +374,7 @@ def test_family_converged_ll_matches_fortran(pdftype: int, n_mix: int):
     data, params = load_sample_data()
     fp = dict(params)
     fp.update(pdftype=pdftype, num_mix=n_mix, max_iter=150, do_newton=True)
-    run_dir = SAMPLE_DIR.parent.parent / "scratch_amica_parity" / f"pt{pdftype}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    fres = run_fortran_amica(data, fp, run_dir, seed=0)
+    fres = run_fortran_amica(data, fp, tmp_path, seed=0)
     assert fres is not None and "final_ll" in fres
 
     kw: dict[str, Any] = dict(num_kurt=0) if pdftype == 1 else {}

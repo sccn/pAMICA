@@ -45,6 +45,11 @@ _BACKEND_PRECISION = {"torch": "float64", "numpy": "float64", "mlx": "float32"}
 # params.json down to what the natural-gradient backend understands.
 _NG_PARAMS = set(inspect.signature(AMICATorchNG).parameters) - {"n_channels"}
 
+# The repository this script lives in: every bundled input below is resolved
+# against it, so the harness runs from any working directory.
+_REPO = Path(__file__).resolve().parent
+_SAMPLE_DIR = _REPO / "pamica" / "sample_data"
+
 # Data-location keys: they tell the reference binary where the data live, but
 # every Python run here is handed the loaded array directly.
 _DATA_LOCATION_KEYS = {"files", "outdir", "data_dim", "field_dim"}
@@ -88,9 +93,8 @@ def set_all_seeds(seed: int):
 
 def load_sample_data() -> Tuple[np.ndarray, Dict]:
     """Load the sample EEG data and parameters."""
-    sample_dir = Path("pamica/sample_data")
-    data_file = sample_dir / "eeglab_data.fdt"
-    params_file = sample_dir / "sample_params.json"
+    data_file = _SAMPLE_DIR / "eeglab_data.fdt"
+    params_file = _SAMPLE_DIR / "sample_params.json"
 
     if not data_file.exists():
         raise FileNotFoundError(f"Sample data not found at {data_file}")
@@ -140,7 +144,7 @@ _PAMICA_EXTRA_KEYS = {"seed"}
 
 
 def fortran_accepted_keys(
-    source: Path = Path("pamica/amica15.f90"),
+    source: Path = _REPO / "pamica" / "amica15.f90",
 ) -> Optional[set]:
     """Keywords the reference binary's parameter parser accepts.
 
@@ -220,7 +224,7 @@ def write_fortran_param_file(
     dest.write_text("".join(out))
 
 
-LEGACY_BINARY = Path("pamica/sample_data/amica15mac")
+LEGACY_BINARY = _SAMPLE_DIR / "amica15mac"
 
 
 def default_reference_binary(*, download: bool = True) -> Path:
@@ -276,12 +280,12 @@ def run_fortran_amica(
     fortran_dir.mkdir(exist_ok=True)
 
     # Copy the sample data file to working directory
-    sample_data_file = Path("pamica/sample_data/eeglab_data.fdt")
+    sample_data_file = _SAMPLE_DIR / "eeglab_data.fdt"
     working_data_file = fortran_dir / "eeglab_data.fdt"
     shutil.copy(sample_data_file, working_data_file)
 
     # Copy and modify the parameter file
-    sample_param_file = Path("pamica/sample_data/input.param")
+    sample_param_file = _SAMPLE_DIR / "input.param"
     working_param_file = fortran_dir / "input.param"
 
     with open(sample_param_file, "r") as f:

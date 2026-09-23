@@ -309,13 +309,12 @@ def test_numpy_runner_writes_under_the_output_dir(dispatch_results, dispatch_out
     assert (dispatch_out / "numpy_run" / "W").exists()
 
 
-def test_main_writes_one_report_per_backend_and_a_summary(tmp_path, monkeypatch):
+def test_main_writes_one_report_per_backend_and_a_summary(tmp_path):
     """``main`` end to end without the reference: the PyTorch report keeps its
     historical name, other backends get their own, and an explicit
     ``--backend`` adds the one-row-per-backend summary."""
     from validate_implementations import main
 
-    monkeypatch.chdir(ROOT)  # the harness reads pamica/sample_data relatively
     out = tmp_path / "out"
     argv = ["--backend", "torch,numpy", "--skip-fortran", "--max-iter", "1"]
     assert main([*argv, "--output-dir", str(out)]) == 0
