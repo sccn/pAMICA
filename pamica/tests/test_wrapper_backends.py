@@ -32,6 +32,7 @@ from pamica.torch_impl.utils import load_eeglab_data
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
 DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
 PARAM_FILE = SAMPLE_DIR / "input.param"
+JSON_FILE = SAMPLE_DIR / "sample_params.json"
 NW = 32
 FIELD = 30504
 SEED = 42
@@ -337,6 +338,33 @@ def test_params_file_drives_the_mlx_backend(X, caplog):
     fit_named = {"max_iter", "lrate", "do_mean", "do_sphere", "do_newton"}
     expected = file_keys - mlx_params - fit_named - {"num_models", "num_mix"}
     assert set(keys) == expected
+
+
+def test_json_params_file_drives_the_mlx_backend(X, caplog):
+    """pamica's JSON schema through the MLX backend, including the JSON-only
+    spellings the shared reader translates (max_decs -> maxdecs,
+    min_grad_norm -> min_nd, share_int -> share_iter, issue #304)."""
+    AMICAMLXNG = _require_mlx()
+    model = AMICA.from_params_file(str(JSON_FILE), backend="mlx", verbose=False)
+    assert model.backend == "mlx"
+    with caplog.at_level(logging.WARNING, logger="pamica.amica"):
+        model.fit(X, max_iter=3, seed=SEED)
+
+    b = model.model_
+    assert b is not None and type(b) is AMICAMLXNG
+    assert b.pcakeep == 32 and b.pcadb == 30.0 and b.block_size == 512
+    assert b.do_newton is True and b.newt_start == 50 and b.newtrate0 == 1.0
+    assert b.maxdecs == 3 and b.min_nd == 1e-7 and b.share_iter == 100
+    assert b.maxrej == 3 and b.rholratefact == 0.5 and b.invsigmax == 100.0
+    assert model.is_fitted_
+
+    backend_name, keys = _not_applied_keys(caplog)
+    assert backend_name == "AMICAMLXNG"
+    mlx_params = set(inspect.signature(AMICAMLXNG).parameters)
+    assert keys and not set(keys) & mlx_params, keys
+    assert {"files", "outdir", "data_dim", "num_comps"} <= set(keys)
+    for translated in ("max_decs", "min_grad_norm", "share_int"):
+        assert translated not in keys
 
 
 def test_params_file_warning_names_the_torch_backend(X, caplog):
