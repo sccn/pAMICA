@@ -105,11 +105,21 @@ def run_pamica(
             self.c = torch.from_numpy(st["c"]).to(dev, dt)
             self._update_unmixing_matrices()
 
-    cls = FixInitNG if fixinit else AMICATorchNG
-    m = cls(
-        n_channels=nw, n_models=1, seed=0 if fixinit else seed, device=device,
-        dtype=torch.float64, **PAMICA_KW,
-    )  # fmt: skip
+    if device == "mlx":
+        # Supplementary float32 run (not part of the #145 protocol): the MLX
+        # backend with the same keywords and the same drawn start as the
+        # float64 PyTorch fit of this seed.
+        if fixinit:
+            raise SystemExit("--fixinit is PyTorch-only")
+        from pamica.mlx_impl import AMICAMLXNG
+
+        m = AMICAMLXNG(n_channels=nw, n_models=1, seed=seed, **PAMICA_KW)
+    else:
+        cls = FixInitNG if fixinit else AMICATorchNG
+        m = cls(
+            n_channels=nw, n_models=1, seed=0 if fixinit else seed, device=device,
+            dtype=torch.float64, **PAMICA_KW,
+        )  # fmt: skip
     t0 = time.time()
     m.fit(data, max_iter=max_iter, verbose=False)
     dt = time.time() - t0
@@ -212,7 +222,9 @@ def compare(out_dir: Path) -> dict:
         "runs": {k: {"final_ll": float(v["final_ll"])} for k, v in runs.items()}
     }
     fort = sorted(k for k in Wt if k.startswith("fortran_seed"))
-    pam = sorted(k for k in Wt if k.startswith("pamica_seed"))
+    pam = sorted(
+        k for k in Wt if k.startswith("pamica_seed") and not k.endswith("_mlx")
+    )
     pairs = {}
     for a, b in itertools.combinations(fort, 2):
         pairs[f"{a} vs {b}"] = summ(matched(Wt[a], Wt[b]))
@@ -231,6 +243,13 @@ def compare(out_dir: Path) -> dict:
             )
         for a in pam:
             pairs[f"pamica_fixinit vs {a}"] = summ(matched(Wt["pamica_fixinit"], Wt[a]))
+    for k in sorted(Wt):
+        if k.endswith("_mlx") and k[: -len("_mlx")] in Wt:
+            pairs[f"{k} vs {k[: -len('_mlx')]}"] = summ(
+                matched(Wt[k], Wt[k[: -len("_mlx")]])
+            )
+            for b in fort:
+                pairs[f"{k} vs {b}"] = summ(matched(Wt[k], Wt[b]))
     report["pairs"] = pairs
     for k, v in runs.items():
         extra = {
@@ -255,7 +274,7 @@ def main() -> None:
     p.add_argument("--data", type=Path)
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--threads", type=int, default=10)
-    p.add_argument("--device", default="cuda")
+    p.add_argument("--device", default="cuda", help="cuda, cpu, or mlx (float32)")
     # Smoke-test knobs only; the protocol is the full recording at 2000 iterations.
     p.add_argument("--max-iter", type=int, default=MAX_ITER)
     p.add_argument("--frames", type=int, default=None)
@@ -270,6 +289,8 @@ def main() -> None:
     if a.frames:
         data = data[:, : a.frames]
     tag = "fixinit" if a.fixinit else f"seed{a.seed}"
+    if a.device == "mlx":
+        tag += "_mlx"
     if a.cmd == "pamica":
         res = run_pamica(data, a.seed, a.fixinit, a.device, a.max_iter)
     else:
