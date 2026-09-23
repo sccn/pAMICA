@@ -27,7 +27,7 @@ that is not listed, that is a bug worth
 | 13 | Preprocessing with `do_sphere=False` | divides each channel by its standard deviation and adds a log-determinant term to the likelihood (amica15.f90:516-526) | identity sphere with a zero log-determinant, on all three array backends: the data are fitted unscaled | not a deliberate choice: an existing divergence, found during epic #324 and not yet ported | none yet (issue #328) |
 | 14 | `scalestep` | parsed (amica15.f90:3686), never used; rescales every iteration (:1843) | rescales every `scalestep` iterations counted from 1; default 1 matches the reference | pamica has always honored the keyword, and keeping it costs nothing; since issue #333 it counts from 1 like the reference's live cadences (`writestep`, `histstep`) instead of firing on the first iteration | `scalestep=1`, the default |
 | 15 | Restart after a non-finite likelihood (NumPy backend only) | within the first `restartiter` iterations, redraws `A` up to `maxrestarts + 1` times (`numrestarts > maxrestarts` ends the run, amica15.f90:1022-1049); `startover` is set at :1046 and never cleared, so after the first restart the binary never calls `update_params` again (:1115-1122) and the redrawn parameters are never fitted | redraws `A` up to `maxrestarts` times within the same window (counted from 1; `restartiter=0` disables it) and resumes fitting after each restart, with the learning rates and likelihood history reset; the restart uses up that iteration of `max_iter` | the reference's recovery path cannot resume, so its count has nothing to recover into; a restart that fits is the evident intent. PyTorch and MLX have no restart-on-NaN path at all: they stop on the non-finite likelihood (`stop_reason="nan_ll"`), and their `n_restarts` (row 10) is a different mechanism | none for the stalled loop; `maxrestarts` one higher reproduces the reference's count, and `restartiter=0` stops on the first non-finite likelihood, as the reference does with `restartiter=0` |
-| 16 | Single-precision density normalizers | `log(dble(1.772453851))` in the exact-Gaussian branch of the generalized Gaussian (`rho == 2`, amica15.f90:1313) is a single-precision literal widened to double, 3.0e-8 above `log(sqrt(pi))`; the Gaussian and cosh families (`pdftype` 2, 4 and 1, :1333, :1359, :1371) use literals of the same kind | `0.5 * log(pi)` for `rho == 2`; the double-precision values of the decimal literals for the other families, which differ from the reference's in the log by 3.7e-10, 2.0e-8 and -2.1e-8 | not a deliberate choice: found during epic #324 Phase 8, while seeding the reference from warm states in which mixtures sit at `maxrho = 2`; each such mixture's log-density differs by 3.0e-8, weighted by its responsibility (2.8e-9 in the log-likelihood of one warm two-model state of the sample). The other families' offsets are computed from the literals, not yet measured against the binary | none yet (issue #344 decides whether to adopt the reference's values); the seeded oracles keep `maxrho` below 2 |
+| 16 | Defaults of `input.param` keys | the compiled-in defaults are single-precision literals widened to double (amica15_header.f90:66-74), so a key missing from `input.param` takes the float32 rounding of its default: `lrate` is 0.1000000015 (the binary prints it), `comp_thresh` 0.9900000095, and likewise `mineig`, `minlrate`, `rholrate`, `rholratefact`, `invsigmin`, `min_dll` and `min_grad_norm`; a value given in `input.param` is read as double | the decimal values (`lrate=0.1`), given or defaulted | they are user inputs, and the reference reads any value it is given as double; pamica's native engine and the seeded oracles write every one of these keys, so they never meet the compiled-in values. The constants the reference hard-codes the same way are its values in every backend since issue #344 ([below](#single-precision-constants-issue-344)) | pass the float32 rounding, for example `lrate=float(numpy.float32(0.1))` |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
 row 3 with ADR 0003; row 5 with issue #50, extended to the raw backends by issue #306 and to non-finite steps and updates by issue #339; row 8 with issues #60, #240 and #334;
@@ -35,7 +35,7 @@ row 9 with issue #232; row 10 with issue #198; row 11 with issue #322 (ADR 0005)
 row 12 with issue #323; row 13 is recorded, not yet resolved, by issue #328;
 row 14 with issue #333 (ADR 0006);
 row 15 with issue #335, which also made the NumPy restart window count from 1;
-row 16 is recorded, not yet resolved, by issue #344.
+row 16 with issue #344, which adopted the reference's hard-coded single-precision constants.
 
 The A-freeze is the reference's arithmetic, applied as it is (issue #345):
 once `iter >= share_start`, every iteration with `mod(iter, share_iter) <= 5` holds the `A` update,
@@ -846,6 +846,48 @@ which also covers the reference's own `load_*` warm-start keywords.
 **How to get a fresh fit.**
 Construct a new `AMICA_NumPy` instance for each fit, as the NumPy command-line interface and the validation harness do,
 or pass `restart_seeds=[seed]`.
+
+## Single-precision constants (issue #344)
+
+This section records a parity fix, not a difference.
+The reference writes several constants as default-kind Fortran literals, which are single precision, widened to double with `dble`.
+The compiler rounds the decimal to float32, so the binary uses that rounding, not the decimal:
+`log(dble(2.506628274))` is the log of 2.5066282749176025.
+pamica used the decimals' double values until issue #344.
+Every backend now uses the reference's values, defined once in `pamica/reference_constants.py`:
+
+| Where | Reference | Value in the binary | Against the value used before |
+|---|---|---|---|
+| Generalized Gaussian at `rho == 2` | `log(dble(1.772453851))`, amica15.f90:1313 | log of 1.7724539041519165 | 3.0e-8 above `0.5 * log(pi)` |
+| Gaussian, `pdftype` 2 | `log(dble(2.506628274))`, amica15.f90:1333 | log of 2.5066282749176025 | 3.7e-10 above |
+| Sub-Gaussian cosh, `pdftype` 4 | `log(dble(4.132731354))`, amica15.f90:1359 | log of 4.1327314376831055 | 2.0e-8 above |
+| Super-Gaussian cosh, `pdftype` 1 | `log(dble(1.858073988))`, amica15.f90:1371 | log of 1.8580739498138428 | 2.1e-8 below |
+| Guard of the rho update, `epsdble` | `1.0e-16`, amica15_header.f90:73, used at amica15.f90:1558 | 1.0000000168623835e-16 | 1.7e-24 above |
+
+The other normalizers, `log(dble(2.0))` and the logistic family's `log(dble(4.0))`, are exact in single precision.
+A log-normalizer that is larger by some amount lowers the log-density of its mixtures by that amount.
+The default `maxrho = 2` clamps mixtures at exactly 2, so default fits take the first row,
+and their log-likelihood and updates move with the responsibility of those mixtures.
+Seeded with a warm two-model state that has mixtures at `rho == 2`,
+the PyTorch and NumPy updates now match the native binary to float64 round-off
+(log-likelihood 2.2e-15 after one iteration and 1.6e-13 after three),
+where the previous code was off by 2.8e-9 and 1.2e-8 in log-likelihood and by up to 8.4e-3 in `mu` after three iterations,
+in a low-mass mixture whose update amplifies any difference (`pamica/tests/test_component_rows.py`).
+Seeded with pamica's initialization for `pdftype` 2, 4 and 1,
+the PyTorch log-likelihood matches the binary's to 2.7e-15,
+where it was off by exactly each literal's rounding (`pamica/tests/test_reference_constants.py`).
+The MLX backend casts the same values to float32;
+at `rho == 2` its host-side `lgamma` table holds the reference's normalizer.
+
+Three kinds of single-precision literal keep their decimal values in pamica:
+
+- the defaults of `input.param` keys (row 16 of the table at the top);
+- the scales of the random initialization, `0.05`, `0.1` and `0.01` (amica15.f90:756, 771, 814 and 1035):
+  pamica draws its initialization from its own random generator, so the reference's cannot be reproduced either way,
+  and the parity tests seed the binary with pamica's initialization;
+- the starting values of the rejection pass's running maximum and minimum log-likelihood (amica15.f90:2210-2211), which pamica does not need.
+
+`pamica/tests/test_reference_constants.py` pins the sweep of both reference sources that found these.
 
 ## Unmapped Fortran keywords
 
