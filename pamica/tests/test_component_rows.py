@@ -724,6 +724,29 @@ def test_load_results_refuses_a_pre_change_multi_model_A(pre, real_data, tmp_pat
     np.testing.assert_array_equal(load_results(tmp_path / "one")["A"], _np(one.A))
 
 
+@pytest.mark.parametrize("keep", ["one-value-short", "one-component-short"])
+def test_load_results_refuses_a_truncated_A(real_data, tmp_path, keep):
+    """A truncated ``A`` file (a copy of a real two-model export) is refused
+    by name, whether the lost bytes leave a length that no reshape accepts or
+    one short by exactly one component, which would otherwise reshape and fail
+    later as a matrix-product error."""
+    import shutil
+
+    from pamica.numpy_impl.data import load_results
+
+    model = AMICATorchNG(n_channels=NW, n_models=2, n_mix=NMIX, seed=SEED, device="cpu")
+    model.fit(real_data[:, :_BYTE_ID_SAMPLES], max_iter=_BYTE_ID_ITERS, verbose=False)
+    model.write_amica_output(tmp_path / "full")
+    assert load_results(tmp_path / "full")["A"].shape == (2 * NW, NW)
+
+    shutil.copytree(tmp_path / "full", tmp_path / "cut")
+    raw = (tmp_path / "full" / "A").read_bytes()
+    lost = 8 if keep == "one-value-short" else 8 * NW
+    (tmp_path / "cut" / "A").write_bytes(raw[:-lost])
+    with pytest.raises(ValueError, match=r"holds \d+ values, expected 2048"):
+        load_results(tmp_path / "cut")
+
+
 # --- 4. seeded native reference oracle from a MERGED state (opt-in) -------------
 # The reference's input.param optimizer, natural gradient only (the Newton start
 # is issue #335), with the block size pinned on both sides. ``maxrho`` sits just

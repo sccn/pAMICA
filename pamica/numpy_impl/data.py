@@ -255,7 +255,13 @@ def load_results(indir: Union[str, Path], compressed: bool = False) -> dict:
     # which is exactly a C-order read of the same bytes: (num_comps, nw).
     A = _read("A")
     if A is not None:
-        results["A"] = A.reshape(num_comps, len(A) // num_comps)
+        if A.size != num_comps * nw:
+            raise ValueError(
+                f"The mixing matrix A in {indir} holds {A.size} values, expected "
+                f"{num_comps * nw} ({num_comps} components x {nw} channels, from "
+                "gm and W); the file may be truncated or from another run."
+            )
+        results["A"] = A.reshape(num_comps, nw)
 
     # Mixture params are stored (num_mix, num_comps) column-major (Fortran names
     # 'sbeta'); reshape order="F" matches the write_amicaout writer and Fortran
