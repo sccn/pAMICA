@@ -248,6 +248,18 @@ def test_every_delegating_method_works(fitted, X, backend, tmp_path):
     model.write_amica_output(str(tmp_path / "amicaout"))
     assert (tmp_path / "amicaout" / "W").exists()
 
+    # fit_transform on a fresh wrapper: the fit it runs is this fixture's, and
+    # it returns that model's own transform of the same data.
+    fresh = _wrapper(backend)
+    sources = fresh.fit_transform(X, max_iter=MAX_ITER, seed=SEED)
+    assert type(fresh.model_) is type(b) and fresh.is_fitted_
+    np.testing.assert_array_equal(sources, fresh.transform(X))
+    reference = model.transform(X)
+    if backend == "torch":
+        np.testing.assert_array_equal(sources, reference)  # CPU: bit for bit
+    else:
+        assert np.abs(sources - reference).max() <= _float32_tol(reference)
+
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_unfitted_accessors_raise_not_fitted(backend):
