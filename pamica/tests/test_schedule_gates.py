@@ -638,7 +638,9 @@ def test_numpy_restart_window_is_the_first_restartiter_iterations(
     assert m.converged is bool(restarts), m.stop_reason
     if not restarts:
         assert m.stop_reason is not None and "Non-finite" in m.stop_reason
-        assert len(m.ll) == nan_iter + 1  # stopped on the poisoned iteration
+        # Stopped on the poisoned iteration, whose non-finite likelihood is not
+        # recorded (as in the PyTorch/MLX ll_history, issue #339 review).
+        assert len(m.ll) == nan_iter
 
 
 # --- validation of the settings the gates read ------------------------------

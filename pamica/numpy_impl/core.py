@@ -1452,15 +1452,25 @@ class AMICA:
         # Main optimization loop
         self._optimize()
 
-        # Record the outcome: a terminal non-finite LL means the fit diverged
-        # (even restart-on-NaN could not recover), which callers/CLI must be
-        # able to detect rather than silently trusting model.A/W.
-        self.converged = len(self.ll) > 0 and bool(np.isfinite(self.ll[-1]))
-        if not self.converged:
+        # Record the outcome: a degenerate stop (a non-finite likelihood that
+        # restart-on-NaN could not recover, a non-finite update direction, or
+        # non-finite parameters after an update) means the fit diverged, which
+        # callers/CLI must be able to detect rather than silently trusting
+        # model.A/W. self.ll holds only finite values, so the stop reason, not
+        # its last entry, is what says so.
+        degenerate_stop = self._is_degenerate_stop(self.stop_reason)
+        self.converged = len(self.ll) > 0 and not degenerate_stop
+        if degenerate_stop:
             self.logger.error(
-                "AMICA did not converge: the log-likelihood is non-finite "
-                "(diverged after %d restart(s)); results were not written.",
+                "AMICA did not converge: %s (after %d restart(s)); results were "
+                "not written.",
+                self.stop_reason,
                 self.numrestarts,
+            )
+        elif not self.converged:
+            self.logger.error(
+                "AMICA did not converge: no iteration completed; results were "
+                "not written."
             )
         else:
             # A finite likelihood is not on its own proof of a usable fit: a
@@ -1509,6 +1519,26 @@ class AMICA:
         "mean", "sphere", "sldet", "_sphere_pinv",
     )  # fmt: skip
 
+    # The stop reasons that mark a fit degenerate, in this backend's prose
+    # vocabulary: a non-finite likelihood (the PyTorch/MLX "nan_ll" and
+    # "singular_ll"), a non-finite update direction ("nan_direction"),
+    # non-finite parameters after an update ("nan_params", followed by ": " and
+    # the offenders' names, as the exit check's reason is), and a restart that
+    # raised. fit() reports converged=False for each (_is_degenerate_stop).
+    _NONFINITE_LL_REASON = "Non-finite likelihood (NaN/-inf) encountered"
+    _NONFINITE_DIRECTION_REASON = "Non-finite update direction (NaN/inf) encountered"
+    _NONFINITE_PARAMS_REASON = "Non-finite parameters after an update"
+    _DEGENERATE_STOP_REASONS = (
+        _NONFINITE_LL_REASON,
+        _NONFINITE_DIRECTION_REASON,
+        _NONFINITE_PARAMS_REASON,
+        restarts.ERROR_STOP_REASON,
+    )
+
+    # What the post-update guard checks, in the order AMICAMLXNG's guard names
+    # them (it adds its cached log-determinant of W).
+    _POST_UPDATE_CHECKED = ("A", "mu", "alpha", "beta", "rho", "gm", "c", "W")
+
     # Every parameter a caller can read back off disk or off the object. `A` and
     # `W` are the decomposition; `c`/`mu`/`alpha`/`beta`/`rho`/`gm` are the model
     # a downstream `loadmodout` reads. `sphere`/`mean` are preprocessing outputs
@@ -1526,7 +1556,16 @@ class AMICA:
         "mean",
     )
 
-    def _nonfinite_params(self) -> List[str]:
+    @classmethod
+    def _is_degenerate_stop(cls, reason: Optional[str]) -> bool:
+        """Whether ``reason`` is one of :attr:`_DEGENERATE_STOP_REASONS`,
+        with or without the ``": names"`` suffix the parameter reason carries."""
+        return reason is not None and any(
+            reason == known or reason.startswith(f"{known}: ")
+            for known in cls._DEGENERATE_STOP_REASONS
+        )
+
+    def _nonfinite_params(self, names: Optional[Tuple[str, ...]] = None) -> List[str]:
         """Names of fitted parameters currently holding a non-finite value.
 
         The single definition of "this state is safe to persist or report as a
@@ -1536,11 +1575,13 @@ class AMICA:
         non-finite rather than only *that* something did.
 
         Parameters not yet allocated (before ``_initialize_parameters``) are
-        skipped rather than treated as bad.
+        skipped rather than treated as bad. ``names`` narrows the sweep (the
+        post-update guard in :meth:`_optimize` passes
+        :attr:`_POST_UPDATE_CHECKED`); the default is :attr:`_FITTED_PARAMS`.
         """
         return [
             name
-            for name in self._FITTED_PARAMS
+            for name in (self._FITTED_PARAMS if names is None else names)
             if getattr(self, name, None) is not None
             and not np.all(np.isfinite(np.asarray(getattr(self, name))))
         ]
@@ -2289,11 +2330,12 @@ class AMICA:
         The reference computes both in ``accum_updates_and_likelihood``
         (amica15.f90:1666-1761), with ``LL(iter)``, before the likelihood-
         decrease response and the stopping checks read ``ndtmpsum`` and before
-        ``update_params`` applies the step. This records the iteration's
-        likelihood and gradient norm (``self.ll``/``self.nd``) and finalizes
-        the Newton curvature (``sigma2``/``lambda_``/``kappa``) as it goes;
-        :meth:`_optimize` calls it first and hands the result to
-        :meth:`_update_parameters` once the checks have run.
+        ``update_params`` applies the step. It finalizes the Newton curvature
+        (``sigma2``/``lambda_``/``kappa``) as it goes but records nothing:
+        :meth:`_optimize` appends the iteration's likelihood and the returned
+        norm to ``self.ll``/``self.nd`` once the likelihood is known to be
+        finite, as the PyTorch and MLX loops append ``ll_history``, and hands
+        the step to :meth:`_update_parameters` once the checks have run.
         """
         assert (
             self.data_dim is not None
@@ -2414,13 +2456,6 @@ class AMICA:
             np.sqrt(np.sum(dAk[used, :] ** 2) / (self.data_dim * int(used.sum())))
         )
 
-        # Record LL(iter) and nd(iter) here, where the reference's accumulation
-        # pass produces them (amica15.f90:1760-1770). _check_convergence uses the
-        # norm as the gradient floor in the decrease-stop condition regardless
-        # of use_grad_norm; the flag only gates the separate final
-        # gradient-norm stop.
-        self.ll.append(updates["ll"])
-        self.nd.append(nd_value)
         return _UpdateStep(dAk, newton_active, no_newt, nd_value)
 
     def _update_parameters(self, updates: Dict, step: Optional[_UpdateStep] = None):
@@ -2435,8 +2470,9 @@ class AMICA:
             The mixing-matrix step :meth:`_update_direction` computed from the
             same ``updates``: :meth:`_optimize` passes the one its stopping
             checks already read, so nothing is computed twice. A direct call
-            may omit it, and it is then computed (and the iteration's
-            likelihood and gradient norm recorded) here first.
+            may omit it, and it is then computed here first; neither path
+            records anything in ``self.ll``/``self.nd``, which only
+            :meth:`_optimize` appends to.
         """
         assert (
             self.data_dim is not None
@@ -2773,40 +2809,71 @@ class AMICA:
                 # AMICATorchNG, in AMICAMLXNG, and in the binary (issue #335).
 
                 # One iteration follows the reference's main loop
-                # (amica15.f90:949-1142, issue #339): the E-step, which records
-                # LL(iter) and the gradient norm and builds the step; the
-                # restart-on-NaN window; the likelihood-decrease response and the
-                # stopping checks; an exit BEFORE any parameter moves if a check
-                # fired; otherwise the update with the rates the response just
-                # set, then the share merge, the checkpoints and rejection.
+                # (amica15.f90:949-1142, issue #339): the E-step, which yields
+                # LL(iter) and the step with its norm; the restart-on-NaN window;
+                # the likelihood-decrease response and the stopping checks; an
+                # exit BEFORE any parameter moves if a check fired; otherwise the
+                # update with the rates the response just set, then the share
+                # merge, the checkpoints and rejection.
                 updates = self._get_updates_and_likelihood()
-                step = self._update_direction(updates)
+                ll = float(updates["ll"])
 
-                # Restart-on-NaN (Fortran amica15.f90:1022-1050): an early
-                # non-finite LL usually means an unlucky init, so redraw A and
-                # start over, up to maxrestarts times, within the first
-                # restartiter iterations (Fortran's absolute `iter <= restartiter`
-                # window over its 1-based counter; the iteration counter is not
-                # reset on restart here). Checked before the update, which the
-                # reference skips on a restart too (``startover``, :1115). A
-                # later NaN falls through to _check_convergence, which stops
-                # (Fortran exits too).
-                if (
-                    len(self.ll) > 0
-                    and not np.isfinite(self.ll[-1])
-                    and schedule.within_restart_window(iter, self.restartiter)
-                    and self.numrestarts < self.maxrestarts
-                ):
-                    self.numrestarts += 1
+                # A non-finite likelihood is never recorded in self.ll, as it is
+                # never recorded in the PyTorch and MLX ll_history: the history
+                # stays the finite trajectory of the parameters the fit
+                # actually visited, and every backend's has the same length for
+                # the same event. A singular W makes logdet -> -inf (not NaN), so
+                # the guard is isfinite, not isnan.
+                if not np.isfinite(ll):
+                    # Restart-on-NaN (Fortran amica15.f90:1022-1050): an early
+                    # non-finite LL usually means an unlucky init, so redraw A
+                    # and start over, up to maxrestarts times, within the first
+                    # restartiter iterations (Fortran's absolute
+                    # `iter <= restartiter` window over its 1-based counter; the
+                    # iteration counter is not reset on restart here). Checked
+                    # before the update, which the reference skips on a restart
+                    # too (``startover``, :1115).
+                    if (
+                        schedule.within_restart_window(iter, self.restartiter)
+                        and self.numrestarts < self.maxrestarts
+                    ):
+                        self.numrestarts += 1
+                        self.logger.warning(
+                            "Non-finite LL at iter %d; reinitializing and "
+                            "starting over (restart %d of %d).",
+                            iter + 1,
+                            self.numrestarts,
+                            self.maxrestarts,
+                        )
+                        self._reinitialize_for_restart()
+                        continue
+                    # Past the window, or out of restarts: stop, as the
+                    # reference does (amica15.f90:1052-1055).
                     self.logger.warning(
-                        "Non-finite LL at iter %d; reinitializing and starting "
-                        "over (restart %d of %d).",
-                        iter + 1,
-                        self.numrestarts,
-                        self.maxrestarts,
+                        "Non-finite log-likelihood (%s) at iteration %d; stopping.",
+                        ll,
+                        iter,
                     )
-                    self._reinitialize_for_restart()
-                    continue
+                    convergence_reason = self._NONFINITE_LL_REASON
+                    break
+
+                step = self._update_direction(updates)
+                self.ll.append(ll)
+                self.nd.append(step.nd)
+
+                # A non-finite step or norm would pass both gradient-norm checks
+                # (NaN <= min_nd is False) and then be applied, so stop on it
+                # here, before any check reads it and before the update, with
+                # the parameters whose (finite) likelihood was just recorded.
+                if not (np.isfinite(step.nd) and np.all(np.isfinite(step.dAk))):
+                    self.logger.warning(
+                        "Non-finite update direction (ndtmpsum %s) at iteration "
+                        "%d; stopping before the update.",
+                        step.nd,
+                        iter,
+                    )
+                    convergence_reason = self._NONFINITE_DIRECTION_REASON
+                    break
 
                 # Calculate metrics for logging/progress
                 elapsed_time = time.time() - start_time
@@ -2862,6 +2929,45 @@ class AMICA:
                 # Update parameters, with the rates the response above just set.
                 self._update_parameters(updates, step)
 
+                # Surface a corrupted update (a collapsed mixture component, a
+                # singular inverse) on the iteration it happens, with the same
+                # check and message as AMICAMLXNG and AMICATorchNG: otherwise a
+                # corruption on the last iteration would end as a max_iter fit
+                # holding non-finite parameters. One difference, for this
+                # backend's restart-on-NaN, which redraws A (and so W) and keeps
+                # the mixture parameters, as the reference's does
+                # (amica15.f90:1026-1046): when only A/W went non-finite and the
+                # next iteration still falls inside the restart window with a
+                # restart left, the next E-step's non-finite likelihood restarts
+                # the fit, as the reference's would, so the loop goes on to it.
+                # A restart could not repair any other parameter, so those stop.
+                bad = self._nonfinite_params(self._POST_UPDATE_CHECKED)
+                if bad:
+                    restartable = (
+                        set(bad) <= {"A", "W"}
+                        and iter + 1 < self.max_iter
+                        and schedule.within_restart_window(iter + 1, self.restartiter)
+                        and self.numrestarts < self.maxrestarts
+                    )
+                    if not restartable:
+                        self.logger.warning(
+                            "Non-finite %s at iter %d (a mixture component likely "
+                            "collapsed); stopping.",
+                            ", ".join(bad),
+                            iter,
+                        )
+                        convergence_reason = (
+                            f"{self._NONFINITE_PARAMS_REASON}: {', '.join(bad)}"
+                        )
+                        break
+                    self.logger.warning(
+                        "Non-finite %s at iter %d (a mixture component likely "
+                        "collapsed); the next iteration's restart-on-NaN will "
+                        "reinitialize.",
+                        ", ".join(bad),
+                        iter,
+                    )
+
                 # Share components if requested (Fortran identify_shared_comps
                 # schedule, amica15.f90:1856): once per share_int cycle from
                 # share_start, merging near-collinear components across
@@ -2875,7 +2981,7 @@ class AMICA:
                 # backend.
                 #
                 # This runs AFTER self.ll recorded this iteration's likelihood
-                # (_update_direction), so a merge on the final iteration lands
+                # (above), so a merge on the final iteration lands
                 # in self.A/comp_list but not in the ll value already stored --
                 # see the final_ll_ note on self.ll's init (issue #269).
                 if self.share_comps and schedule.periodic_due(
@@ -2990,14 +3096,10 @@ class AMICA:
 
         # Check for non-finite LL: a singular W makes logdet -> -inf (not NaN),
         # so guard on isfinite, not isnan alone, or a degenerate model would run
-        # to max_iter undetected.
+        # to max_iter undetected. _optimize stops on a non-finite likelihood
+        # before recording it, so this guards a direct caller's history.
         if not np.isfinite(self.ll[-1]):
-            return (
-                True,
-                "Non-finite likelihood (NaN/-inf) encountered",
-                numdecs,
-                numincs,
-            )
+            return (True, self._NONFINITE_LL_REASON, numdecs, numincs)
 
         # The remaining checks compare consecutive iterations; skip until there
         # are two LL values -- the first iteration, or the first iteration after

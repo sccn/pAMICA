@@ -967,12 +967,17 @@ class AMICAMLXNG:
         self._llt_lht: Optional[np.ndarray] = None
         self._llt_lt: Optional[np.ndarray] = None
 
-    # The last entry is only reachable under best-of-N restarts (issue #198): a
-    # restart whose fit raised rather than stopping, recorded as degenerate so a
-    # search in which every restart crashed still reports an unusable model.
+    # Stop reasons that mark a fit as degenerate, the same set as
+    # AMICATorchNG's: a non-finite log-likelihood ("nan_ll"/"singular_ll"), a
+    # non-finite update direction ("nan_direction"), non-finite parameters after
+    # an update ("nan_params"). The last entry is only reachable under best-of-N
+    # restarts (issue #198): a restart whose fit raised rather than stopping,
+    # recorded as degenerate so a search in which every restart crashed still
+    # reports an unusable model.
     _DEGENERATE_STOP_REASONS = (
         "nan_ll",
         "singular_ll",
+        "nan_direction",
         "nan_params",
         restarts.ERROR_STOP_REASON,
     )
@@ -1782,10 +1787,10 @@ class AMICAMLXNG:
         # (no .item() here) so it rides fit()'s single per-iteration mx.eval.
         #
         # SELECT, not multiply-by-mask: 0*NaN is NaN, so a single non-finite
-        # row would poison the whole reduction, and a NaN ndtmpsum silently
-        # disables BOTH grad-norm stops (NaN <= min_nd is False), burning the
-        # entire iteration budget with no diagnostic. mx.where drops the masked
-        # lanes structurally instead. Unreachable today (a merged-away row's
+        # row would poison the whole reduction, and a NaN ndtmpsum would
+        # disable BOTH grad-norm stops (NaN <= min_nd is False) if fit() did not
+        # stop on it ("nan_direction"); a masked-away row must not trigger that
+        # stop. mx.where drops the masked lanes structurally instead. Unreachable today (a merged-away row's
         # dAk is exactly 0), but Phase 3's Newton direction feeds this same dAk.
         used_f = self._comp_used_arr.astype(mx.float32)
         nd = (dAk**2).sum(axis=1)  # (n_comps,)
@@ -2516,8 +2521,8 @@ class AMICAMLXNG:
         Records (index-aligned, always populated): ``restart_seeds_``,
         ``restart_lls_`` (NaN where a restart ended degenerate) and
         ``restart_stop_reasons_``; the winner is named in one INFO log line. A
-        degenerate restart (``nan_ll``/``singular_ll``/``nan_params``) is
-        excluded from selection but recorded; if every restart is degenerate the
+        degenerate restart (``nan_ll``/``singular_ll``/``nan_direction``/
+        ``nan_params``) is excluded from selection but recorded; if every restart is degenerate the
         model is left holding the last one.
 
         ``mir_step``, as :meth:`_fit_once`, is passed through to every
@@ -2614,9 +2619,12 @@ class AMICAMLXNG:
         exactly the log-likelihood of the returned parameters; a fit that runs
         to ``max_iter`` takes the last iteration's update, so its
         ``final_ll_ == ll_history[-1]`` is the likelihood one update before the
-        returned parameters, as in the reference. A ``"nan_params"`` stop
-        records its iteration's (finite) likelihood before the update that
-        went non-finite.
+        returned parameters, as in the reference. A ``"nan_direction"`` stop
+        (a non-finite step or gradient norm, caught before any check reads it)
+        and a ``"nan_params"`` stop (non-finite parameters right after an
+        update) both record their iteration's (finite) likelihood; a
+        ``"nan_ll"``/``"singular_ll"`` stop does not record the non-finite one.
+        All four are degenerate (``_DEGENERATE_STOP_REASONS``).
 
         Under ``share_comps``, if a merge fires on the LAST iteration, the
         returned ``A``/``W``/``comp_list`` are already post-merge but
@@ -2820,6 +2828,26 @@ class AMICAMLXNG:
 
             self.ll_history.append(ll)
 
+            # A non-finite step or norm would pass both gradient-norm checks
+            # below (NaN <= min_nd is False) and then be applied, so stop on it
+            # here, before any check reads it and before the update, with the
+            # parameters whose (finite) likelihood was just recorded (as
+            # AMICATorchNG does). Both were materialized with the likelihood.
+            nd_now = self._ndtmpsum
+            if not (
+                nd_now is not None
+                and math.isfinite(nd_now)
+                and bool(mx.all(mx.isfinite(step.dAk)).item())
+            ):
+                self.stop_reason = "nan_direction"
+                logger.warning(
+                    "Non-finite update direction (ndtmpsum %s) at iteration %d; "
+                    "stopping before the update.",
+                    nd_now,
+                    it,
+                )
+                break
+
             # Learning-rate control (Fortran amica15.f90:1051-1097): anneal the
             # working lrate (and the working rho rate) on an LL decrease; ratchet
             # the ceilings after maxdecs persistent decreases. All of it runs
@@ -3000,10 +3028,10 @@ class AMICAMLXNG:
             # blow-up would otherwise complete as max_iter with silently NaN
             # parameters (the torch backend has state_dict as a backstop; the
             # MLX backend does not, so guard in fit()). Params are already
-            # materialized by the mx.eval above, so this is a cheap read.
-            # _nd_arr is included as defense in depth: a non-finite gradient norm
-            # silently disables both grad-norm stops (NaN <= min_nd is False), so
-            # it must not be the one quantity nothing checks.
+            # materialized by the mx.eval above, so this is a cheap read. The
+            # gradient norm is not among them: a non-finite one already stopped
+            # the fit before the update ("nan_direction", above). AMICATorchNG
+            # and the NumPy backend run the same check with the same message.
             checked = {
                 "A": self.A,
                 "mu": self.mu,
@@ -3012,7 +3040,6 @@ class AMICAMLXNG:
                 "rho": self.rho,
                 "gm": self.gm,
                 "c": self.c,
-                "ndtmpsum": self._nd_arr,
                 # W and its log-determinant are DERIVED from A by
                 # mx.linalg.inv/slogdet, so a non-finite value can reach the
                 # caller while A itself is still finite -- and nothing else
@@ -3042,10 +3069,8 @@ class AMICAMLXNG:
                 params_finite = params_finite & mx.all(mx.isfinite(value))
             if not bool(params_finite.item()):
                 # Name the offenders. Everything here is already materialized, so
-                # the per-tensor reads add no mid-graph sync -- this is the MLX
-                # stand-in for AMICATorchNG's inline mu/beta/alpha canary
-                # (in ``AMICATorchNG._update_parameters``), which MLX cannot afford
-                # inside _update_parameters because it would sync the lazy graph.
+                # the per-tensor reads add no mid-graph sync (a check inside
+                # _update_parameters would sync the lazy graph mid-update).
                 bad = [
                     name
                     for name, value in checked.items()
@@ -3909,7 +3934,7 @@ class AMICAMLXNG:
         if self.stop_reason in self._DEGENERATE_STOP_REASONS:
             raise RuntimeError(
                 f"Refusing to write output for a degenerate model (stop_reason="
-                f"{self.stop_reason!r}): fit() hit a non-finite log-likelihood "
+                f"{self.stop_reason!r}): fit() hit a non-finite value "
                 f"at iteration {self.iteration}. Fix the instability (lower "
                 f"lrate, disable Newton, or check data conditioning) before "
                 f"writing."
@@ -3917,7 +3942,7 @@ class AMICAMLXNG:
         # Defense-in-depth, mirroring state_dict(): catch a non-finite
         # parameter even if stop_reason bookkeeping ever misses it. Also
         # neutralizes a stale LLt stash: a failed final iteration's
-        # _llt_lht/_llt_lt (from before the nan_params/nan_ll break) can no
+        # _llt_lht/_llt_lt (from before a degenerate break) can no
         # longer reach disk once this guard refuses the write outright.
         nonfinite = self._nonfinite_params()
         if nonfinite:
@@ -4057,7 +4082,7 @@ class AMICAMLXNG:
         if self.stop_reason in self._DEGENERATE_STOP_REASONS:
             raise RuntimeError(
                 f"Refusing to serialize a degenerate model (stop_reason="
-                f"{self.stop_reason!r}): fit() hit a non-finite log-likelihood "
+                f"{self.stop_reason!r}): fit() hit a non-finite value "
                 f"at iteration {self.iteration}. Fix the instability (lower "
                 f"lrate, disable Newton, or check data conditioning) before "
                 f"saving."

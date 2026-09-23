@@ -295,12 +295,13 @@ def test_checkpoints_never_persist_non_finite_parameters(tmp_path):
     """A mid-fit checkpoint must not write a degenerate state to disk.
 
     ``fit``'s final write is not the only write: ``writestep`` checkpoints run
-    inside the loop, and a state that goes non-finite early is still on the
-    object for every later checkpoint. Persisting it would leave a run whose
-    only on-disk artifact is corrupt -- ``loadmodout`` reads NaN back without
+    inside the loop. Persisting a non-finite state would leave a run whose only
+    on-disk artifact is corrupt -- ``loadmodout`` reads NaN back without
     complaint. The collapse lands at iteration 2 of 4 with ``writestep=1``, so
-    the first checkpoint is valid and every later one must be refused, loudly,
-    without disturbing what the valid one wrote.
+    the first checkpoint is valid. Since the issue #339 review the fit stops
+    right after that update (``nan_params``), before its checkpoint; the
+    checkpoint's own refusal stays as the backstop and is exercised directly
+    at the end, without disturbing what the valid checkpoint wrote.
     """
     model = _collapsing_model(tmp_path, max_iter=4, collapse_iter=1, writestep=1)
     with pytest.warns(RuntimeWarning, match="invalid value"):
@@ -318,12 +319,19 @@ def test_checkpoints_never_persist_non_finite_parameters(tmp_path):
         assert value is not None, f"{name} missing from the written output"
         assert np.all(np.isfinite(np.asarray(value))), f"{name} written non-finite"
 
-    # Refused loudly, naming the parameter. Once here rather than once per
-    # remaining iteration: the NaN mu makes the next likelihood non-finite, so
-    # restart-on-NaN takes over and its `continue` skips the checkpoint entirely.
+    # The fit stopped on the collapse, before that iteration's checkpoint.
+    assert model.stop_reason == f"{AMICA._NONFINITE_PARAMS_REASON}: mu"
+    log_text = (tmp_path / "out" / "out.txt").read_text()
+    assert "Skipping the results checkpoint" not in log_text
+
+    # The checkpoint refuses a non-finite state loudly, naming the parameter,
+    # and leaves the valid checkpoint alone.
+    written = (tmp_path / "out" / "W").read_bytes()
+    assert model._write_checkpoint("results") is False
     log_text = (tmp_path / "out" / "out.txt").read_text()
     assert "Skipping the results checkpoint" in log_text
     assert "non-finite mu" in log_text
+    assert (tmp_path / "out" / "W").read_bytes() == written
 
 
 # --- one gm-weighted A step per shared column (#242) ------------------------
@@ -450,13 +458,14 @@ def test_freeze_holds_A_but_still_measures_the_gradient():
     assert model._a_frozen() is True
     A_before = model.A.copy()
     lrate_before = model.lrate
-    nd_count = len(model.nd)
 
-    model._update_parameters(model._get_updates_and_likelihood())
+    updates = model._get_updates_and_likelihood()
+    step = model._update_direction(updates)
+    model._update_parameters(updates, step)
 
     np.testing.assert_array_equal(model.A, A_before)
     assert model.lrate == lrate_before  # the ramp is held with the step
-    assert len(model.nd) == nd_count + 1 and model.nd[-1] > 0.0
+    assert step.nd > 0.0
 
 
 # --- cross-backend agreement (.rules/backend_parity.md) ---------------------

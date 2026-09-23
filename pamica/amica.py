@@ -265,19 +265,25 @@ class AMICA:
         ``save`` refuse such a model (issue #50).
     converged_ : bool
         Whether the last ``fit`` ended on a usable stop rather than a degenerate
-        one (``stop_reason_`` not in ``nan_ll``/``singular_ll``). A degenerate fit
-        holds non-finite parameters and would produce NaN sources (issue #50).
+        one (``stop_reason_`` not in the backend's ``_DEGENERATE_STOP_REASONS``:
+        ``nan_ll``/``singular_ll``/``nan_direction``/``nan_params``). A
+        degenerate fit holds non-finite parameters, or stopped before applying
+        a non-finite step, and would produce NaN sources (issue #50).
     stop_reason_ : str or None
         Why the last ``fit`` stopped (the backend ``stop_reason``):
         ``"max_iter"``, ``"lrate_floor"``, ``"grad_norm_floor"``, ``"min_dll"``,
-        ``"grad_norm"``, ``"nan_ll"``, or ``"singular_ll"``. The last five are
+        ``"grad_norm"``, ``"nan_ll"``, ``"singular_ll"``, ``"nan_direction"``
+        or ``"nan_params"``. ``"lrate_floor"`` to ``"grad_norm"`` are
         Fortran-faithful convergence stops (issue #207: ``lrate_floor``/
         ``grad_norm_floor`` fire together as two halves of the same
         likelihood-decrease branch; ``min_dll``/``grad_norm`` are separate,
-        unconditional per-iteration checks); only ``nan_ll``/``singular_ll``
-        are degenerate (see ``converged_``), plus each backend's own further
-        markers (MLX's ``"nan_params"``, and under best-of-N restarts the
-        marker of a restart that raised). None of these checks short-
+        unconditional per-iteration checks). The last four are degenerate (see
+        ``converged_``): a non-finite log-likelihood (``nan_ll``/
+        ``singular_ll``), a non-finite update direction caught before it is
+        applied (``nan_direction``), or non-finite parameters right after an
+        update (``nan_params``); PyTorch and MLX use the same set (issue #339
+        review), and under best-of-N restarts a restart that raised has its
+        own degenerate marker. None of these checks short-
         circuits on an earlier one in the same iteration, so under the
         shipped ``use_grad_norm=True`` default ``"grad_norm"`` always takes
         precedence over ``"grad_norm_floor"`` when both would apply --

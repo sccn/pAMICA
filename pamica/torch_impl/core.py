@@ -1933,20 +1933,12 @@ class AMICATorchNG:
             ),
             self.beta,
         )
-        # Fortran keeps a live "NaN in sbeta!" canary here (amica17.f90:1996-2000).
         # The exact-EM mu/beta divisions are unguarded (matching Fortran, whose own
-        # mu/beta guard is commented out), so surface a non-finite value here
-        # instead of letting it propagate to a later, unattributable nan-LL stop.
-        if (
-            not torch.isfinite(self.mu).all()
-            or not torch.isfinite(self.beta).all()
-            or not torch.isfinite(self.alpha).all()
-        ):
-            logger.warning(
-                "Non-finite mu/beta/alpha at iter %d (a mixture component's mass "
-                "likely collapsed).",
-                self.iteration,
-            )
+        # mu/beta guard is commented out; it keeps a "NaN in sbeta!" canary,
+        # amica17.f90:1996-2000). fit() checks every parameter right after this
+        # update and stops, naming the offenders, on the iteration a value goes
+        # non-finite (stop_reason "nan_params"), so the failure is attributed
+        # where it happens rather than at a later nan-LL stop.
 
         # GG shape update with the 1/psi(1+1/rho) digamma factor (Fortran
         # :2013-2014); the divisor is the per-component responsibility mass
@@ -2587,6 +2579,13 @@ class AMICATorchNG:
           returned parameters are the ones whose likelihood is
           ``ll_history[-1]``, and ``final_ll_`` (without a keep-best restore)
           is exactly their log-likelihood. ``iteration`` updates were applied.
+        * A ``"nan_direction"`` stop (a non-finite step or gradient norm,
+          caught before any check reads it or the update applies it) and a
+          ``"nan_params"`` stop (non-finite parameters right after an update)
+          both record their iteration's finite likelihood. Both are
+          degenerate (``_DEGENERATE_STOP_REASONS``), like ``"nan_ll"`` and
+          ``"singular_ll"``, so ``final_ll_`` is NaN and the model is refused
+          by every output path.
         * At ``max_iter`` (``stop_reason == "max_iter"``) the last iteration
           does take its update, as in the reference, so ``max_iter`` updates
           were applied and ``final_ll_ == ll_history[-1]`` is the likelihood
@@ -2804,6 +2803,24 @@ class AMICATorchNG:
 
             self.ll_history.append(ll)
 
+            # A non-finite step or norm would pass both gradient-norm checks
+            # below (NaN <= min_nd is False) and then be applied, so stop on it
+            # here, before any check reads it and before the update, with the
+            # parameters whose (finite) likelihood was just recorded.
+            if not (
+                self._ndtmpsum is not None
+                and math.isfinite(self._ndtmpsum)
+                and bool(torch.isfinite(step.dAk).all())
+            ):
+                self.stop_reason = "nan_direction"
+                logger.warning(
+                    "Non-finite update direction (ndtmpsum %s) at iteration %d; "
+                    "stopping before the update.",
+                    self._ndtmpsum,
+                    it,
+                )
+                break
+
             # Learning-rate control, ported from Fortran (amica15.f90:1051-1097).
             # Natural-gradient/Newton ascent is not monotonic at a fixed rate:
             # when the log-likelihood decreases, anneal the working lrate (and the
@@ -2958,6 +2975,34 @@ class AMICATorchNG:
                 reject_ll = None
 
             self._update_parameters(acc, n_use, step)
+
+            # Surface a corrupted update (a collapsed mixture component, a
+            # singular inverse) on the iteration it happens, with AMICAMLXNG's
+            # check and message. The likelihood check above only sees a
+            # corruption through the NEXT iteration's E-step, so one on the last
+            # iteration would otherwise end as stop_reason="max_iter" with
+            # non-finite parameters. One sync: the per-parameter flags are
+            # stacked and reduced together, and the names are only read out once
+            # that reduction has failed.
+            post_update = [getattr(self, name) for name in self._POST_UPDATE_CHECKED]
+            if not bool(
+                torch.stack(
+                    [torch.isfinite(value).all() for value in post_update]
+                ).all()
+            ):
+                bad = [
+                    name
+                    for name, value in zip(self._POST_UPDATE_CHECKED, post_update)
+                    if not bool(torch.isfinite(value).all())
+                ]
+                logger.warning(
+                    "Non-finite %s at iter %d (a mixture component likely "
+                    "collapsed); stopping.",
+                    ", ".join(bad),
+                    it,
+                )
+                self.stop_reason = "nan_params"
+                break
 
             # Extended-Infomax adaptive PDF switch (Fortran do_choose_pdfs). Runs
             # on the kurt_start/num_kurt/kurt_int schedule using the just-updated
@@ -3861,7 +3906,7 @@ class AMICATorchNG:
         if self.stop_reason in self._DEGENERATE_STOP_REASONS:
             raise RuntimeError(
                 f"Refusing to write output for a degenerate model (stop_reason="
-                f"{self.stop_reason!r}): fit() hit a non-finite log-likelihood at "
+                f"{self.stop_reason!r}): fit() hit a non-finite value at "
                 f"iteration {self.iteration}. Fix the instability (lower lrate, "
                 f"disable Newton, or check data conditioning) before writing."
             )
@@ -3953,12 +3998,23 @@ class AMICATorchNG:
     # versions load as.
     _STATE_FORMAT_VERSION = 4
 
-    # Stop reasons that mark a fit as degenerate (non-finite log-likelihood, or
-    # -- only reachable under best-of-N restarts, issue #198 -- a fit that raised
-    # before it could finish). Such a model yields NaN sources, so state_dict()
-    # refuses to persist it rather than let it round-trip silently
-    # (silent-failure review, PR #44).
-    _DEGENERATE_STOP_REASONS = ("nan_ll", "singular_ll", restarts.ERROR_STOP_REASON)
+    # Stop reasons that mark a fit as degenerate: a non-finite log-likelihood
+    # ("nan_ll"/"singular_ll"), a non-finite update direction ("nan_direction"),
+    # non-finite parameters after an update ("nan_params"), or -- only reachable
+    # under best-of-N restarts, issue #198 -- a fit that raised before it could
+    # finish. Such a model yields NaN sources or was never fitted to the end, so
+    # state_dict() refuses to persist it rather than let it round-trip silently
+    # (silent-failure review, PR #44). The same set as AMICAMLXNG's.
+    _DEGENERATE_STOP_REASONS = (
+        "nan_ll",
+        "singular_ll",
+        "nan_direction",
+        "nan_params",
+        restarts.ERROR_STOP_REASON,
+    )
+    # What fit()'s post-update guard checks, in the order AMICAMLXNG's guard
+    # names them (it adds its cached log-determinant of W).
+    _POST_UPDATE_CHECKED = ("A", "mu", "alpha", "beta", "rho", "gm", "c", "W")
 
     def state_dict(self) -> dict:
         """Serialize the fitted model to a plain, device-agnostic dict.
@@ -3982,7 +4038,7 @@ class AMICATorchNG:
         if self.stop_reason in self._DEGENERATE_STOP_REASONS:
             raise RuntimeError(
                 f"Refusing to serialize a degenerate model (stop_reason="
-                f"{self.stop_reason!r}): fit() hit a non-finite log-likelihood at "
+                f"{self.stop_reason!r}): fit() hit a non-finite value at "
                 f"iteration {self.iteration}. Fix the instability (lower lrate, "
                 f"disable Newton, or check data conditioning) before saving."
             )

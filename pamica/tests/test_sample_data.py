@@ -662,9 +662,12 @@ def test_restart_gives_up_after_maxrestarts(tmp_path):
     model.fit(data)
     # Restarts are capped, the run stops on the persistent non-finite LL, and
     # the terminal failure is surfaced (converged=False), not silently ignored.
+    # The non-finite likelihood itself is never recorded (issue #339 review),
+    # so the history is empty: every iteration was non-finite.
     assert model.numrestarts == 2
     assert model.converged is False
-    assert not np.isfinite(model.ll[-1])
+    assert model.stop_reason == AMICA._NONFINITE_LL_REASON
+    assert model.ll == []
 
 
 def test_check_convergence_ratchets_lrate_on_decrease():

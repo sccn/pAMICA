@@ -929,10 +929,13 @@ def _seeded_run(
         model._update_unmixing_matrices()
         model.comp_list = seed["merged"].copy()
         model.comp_used = np.isin(np.arange(2 * NW), model.comp_list)
+        # Read from the E-step itself: only fit()'s loop records self.ll
+        # (issue #339 review), and a pre-change class records it in the update.
         for it in range(k):
             model.iter = it
-            model._update_parameters(model._get_updates_and_likelihood())
-        lls = list(model.ll)
+            updates = model._get_updates_and_likelihood()
+            lls.append(float(updates["ll"]))
+            model._update_parameters(updates)
     mixing = [_mixing(model, h) for h in range(2)]
     return np.asarray(lls), mixing, _np(model.mu), _np(model.beta)
 
