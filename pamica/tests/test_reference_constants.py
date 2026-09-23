@@ -29,7 +29,10 @@ always run; the MLX checks skip individually without MLX or an Apple GPU):
    PyTorch to float64 round-off after one and three iterations, where the code
    before this change is off by exactly each literal's rounding.
    ``test_component_rows.py`` runs the ``rho == 2`` oracle from a warm
-   two-model state.
+   two-model state;
+6. ``pre_change.use_pre_344_constants``, which the byte-identity tests against
+   older code call, changes every constant it patches and covers every changed
+   constant each backend reads.
 
 Real bundled sample EEG only, no synthetic data or mocks (``.rules/testing.md``).
 The density checks evaluate the formulas on a grid of activations, as
@@ -38,6 +41,7 @@ The density checks evaluate the formulas on a grid of activations, as
 
 from __future__ import annotations
 
+import importlib
 import io
 import math
 import os
@@ -54,6 +58,7 @@ import torch
 import pamica.reference_constants as rc
 from pamica.numpy_impl.core import AMICA as AMICA_NumPy
 from pamica.numpy_impl.pdf import compute_pdf
+from pamica.tests import pre_change
 from pamica.tests.pre_change import load_pre_change_package
 from pamica.torch_impl.core import AMICATorchNG, _log_pdf_and_deriv, _log_pdf_only
 from pamica.torch_impl.utils import load_eeglab_data
@@ -562,3 +567,41 @@ def test_family_matches_the_seeded_reference(
         print(f"pdftype={pdftype} k={k} pre-change: LL - reference = {shift}")
         assert np.abs(shift - offset).max() <= tol["LL"]
         assert abs(offset) > 10 * tol["LL"]
+
+
+# --- 6. the pre-#344 substitution the byte-identity tests use --------------------
+@pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
+def test_the_pre_344_substitution_changes_every_constant_it_patches(
+    backend, monkeypatch
+):
+    """``pre_change.use_pre_344_constants`` gives a live backend the constants
+    it had before this change, so the tests that compare it bit for bit with
+    older code isolate what they were written for. A patch that changed
+    nothing would let those tests pass vacuously, so every patched constant
+    must differ from the live value, the patch must take effect, and it must
+    cover every changed constant the backend module reads."""
+    module_name, names = pre_change._PRE_344_USERS[backend]
+    if backend == "mlx":
+        pytest.importorskip(
+            module_name, reason="MLX not installed (Apple Silicon only)"
+        )
+    module = importlib.import_module(module_name)
+    old = pre_change._PRE_344_CONSTANTS
+    read = {name for name in old if hasattr(module, name)}
+    assert read == set(names), f"{backend} reads {read}, the patch covers {names}"
+    for name in names:
+        assert getattr(module, name) == getattr(rc, name)
+        assert getattr(module, name) != old[name], name
+    pre_change.use_pre_344_constants(monkeypatch, backend)
+    for name in names:
+        assert getattr(module, name) == old[name], name
+    if backend == "mlx":
+        # The patched rho == 2 table entry is the float32 lgamma(1.5) the
+        # pre-change code held.
+        from scipy.special import gammaln
+
+        mx = module.mx
+        m = module.AMICAMLXNG(n_channels=NW, n_mix=1)
+        m.rho = mx.array(np.array([[2.0]], dtype=np.float32))
+        m._refresh_lgamma_table()
+        assert np.array(m._lgamma_table)[0, 0] == np.float32(gammaln(1.5))
