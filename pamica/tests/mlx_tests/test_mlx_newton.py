@@ -117,13 +117,17 @@ def _ratchet_count(rate: float, rate0: float, factor: float) -> int:
 #
 # They are therefore data-driven: a probe fit whose ``newt_start`` sits past the
 # budget reports where the decreases actually land ON THE EXECUTING MACHINE, and
-# the real ``newt_start`` is chosen from that. This works because the
-# natural-gradient PREFIX is independent of ``newt_start``: for ``it <
-# newt_start`` every branch that reads it (Newton activation, the two ``it >
-# newt_start`` ceiling ratchets, the ``it == newt_start`` counter reset) is false
-# on both sides, so the two runs are bit-identical there. The likelihood recorded
-# AT ``it == newt_start`` is shared too -- ``fit`` computes it from the previous
-# iteration's parameters, before the first Newton M-step runs.
+# the real ``newt_start`` is chosen from that. ``newt_start`` counts from 1, as
+# the reference's ``iter`` does (issue #335): Newton switches on at 0-based
+# ``ll_history`` index ``newt_start - 1``. This works because the
+# natural-gradient PREFIX is independent of ``newt_start``: before that index
+# every branch that reads it (Newton activation, the two ``iter > newt_start``
+# ceiling ratchets, the ``iter == newt_start`` counter reset) is false on both
+# sides, so the two runs are bit-identical there. The likelihood recorded AT
+# index ``newt_start - 1`` is shared too -- ``fit`` computes it from the previous
+# iteration's parameters, before the first Newton M-step runs. The replays below
+# spell the reference's 1-based arithmetic out (``i + 1`` for index ``i``)
+# rather than calling the implementation's own ``pamica.schedule``.
 
 _SCHEDULE_DATA = 8192
 _SCHEDULE_ITERS = 120
@@ -174,9 +178,10 @@ def _fit_schedule(newt_start: int, do_newton: bool = True, max_iter: int | None 
 
 
 def _ratchet_iterations(ll, maxdecs: int, newt_start: int | None = None) -> list[int]:
-    """Iterations at which the decrease counter completes a ``maxdecs`` cycle and
-    the ceilings ratchet. ``newt_start`` applies Fortran's counter reset on the
-    switch-on iteration; ``None`` replays without it (the counterfactual)."""
+    """``ll`` indices at which the decrease counter completes a ``maxdecs`` cycle
+    and the ceilings ratchet. ``newt_start`` applies Fortran's counter reset on
+    the switch-on iteration (``iter == newt_start`` over its 1-based ``iter``,
+    amica15.f90:1099); ``None`` replays without it (the counterfactual)."""
     numdecs, hits = 0, []
     for i in range(1, len(ll)):
         if ll[i] < ll[i - 1]:
@@ -184,7 +189,7 @@ def _ratchet_iterations(ll, maxdecs: int, newt_start: int | None = None) -> list
             if numdecs >= maxdecs:
                 hits.append(i)
                 numdecs = 0
-        if newt_start is not None and i == newt_start:
+        if newt_start is not None and i + 1 == newt_start:
             numdecs = 0
     return hits
 
@@ -378,10 +383,11 @@ def test_fallback_ramps_toward_lrate_cap_and_counts():
 def test_newtrate_ratchet_is_suppressed_before_newt_start(natural_gradient_prefix):
     """A ``maxdecs`` cycle completing BEFORE the Newton switch-on ratchets
     ``lrate_cap`` but must leave ``newtrate`` alone (Fortran
-    amica15.f90:1056-1077 gates it on ``it > newt_start``).
+    amica15.f90:1056-1077 gates it on ``iter > newt_start``).
 
-    ``newt_start`` is read off the probe trajectory -- one past the first ratchet
-    of the natural-gradient phase -- so a suppressed ratchet exists BY
+    ``newt_start`` is read off the probe trajectory -- the 1-based iteration of
+    the first ratchet of the natural-gradient phase, which ``iter > newt_start``
+    therefore just excludes -- so a suppressed ratchet exists BY
     CONSTRUCTION on whatever machine is running, rather than by a constant that
     happened to straddle on the author's. The expected counts are then replayed
     from the run's own ``ll_history``, so what is pinned is the semantics, not a
@@ -405,11 +411,11 @@ def test_newtrate_ratchet_is_suppressed_before_newt_start(natural_gradient_prefi
     m = _fit_schedule(newt_start)
     hits = _ratchet_iterations(m.ll_history, m.maxdecs, newt_start=newt_start)
     cap_ratchets = len(hits)
-    newt_ratchets = sum(1 for i in hits if i > newt_start)
+    newt_ratchets = sum(1 for i in hits if i + 1 > newt_start)
 
-    # Guaranteed by the choice of newt_start: the prefix ratchet at
-    # prefix_hits[0] < newt_start is shared with the probe bit-for-bit, so it
-    # ratchets lrate_cap while the gate holds newtrate.
+    # Guaranteed by the choice of newt_start: the prefix ratchet at index
+    # prefix_hits[0] (iteration newt_start, not past it) is shared with the
+    # probe bit-for-bit, so it ratchets lrate_cap while the gate holds newtrate.
     assert newt_ratchets < cap_ratchets, (
         f"expected a ratchet before newt_start={newt_start} from the shared "
         f"prefix; got {hits}"
@@ -434,7 +440,7 @@ def test_newtrate_ratchets_at_maxdecs_once_newton_runs():
         "Newton running throughout; the DATA did not decrease often enough to "
         "exercise the ratchet"
     )
-    assert all(i > m.newt_start for i in hits)  # newt_start=0; i starts at 1
+    assert all(i + 1 > m.newt_start for i in hits)  # newt_start=0; i starts at 1
     assert _ratchet_count(m.lrate_cap, m.lrate0, m.lratefact) == len(hits)
     assert _ratchet_count(m.newtrate, m.newtrate0, m.lratefact) == len(hits)
     assert m.newtrate < m.newtrate0  # non-vacuous: the ceiling actually moved
@@ -449,72 +455,18 @@ def test_newtrate_never_ratchets_without_newton(natural_gradient_prefix):
     m = _fit_schedule(prefix_hits[0] + 1, do_newton=False)
 
     hits = _ratchet_iterations(m.ll_history, m.maxdecs, newt_start=None)
-    assert any(i > m.newt_start for i in hits), (
+    assert any(i + 1 > m.newt_start for i in hits), (
         "no ratchet landed past newt_start, so the do_newton gate is untested"
     )
     assert _ratchet_count(m.lrate_cap, m.lrate0, m.lratefact) == len(hits)
     assert m.newtrate == m.newtrate0
 
 
-def test_numdecs_resets_when_newton_switches_on(natural_gradient_prefix):
-    """The decrease counter is cleared on the iteration Newton switches on
-    (Fortran amica15.f90:1099-1102), so a partially filled count from the
-    natural-gradient phase cannot ratchet the ceilings under the new schedule.
-
-    Made observable in three data-driven steps, none of them a hardcoded
-    trajectory. First ``newt_start`` is placed at an iteration where the probe
-    shows the counter PARTIALLY filled -- that state is in the shared prefix, so
-    it holds on any machine. Then a full-budget fit at that ``newt_start`` is
-    scanned for the smallest budget at which the reset and no-reset replays
-    disagree; one exists as soon as the Newton phase decreases at all, because
-    the no-reset counter is strictly ahead and therefore completes its cycle
-    strictly earlier. Finally the fit is repeated at exactly that budget, where
-    the two hypotheses predict different ``lrate_cap`` values, and the observed
-    one has to match the reset prediction. Truncating is sound because the loop
-    is causal: iteration k depends only on the state after k-1, so a shorter
-    budget reproduces the same prefix.
-    """
-    partial = None
-    numdecs = 0
-    for i in range(1, len(natural_gradient_prefix)):
-        if natural_gradient_prefix[i] < natural_gradient_prefix[i - 1]:
-            numdecs += 1
-            if numdecs >= _SCHEDULE_MAXDECS:
-                numdecs = 0
-        if 0 < numdecs < _SCHEDULE_MAXDECS:
-            partial = i
-            break
-    assert partial is not None, (
-        "the sample recording never left the decrease counter partially filled "
-        "in the natural-gradient phase, so the reset has nothing to clear: the "
-        "DATA, not the config, is the problem here"
-    )
-
-    full = _fit_schedule(partial)
-    ll = full.ll_history
-    budget = next(
-        (
-            t
-            for t in range(2, len(ll) + 1)
-            if len(_ratchet_iterations(ll[:t], full.maxdecs, newt_start=partial))
-            != len(_ratchet_iterations(ll[:t], full.maxdecs))
-        ),
-        None,
-    )
-    assert budget is not None, (
-        f"over {len(ll)} iterations the two counter hypotheses never predicted "
-        f"different ratchet counts at newt_start={partial}; the DATA did not "
-        "decrease often enough in the Newton phase to expose the reset"
-    )
-
-    m = _fit_schedule(partial, max_iter=budget)
-    assert len(m.ll_history) == budget, "the truncated fit stopped early"
-    with_reset = _ratchet_iterations(m.ll_history, m.maxdecs, newt_start=partial)
-    without_reset = _ratchet_iterations(m.ll_history, m.maxdecs)
-    assert len(with_reset) != len(without_reset), (
-        f"the reset is unobservable at budget {budget}: {with_reset} vs {without_reset}"
-    )
-    assert _ratchet_count(m.lrate_cap, m.lrate0, m.lratefact) == len(with_reset)
+# The switch-on counter reset (amica15.f90:1099) is pinned for MLX by the
+# cross-backend ``test_schedule_gates.py::
+# test_newton_switch_on_clears_the_decrease_counter``. A replay test that lived
+# here passed with the reset one iteration late too (issue #335 review): on the
+# schedule fixture's trajectory the two rules predicted the same ratchets.
 
 
 def test_grad_norm_floor_fires_under_newton():

@@ -1403,12 +1403,13 @@ def test_keep_best_snapshot_restore_roundtrip():
 def _multimodel_keep_best(keep_best: bool) -> AMICATorchNG:
     """The aggressive-Newton overshoot recipe of ``test_ng_convergence.py`` on
     the same 4096 real samples, so the same trajectory: it peaks at iteration
-    70 and stops via the loosened ``min_dll`` at 71. A fixed 60-iteration
+    70 and stops via the loosened ``min_dll`` at 71 (``newt_start=2``, counted
+    from 1 since issue #335, is the run measured as 1 before it). A fixed 60-iteration
     budget without that stop overshot on the development machine only; on the
     CI runners that run was monotone."""
     m = AMICATorchNG(
         n_channels=NW, n_models=2, n_mix=NMIX, seed=0, device="cpu",
-        dtype=torch.float64, block_size=1024, do_newton=True, newt_start=1,
+        dtype=torch.float64, block_size=1024, do_newton=True, newt_start=2,
         lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-4, maxincs=2,
         use_grad_norm=False, keep_best=keep_best,
     )  # fmt: skip
@@ -1482,7 +1483,7 @@ def test_keep_best_inactive_under_reject():
     x = _load_real_data()[:, :4096]
     kwargs: dict[str, Any] = dict(
         n_channels=NW, n_models=2, n_mix=NMIX, seed=0, device="cpu",
-        dtype=torch.float64, block_size=1024, do_newton=True, newt_start=1,
+        dtype=torch.float64, block_size=1024, do_newton=True, newt_start=2,
         lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-4, maxincs=2,
         use_grad_norm=False, keep_best=True,
     )  # fmt: skip
@@ -1493,7 +1494,7 @@ def test_keep_best_inactive_under_reject():
     assert plain.final_ll_ == max(plain.ll_history) > plain.ll_history[-1]
 
     m = AMICATorchNG(
-        **kwargs, do_reject=True, rejsig=3.0, rejstart=5, rejint=5, maxrej=1
+        **kwargs, do_reject=True, rejsig=3.0, rejstart=6, rejint=5, maxrej=1
     )
     m.fit(x, max_iter=150, verbose=False)
     assert m.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS
@@ -1607,11 +1608,12 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
     ``newtrate=3.0`` since issue #333: with ``doscaling`` rescaling components
     instead of stored columns, the ``newtrate=1.0`` run is monotone through all
     300 iterations (no decrease, so no ratchet to test); at 3.0 it decreases 6
-    times and both ceilings ratchet twice.
+    times and both ceilings ratchet twice. ``newt_start=51`` since issue #335,
+    which counts it from 1: the run measured as 50 before.
     """
     data = _load_real_data()
     m = _fresh_ng(
-        block_size=512, do_newton=True, newt_start=50, newtrate=3.0, lrate=0.05,
+        block_size=512, do_newton=True, newt_start=51, newtrate=3.0, lrate=0.05,
         lratefact=0.5, rholrate=0.05, rholratefact=0.5, maxdecs=3,
     )  # fmt: skip
     m.fit(data, max_iter=300, verbose=False)

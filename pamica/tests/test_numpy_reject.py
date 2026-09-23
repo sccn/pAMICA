@@ -111,7 +111,8 @@ def test_rejection_does_not_spuriously_stop_fit():
     assert len(ll) > model.rejstart + 2
     # LL after the rejection is not below LL at the rejection iteration (dropping
     # below-average samples raises the mean of what remains; no spurious descent).
-    assert ll[-1] >= ll[model.rejstart]
+    # rejstart counts from 1 (issue #335), so that iteration is ll[rejstart - 1].
+    assert ll[-1] >= ll[model.rejstart - 1]
 
 
 @pytest.mark.skipif(not _FDT.exists(), reason="sample data missing")
