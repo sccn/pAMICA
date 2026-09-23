@@ -469,6 +469,44 @@ def test_mlx_bool_array_survives_the_payload_conversion(fitted, tmp_path):
         np.testing.assert_array_equal(restored["params"][name], array, err_msg=name)
 
 
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("config", "restart_seeds", {SEED, SEED + 1}),  # a set
+        ("extra", "good_idx", np.arange(4)),  # a bare array outside params
+    ],
+)
+def test_unsavable_state_value_names_its_key_path(fitted, section, key, value):
+    """A value torch.load(weights_only=True) could not read back fails at
+    save time, naming where it sits, instead of writing an unloadable file.
+    The state is a real fitted torch model's; one entry is replaced."""
+    from pamica.amica import _state_to_payload
+
+    b = fitted("torch").model_
+    assert b is not None
+    state = b.state_dict()
+    state[section][key] = value
+    path = re.escape(f"state[{section!r}][{key!r}]")
+    with pytest.raises(TypeError, match=rf"cannot write {path} = .*weights_only"):
+        _state_to_payload(state)
+
+
+def test_weights_only_safe_converts_scalars_and_names_nested_paths():
+    """Called directly: numpy scalars become Python numbers of the matching
+    type, and a rejected value deep in a list is named down to its index."""
+    from pamica.amica import _weights_only_safe
+
+    converted = _weights_only_safe(
+        {"seed": np.int64(3), "tol": np.float32(0.5), "flag": np.bool_(True)},
+        "state['config']",
+    )
+    assert converted == {"seed": 3, "tol": 0.5, "flag": True}
+    assert [type(v) for v in converted.values()] == [int, float, bool]
+    path = re.escape("state['extra']['restart_seeds_'][1] = {3} (set)")
+    with pytest.raises(TypeError, match=path):
+        _weights_only_safe({"restart_seeds_": [0, {3}]}, "state['extra']")
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_numpy_scalar_settings_save_and_load(X, backend, tmp_path):
     """A numpy-integer seed lands in the backend's config and fit record,
