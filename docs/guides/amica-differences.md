@@ -735,7 +735,7 @@ are additionally capped by `n_samples` and by a conservative estimate of one
 block's peak, so the search usually finds its ceiling without having to walk
 into a failure at all.
 
-One consequence worth stating plainly: on the NumPy backend this flag used to
+One consequence for earlier NumPy results: on that backend this flag used to
 default to **on** (following Fortran's header) while its sweep ran over
 128–1024, so every NumPy fit quietly re-tuned itself to a small block and
 ignored the `block_size` it was given. It is now off by default there too, and
