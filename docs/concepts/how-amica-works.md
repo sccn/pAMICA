@@ -114,6 +114,7 @@ $$
   and rescales that component's density location and scale to match.
   This is an exact change of scale: the log-likelihood does not change, and every component's mixing vector has unit norm.
 
+An update that leaves any parameter non-finite ends the fit at once, also marked degenerate.
 After the update come the optional steps:
 the extended-Infomax switch between super- and sub-Gaussian densities (`pdftype=1`),
 the component-sharing scan (`share_comps`),
