@@ -66,7 +66,9 @@ def _fit_and_write(
 ):
     """Fit a short ``backend`` model and write its EEGLAB output to
     ``outdir``. Returns ``(model, expected_sphere)``, where ``expected_sphere``
-    is what the backend itself reports as the fitted sphere."""
+    is the array ``write_amica_output`` actually wrote to disk (so the
+    round-trip comparison below can be bit-exact), not necessarily what
+    ``get_sphere()`` reports -- see the MLX branch."""
     if backend == "numpy":
         model = AMICA_NumPy(
             use_tqdm=False,
@@ -94,6 +96,16 @@ def _fit_and_write(
     )
     model.fit(data, max_iter=MAX_ITER, verbose=False)
     model.write_amica_output(outdir)
+    if backend == "mlx":
+        # write_amica_output writes np.array(self.sphere) (mlx_impl/core.py),
+        # the float32-cast sphere set in _preprocess; a float32->float64 upcast
+        # is exact (every float32 value is exactly representable in float64),
+        # so this is what loadmodout must reproduce bit-exactly, same as the
+        # other two backends. This is deliberately NOT get_sphere(), which
+        # returns the higher-precision float64 sphere computed just before
+        # that cast (_sphere_np) -- see the separate, explicitly-labeled
+        # float32-rounding assertion in the test below.
+        return model, np.array(model.sphere, dtype=np.float64)
     return model, model.get_sphere()
 
 
@@ -117,6 +129,24 @@ def fits(X, tmp_path_factory):
 @pytest.mark.parametrize("do_approx_sphere", [True, False])
 @pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
 def test_loadmodout_sphere_matches_backend(fits, backend, do_approx_sphere, config):
+    """``loadmodout`` reproduces the exact bytes ``write_amica_output`` wrote,
+    for every backend, bit-exactly (``assert_array_equal``) -- including MLX,
+    since the file holds a float32 sphere upcast to float64, and that upcast
+    is exact.
+
+    The ``reduced`` (``pcakeep``) cells exercise the padded branch of
+    ``write_amicaout``, which was already column-major before issue #336's
+    fix (only the square branch was C order), so none of the six
+    ``reduced`` cells can fail on the old code; they stay in the matrix as a
+    same-shape regression guard, not because they demonstrate the fix.
+    ``mlx-True-full`` also cannot fail on the old code, for a different
+    reason: MLX's float32 cast rounds the default ZCA sphere's ~1e-17
+    asymmetry to exactly zero, so a C-order read of a bit-symmetric matrix is
+    indistinguishable from a column-major one. The five cells that do fail
+    pre-fix are ``{torch,numpy}-{True,False}-full`` (the ZCA sphere is
+    symmetric only to ~1e-17, not bit-exact, so ``assert_array_equal`` still
+    catches the old C-order write even there) and ``mlx-False-full``.
+    """
     if backend == "mlx":
         _mlx_class()
     model, expected, outdir = fits(backend, do_approx_sphere, config)
@@ -135,17 +165,17 @@ def test_loadmodout_sphere_matches_backend(fits, backend, do_approx_sphere, conf
 
     out = loadmodout(outdir)
     loaded = out.S[:n]
+    np.testing.assert_array_equal(loaded, expected)
+
     if backend == "mlx":
-        # write_amica_output exports self.sphere, the float32-cast sphere
-        # (mlx_impl/core.py _preprocess); get_sphere() returns the un-rounded
-        # float64 sphere (_sphere_np) computed just before that cast. The two
-        # differ by a ~1e-7 relative float32-rounding gap independent of the
-        # column-major fix this module guards (present equally for both
-        # do_approx_sphere values), so this is not a tolerance loosened to
-        # hide the order bug: a wrong-order read is off by O(1), not O(1e-7).
-        np.testing.assert_allclose(loaded, expected, rtol=1e-6, atol=1e-7)
-    else:
-        np.testing.assert_array_equal(loaded, expected)
+        # Separate, explicitly-labeled relationship check: get_sphere() is not
+        # what got written to disk (see _fit_and_write's docstring), so it is
+        # not compared to `loaded` above. It differs from the exported sphere
+        # only by MLX's float32 rounding -- measured max_abs=1.4e-8,
+        # max_rel=5.9e-8 across do_approx_sphere x pcakeep on this fixture --
+        # independent of the column-major bug this module guards (present
+        # equally for both do_approx_sphere values, before and after #336).
+        np.testing.assert_allclose(expected, model.get_sphere(), rtol=1e-6, atol=1e-7)
 
     if backend == "numpy":
         r = load_results(outdir)
