@@ -53,7 +53,7 @@ from scipy.special import logsumexp
 from pamica import AMICA_NumPy
 from pamica.component_layout import rows_from_legacy_columns
 from pamica.numpy_impl.utils import identify_shared_components
-from pamica.tests.pre_change import load_pre_change_package
+from pamica.tests.pre_change import load_pre_change_package, use_pre_344_constants
 from pamica.torch_impl.core import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
 
@@ -256,7 +256,7 @@ def _fit_arrays(
 
 @pytest.mark.parametrize("backend, n_models, cfg", _byte_id_configs())
 def test_unshared_fits_are_byte_identical_to_the_column_layout(
-    pre, real_data, backend, n_models, cfg, tmp_path
+    pre, real_data, backend, n_models, cfg, tmp_path, monkeypatch
 ):
     """Without a merge every per-model block holds the same ``n x n`` matrix in
     both layouts, so every trajectory and fitted array is bit for bit what the
@@ -270,7 +270,13 @@ def test_unshared_fits_are_byte_identical_to_the_column_layout(
     Measured: at most 2.2e-16 relative in float64 and 1.1e-7 (one float32 unit
     in the last place) on MLX. It only feeds the gradient-norm stops, and no
     stop fired in these fits.
+
+    The live backend runs with the density constants it had before issue #344,
+    which the pre-change code predates: the two-model fits reach ``rho == 2``
+    by the fifth iteration, and the Gaussian and cosh families use their
+    normalizers on every one.
     """
+    use_pre_344_constants(monkeypatch, backend)
     old_cls, new_cls = _classes(backend, pre)
     X = real_data[:, :_BYTE_ID_SAMPLES]
     old = _fit_arrays(backend, old_cls, n_models, cfg, X, tmp_path / "old")

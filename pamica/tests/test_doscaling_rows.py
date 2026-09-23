@@ -54,7 +54,7 @@ from scipy.special import logsumexp
 
 from pamica import AMICA_NumPy
 from pamica.component_layout import rows_from_legacy_columns
-from pamica.tests.pre_change import load_pre_change_package
+from pamica.tests.pre_change import load_pre_change_package, use_pre_344_constants
 from pamica.torch_impl.core import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
 
@@ -457,11 +457,14 @@ def _fit_unscaled(
 @pytest.mark.parametrize("n_models", [1, 2])
 @pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
 def test_doscaling_off_is_byte_identical_to_the_pre_fix_code(
-    pre_fix, real_slice, backend, n_models, tmp_path
+    pre_fix, real_slice, backend, n_models, tmp_path, monkeypatch
 ):
     """``doscaling=False`` never enters the rescale, so this fix must leave its
     trajectory and every fitted array bit for bit where the pre-fix code put
-    them, on every backend."""
+    them, on every backend. The live backend runs with the density constants it
+    had before issue #344, which the pre-fix code predates (the two-model fits
+    reach ``rho == 2``)."""
+    use_pre_344_constants(monkeypatch, backend)
     new_cls: Any
     if backend == "mlx":
         new_cls = _mlx_core().AMICAMLXNG
