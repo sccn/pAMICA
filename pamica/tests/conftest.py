@@ -2,12 +2,14 @@
 
 Every test runs with its working directory set to a per-session temporary
 directory, so nothing the suite writes to a relative path lands in the
-repository. The legacy NumPy backend is the main reason: ``AMICA_NumPy``
-writes ``out.txt`` into its ``outdir`` at construction and its model files at
-the end of a fit, and ``outdir`` defaults to ``./output``. Tests that need a
-repository-relative path (a params file whose ``files`` entry is relative to
-the repository root, say) resolve it from ``__file__`` or ``monkeypatch.chdir``
-explicitly.
+repository. This is defense in depth: the legacy NumPy backend used to default
+``outdir`` to ``./output`` and write ``out.txt`` and its model files there
+from every fit (63 tests did), and a relative ``outdir`` in a params file
+(``sample_params.json`` says ``./amicaout/``) or the NumPy CLI's ``--outdir``
+default of ``output`` still resolve against the working directory. Tests that
+need a repository-relative path (a params file whose ``files`` entry is
+relative to the repository root, say) resolve it from ``__file__`` or
+``monkeypatch.chdir`` explicitly.
 """
 
 import pytest

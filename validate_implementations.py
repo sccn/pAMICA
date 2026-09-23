@@ -558,9 +558,9 @@ def run_numpy_amica(
         applied.add(key)
     _warn_ignored(params, applied, "AMICA_NumPy", "NumPy")
 
-    # The backend writes out.txt at construction and checkpoints every
-    # writestep, so point it at this run's own directory (its default,
-    # ./output, would land in the working directory).
+    # Keep the backend's Fortran-style output (out.txt, the writestep
+    # checkpoints and the final amicaout files) next to this run's reports,
+    # as the reference run's is; the backend writes nothing without an outdir.
     numpy_kwargs["outdir"] = str(output_dir / "numpy_run")
     numpy_kwargs["seed"] = seed
     model = AMICA_NumPy(**numpy_kwargs)

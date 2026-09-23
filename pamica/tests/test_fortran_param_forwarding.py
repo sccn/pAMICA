@@ -301,9 +301,9 @@ def test_mlx_runner_applies_the_same_params_as_torch(dispatch_results):
 
 
 def test_numpy_runner_writes_under_the_output_dir(dispatch_results, dispatch_out):
-    """AMICA_NumPy writes ``out.txt`` at construction and its model files at the
-    end of the fit; the runner must point it at the run's output directory, not
-    the backend's ``./output`` default in the working directory."""
+    """The runner hands AMICA_NumPy the run's own output directory, so its
+    ``out.txt`` log and final model files sit next to the reports (the backend
+    writes nothing without an ``outdir``)."""
     assert "numpy" in dispatch_results
     assert (dispatch_out / "numpy_run" / "out.txt").exists()
     assert (dispatch_out / "numpy_run" / "W").exists()

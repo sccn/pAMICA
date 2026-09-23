@@ -18,6 +18,10 @@ Release notes are also published on the
     and the differences page records two existing divergences:
     `do_sphere=False` fits unscaled data where the reference divides each channel by its standard deviation (issue #328),
     and a second `fit` on the same `AMICA_NumPy` instance continues from the first (related to issue #312).
+  - **Behavior change (legacy NumPy backend):** `AMICA_NumPy` writes files only when given an `outdir`.
+    Its default was `./output`, so every fit wrote `out.txt` at construction, `writestep` checkpoints and its final results into the caller's working directory.
+    The default is now `outdir=None`, which writes nothing, as the PyTorch and MLX backends never do unless asked.
+    An explicit `outdir` (keyword, params file, or the command-line interface's `--outdir`, which still defaults to `output`) writes exactly what it did before.
   - **Fix:** `AMICA_NumPy.get_sensor_mixing_matrix` returned `pinv(sphere)` times the stored mixing matrix without the transpose the PyTorch and MLX backends apply,
     so its columns were the rows of the true mixing matrix rather than the components' sensor maps
     (about 10% away from the PyTorch backend's maps after five iterations on the bundled sample, and not an inverse of `get_weights() @ sphere`).
