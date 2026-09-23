@@ -1,6 +1,5 @@
 """EEGLAB export (``write_amica_output``) on the MLX backend -- issue #92,
-epic #278 Phase 3/#289 (port of ``AMICATorchNG.write_amica_output``,
-torch_impl/core.py:3285-3366).
+epic #278 Phase 3/#289 (port of ``AMICATorchNG.write_amica_output``).
 
 Round-trips through the shared :func:`pamica.numpy_impl.load.loadmodout`
 reader (the same reader real EEGLAB output is validated against, issue

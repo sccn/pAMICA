@@ -205,7 +205,7 @@ def test_keep_best_inactive_reason_prefers_do_reject_when_both_are_on(
 ):
     """PR #311 review: when do_reject AND share_comps are BOTH on, the
     reported reason must be "do_reject", matching AMICATorchNG's exact
-    precedence (torch_impl/core.py:2425, ``"do_reject" if self.do_reject
+    precedence (``AMICATorchNG._fit_once``: ``"do_reject" if self.do_reject
     else "share_comps"``) -- the two backends must report the same reason
     for the same configuration, not whichever flag MLX happened to check
     first."""

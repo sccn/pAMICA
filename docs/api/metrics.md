@@ -30,7 +30,7 @@ from pamica.metrics import mir, pairwise_mi, block_diagonal_order
 
 `mir` is a direct port of `getMIR.m` from
 [bigdelys/pre_ICA_cleaning](https://github.com/bigdelys/pre_ICA_cleaning)
-(Apache-2.0); the licence is vendored in `THIRD_PARTY_NOTICES.md`. It agrees
+(Apache-2.0); the license is vendored in `THIRD_PARTY_NOTICES.md`. It agrees
 with the original to 1.7e-15 relative on the bundled sample data.
 
 `pairwise_mi` and `block_diagonal_order` are a clean-room reimplementation. The

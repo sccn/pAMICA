@@ -1,6 +1,6 @@
 """``model_loglik``/``model_probability`` on the MLX backend -- issue #141,
 epic #278 Phase 3/#289 (port of ``AMICATorchNG.model_loglik``/
-``model_probability``, torch_impl/core.py:3041-3132).
+``model_probability``).
 
 Real sample EEG only (no synthetic/mock). Unlike the torch backend (float64
 throughout), MLX's ``model_loglik`` recomputes the sphere-multiply in

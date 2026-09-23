@@ -6,7 +6,6 @@
 extend-exclude = [
     "*.f90",                  # read-only Fortran reference (amica17*.f90, funmod2.f90)
     "pamica/sample_data/",   # sample EEG + Fortran outputs + saved .npy results
-    "pytorch_debug_test/",    # generated debug output
     "uv.lock",
     "paper.bib",              # citation metadata: accented author names + LaTeX escapes
 ]

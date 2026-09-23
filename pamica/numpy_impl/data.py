@@ -282,9 +282,17 @@ def load_results(indir: Union[str, Path], compressed: bool = False) -> dict:
     if mean is not None:
         results["mean"] = mean
 
+    # The sphere is (nw, nx): square unless rank reduction kept nw < nx
+    # dimensions, in which case write_amicaout pads it with zero rows to the
+    # reference's (nx, nx) record and writes it column-major (a square one is
+    # written C-order). Read it back the way it was written.
     S = _read("S")
     if S is not None:
-        results["sphere"] = S.reshape(nw, nw)
+        nx = int(round(np.sqrt(len(S))))
+        if nx == nw:
+            results["sphere"] = S.reshape(nw, nw)
+        else:
+            results["sphere"] = S.reshape(nx, nx, order="F")[:nw]
 
     ll = _read("LL")
     if ll is not None:

@@ -159,7 +159,7 @@ Every AI-assisted change was reviewed by a human before merge and run through th
 which scores output against the reference binary on real recordings rather than generated fixtures.
 The reported numbers came from running the software and were checked against their run records, as was every bibliographic entry.
 
-# Acknowledgements
+# Acknowledgments
 
 We thank Jason Palmer and his advisor Ken Kreutz-Delgado, co-developers of AMICA, for the reference implementation,
 and the EEGLAB community for the tools and sample data used to validate this work.

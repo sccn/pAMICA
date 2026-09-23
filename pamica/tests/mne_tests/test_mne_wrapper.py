@@ -160,7 +160,7 @@ def test_plot_components_returns_figure(fitted):
 
 
 def test_pca_components_orthonormal_and_variance_ordered(raw, fitted):
-    """The eigenbasis ordering (invisible to the V-cancelling round trip) is real.
+    """The eigenbasis ordering (invisible to the V-canceling round trip) is real.
 
     get_sources/get_components reduce to W@sphere and inv(sphere)@inv(W) for ANY
     orthonormal V, so they cannot see a wrong eigenvector order. Pin it here:

@@ -5,6 +5,33 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 6 of epic #324: the validation harness covers every backend (issue #315).**
+  `validate_implementations.py --backend {torch,numpy,mlx}` (or a comma-separated list, or `all`)
+  compares each backend against one Fortran reference run with the same settings;
+  the default remains `torch` and prints the same report as before.
+  NumPy receives the settings through its own key-translation table, PyTorch and MLX through `AMICA(backend=...)`;
+  an explicit `--backend` also prints and saves a one-row-per-backend summary with runtimes (`parity_summary.md`),
+  and `--backend mlx` without MLX exits with status 2 and the install hint.
+  On the bundled sample all three backends meet the reference bar (log-likelihood within 3.2e-5, matched correlation 0.9992, Amari distance 0.004);
+  the rows and each backend's expected bar are in the validation guide, pinned by an `AMICA_RUN_FORTRAN`-gated test.
+  - The getting-started page gains a short Apple Silicon (MLX) route that links to the backends guide's full workflow,
+    and the differences page records two existing divergences:
+    `do_sphere=False` fits unscaled data where the reference divides each channel by its standard deviation (issue #328),
+    and a second `fit` on the same `AMICA_NumPy` instance continues from the first (related to issue #312).
+  - **Behavior change (legacy NumPy backend):** `AMICA_NumPy` writes files only when given an `outdir`.
+    Its default was `./output`, so every fit wrote `out.txt` at construction, `writestep` checkpoints and its final results into the caller's working directory.
+    The default is now `outdir=None`, which writes nothing, as the PyTorch and MLX backends never do unless asked.
+    An explicit `outdir` (keyword, params file, or the command-line interface's `--outdir`, which still defaults to `output`) writes exactly what it did before.
+  - **Fix:** `AMICA_NumPy.get_sensor_mixing_matrix` returned `pinv(sphere)` times the stored mixing matrix without the transpose the PyTorch and MLX backends apply,
+    so its columns were the rows of the true mixing matrix rather than the components' sensor maps
+    (about 10% away from the PyTorch backend's maps after five iterations on the bundled sample, and not an inverse of `get_weights() @ sphere`).
+    It now matches the PyTorch backend to round-off (4.6e-12 relative), pinned by a cross-backend test.
+    The NumPy backend's fit, `transform`, `get_weights` and EEGLAB export were not affected.
+  - **Fix:** the legacy plotting helpers in `pamica.numpy_impl.viz` had the same orientation slip.
+    `plot_components` drew rows of the mixing matrix as mixing vectors, and it and `plot_pdf_fits` formed activations from the raw data with no mean removal, no sphere and no transpose;
+    `plot_model_comparison` skipped the sphere.
+    They now plot the model's own sensor maps and sources (what `get_sensor_mixing_matrix` and `transform` return), checked against those accessors on a real fit.
+    `load_results` also reads a rank-reduced fit's zero-padded sphere, which it used to reject.
 - **Phase 9 of epic #324: iteration schedules count from 1, as the reference's do (issue #335).**
   **Behavior change:** `newt_start` and `rejstart` now name iterations counted from 1, like the reference's `iter` (amica15.f90:949):
   the first Newton M-step is the `newt_start`-th iteration's, and the first rejection follows the `rejstart`-th.
