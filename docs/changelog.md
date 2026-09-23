@@ -5,6 +5,31 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 9 of epic #324: iteration schedules count from 1, as the reference's do (issue #335).**
+  **Behavior change:** `newt_start` and `rejstart` now name iterations counted from 1, like the reference's `iter` (amica15.f90:949):
+  the first Newton M-step is the `newt_start`-th iteration's, and the first rejection follows the `rejstart`-th.
+  The PyTorch, NumPy and MLX backends compared their 0-based loop index with these 1-based settings, so each of the following fired one iteration late:
+  - the Newton switch (`iter .ge. newt_start`), the decrease-counter reset on the switch-on iteration (`iter == newt_start`),
+    and the `maxdecs` ratchet of the rho-rate ceiling and of `newtrate` (`iter > newt_start`);
+  - the outlier-rejection schedule (`iter == rejstart`, then every `rejint` iterations);
+  - the NumPy backend's restart-on-NaN window (`iter .le. restartiter`), which covered one iteration too many.
+
+  Measured against the pinned v0.3.3 native binary, seeded with pamica's own initialization, `doscaling` off and single-threaded:
+  with `newt_start=3`, the first 6 iterations now match to round-off,
+  the log-likelihood within 5.4e-11 (PyTorch) and 2.1e-12 (NumPy) and `A` within 4.2e-10 and 1.1e-10,
+  where they deviated by 1.2e-3 and 3.1e-2 before.
+  Over 100 iterations with the reference's own `newt_start=50`, the largest log-likelihood deviation drops from 1.3e-3 to 6.7e-6 (PyTorch) and 4.1e-6 (NumPy).
+  That is the floor this recording sets before Newton even starts:
+  one mixture component's shape sits at `rho=1`, where the location update divides by `|y|` and amplifies round-off from one iteration to the next.
+  - Default fits (`do_newton=False`, `do_reject=False`) change in two narrow cases only.
+    A `maxdecs` ratchet that completes on exactly iteration `newt_start + 1` (21 by default) now tightens the rho-rate ceiling, as the reference's does.
+    On NumPy, a non-finite likelihood on iteration `restartiter + 1` (11 by default) now ends the fit instead of restarting it.
+  - To reproduce a trajectory from before this change, add 1 to `newt_start` and `rejstart` (and to `restartiter` on NumPy).
+  - Every schedule gate now lives in one shared module, `pamica/schedule.py`, which all three backends call.
+    The share-merge, A-freeze, kurtosis-switch and `writestep`/`histstep` schedules already counted from 1 and are unchanged.
+  - `iteration`, `ll_history` and `mir_history_` keep their 0-based indexing.
+  - Tests: `pamica/tests/test_schedule_gates.py` observes each gate through real fits on all three backends,
+    and `pamica/tests/test_schedule_native_oracle.py` (opt-in, `AMICA_RUN_FORTRAN=1`) is the native-binary comparison above.
 - **Phase 4 of epic #324: backend selection in `AMICA` and `AMICAICA` (issue #313).**
   `AMICA` and `AMICAICA` gain a `backend` parameter:
   `"torch"` (the default, `AMICATorchNG`, float64 Fortran parity) or `"mlx"` (`AMICAMLXNG`, Apple GPU, float32 only).
