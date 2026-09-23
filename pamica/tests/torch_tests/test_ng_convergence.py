@@ -103,20 +103,22 @@ def _predict_grad_norm_stop(nd_history: list, min_nd: float) -> Optional[int]:
 
 
 def _fit_with_nd_history(ng: AMICATorchNG, data: np.ndarray, **fit_kwargs) -> list:
-    """Fit ``ng``, recording ``ndtmpsum`` after every ``_update_parameters``
-    call. This is an observational spy on the real method (calls straight
-    through via ``side_effect``, does not replace or bypass any computation)
-    -- the same pattern ``test_ng_backend.py`` already uses to inspect
-    intermediate state (e.g. ``test_newton_finalize_uses_preupdate_mu``)."""
+    """Fit ``ng``, recording ``ndtmpsum`` after every ``_update_direction``
+    call, the one that computes it, every iteration the fit runs (including
+    the one a stop ends on, which takes no update). This is an observational
+    spy on the real method (calls straight through via ``side_effect``, does
+    not replace or bypass any computation) -- the same pattern
+    ``test_ng_backend.py`` already uses to inspect intermediate state (e.g.
+    ``test_newton_finalize_uses_preupdate_mu``)."""
     nd_history: list = []
-    original = ng._update_parameters
+    original = ng._update_direction
 
-    def spy(acc, n):
-        result = original(acc, n)
+    def spy(acc):
+        result = original(acc)
         nd_history.append(ng._ndtmpsum)
         return result
 
-    with mock.patch.object(ng, "_update_parameters", side_effect=spy):
+    with mock.patch.object(ng, "_update_direction", side_effect=spy):
         ng.fit(data, verbose=False, **fit_kwargs)
     return nd_history
 
@@ -356,14 +358,14 @@ def test_a_frozen_window_still_computes_fresh_grad_norm(real_data):
     # it would be if this iteration took no gradient step at all.
     probe = _fresh_ng(n_models=2)
 
-    def spy(acc, n):
+    def spy(acc, n, step):
         assert ng.A is not None and ng.mu is not None and ng.beta is not None
         assert ng.comp_list is not None
         frozen = ng._a_frozen()
         probe.A, probe.mu, probe.beta = ng.A.clone(), ng.mu.clone(), ng.beta.clone()
         probe.comp_list = ng.comp_list.clone()
         probe._rescale_components()
-        result = original(acc, n)
+        result = original(acc, n, step)
         trace.append(
             {
                 "frozen": frozen,
@@ -466,8 +468,11 @@ def test_grad_norm_floor_stop_leaves_wrapper_usable(real_data, tmp_path):
 
 # --- keep_best / do_reject interaction (early stopping must not break them) -
 
-# The genuine-overshoot recipe (real 2-model data, aggressive Newton): it peaks
-# and then stops via the loosened min_dll a couple of iterations later (see
+# The genuine-overshoot recipe (real 2-model data, aggressive Newton). With
+# maxincs=0 and min_dll=1e-8 the min_dll stop fires on the first iteration
+# whose gain is below 1e-8, which on this trajectory is its first likelihood
+# decrease: the overshoot is built into the stop, not left to where a chaotic
+# trajectory happens to end (see
 # test_keep_best_restores_genuine_overshoot_under_min_dll_stop). newt_start
 # counts from 1 since issue #335, so 2 is the trajectory measured as 1 before.
 _OVERSHOOT_KWARGS: dict[str, Any] = dict(
@@ -479,8 +484,8 @@ _OVERSHOOT_KWARGS: dict[str, Any] = dict(
     newtrate=3.0,
     block_size=1024,
     use_min_dll=True,
-    min_dll=1e-4,
-    maxincs=2,
+    min_dll=1e-8,
+    maxincs=0,
     use_grad_norm=False,
 )
 _OVERSHOOT_MAX_ITER = 150
@@ -498,12 +503,16 @@ def test_keep_best_restores_genuine_overshoot_under_min_dll_stop(real_data):
     ``test_write_amica_output_ll_matches_kept_iterate`` (issue #92,
     ``test_amica_ng_wrapper.py``: real 2-model data, aggressive
     ``do_newton``/``lrate``/``newtrate``), combined with a loosened ``min_dll``
-    so the run stops via the NEW ``min_dll`` stop_reason a few iterations
-    after its peak, not via ``max_iter`` and not via a monotone approach to
-    that peak. ``newtrate=3.0`` and the 150-iteration budget were added for
-    issue #333: with ``doscaling`` rescaling components (not stored columns)
-    the old ``newtrate=0.5``/60-iteration recipe runs monotone to
-    ``max_iter``; this one peaks at iteration 70 and stops at 71.
+    so the run stops via the NEW ``min_dll`` stop_reason right after its peak,
+    not via ``max_iter`` and not via a monotone approach to that peak.
+    ``newtrate=3.0`` dates from issue #333: with ``doscaling`` rescaling
+    components (not stored columns) the old ``newtrate=0.5``/60-iteration
+    recipe runs monotone to ``max_iter``. ``maxincs=0``/``min_dll=1e-8`` date
+    from issue #339: the ``min_dll=1e-4``/``maxincs=2`` stop ended wherever
+    three small gains in a row fell, below the peak or at it depending on
+    round-off (it ended at its peak on the macOS CI runner, and in 1 of 12
+    relative data perturbations of 1e-13 here). This one stops on the first
+    likelihood decrease, iteration 14, 1.6e-3 below the peak at 13, in all 12.
     """
     x = real_data[:, :4096]
     ng = _fresh_ng(**_OVERSHOOT_KWARGS, keep_best=True)
@@ -792,7 +801,7 @@ def test_mir_history_survives_keep_best_restore(real_data):
     with ``mir_step=1`` added.
 
     ``mir_step=1`` is load-bearing, not incidental. The ``min_dll``/``maxincs``
-    stop halts one or two iterations past the peak, so with any coarser step
+    stop halts one iteration past the peak, so with any coarser step
     the last waypoint lands *before* the best iterate and the window a
     truncating restore would damage is never sampled -- a restore that dropped
     every waypoint after the best iterate would leave this fixture unchanged
@@ -813,16 +822,26 @@ def test_mir_history_survives_keep_best_restore(real_data):
     # stopping iteration; the earlier equality-with-a-multiple-of-5 form was
     # satisfied by a truncating restore as well as a correct one.
     final_it = len(ng.ll_history) - 1
+    # The min_dll stop exits before its iteration's update, as the reference
+    # does (issue #339), so that iteration records no waypoint: the last one
+    # belongs to the iteration before it.
+    last_update_it = final_it - 1
     assert ng.final_ll_ is not None
     best_it = ng.ll_history.index(ng.final_ll_)
-    assert best_it < final_it, (
-        "test setup: the restore must discard at least one iteration, or "
+    # Waypoint i is computed after iteration i's update, from the parameters
+    # whose likelihood is ll_history[i + 1]; the restore returns the ones
+    # measured at ll_history[best_it], so every waypoint from best_it on was
+    # computed from parameters it discards. A restore that rolled
+    # mir_history_ back with its snapshot (taken at best_it's E-step, before
+    # waypoint best_it exists) would end it at best_it - 1.
+    assert best_it <= last_update_it, (
+        "test setup: the restore must discard at least one waypoint, or "
         "there is no truncation window to guard"
     )
-    assert last_it == final_it, "the post-peak waypoints were dropped"
+    assert last_it == last_update_it, "the post-peak waypoints were dropped"
     # The count is what a partial truncation would move even if the last entry
     # happened to survive.
-    assert len(ng.mir_history_) == final_it + 1, (
+    assert len(ng.mir_history_) == last_update_it + 1, (
         "mir_history_ is not the full per-iteration trajectory"
     )
 

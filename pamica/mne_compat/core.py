@@ -669,7 +669,10 @@ class AMICAICA:
         ica.pca_explained_variance_ = cov_evals
         ica.unmixing_matrix_ = unmixing
         ica.pre_whitener_ = self.pre_whitener_
-        ica.n_iter_ = max(int(getattr(amica.model_, "iteration", 0)), 1)
+        # The number of iterations the fit ran: ``iteration`` is the 0-based
+        # index of the last one whose E-step ran (issue #339), which is also the
+        # reference's own ``iter`` count at a stop.
+        ica.n_iter_ = int(getattr(amica.model_, "iteration", 0)) + 1
         # MNE's own fit sets these; read_ica_eeglab (the precedent for building
         # an ICA from an external decomposition) sets reject_=None. Without them
         # ICA.save()/plot_properties raise AttributeError.

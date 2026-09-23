@@ -44,9 +44,10 @@
       `.context/issue-51/`.
 - [x] Component sharing (issue #60): `share_comps` multi-model reassignment ported to
       `AMICATorchNG` (de-sphered cosine-similarity merge, `share_start`/`share_iter`/`comp_thresh`
-      schedule + A-freeze). OFF by default so single-model (#24)/default multi-model (#27) parity is
+      schedule). OFF by default so single-model (#24)/default multi-model (#27) parity is
       byte-for-byte. No bit-exact oracle (reference `Spinv2` metric is dead code, like #26);
-      behavior-validated. See `tests/torch_tests/test_ng_sharing.py`.
+      behavior-validated. See `tests/torch_tests/test_ng_sharing.py`. The A-freeze is not part of
+      sharing: it is the reference's schedule, applied to every fit (ADR 0008, #345).
 
 ### Priority 3: Testing & validation
 - [x] Real-data test suite exercising the PyTorch backend end-to-end (issue #7) - Phase 1, issue #10:

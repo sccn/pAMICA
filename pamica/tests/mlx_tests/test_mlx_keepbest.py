@@ -15,32 +15,39 @@ on the same config PyTorch's float64 one does):
 
 * ``_FORCED_RESTORE_KWARGS`` (real EEG, first 4096 samples, ``max_iter=150``):
   ``n_models=2, n_mix=3, seed=0, block_size=1024, do_newton=True,
-  newt_start=2, lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-4,
-  maxincs=2, use_grad_norm=False`` -- the same aggressive-Newton config
+  newt_start=2, lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-8,
+  maxincs=0, use_grad_norm=False`` -- the same aggressive-Newton config
   ``test_ng_convergence.py::test_keep_best_restores_genuine_overshoot_under_min_dll_stop``
   uses on PyTorch (``newt_start`` counts from 1 since issue #335, so ``2`` is
-  the run measured as ``newt_start=1`` before it), and it reproduces a genuine overshoot here too: the fit
-  stops via ``min_dll`` at iteration 64 (65 recorded LLs), peaks at
-  ``ll_history[63]``, and ends ``best_ll - ll_history[-1] ~= 4.24e-4`` below
-  that peak (measured on an Apple M4 Pro; the exact float32 value is
-  machine-dependent, but the qualitative overshoot -- peak strictly above the
-  final entry -- reproduces across seeds, see
-  ``test_keep_best_restores_a_genuine_overshoot`` below for the live
-  measurement this module actually asserts against). ``newtrate=3.0`` and the
-  longer budget date from issue #333: once ``doscaling`` rescaled components
-  instead of stored columns, the earlier ``newtrate=0.5``/60-iteration recipe
-  ran monotone to ``max_iter`` on every seed tried (0-11).
+  the run measured as ``newt_start=1`` before it), and it reproduces a genuine
+  overshoot here too: ``maxincs=0`` with a ``min_dll`` far below every gain
+  stops the fit on its first likelihood decrease, at iteration 14 (15
+  recorded LLs), ``best_ll - ll_history[-1] ~= 1.6e-3`` below the peak at
+  ``ll_history[13]`` (measured on an Apple M4 Pro; the exact float32 value is
+  machine-dependent, but the overshoot is built into the stop: across 12
+  relative data perturbations of 1e-6 it stopped at 14, 2.7e-4 to 3.6e-3
+  below the peak, every time; see ``test_keep_best_restores_a_genuine_overshoot``
+  below for the live measurement this module actually asserts against).
+  ``newtrate=3.0`` dates from issue #333: once ``doscaling`` rescaled
+  components instead of stored columns, the earlier ``newtrate=0.5``/
+  60-iteration recipe ran monotone to ``max_iter`` on every seed tried (0-11).
+  The first-decrease stop dates from issue #339: the ``min_dll=1e-4``/
+  ``maxincs=2`` stop before it ended wherever three small gains in a row fell,
+  below the peak or at it depending on round-off (at it in 1 of those 12).
 * ``_FORCED_RESTORE_PDFTYPE1_KWARGS``: the ``pdftype=1``/``n_mix=1`` analogue
-  (seed 2, ``kurt_start=6``) chosen so the adaptive switcher's first kurtosis
-  re-evaluation (run at the end of iteration 5, after that iteration's E-step)
-  comes strictly AFTER the peak iterate (measured at iteration 5), while the
-  run lasts long enough for all five passes (it stops via ``min_dll`` at
-  iteration 12) -- the scenario
+  (seed 3, ``kurt_start=7``) chosen so the adaptive switcher's first kurtosis
+  re-evaluation (run at the end of iteration 7, after that iteration's E-step)
+  comes strictly AFTER the E-step of the peak iterate (0-based ll index 6),
+  while the run lasts long enough for all five passes (it stops via ``min_dll``
+  at ll index 19, 0.26 below the peak): the scenario
   ``test_pdftype1_forced_restore_rolls_back_n_kurt_done_with_pdtype`` needs to
   prove the restore rolls ``n_kurt_done`` back in step with ``pdtype``, not
-  just the floating-point arrays. (``kurt_start=8`` served until issue #333;
-  the rescale fix moved that run's ``min_dll`` stop to iteration 8, after
-  only two passes.)
+  just the floating-point arrays. (``kurt_start=8`` served until issue #333,
+  seed 2 with ``kurt_start=6`` until issue #339, whose earlier decrease
+  response no longer lets that run overshoot. Seeds 0-5 and ``kurt_start``
+  3-11 were searched; seed 1 with ``kurt_start=8`` also qualifies, and most
+  other overshooting runs end in a ``nan_params`` stop, which skips the
+  restore.)
 
 The truncated-refit bit-identity check (both here and in the pdftype=1 test)
 uses ``max_iter=argmax`` where ``argmax = int(np.argmax(ll_history))``: a
@@ -76,8 +83,8 @@ Two more scenarios, added after PR #310 review:
   ``n_restarts=2`` search must record ``restart_lls_[0]`` as the RESTORED
   best iterate's LL, not the raw last iterate -- i.e. the same value a
   standalone seed-0 fit's ``final_ll_`` reports, confirmed bit-identical in
-  the same process. The second restart (seed 1) is cheap: it converges in
-  under 60 iterations on the same recipe with no forcing needed.
+  the same process. The second restart (seed 1) is cheap: it stops on its
+  own first decrease, at iteration 16, on the same recipe.
 """
 
 import logging
@@ -135,8 +142,8 @@ _FORCED_RESTORE_KWARGS: dict[str, Any] = dict(
     lrate=0.5,
     newtrate=3.0,
     use_min_dll=True,
-    min_dll=1e-4,
-    maxincs=2,
+    min_dll=1e-8,
+    maxincs=0,
     use_grad_norm=False,
 )
 _FORCED_RESTORE_MAX_ITER = 150
@@ -147,7 +154,7 @@ _FORCED_RESTORE_PDFTYPE1_KWARGS: dict[str, Any] = dict(
     n_models=2,
     n_mix=1,
     pdftype=1,
-    seed=2,
+    seed=3,
     block_size=BLOCK,
     do_newton=True,
     newt_start=2,
@@ -156,7 +163,7 @@ _FORCED_RESTORE_PDFTYPE1_KWARGS: dict[str, Any] = dict(
     min_dll=1e-4,
     maxincs=2,
     use_grad_norm=False,
-    kurt_start=6,
+    kurt_start=7,
     num_kurt=5,
     kurt_int=1,
 )
@@ -366,8 +373,8 @@ def test_pdftype1_forced_restore_rolls_back_n_kurt_done_with_pdtype(real_data):
     ``AMICATorchNG``).
 
     The recipe (module docstring) runs the adaptive switcher's first
-    kurtosis pass at the end of iteration 5, strictly after the E-step that
-    measures the peak at iteration 5, so ``keep_best=False`` reaches
+    kurtosis pass at the end of iteration 7, strictly after the E-step that
+    measures the peak (ll index 6), so ``keep_best=False`` reaches
     ``n_kurt_done=5`` (all switch passes ran) with a mixed pdtype, while the
     restored ``keep_best=True`` model must be pinned at the pre-switch state:
     ``n_kurt_done=0`` and ``pdtype`` unchanged from its all-super-Gaussian

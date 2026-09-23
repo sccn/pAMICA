@@ -662,9 +662,12 @@ def test_restart_gives_up_after_maxrestarts(tmp_path):
     model.fit(data)
     # Restarts are capped, the run stops on the persistent non-finite LL, and
     # the terminal failure is surfaced (converged=False), not silently ignored.
+    # The non-finite likelihood itself is never recorded (issue #339 review),
+    # so the history is empty: every iteration was non-finite.
     assert model.numrestarts == 2
     assert model.converged is False
-    assert not np.isfinite(model.ll[-1])
+    assert model.stop_reason == AMICA._NONFINITE_LL_REASON
+    assert model.ll == []
 
 
 def test_check_convergence_ratchets_lrate_on_decrease():
@@ -674,9 +677,12 @@ def test_check_convergence_ratchets_lrate_on_decrease():
     ratchet (#41). Drives the convergence handler directly with a decreasing LL
     history.
 
-    Also pins the #193 fix: the rho rate is a maxdecs-ratcheted CEILING, NOT a
-    per-decrease monotone decay. rholrate must stay untouched on a decrease below
-    max_decs and only ratchet when numdecs hits max_decs.
+    Also pins the #193 fix: the rho-rate ceiling (``rholrate_cap``) is
+    ratcheted only when numdecs hits max_decs, never per decrease. What each
+    decrease scales is the working rate ``rholrate``, as the reference's does
+    (amica15.f90:1063); every A update resets it to the ceiling before rho moves
+    (issue #339), so the per-decrease scaling is not the monotone decay #193
+    removed.
     """
     model = AMICA(
         num_models=1,
@@ -692,15 +698,18 @@ def test_check_convergence_ratchets_lrate_on_decrease():
     model.nd = [1.0]  # gradient norm well above min_grad_norm (no floor stop)
     lrate0_before = model.lrate0
     newtrate_before = model.newtrate
+    rholrate_cap_before = model.rholrate_cap
     rholrate_before = model.rholrate
 
-    # First decrease: numdecs -> 1 (below max_decs), so just reduce lrate. The rho
-    # ceiling must NOT move here -- pre-#193 it decayed on every decrease.
+    # First decrease: numdecs -> 1 (below max_decs), so just reduce the working
+    # rates. The rho ceiling must NOT move here -- pre-#193 it decayed on every
+    # decrease.
     model.ll = [-3.0, -3.1]
     conv, _, numdecs, numincs = model._check_convergence(0, 0)
     assert conv is False
     assert numdecs == 1
-    assert model.rholrate == rholrate_before
+    assert model.rholrate_cap == rholrate_cap_before
+    assert model.rholrate == pytest.approx(rholrate_before * model.rholratefact)
 
     # Second consecutive decrease: numdecs hits max_decs=2 -> ratchet ceilings,
     # reset numdecs, and CONTINUE (not converged).
@@ -710,13 +719,14 @@ def test_check_convergence_ratchets_lrate_on_decrease():
     assert numdecs == 0
     assert model.lrate0 == lrate0_before * 0.5
     assert model.newtrate == newtrate_before * 0.5
-    assert model.rholrate == pytest.approx(rholrate_before * model.rholratefact)
+    assert model.rholrate_cap == pytest.approx(rholrate_cap_before * model.rholratefact)
 
 
 def test_reinitialize_for_restart_resets_rho_ceiling():
     """Issue #193: a mid-fit restart (non-finite LL, Fortran restartiter path)
-    resets the rho-rate ceiling to rholrate0, exactly like the lrate reset -- a
-    previously-ratcheted rholrate must not carry across the restart.
+    resets the rho-rate ceiling, and the working rate with it, to rholrate0,
+    exactly like the lrate reset -- a previously-ratcheted rho rate must not
+    carry across the restart.
     """
     model = AMICA(num_models=1, num_mix=3, seed=0)
     model.data_dim = 4
@@ -727,7 +737,8 @@ def test_reinitialize_for_restart_resets_rho_ceiling():
     model._initialize_parameters()
 
     # Simulate a fit that ratcheted both ceilings, then hit a non-finite LL.
-    model.rholrate = model.rholrate0 * 0.25
+    model.rholrate_cap = model.rholrate0 * 0.25
+    model.rholrate = model.rholrate0 * 0.025
     model.lrate = model.lrate0 * 0.25
     model.ll = [-3.0, -3.1]
     model.nd = [0.5]
@@ -735,6 +746,7 @@ def test_reinitialize_for_restart_resets_rho_ceiling():
     model._reinitialize_for_restart()
 
     # Both ceilings restored to pristine; history cleared for a fresh judgment.
+    assert model.rholrate_cap == model.rholrate0
     assert model.rholrate == model.rholrate0
     assert model.lrate == model.lrate0
     assert model.ll == []

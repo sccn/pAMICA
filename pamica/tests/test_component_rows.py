@@ -132,6 +132,14 @@ _BYTE_ID_ITERS = 6
 
 
 _ALL = ("torch", "numpy", "mlx")
+# Newton from the second iteration. newtrate at the natural-gradient rate (0.1)
+# keeps the ramp saturated: the likelihood falls on the iteration after
+# pdftype=1's density switch, and the halved rate is ramped straight back to
+# 0.1, so it steps the same whether the decrease response runs before the
+# update (the reference's order, issue #339) or after it (the order the
+# pre-change code, and this layout comparison, predate). A ramp toward the
+# default newtrate 0.5 would move that step, which is not a layout effect.
+_NEWTON: Dict[str, Any] = dict(newt_start=2, newtrate=0.1)
 # The NumPy backend implements only the generalized-Gaussian density (it raises
 # NotImplementedError for any other pdftype; test_numpy_rejects_other_pdftypes
 # below) and has no keep_best option, so those configurations run on PyTorch
@@ -149,7 +157,7 @@ def _byte_id_configs() -> List[Any]:
                 for pdftype in (0, 1):
                     cfg = dict(doscaling=doscaling, do_newton=newton, pdftype=pdftype)
                     if newton:
-                        cfg["newt_start"] = 2
+                        cfg.update(_NEWTON)
                     name = (
                         f"m{n_models}-{'scale' if doscaling else 'noscale'}-"
                         f"{'newton' if newton else 'ng'}-pdf{pdftype}"
@@ -157,7 +165,7 @@ def _byte_id_configs() -> List[Any]:
                     configs.append(
                         (name, n_models, cfg, _ALL if pdftype == 0 else _NOT_NUMPY)
                     )
-    newton: Dict[str, Any] = dict(do_newton=True, newt_start=2)
+    newton: Dict[str, Any] = dict(do_newton=True, **_NEWTON)
     configs += [
         (
             "m2-reject-newton",
@@ -175,9 +183,12 @@ def _byte_id_configs() -> List[Any]:
         # Four blocks of 1024 samples: the per-block accumulation.
         ("m2-newton-4blocks", 2, dict(newton, block_size=1024), _ALL),
         # The best-iterate safeguard, with a learning rate high enough that the
-        # log-likelihood falls, so it restores an earlier snapshot of A.
-        # (lrate 1.5: from 2.0 the float32 MLX fit goes non-finite.)
-        ("m2-keepbest-restores", 2, dict(keep_best=True, lrate=1.5), _NOT_NUMPY),
+        # log-likelihood falls, so it restores an earlier snapshot of A. At lrate
+        # 0.5 the one decrease is on the last iteration (by 2.4e-2 on PyTorch and
+        # MLX), whose update the restore discards, so the iteration order of
+        # issue #339 acts on nothing compared here; at 1.5, the value before
+        # that issue, the likelihood falls on iterations 2, 4, 5 and 6.
+        ("m2-keepbest-restores", 2, dict(keep_best=True, lrate=0.5), _NOT_NUMPY),
         # Best-of-two restarts, which re-initializes A and keeps the winner.
         ("m2-restarts", 2, dict(n_restarts=2), _ALL),
     ]
@@ -912,15 +923,19 @@ def _seeded_run(
             setattr(model, name, seed[name].copy())
         model.c = np.zeros((NW, 2))
         model.lrate, model.rholrate = _OPT["lrate"], _OPT["rholrate"]
+        model.rholrate_cap = _OPT["rholrate"]
         model.ll, model.nd = [], []
         model.comp_list = seed["default"].copy()
         model._update_unmixing_matrices()
         model.comp_list = seed["merged"].copy()
         model.comp_used = np.isin(np.arange(2 * NW), model.comp_list)
+        # Read from the E-step itself: only fit()'s loop records self.ll
+        # (issue #339 review), and a pre-change class records it in the update.
         for it in range(k):
             model.iter = it
-            model._update_parameters(model._get_updates_and_likelihood())
-        lls = list(model.ll)
+            updates = model._get_updates_and_likelihood()
+            lls.append(float(updates["ll"]))
+            model._update_parameters(updates)
     mixing = [_mixing(model, h) for h in range(2)]
     return np.asarray(lls), mixing, _np(model.mu), _np(model.beta)
 
@@ -1034,11 +1049,16 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
 
 
 # --- 5. early mass merges behave the same in the reference (opt-in) -------------
-# The recipe the sharing tests used before issue #334 made the metric compare
-# true component maps: 4096 samples, pamica's default optimizer, an early scan
-# at a loose threshold. The first scan (iteration 8) merges 28 components and the
-# one at iteration 18 one more; the second model then loses its responsibility
-# and the fit goes non-finite at iteration 20. _COLLAPSE_REF spells pamica's
+# The kind of recipe the sharing tests used before issue #334 made the metric
+# compare true component maps: 4096 samples, pamica's default optimizer, an
+# early scan at a loose threshold. The first scan (iteration 11) merges 25
+# components and the second model's gm falls from 0.53 to 6.0e-4 within two
+# iterations; by the second scan (iteration 22, which merges nothing more) it
+# is 2e-22, and the fit goes non-finite at iteration 25. Issue #345 moved the
+# A-freeze to the reference's iterations (mod(iter, share_iter) <= 5), so
+# share_start is a multiple of share_iter here, which puts each window on its
+# scan iteration; the earlier recipe (seed 7, scans at 8 and 18) now goes
+# non-finite at iteration 18, before its second scan. _COLLAPSE_REF spells pamica's
 # defaults out for the binary, with no further scans, no A-freeze and no
 # convergence stops, so both sides run the same updates from the same state.
 _COLLAPSE_SAMPLES = 4096
@@ -1046,13 +1066,13 @@ _COLLAPSE: Dict[str, Any] = dict(
     n_channels=NW,
     n_models=2,
     n_mix=NMIX,
-    seed=7,
+    seed=20,
     device="cpu",
     dtype=torch.float64,
     block_size=1024,
     share_comps=True,
-    share_start=8,
-    share_iter=10,
+    share_start=11,
+    share_iter=11,
     comp_thresh=0.9,
 )
 _COLLAPSE_REF: Dict[str, Any] = dict(
@@ -1181,7 +1201,8 @@ def test_an_early_mass_merge_collapses_the_reference_too(real_data, tmp_path):
         return np.asarray(lls), float(_np(model.gm)[1])
 
     first = AMICATorchNG(**_COLLAPSE)
-    first.fit(X, max_iter=8, verbose=False)  # the scan runs on the last iteration
+    # The scan runs on the last iteration of each fit.
+    first.fit(X, max_iter=_COLLAPSE["share_start"], verbose=False)
     seed = _post_scan(first)
     merges = 2 * NW - len(np.unique(seed["merged"]))
     assert merges >= 20, f"setup: the first scan merged only {merges}"
@@ -1202,7 +1223,10 @@ def test_an_early_mass_merge_collapses_the_reference_too(real_data, tmp_path):
     np.testing.assert_allclose(gm2, ref.gm[1], rtol=1e-2)
 
     second = AMICATorchNG(**_COLLAPSE)
-    second.fit(X, max_iter=18, verbose=False)  # the second scan runs last
+    second.fit(
+        X, max_iter=_COLLAPSE["share_start"] + _COLLAPSE["share_iter"], verbose=False
+    )
+    assert second.stop_reason == "max_iter", "the fit collapsed before its second scan"
     seed = _post_scan(second)
     ref = run_seeded_reference(
         _reference_seed(seed),

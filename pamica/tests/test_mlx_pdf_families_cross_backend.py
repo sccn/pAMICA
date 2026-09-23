@@ -240,6 +240,7 @@ def _torch_twin(model, x_t):
     ng._sphere_pinv = None
     ng.lrate = model.lrate
     ng.rholrate = model.rholrate
+    ng.rholrate_cap = model.rholrate_cap
     ng.iteration = model.iteration
     ng.sldet = model.sldet
     ng._update_unmixing_matrices()

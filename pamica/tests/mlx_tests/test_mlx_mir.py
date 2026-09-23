@@ -361,23 +361,28 @@ def test_mir_history_survives_keep_best_restore(real_data):
     buggy restore would damage (mirrors test_ng_convergence.py's
     identically-named test and its mir_step=1 rationale).
 
-    Seed 1 rather than the recipe's seed 0 since issue #333: both overshoot,
-    but seed 0's restored iterate sits so close to its last one that their MIR
-    differ by only 4.9e-5 relative, under the 1e-4 float32 margin below;
-    seed 1's differ by 7.5e-4."""
+    Since issue #339 the min_dll stop exits before its own update, so the
+    last waypoint is the one right after the restored iterate, and the
+    recipe stops on its first likelihood decrease (``maxincs=0``,
+    ``min_dll=1e-8``): iteration 14, 1.6e-3 below the peak at 13. The MIR of
+    that one discarded step moves by 9.4e-4 relative, well past the 1e-4
+    float32 margin below, and by 8.2e-4 to 1.1e-3 across 8 relative data
+    perturbations of 1e-6. Seed 1 with ``min_dll=1e-4``/``maxincs=2``, the
+    choice from issue #333 until then, moved it by 2.5e-5 under the new
+    order."""
     m = AMICAMLXNG(
         n_channels=NW,
         n_models=2,
         n_mix=NMIX,
-        seed=1,
+        seed=0,
         block_size=BLOCK,
         do_newton=True,
         newt_start=2,
         lrate=0.5,
         newtrate=3.0,  # overshoots since issue #333 (test_mlx_keepbest.py)
         use_min_dll=True,
-        min_dll=1e-4,
-        maxincs=2,
+        min_dll=1e-8,
+        maxincs=0,
         use_grad_norm=False,
         keep_best=True,
     )
@@ -392,13 +397,20 @@ def test_mir_history_survives_keep_best_restore(real_data):
 
     assert m.mir_history_, "test setup: mir_step recorded nothing"
     final_it = len(m.ll_history) - 1
+    # A convergence stop exits before its iteration's update, as the reference
+    # does (issue #339), so that iteration records no waypoint; a max_iter fit
+    # updates, and records one, on its last iteration.
+    last_update_it = final_it if m.stop_reason == "max_iter" else final_it - 1
     best_it = m.ll_history.index(m.final_ll_)
-    assert best_it < final_it, (
-        "test setup: the restore must discard at least one iteration"
+    # Waypoint i comes from the parameters after iteration i's update, so
+    # every waypoint from best_it on was computed from parameters the restore
+    # discards (see test_ng_convergence.py's identically-named test).
+    assert best_it <= last_update_it, (
+        "test setup: the restore must discard at least one waypoint"
     )
     last_it, last_mir, _ = m.mir_history_[-1]
-    assert last_it == final_it, "the post-peak waypoints were dropped"
-    assert len(m.mir_history_) == final_it + 1, (
+    assert last_it == last_update_it, "the post-peak waypoints were dropped"
+    assert len(m.mir_history_) == last_update_it + 1, (
         "mir_history_ is not the full per-iteration trajectory"
     )
 

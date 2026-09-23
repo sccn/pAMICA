@@ -153,8 +153,8 @@ def test_written_ll_ends_at_the_keep_best_restored_iterate(real_data):
         lrate=0.5,
         newtrate=3.0,  # overshoots since issue #333 (test_mlx_keepbest.py)
         use_min_dll=True,
-        min_dll=1e-4,
-        maxincs=2,
+        min_dll=1e-8,  # stops on the first decrease (test_mlx_keepbest.py)
+        maxincs=0,
         use_grad_norm=False,
     )
     m = AMICAMLXNG(n_channels=NW, **kwargs)

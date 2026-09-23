@@ -16,7 +16,7 @@ that is not listed, that is a bug worth
 | 2 | Zero numerical rank | `numeigs = 0`, continues | `ValueError` naming cause and fix | fitting a zero-dimensional model is not a recoverable state | — (no reason to want it) |
 | 3 | Returned iterate | last EM iterate | highest-likelihood iterate (`keep_best`) | the lrate schedule is non-monotone; late Newton overshoots cut LL variance 12.7x → 2.0x | `keep_best=False` |
 | 4 | Newton | on (`do_newton=1`) | off | isolates the algorithm from initialization for parity work | `do_newton=True` |
-| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | the `AMICA` wrapper, on either backend, refuses `transform`/`get_*`/`save`; the raw `AMICATorchNG`, `AMICAMLXNG` and NumPy `AMICA` backends now refuse their own output accessors on a degenerate fit too (issue #306), not just the wrapper; NumPy additionally reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk) | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50, #240 and #306) |
+| 5 | Degenerate fits | returns NaN sources, and writes them out on its `writestep` cadence | the `AMICA` wrapper, on either backend, refuses `transform`/`get_*`/`save`; the raw `AMICATorchNG`, `AMICAMLXNG` and NumPy `AMICA` backends now refuse their own output accessors on a degenerate fit too (issue #306), not just the wrapper; NumPy additionally reports `converged=False` with a `stop_reason`, refuses the final write, and skips each periodic checkpoint with a logged reason (leaving the last valid one on disk). Every backend stops before a non-finite value is applied or returned: a non-finite likelihood (never recorded in the history), update direction (`nan_direction`) or parameter after an update (`nan_params`), where the reference applies a NaN step and exits on the next likelihood | NaN sources silently poison downstream analysis, and `loadmodout` reads a NaN checkpoint back without complaint | — (see issues #50, #240, #306 and #339) |
 | 6 | Precision | float64 | float64 (float32 on Apple GPUs) | Apple GPUs have no float64; float32 agrees to ~7 significant digits, not bit-parity | `dtype=torch.float64` |
 | 7 | Sensor-space maps | `Spinv` applied internally | `get_sensor_mixing_matrix()` | `get_mixing_matrix()` returns sphered-space `A`; switching its meaning by data conditioning would be worse | — |
 | 8 | Components merged away by `share_comps` | mixing vector and density updated to NaN, then hidden by the `comp_used` mask | frozen at their last finite value (never divided, never rescaled) | a fit must not end holding NaN parameters, mask or no mask; the components are dead either way | — (see issues #60, #240, #334) |
@@ -30,19 +30,28 @@ that is not listed, that is a bug worth
 | 16 | Single-precision density normalizers | `log(dble(1.772453851))` in the exact-Gaussian branch of the generalized Gaussian (`rho == 2`, amica15.f90:1313) is a single-precision literal widened to double, 3.0e-8 above `log(sqrt(pi))`; the Gaussian and cosh families (`pdftype` 2, 4 and 1, :1333, :1359, :1371) use literals of the same kind | `0.5 * log(pi)` for `rho == 2`; the double-precision values of the decimal literals for the other families, which differ from the reference's in the log by 3.7e-10, 2.0e-8 and -2.1e-8 | not a deliberate choice: found during epic #324 Phase 8, while seeding the reference from warm states in which mixtures sit at `maxrho = 2`; each such mixture's log-density differs by 3.0e-8, weighted by its responsibility (2.8e-9 in the log-likelihood of one warm two-model state of the sample). The other families' offsets are computed from the literals, not yet measured against the binary | none yet (issue #344 decides whether to adopt the reference's values); the seeded oracles keep `maxrho` below 2 |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
-row 3 with ADR 0003; row 5 with issue #50, extended to the raw backends by issue #306; row 8 with issues #60, #240 and #334;
+row 3 with ADR 0003; row 5 with issue #50, extended to the raw backends by issue #306 and to non-finite steps and updates by issue #339; row 8 with issues #60, #240 and #334;
 row 9 with issue #232; row 10 with issue #198; row 11 with issue #322 (ADR 0005);
 row 12 with issue #323; row 13 is recorded, not yet resolved, by issue #328;
 row 14 with issue #333 (ADR 0006);
 row 15 with issue #335, which also made the NumPy restart window count from 1;
 row 16 is recorded, not yet resolved, by issue #344.
 
-Two `share_comps` details are pamica's own because the reference cannot decide
-them: the A-freeze window after a merge is anchored on `share_start` (the literal
-`mod(iter, share_iter)` misaligns unless `share_start` is a multiple of
-`share_iter`, and freezes A permanently for `share_iter <= 6`, which the array
-backends reject up front), and the merge similarity metric has no bit-exact
-oracle, because the reference's `Spinv2` is declared but never allocated.
+The A-freeze is the reference's arithmetic, applied as it is (issue #345):
+once `iter >= share_start`, every iteration with `mod(iter, share_iter) <= 5` holds the `A` update,
+together with the `lrate` ramp and the `rholrate` reset that share its branch (amica15.f90:1803).
+The reference applies it to every fit, one model or several, whether or not `share_comps` is on,
+so with the defaults (`share_start = share_iter = 100`) every backend holds `A` on iterations 100-105, 200-205, and so on.
+Until issue #345 pamica held `A` only under `share_comps` with two or more models, on each scan iteration and the five after it, counted from `share_start`.
+The literal remainder starts the window on the scan iteration only when `share_start` is a multiple of `share_iter`, as with the defaults;
+otherwise the window and the scan fall on different iterations, in the reference and in pamica alike.
+A `share_iter` below 7 would leave every remainder at 5 or less, holding `A` permanently from `share_start` on,
+so every backend rejects it, sharing on or off (the NumPy backend takes it as `share_int` or `share_iter`).
+For the same reason every backend requires `share_start >= 1` whether or not sharing is on:
+`share_start=0` would start the freeze on the first iteration.
+
+One `share_comps` detail is pamica's own because the reference cannot decide it:
+the merge similarity metric has no bit-exact oracle, because the reference's `Spinv2` is declared but never allocated.
 Its scan still runs, but every similarity it computes is NaN, so a reference run with `share_comps` on never merges anything:
 seeded from pamica's initialization, the pinned binary leaves `comp_list` unchanged
 and reports 64 unique components after a scan at iteration 8, even at `comp_thresh=0`.
@@ -333,7 +342,7 @@ that on the bundled sample). Statements elsewhere in these guides about the
 Component sharing was the other gap, closed by issue #263: `AMICAMLXNG` now takes
 `share_comps`/`share_start`/`share_iter`/`comp_thresh` with the PyTorch
 backend's names, defaults and validation, runs the same merge schedule and
-post-merge A-freeze, and exposes `comp_used`/`shared_components()`.
+A-freeze, and exposes `comp_used`/`shared_components()`.
 It does not re-derive the merge metric — it calls the same
 `identify_shared_components` kernel the NumPy backend uses, on the host float64
 sensor maps `pinv(sphere) @ A.T` (one column per component, issue #334), so all
@@ -461,11 +470,11 @@ Two consequences to know:
   but its similarity with `Spinv2 = Spinv^T Spinv`, applied to the binary's own state after 8 iterations from pamica's initialization,
   merges exactly the pairs the PyTorch and NumPy scans merge: 32, 32 and 30 at `comp_thresh` 0.9, 0.95 and 0.99.
 - A model left with few components of its own then loses its responsibility, and can end in a non-finite fit.
-  In a short recipe (4096 samples, `share_start=8`, `share_iter=10`, `comp_thresh=0.9`), 28 merges at iteration 8
-  dropped the second model's `gm` from 0.41 to 0.003, and one more merge at iteration 18 drove it to zero and the fit to NaN.
+  In a short recipe (4096 samples, seed 20, `share_start=11`, `share_iter=11`, `comp_thresh=0.9`), 25 merges at iteration 11
+  dropped the second model's `gm` from 0.53 to 6.0e-4 within two iterations, and the fit went non-finite at iteration 25.
   Seeded with the same merged states, the reference's update does the same:
-  the second model's `gm` falls to 0.005 within two iterations, as pamica's does from the same state,
-  and from the second merge it reaches zero in one iteration and the binary reports NaN and reinitializes.
+  the second model's `gm` falls to 6.0e-4 within two iterations, as pamica's does from the same state,
+  and from the state after the second scan (iteration 22) it reaches zero in one iteration and the binary reports NaN and reinitializes.
   This is the algorithm on models that have not yet separated, not a defect of the port.
   The reference's default `share_start=100` avoids it; keep `share_start` well past the first iterations.
 - Saved models: a PyTorch `state_dict` (now `format_version` 4) or MLX save (now format 2) from an earlier version
@@ -491,6 +500,11 @@ gap. All three backends share it by construction, and it is pinned as
 behavior rather than fixed (`test_merge_on_the_final_iteration_completes` in
 each of `tests/torch_tests/test_ng_sharing.py`,
 `tests/test_numpy_share_comps.py` and `tests/mlx_tests/test_mlx_sharing.py`).
+
+It can only happen on a fit that runs to `max_iter`.
+A fit that stops on a convergence check (`min_dll`, the gradient norm, the `lrate` floor)
+exits before that iteration's update and scan, as the reference does (amica15.f90:1111, issue #339),
+so its returned parameters are the ones `final_ll_` was computed from.
 
 One interaction worth knowing: the `keep_best` safeguard (row 3 above,
 implemented on PyTorch and, since epic #278 Phase 2, MLX) is disabled
@@ -519,8 +533,13 @@ Fortran's iteration runs `get_updates_and_likelihood` (amica15.f90:996), then
 parameters as they stood *before* the M-step whose `W`/`A` sit next to it. It
 is not the likelihood of the written decomposition; it is the likelihood of its
 immediate predecessor, and it is the E-step that produced the last entry of the
-written `LL` trajectory. The relation that holds on both sides — on the
-committed reference output as much as on pamica's — is
+written `LL` trajectory.
+The exception is a fit that stops on a convergence check:
+the reference exits before that iteration's `update_params` (amica15.f90:1111),
+and since issue #339 every pamica backend does too,
+so the final write's `LLt` is the likelihood of the `W`/`A` beside it.
+The relation that holds on both sides, on the
+committed reference output as much as on pamica's, is
 
 ```
 LLt[num_models, :].sum() / (n_good_samples * nw) == LL[-1]

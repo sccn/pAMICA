@@ -152,9 +152,10 @@ def test_llt_stash_is_none_before_any_estep_ran():
 # Reuses the aggressive-Newton recipe test_mlx_keepbest.py measured to
 # genuinely overshoot on this backend (module docstring there): n_models=2,
 # seed=0, block_size=1024, do_newton=True, newt_start=2, lrate=0.5,
-# newtrate=3.0, use_min_dll=True, min_dll=1e-4, maxincs=2,
-# use_grad_norm=False, max_iter=150 (newtrate and the budget since issue #333;
-# newt_start 2, counted from 1 since issue #335, is the run measured as 1).
+# newtrate=3.0, use_min_dll=True, min_dll=1e-8, maxincs=0,
+# use_grad_norm=False, max_iter=150 (newtrate since issue #333; newt_start 2,
+# counted from 1 since issue #335, is the run measured as 1; the
+# first-decrease stop since issue #339).
 _FORCED_RESTORE_KWARGS: dict[str, Any] = dict(
     n_models=2,
     n_mix=NMIX,
@@ -165,8 +166,8 @@ _FORCED_RESTORE_KWARGS: dict[str, Any] = dict(
     lrate=0.5,
     newtrate=3.0,
     use_min_dll=True,
-    min_dll=1e-4,
-    maxincs=2,
+    min_dll=1e-8,
+    maxincs=0,
     use_grad_norm=False,
 )
 

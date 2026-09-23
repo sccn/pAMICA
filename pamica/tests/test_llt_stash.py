@@ -390,10 +390,11 @@ def test_keep_best_restore_rolls_the_llt_stash_back(real_data, tmp_path):
     assertion rules out.
     """
     # The overshoot recipe of test_ng_convergence.py (same data, block size
-    # and settings, so the same trajectory): aggressive Newton that peaks and
-    # then stops via the loosened min_dll (peak at iteration 70, stop at 71).
-    # A fixed 60-iteration budget overshot on the development machine only;
-    # on the CI runners that run was monotone.
+    # and settings, so the same trajectory): aggressive Newton that
+    # maxincs=0/min_dll=1e-8 stop on its first likelihood decrease (peak at
+    # iteration 13, stop at 14). Endings left to the trajectory (a fixed
+    # 60-iteration budget, then min_dll=1e-4/maxincs=2) overshot on one
+    # machine and ended at the peak on another.
     m = _torch_fit(
         real_data,
         n_models=2,
@@ -404,8 +405,8 @@ def test_keep_best_restore_rolls_the_llt_stash_back(real_data, tmp_path):
         lrate=0.5,
         newtrate=3.0,
         use_min_dll=True,
-        min_dll=1e-4,
-        maxincs=2,
+        min_dll=1e-8,
+        maxincs=0,
         use_grad_norm=False,
     )
     assert m.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS, (

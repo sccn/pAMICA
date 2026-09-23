@@ -51,9 +51,11 @@ pytestmark = pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data miss
 # the likelihood-decrease bookkeeping has something to count within a short
 # budget. lrate=0.6/maxdecs=2/seed=3/8192 frames is test_mlx_newton.py's
 # schedule fixture: it was chosen there by sweeping seeds, block sizes and
-# sample counts, and here it completes the first maxdecs cycle at iteration 11
-# on all three backends. Every test below still reads the iterations it needs
-# off the executing machine's own trajectory rather than trusting that number.
+# sample counts, and here it completes the first maxdecs cycle at iteration 9
+# on all three backends (iteration 11 before issue #339 moved the decrease
+# response ahead of the update). Every test below still reads the iterations it
+# needs off the executing machine's own trajectory rather than trusting that
+# number.
 _OVERSHOOT: dict[str, Any] = dict(lrate=0.6, lratefact=0.5, maxdecs=2)
 # The Newton-phase ceiling test_mlx_newton.py pairs with it: at newtrate=1.0
 # the post-switch-on trajectory can be monotone, leaving the reset unobservable.
@@ -89,7 +91,7 @@ class _Run:
     lrate: float
     lrate_ceiling: float  # lrate_cap (torch/MLX), lrate0 (NumPy)
     lrate_ceiling0: float
-    rholrate: float
+    rholrate: float  # the rho-rate ceiling: rholrate_cap on every backend
     rholrate0: float
     newtrate: float
     newtrate0: float
@@ -130,7 +132,7 @@ def _fit(
             lrate=m.lrate,
             lrate_ceiling=m.lrate0,
             lrate_ceiling0=m._pristine_state["lrate0"],
-            rholrate=m.rholrate,
+            rholrate=m.rholrate_cap,
             rholrate0=m.rholrate0,
             newtrate=m.newtrate,
             newtrate0=m._pristine_state["newtrate"],
@@ -165,7 +167,7 @@ def _fit(
         lrate=m.lrate,
         lrate_ceiling=m.lrate_cap,
         lrate_ceiling0=m.lrate0,
-        rholrate=m.rholrate,
+        rholrate=m.rholrate_cap,
         rholrate0=m.rholrate0,
         newtrate=m.newtrate,
         newtrate0=m.newtrate0,
@@ -293,15 +295,16 @@ def test_every_gate_fires_on_the_reference_iteration():
     # Share merges from share_start=3 every 4 (amica15.f90:1856): 3, 7, 11.
     assert [i for i in idx if schedule.periodic_due(i, 3, 4)] == [2, 6, 10]
     assert fires(lambda i: schedule.periodic_due(i, 1, 1)) == list(idx)
-    # The A-freeze: the merge iteration and the 5 after it, anchored on
-    # share_start (a documented pamica decision), share_start=3, share_iter=8.
+    # The A-freeze (amica15.f90:1803): from share_start=3 on, every iteration
+    # whose remainder mod share_iter=8 is 0 to 5 (3, 4, 5, then 8 to 13),
+    # whether or not share_comps is on (issue #345).
     assert [i for i in idx if schedule.share_freeze(i, 3, 8)] == [
         2,
         3,
         4,
-        5,
-        6,
         7,
+        8,
+        9,
         10,
         11,
     ]
@@ -448,11 +451,15 @@ def test_rho_rate_ratchet_opens_only_after_iteration_newt_start(backend, X, tmp_
 # lrate 0.5/0.6/0.8, maxdecs 2/3, newt_ramp 10/1 and 4096/8192 frames for a
 # ratchet at ll index 20, first on PyTorch and then checked on NumPy and MLX;
 # re-searched when issue #333's component-row doscaling changed the default
-# trajectories. This one decreases at ll indices 4, 5, 8 and 9, 19, 20 on all
-# three backends, so it ratchets at 8 and 20; the smallest of those decreases
-# is 4.7e-4, far above round-off, float32 included.
+# trajectories, and again when issue #339 moved the decrease response ahead of
+# the update (seed 1, the previous choice, now ratchets at 8 and 16). Seven
+# configurations qualify on PyTorch; this one, seed 3, also does on NumPy and
+# MLX (seed 4, the widest-margin PyTorch candidate, ratchets at 16 in float32).
+# It decreases at ll indices 4, 5, 8 and 14, 15, 20 on all three backends, so it
+# ratchets at 8 and 20; the smallest decrease is 2.4e-3 and the smallest
+# likelihood step of the run 4.4e-4, far above round-off, float32 included.
 _DEFAULT_GATE_FRAMES = 4096
-_DEFAULT_GATE_SEED = 1
+_DEFAULT_GATE_SEED = 3
 _DEFAULT_GATE: dict[str, Any] = dict(lrate=0.6, lratefact=0.5, maxdecs=3, newt_ramp=1)
 
 
@@ -631,7 +638,111 @@ def test_numpy_restart_window_is_the_first_restartiter_iterations(
     assert m.converged is bool(restarts), m.stop_reason
     if not restarts:
         assert m.stop_reason is not None and "Non-finite" in m.stop_reason
-        assert len(m.ll) == nan_iter + 1  # stopped on the poisoned iteration
+        # Stopped on the poisoned iteration, whose non-finite likelihood is not
+        # recorded (as in the PyTorch/MLX ll_history, issue #339 review).
+        assert len(m.ll) == nan_iter
+
+
+def test_numpy_restart_clears_the_small_gain_count_as_the_reference_does(X, tmp_path):
+    """The reference's checks still run on its restart iteration, and its
+    ``min_dll`` comparison with the NaN likelihood is false, so it zeroes
+    ``numincs`` (amica15.f90:1078-1090). With every gain counted as small
+    (``min_dll=10``) and ``maxincs=3``, two small gains before a restart on the
+    4th iteration (index 3) must not count after it: the fit stops on the 5th
+    small gain after the restart, at index 8, not at index 6, where the gains
+    carried across the restart (the behavior before the issue #339 review)
+    would stop it."""
+    m = _NaNOnIteration(
+        num_models=1,
+        num_mix=NMIX,
+        seed=SEED,
+        block_size=BLOCK,
+        max_iter=20,
+        use_tqdm=False,
+        do_opt_block=False,
+        writestep=10**7,
+        restartiter=10,
+        maxrestarts=3,
+        use_min_dll=True,
+        min_dll=10.0,
+        maxincs=3,
+        use_grad_norm=False,
+        outdir=str(tmp_path / "out"),
+    )
+    m.nan_iter = 3
+    m.fit(X)
+    assert m.numrestarts == 1
+    assert m.stop_reason == "Converged: small likelihood increase"
+    # Indices 4 to 8 after the restart: one to start the history, then four
+    # small gains, the fourth of which exceeds maxincs=3.
+    assert m.iter == 8
+    assert len(m.ll) == 5
+
+
+# The epic base before issue #339, the last NumPy loop that updated before its
+# restart check.
+_PRE_339 = "5b6ae4f69eacf6aa18002ce336ed904f73438516"
+
+
+def _updates_around_a_restart(base: Any, X: np.ndarray, tmp_path: Path) -> tuple:
+    """Fit ``base`` with a NaN likelihood on iteration 2 inside the restart
+    window, recording the iteration of every ``_update_parameters`` call with a
+    pass-through recorder (it records, then calls the real method with the same
+    arguments). Returns the recorded iterations and the restart count."""
+
+    class _NaNOnTwo(base):
+        def _get_updates_and_likelihood(self):
+            upd = super()._get_updates_and_likelihood()
+            if self.iter == 2:
+                upd["ll"] = float("nan")
+            return upd
+
+    m = _NaNOnTwo(
+        num_models=1,
+        num_mix=NMIX,
+        seed=SEED,
+        block_size=BLOCK,
+        max_iter=5,
+        use_tqdm=False,
+        do_opt_block=False,
+        writestep=10**7,
+        restartiter=10,
+        maxrestarts=3,
+        outdir=str(tmp_path / "out"),
+    )
+    updated: list = []
+    real_update = m._update_parameters
+
+    def record(*args, **kwargs):
+        updated.append(m.iter)
+        return real_update(*args, **kwargs)
+
+    m._update_parameters = record
+    m.fit(X)
+    return updated, m.numrestarts
+
+
+def test_numpy_restart_iteration_applies_no_update(X, tmp_path, tmp_path_factory):
+    """The reference checks for a restart before ``update_params`` and skips
+    the update on a restarting iteration (``startover``, amica15.f90:1115-1122).
+    Since issue #339 the NumPy loop does the same: iteration 2, whose
+    likelihood is NaN, redraws A and applies no update, while every other
+    iteration updates. The same fit of the code before issue #339, the control,
+    updated on iteration 2 too, from the parameters whose likelihood was NaN."""
+    updated, restarts = _updates_around_a_restart(AMICA_NumPy, X, tmp_path / "now")
+    assert restarts == 1
+    assert updated == [0, 1, 3, 4]
+
+    from pamica.tests.pre_change import load_pre_change_package
+
+    pre = load_pre_change_package(
+        _PRE_339, "pamica_pre339_gates", tmp_path_factory.mktemp("pre339")
+    )
+    old, old_restarts = _updates_around_a_restart(
+        pre.numpy_impl.core.AMICA, X, tmp_path / "pre"
+    )
+    assert old_restarts == 1
+    assert old == [0, 1, 2, 3, 4], "control: the old loop no longer updates first"
 
 
 # --- validation of the settings the gates read ------------------------------
@@ -660,14 +771,22 @@ def _construct(backend: str, **kwargs: Any):
         ("rejstart", 0, 1, {"do_reject": True}),
         ("rejstart", -2, 1, {"do_reject": True}),
         ("rejstart", 2.0, 1, {"do_reject": True}),
+        # Checked whether or not share_comps is on: the reference's A-freeze
+        # reads it on every fit, and 0 would hold A from the first iteration
+        # (issue #339 review).
+        ("share_start", 0, 1, {}),
+        ("share_start", -5, 1, {"share_comps": True}),
+        ("share_start", 2.5, 1, {}),
+        ("share_start", True, 1, {}),
     ],
 )
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_schedule_settings_are_rejected_with_one_message(
     backend, setting, value, minimum, extra
 ):
-    """Every backend refuses the same ``newt_start``/``rejstart`` values with
-    the same message (``pamica.schedule.validate_iteration_setting``)."""
+    """Every backend refuses the same ``newt_start``/``rejstart``/
+    ``share_start`` values with the same message
+    (``pamica.schedule.validate_iteration_setting``)."""
     with pytest.raises(ValueError) as exc:
         _construct(backend, **{setting: value}, **extra)
     assert str(exc.value) == f"{setting} must be an integer >= {minimum}, got {value!r}"
@@ -676,13 +795,15 @@ def test_schedule_settings_are_rejected_with_one_message(
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_boundary_schedule_settings_are_accepted(backend):
     """The smallest meaningful values construct, numpy integers included, and
-    ``rejstart`` is inert (unchecked) while ``do_reject`` is off, the pattern
-    ``share_start`` follows."""
+    ``rejstart`` is inert (unchecked) while ``do_reject`` is off.
+    ``share_start`` is not inert without sharing: the A-freeze reads it."""
     for kwargs in (
         {"newt_start": 0},
         {"newt_start": np.int64(3)},
         {"do_reject": True, "rejstart": 1},
         {"rejstart": 0},
+        {"share_start": 1},
+        {"share_start": np.int64(1), "share_comps": True},
     ):
         _construct(backend, **kwargs)
 

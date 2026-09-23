@@ -248,8 +248,8 @@ _OVERSHOOT_KWARGS: dict[str, Any] = dict(
     lrate=0.5,
     newtrate=3.0,
     use_min_dll=True,
-    min_dll=1e-4,
-    maxincs=2,
+    min_dll=1e-8,
+    maxincs=0,
     use_grad_norm=False,
 )
 _REJECT_KWARGS: dict[str, Any] = dict(
@@ -263,12 +263,18 @@ def test_keep_best_restore_never_fires_under_do_reject(real_data):
     on: fit() returns the last iterate there.
 
     Non-vacuous on both counts, measured on an Apple M4 Pro. Without
-    do_reject the same fit restores (peak at iteration 63, stop at 64, 4.2e-4
+    do_reject the same fit restores (peak at iteration 13, stop at 14, 1.6e-3
     below the peak). With do_reject its own trajectory also ends below an
-    earlier peak (iteration 36, stop at 37, 2.0e-3 below), so a restore would
-    fire if the safeguard were active, and it does not. The previous version
-    (``newtrate`` 0.5, 30 iterations) ran monotone once issue #333 changed
-    ``doscaling`` to rescale components, so it could not have failed.
+    earlier peak (after the rejection pass at iteration 6: peak at 13, stop at
+    14, 9.4e-3 below), so a restore would fire if the safeguard were active,
+    and it does not. Both stop on their first likelihood decrease
+    (``maxincs=0``, ``min_dll=1e-8``), so the overshoot does not depend on
+    round-off: across 12 relative data perturbations of 1e-6 it held in all,
+    9.4e-3 to 1.1e-2 below the peak with do_reject. The ``min_dll=1e-4``/
+    ``maxincs=2`` stop used until issue #339 ended at the peak in 2 of those
+    12, and on the macOS CI runner. The version before that (``newtrate`` 0.5,
+    30 iterations) ran monotone once issue #333 changed ``doscaling`` to
+    rescale components, so it could not have failed.
     """
     plain = _model(keep_best=True, **_OVERSHOOT_KWARGS)
     plain.fit(real_data, max_iter=_OVERSHOOT_MAX_ITER, verbose=False)

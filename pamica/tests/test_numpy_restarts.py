@@ -196,6 +196,7 @@ def test_a_restart_does_not_inherit_the_previous_restart_schedule(real_data, out
     assert model.lrate0 == reference.lrate0
     assert model.newtrate == reference.newtrate
     assert model.rholrate == reference.rholrate
+    assert model.rholrate_cap == reference.rholrate_cap
 
 
 # ---------------------------------------------------------------------------

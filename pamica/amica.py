@@ -265,19 +265,25 @@ class AMICA:
         ``save`` refuse such a model (issue #50).
     converged_ : bool
         Whether the last ``fit`` ended on a usable stop rather than a degenerate
-        one (``stop_reason_`` not in ``nan_ll``/``singular_ll``). A degenerate fit
-        holds non-finite parameters and would produce NaN sources (issue #50).
+        one (``stop_reason_`` not in the backend's ``_DEGENERATE_STOP_REASONS``:
+        ``nan_ll``/``singular_ll``/``nan_direction``/``nan_params``). A
+        degenerate fit holds non-finite parameters, or stopped before applying
+        a non-finite step, and would produce NaN sources (issue #50).
     stop_reason_ : str or None
         Why the last ``fit`` stopped (the backend ``stop_reason``):
         ``"max_iter"``, ``"lrate_floor"``, ``"grad_norm_floor"``, ``"min_dll"``,
-        ``"grad_norm"``, ``"nan_ll"``, or ``"singular_ll"``. The last five are
+        ``"grad_norm"``, ``"nan_ll"``, ``"singular_ll"``, ``"nan_direction"``
+        or ``"nan_params"``. ``"lrate_floor"`` to ``"grad_norm"`` are
         Fortran-faithful convergence stops (issue #207: ``lrate_floor``/
         ``grad_norm_floor`` fire together as two halves of the same
         likelihood-decrease branch; ``min_dll``/``grad_norm`` are separate,
-        unconditional per-iteration checks); only ``nan_ll``/``singular_ll``
-        are degenerate (see ``converged_``), plus each backend's own further
-        markers (MLX's ``"nan_params"``, and under best-of-N restarts the
-        marker of a restart that raised). None of these checks short-
+        unconditional per-iteration checks). The last four are degenerate (see
+        ``converged_``): a non-finite log-likelihood (``nan_ll``/
+        ``singular_ll``), a non-finite update direction caught before it is
+        applied (``nan_direction``), or non-finite parameters right after an
+        update (``nan_params``); PyTorch and MLX use the same set (issue #339
+        review), and under best-of-N restarts a restart that raised has its
+        own degenerate marker. None of these checks short-
         circuits on an earlier one in the same iteration, so under the
         shipped ``use_grad_norm=True`` default ``"grad_norm"`` always takes
         precedence over ``"grad_norm_floor"`` when both would apply --
@@ -286,11 +292,17 @@ class AMICA:
         docstring for the full explanation).
     ll_history_ : list
         Log-likelihood history during training (the true per-iteration
-        trajectory; may dip below its peak on a late overshoot)
+        trajectory; may dip below its peak on a late overshoot): entry ``i`` is
+        the likelihood of the parameters iteration ``i`` started from, recorded
+        before that iteration's checks and update.
     final_ll_ : float
         Log-likelihood of the *fitted* parameters (issue #51). Use this, not
         ``ll_history_[-1]``, as the model's log-likelihood: with the best-iterate
         safeguard the returned parameters can be an earlier, higher-LL iterate.
+        Exact after a convergence stop, which exits before that iteration's
+        update, as the reference does (issue #339); after ``max_iter`` it is
+        the likelihood one update before the returned parameters, also as in
+        the reference.
     mir_history_ : list
         Mutual Information Reduction (MIR) waypoint trajectory (issue #137),
         populated when ``fit`` is called
@@ -301,6 +313,9 @@ class AMICA:
         Not index-aligned with ``ll_history_``: entry ``i`` is computed after
         iteration ``i``'s update, while ``ll_history_[i]`` is the likelihood of
         the parameters before it, so the two are one update apart (issue #161).
+        An iteration that ends the fit on a stop (a convergence check or a
+        degenerate value) takes no update and so records no waypoint: the last
+        waypoint then belongs to the iteration before it (issue #339).
     restart_seeds_ : list
         The seed each restart ran from (issue #198). One entry for a default
         ``n_restarts=1`` fit, ``n_restarts`` entries otherwise.
@@ -1091,10 +1106,12 @@ class AMICA:
         #155) for a model that was just fit in this process, taken from the
         E-step stash (issue #157); a model restored via :meth:`load` carries no
         stash, so ``LLt`` is omitted for it (a warning is logged). As in the
-        reference, ``LLt`` is the E-step that produced ``final_ll_`` and is
-        therefore one M-step older than the ``W``/``A`` written beside it --
-        see ``docs/guides/amica-differences.md``. Use :meth:`model_loglik` for
-        the log-likelihood of the written parameters.
+        reference, ``LLt`` is the E-step that produced ``final_ll_``: after a
+        fit that ran to ``max_iter`` it is therefore one M-step older than the
+        ``W``/``A`` written beside it, and after a convergence stop, which
+        exits before that iteration's update, it belongs to them -- see
+        ``docs/guides/amica-differences.md``. Use :meth:`model_loglik` for the
+        log-likelihood of the written parameters.
 
         Parameters
         ----------

@@ -51,8 +51,10 @@ what remains as of the v0.1.0 preparation.
 - `share_comps` runs on all three backends. Since #334 (ADR 0007) `A` stores one component per row,
   so the metric compares de-sphered component mixing vectors (rows of `A` through `pinv(sphere)`,
   the scalp maps) across models, and a merge above `comp_thresh` ties the two components: `comp_list`
-  is re-pointed and they share one mixing vector and density, with an A-freeze for 6 iterations
-  after each merge (Fortran `identify_shared_comps`, amica15.f90:1916).
+  is re-pointed and they share one mixing vector and density (Fortran `identify_shared_comps`,
+  amica15.f90:1916). The A-freeze is the reference's unconditional schedule (ADR 0008, #345): from
+  `share_start` on, `A` is held on every iteration with `mod(iter, share_iter) <= 5`, on every fit,
+  sharing on or off.
 - The `gm`-weighted `dAk/zeta` step averages a shared component over its models; byte-identical to
   the per-model update when no merge fires.
 - `keep_best` (#51) is disabled under sharing (a merge changes the parameter count, so pre-/post-merge

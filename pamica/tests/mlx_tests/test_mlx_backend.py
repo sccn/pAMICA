@@ -391,9 +391,11 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
     """Issue #195 (mirrors #193/#194 for torch/numpy): the MLX rho learning rate is
     a maxdecs-ratcheted CEILING, not a per-LL-decrease monotone decay.
 
-    Fortran resets ``rholrate = rholrate0`` each iteration before the rho update
-    (amica15.f90:1806/1813) and only tightens the ceiling at ``maxdecs``
-    (amica15.f90:1068, gated on ``iter > newt_start``). MLX previously decayed
+    Fortran scales the working ``rholrate`` on each decrease (amica15.f90:1063),
+    resets it to the ceiling ``rholrate0`` in every A update before the rho
+    update (amica15.f90:1806/1813), and only tightens the ceiling at ``maxdecs``
+    (amica15.f90:1068, gated on ``iter > newt_start``). pamica names that
+    ceiling ``rholrate_cap`` (issue #339). MLX previously decayed the one
     ``rholrate`` on EVERY LL decrease with no reset, collapsing it toward ~1e-5
     within a few hundred iterations and freezing rho at a stale shape.
 
@@ -418,13 +420,13 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
 
     # The ceiling ratcheted a whole number of times at the maxdecs cadence
     # (rholrate0 * rholratefact**k), far fewer steps than one-per-decrease.
-    assert m.rholrate < m.rholrate0
-    k = round(np.log(m.rholrate / m.rholrate0) / np.log(m.rholratefact))
-    assert m.rholrate == pytest.approx(m.rholrate0 * m.rholratefact**k)
+    assert m.rholrate_cap < m.rholrate0
+    k = round(np.log(m.rholrate_cap / m.rholrate0) / np.log(m.rholratefact))
+    assert m.rholrate_cap == pytest.approx(m.rholrate0 * m.rholratefact**k)
     assert k <= n_dec // m.maxdecs + 1
     # Guard against a regression to the old per-decrease decay (orders below).
     buggy = m.rholrate0 * (m.rholratefact**n_dec)
-    assert m.rholrate > buggy * 10
+    assert m.rholrate_cap > buggy * 10
 
 
 def test_rholrate_ceiling_ratchet_gated_on_newt_start():
@@ -446,20 +448,23 @@ def test_rholrate_ceiling_ratchet_gated_on_newt_start():
     n_dec = sum(1 for i in range(1, len(ll)) if ll[i] < ll[i - 1])
     assert n_dec >= m.maxdecs, "config did not exercise the decrease path"
     # Gated off for the whole run: the rho ceiling never moved.
-    assert m.rholrate == m.rholrate0
+    assert m.rholrate_cap == m.rholrate0
 
 
 def test_rholrate_ceiling_resets_at_fit_start():
     """Issue #195: the rho-rate ceiling is reset to rholrate0 at fit start
     (``_initialize_parameters``, the same call ``fit`` makes), so a previously
-    ratcheted ``rholrate`` does not carry across a re-fit/restart -- parity with
-    the numpy backend's ``test_reinitialize_for_restart_resets_rho_ceiling``."""
+    ratcheted ceiling (``rholrate_cap``), or a scaled working ``rholrate``,
+    does not carry across a re-fit/restart -- parity with the numpy backend's
+    ``test_reinitialize_for_restart_resets_rho_ceiling``."""
     from pamica.mlx_impl import AMICAMLXNG
 
     m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED)
     # Simulate a prior fit that ratcheted both ceilings down at maxdecs.
-    m.rholrate = m.rholrate0 * 0.25
+    m.rholrate_cap = m.rholrate0 * 0.25
+    m.rholrate = m.rholrate0 * 0.025
     m.lrate_cap = m.lrate0 * 0.25
     m._initialize_parameters()  # fit-start reset
+    assert m.rholrate_cap == m.rholrate0
     assert m.rholrate == m.rholrate0
     assert m.lrate_cap == m.lrate0

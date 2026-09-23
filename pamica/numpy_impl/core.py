@@ -88,7 +88,7 @@ import inspect
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 from scipy import linalg
@@ -113,6 +113,20 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _UpdateStep(NamedTuple):
+    """The mixing-matrix step one E-step implies, computed before the
+    iteration's stopping checks and applied after them (the reference's
+    ``dAk`` and ``ndtmpsum``, built in ``accum_updates_and_likelihood``,
+    amica15.f90:1749-1761, before ``update_params``, :1782). See
+    :meth:`AMICA._update_direction`."""
+
+    dAk: np.ndarray  # (num_comps, data_dim), before the lrate scaling
+    newton_active: bool  # the Newton schedule is on this iteration
+    no_newt: bool  # some model failed the positive-definiteness guard
+    nd: float  # the weight-gradient norm ndtmpsum
+
 
 # Data-location keys: not AMICA hyperparameters, so they are excluded from
 # load_default_params()'s return value. AMICA.__init__ reads files/data_dim/
@@ -661,7 +675,13 @@ class AMICA:
         self.rho0 = params.get("rho0", 1.5)
         self.minrho = params.get("minrho", 1.0)
         self.maxrho = params.get("maxrho", 2.0)
+        # Working rho rate, its ceiling and the constructor value, as the other
+        # backends keep them (the reference's rholrate/rholrate0,
+        # amica15.f90:1063-1068, 1806/1813): a decrease scales the working
+        # rate, a maxdecs ratchet the ceiling, and every A update resets the
+        # working rate to the ceiling.
         self.rholrate = params.get("rholrate", 0.05)
+        self.rholrate_cap = self.rholrate
         self.rholrate0 = self.rholrate
         self.rholratefact = params.get("rholratefact", 0.1)
         self.invsigmax = params.get("invsigmax", 1000.0)
@@ -695,17 +715,17 @@ class AMICA:
         self.comp_thresh = params.get("comp_thresh", 0.99)
         self.share_start = params.get("share_start", 100)
         self.share_int = params.get("share_int", 100)
+        # The reference's A-freeze reads share_start/share_int whether or not
+        # share_comps is on (issue #345), so both are validated always, with
+        # AMICATorchNG's messages (pamica.schedule): share_start >= 1, and a
+        # share_int below 7, which would hold A for every iteration of every
+        # cycle, is rejected under both of this backend's spellings.
+        schedule.validate_share_start(self.share_start)
+        schedule.validate_share_iter(self.share_int, "share_int/share_iter")
         if self.share_comps:
-            # Same validation (and the same reasons) as AMICATorchNG: the merge
-            # schedule is 1-indexed, and the post-merge A-freeze settle window is
-            # 6 iterations, so a share_int of 6 or less would hold A frozen for
-            # every iteration of every cycle -- a fit that silently never moves
-            # its mixing matrix again. comp_thresh is a cosine cutoff, so it is
-            # only meaningful in (0, 1]; at 0 every pair of columns merges.
-            if self.share_start < 1:
-                raise ValueError(f"share_start must be >= 1, got {self.share_start}")
-            if self.share_int <= 6:
-                raise ValueError(f"share_int must be > 6, got {self.share_int}")
+            # Same validation (and the same reason) as AMICATorchNG: comp_thresh
+            # is a cosine cutoff, so it is only meaningful in (0, 1]; at 0 every
+            # pair of columns merges.
             if not 0.0 < self.comp_thresh <= 1.0:
                 raise ValueError(
                     f"comp_thresh must be in (0, 1], got {self.comp_thresh}"
@@ -875,6 +895,7 @@ class AMICA:
             "lrate0": self.lrate0,
             "newtrate": self.newtrate,
             "rholrate": self.rholrate,
+            "rholrate_cap": self.rholrate_cap,
             "block_size": self.block_size,
         }
 
@@ -932,7 +953,11 @@ class AMICA:
         self.iter = 0
         self.ll = []  # Log likelihood history
         # ``self.ll[-1]`` is this backend's equivalent of AMICATorchNG's
-        # ``final_ll_``: the LL of the returned model. Under ``share_comps``,
+        # ``final_ll_``: the LL of the returned model. Exactly so when the fit
+        # ended on a convergence stop, which exits before that iteration's
+        # update as the reference does (issue #339); after max_iter the last
+        # iteration's update follows its LL, so it is the LL one update before
+        # the returned parameters, also as in the reference. Under ``share_comps``,
         # if a merge fires on the LAST fit iteration, ``self.A``/``comp_list``
         # are already post-merge but ``self.ll[-1]`` still reports the
         # pre-merge log-likelihood -- the merge runs after that iteration's LL
@@ -1156,6 +1181,20 @@ class AMICA:
 
         Notes
         -----
+        Iteration order (issue #339), as in ``AMICATorchNG.fit`` and
+        ``AMICAMLXNG.fit``: each iteration runs the E-step, then the
+        restart-on-NaN window, the likelihood-decrease response and the
+        stopping checks, and only then, unless a check fired, the update with
+        the rates just set, followed by the share merge, the checkpoints and
+        rejection. ``self.ll`` and ``self.nd`` record every iteration whose
+        likelihood was finite, and nothing else. A convergence stop takes no
+        update on its stopping iteration, so the returned parameters are the
+        ones whose likelihood is ``self.ll[-1]``; a fit that runs to
+        ``max_iter`` updates on its last iteration, as the reference does. A
+        non-finite likelihood outside the restart window, a non-finite update
+        direction, and non-finite parameters after an update each stop the fit
+        with ``converged=False`` (see ``_DEGENERATE_STOP_REASONS``).
+
         Under ``share_comps``, if a merge fires on the LAST iteration, the
         returned ``A``/``comp_list`` are already post-merge but ``self.ll[-1]``
         still reports the pre-merge log-likelihood -- the merge's effect on
@@ -1427,15 +1466,25 @@ class AMICA:
         # Main optimization loop
         self._optimize()
 
-        # Record the outcome: a terminal non-finite LL means the fit diverged
-        # (even restart-on-NaN could not recover), which callers/CLI must be
-        # able to detect rather than silently trusting model.A/W.
-        self.converged = len(self.ll) > 0 and bool(np.isfinite(self.ll[-1]))
-        if not self.converged:
+        # Record the outcome: a degenerate stop (a non-finite likelihood that
+        # restart-on-NaN could not recover, a non-finite update direction, or
+        # non-finite parameters after an update) means the fit diverged, which
+        # callers/CLI must be able to detect rather than silently trusting
+        # model.A/W. self.ll holds only finite values, so the stop reason, not
+        # its last entry, is what says so.
+        degenerate_stop = self._is_degenerate_stop(self.stop_reason)
+        self.converged = len(self.ll) > 0 and not degenerate_stop
+        if degenerate_stop:
             self.logger.error(
-                "AMICA did not converge: the log-likelihood is non-finite "
-                "(diverged after %d restart(s)); results were not written.",
+                "AMICA did not converge: %s (after %d restart(s)); results were "
+                "not written.",
+                self.stop_reason,
                 self.numrestarts,
+            )
+        elif not self.converged:
+            self.logger.error(
+                "AMICA did not converge: no iteration completed; results were "
+                "not written."
             )
         else:
             # A finite likelihood is not on its own proof of a usable fit: a
@@ -1473,7 +1522,7 @@ class AMICA:
         # ... the ratcheted learning-rate ceilings (this backend anneals lrate0
         # and newtrate in place), the tuned block size, and the seed/RNG the
         # winning restart ran from.
-        "lrate", "lrate0", "newtrate", "rholrate",
+        "lrate", "lrate0", "newtrate", "rholrate", "rholrate_cap",
         "block_size", "seed", "rng",
     )  # fmt: skip
     # Written by the fit path but identical across the restarts of one fit()
@@ -1483,6 +1532,26 @@ class AMICA:
         "data", "data_dim", "num_samples", "num_comps",
         "mean", "sphere", "sldet", "_sphere_pinv",
     )  # fmt: skip
+
+    # The stop reasons that mark a fit degenerate, in this backend's prose
+    # vocabulary: a non-finite likelihood (the PyTorch/MLX "nan_ll" and
+    # "singular_ll"), a non-finite update direction ("nan_direction"),
+    # non-finite parameters after an update ("nan_params", followed by ": " and
+    # the offenders' names, as the exit check's reason is), and a restart that
+    # raised. fit() reports converged=False for each (_is_degenerate_stop).
+    _NONFINITE_LL_REASON = "Non-finite likelihood (NaN/-inf) encountered"
+    _NONFINITE_DIRECTION_REASON = "Non-finite update direction (NaN/inf) encountered"
+    _NONFINITE_PARAMS_REASON = "Non-finite parameters after an update"
+    _DEGENERATE_STOP_REASONS = (
+        _NONFINITE_LL_REASON,
+        _NONFINITE_DIRECTION_REASON,
+        _NONFINITE_PARAMS_REASON,
+        restarts.ERROR_STOP_REASON,
+    )
+
+    # What the post-update guard checks, in the order AMICAMLXNG's guard names
+    # them (it adds its cached log-determinant of W).
+    _POST_UPDATE_CHECKED = ("A", "mu", "alpha", "beta", "rho", "gm", "c", "W")
 
     # Every parameter a caller can read back off disk or off the object. `A` and
     # `W` are the decomposition; `c`/`mu`/`alpha`/`beta`/`rho`/`gm` are the model
@@ -1501,7 +1570,16 @@ class AMICA:
         "mean",
     )
 
-    def _nonfinite_params(self) -> List[str]:
+    @classmethod
+    def _is_degenerate_stop(cls, reason: Optional[str]) -> bool:
+        """Whether ``reason`` is one of :attr:`_DEGENERATE_STOP_REASONS`,
+        with or without the ``": names"`` suffix the parameter reason carries."""
+        return reason is not None and any(
+            reason == known or reason.startswith(f"{known}: ")
+            for known in cls._DEGENERATE_STOP_REASONS
+        )
+
+    def _nonfinite_params(self, names: Optional[Tuple[str, ...]] = None) -> List[str]:
         """Names of fitted parameters currently holding a non-finite value.
 
         The single definition of "this state is safe to persist or report as a
@@ -1511,11 +1589,13 @@ class AMICA:
         non-finite rather than only *that* something did.
 
         Parameters not yet allocated (before ``_initialize_parameters``) are
-        skipped rather than treated as bad.
+        skipped rather than treated as bad. ``names`` narrows the sweep (the
+        post-update guard in :meth:`_optimize` passes
+        :attr:`_POST_UPDATE_CHECKED`); the default is :attr:`_FITTED_PARAMS`.
         """
         return [
             name
-            for name in self._FITTED_PARAMS
+            for name in (self._FITTED_PARAMS if names is None else names)
             if getattr(self, name, None) is not None
             and not np.all(np.isfinite(np.asarray(getattr(self, name))))
         ]
@@ -1750,8 +1830,10 @@ class AMICA:
             self.good_idx = saved_good_idx
             self.num_good_samples = saved_num_good
         self.lrate = self.lrate0
-        # rholrate is the (maxdecs-ratcheted) rho-rate ceiling; restore it to the
-        # pristine rholrate0 so a re-fit starts fresh (issue #193).
+        # rholrate_cap is the (maxdecs-ratcheted) rho-rate ceiling; restore it,
+        # and the working rate with it, to the pristine rholrate0 so a re-fit
+        # starts fresh (issue #193).
+        self.rholrate_cap = self.rholrate0
         self.rholrate = self.rholrate0
         self.ll = []
         self.nd = []
@@ -2215,9 +2297,12 @@ class AMICA:
         (amica15.f90:996, 1122, 1124-1127), so the ``LLt`` written at any
         checkpoint is the E-step of the parameters as they stood BEFORE that
         iteration's M-step: one M-step older than the ``W``/``A`` written beside
-        it. pamica's loop has the same three steps in the same order, so
-        stashing reproduces that exactly, and the on-disk ``LLt`` is comparable
-        with the binary's. The invariant this pins down, on both sides, is
+        it. The same holds for the final write after a fit that ran to
+        ``max_iter``; after a convergence stop the loop exits before the
+        update (amica15.f90:1111, issue #339), so the final ``LLt`` is the
+        E-step of the written parameters themselves. pamica's loop has the
+        same steps in the same order, so stashing reproduces that exactly, and
+        the on-disk ``LLt`` is comparable with the binary's. The invariant this pins down, on both sides, is
         ``Lt.sum() / (num_good_samples * data_dim) == self.ll[-1]``.
 
         That equality holds bit for bit except on a write whose iteration also
@@ -2251,152 +2336,32 @@ class AMICA:
             return None, None
         return self._llt_logv.T, self._llt_ll
 
-    def _update_parameters(self, updates: Dict):
-        """
-        Update model parameters using computed updates.
+    def _update_direction(self, updates: Dict) -> _UpdateStep:
+        """The natural-gradient or Newton step for ``A`` from this iteration's
+        sufficient statistics, and its norm, without changing ``A`` or any
+        density parameter.
 
-        Parameters
-        ----------
-        updates : dict
-            Dictionary containing parameter updates
+        The reference computes both in ``accum_updates_and_likelihood``
+        (amica15.f90:1666-1761), with ``LL(iter)``, before the likelihood-
+        decrease response and the stopping checks read ``ndtmpsum`` and before
+        ``update_params`` applies the step. It finalizes the Newton curvature
+        (``sigma2``/``lambda_``/``kappa``) as it goes but records nothing:
+        :meth:`_optimize` appends the iteration's likelihood and the returned
+        norm to ``self.ll``/``self.nd`` once the likelihood is known to be
+        finite, as the PyTorch and MLX loops append ``ll_history``, and hands
+        the step to :meth:`_update_parameters` once the checks have run.
         """
         assert (
             self.data_dim is not None
-            and self.num_samples is not None
-            and self.c is not None
-            and self.mu is not None
-            and self.alpha is not None
-            and self.beta is not None
-            and self.rho is not None
+            and self.gm is not None
             and self.comp_list is not None
             and self.A is not None
         )
-        # Fortran builds dAk from the model weights of the *previous* iteration:
-        # gm is not reassigned until update_params (amica15.f90:1788+), which runs
-        # after accum_updates_and_likelihood (:1731-1743). Snapshot it here so the
-        # nd block below weights by the same gm Fortran would (issue #219).
-        assert self.gm is not None
-        gm_prev = self.gm.copy()
-
-        # Update model weights, normalizing by the number of samples the E-step
-        # actually summed over: the good set under do_reject, else all samples.
-        if self.do_reject:
-            assert self.num_good_samples is not None
-            self.gm = updates["dgm"] / self.num_good_samples
-        else:
-            self.gm = updates["dgm"] / self.num_samples
-
-        # Per-model data-space bias c (Fortran's `update_c` flag, amica17.f90:1423-
-        # 1429 numerator / :1899-1901 division): c[i,h] = sum_t v_h*x / sum_t v_h,
-        # the responsibility-weighted data mean for model h (the E-step centers
-        # each model at its own mean, b = W(x - c)). Skipped for a single model to
-        # keep the issue #24 parity bit-exact: with v==1 the update would add a
-        # ~1e-13 float-sum residual of the (mean-removed) data. dgm[h] = sum_t v_h
-        # is the denominator (Fortran `dc_denom`). A dead model (dgm[h]==0) gives
-        # 0/0; keep its prior c so a NaN cannot poison the next iteration's
-        # cross-model softmax for every model (mirrors the mu/beta/rho guards).
-        if self.num_models > 1:
-            dgm = updates["dgm"]
-            live = dgm > 0.0
-            new_c = (
-                updates["dc_numer"]
-                / np.maximum(dgm, np.finfo(np.float64).tiny)[None, :]
-            )
-            self.c = np.where(live[None, :], new_c, self.c)
-            if not np.all(live):
-                self.logger.warning(
-                    "Zero-responsibility model(s) at iter %d; kept prior bias c "
-                    "(dead-model guard).",
-                    self.iter,
-                )
-
-        # A component merged away by share_comps is no longer referenced by
-        # comp_list, so no sufficient statistic accumulates into its column and
-        # its mixture divisions would be 0/0 = NaN. Update only the used columns
-        # and leave the rest frozen at their last finite value, as AMICATorchNG
-        # does (Fortran instead carries the NaN harmlessly behind its comp_used
-        # mask; keeping them finite means a fit cannot report success while
-        # holding NaN parameters, issue #240).
-        #
-        # The dead columns are INDEXED OUT rather than computed and masked: a
-        # 0/0 that is never evaluated raises no RuntimeWarning, so nothing has to
-        # be suppressed with np.errstate and a genuine 0/0 in a LIVE column (a
-        # component whose responsibility mass collapses to exactly zero) still
-        # warns, as it does with sharing off. ``cols`` is a full slice whenever
-        # every column is live -- always so with the default comp_list -- which
-        # keeps the ordinary path bit-identical and copy-free. (comp_used is None
-        # until fit() sets it up, and the M-step is exercised directly in tests
-        # before that happens, so fall back to "all used".)
         used = (
             self.comp_used
             if self.comp_used is not None
             else np.ones(self.num_comps, dtype=bool)
         )
-        cols = slice(None) if used.all() else np.flatnonzero(used)
-
-        # Update mixture weights
-        dalpha_n = updates["dalpha_n"][:, cols]
-        self.alpha[:, cols] = dalpha_n / np.sum(dalpha_n, axis=0)
-        # Fortran has no alpha canary, but a collapsed live component gives the
-        # same 0/0 the mu/beta canary below reports; surface it here too so the
-        # origin is not lost to a later unattributable nan-LL stop.
-        if not np.all(np.isfinite(self.alpha)):
-            self.logger.warning(
-                "Non-finite alpha at iter %d (component responsibility mass "
-                "collapsed).",
-                self.iter,
-            )
-
-        # Exact-EM mixture location/scale (Fortran :1978/:1993). These are
-        # fixed-point updates -- mu += dmu_n/dmu_d, beta *= sqrt(dbeta_n/dbeta_d)
-        # -- NOT first-order gradient steps, so they carry no lrate.
-        dmu = updates["dmu_n"][:, cols] / updates["dmu_d"][:, cols]
-        self.mu[:, cols] = self.mu[:, cols] + dmu
-        self.beta[:, cols] = self.beta[:, cols] * np.sqrt(
-            updates["dbeta_n"][:, cols] / updates["dbeta_d"][:, cols]
-        )
-        self.beta = np.clip(self.beta, self.invsigmin, self.invsigmax)
-        # Fortran keeps a live "NaN in sbeta!" canary here (amica17.f90:1996-2000);
-        # the exact-EM mu/beta divisions are unguarded (matching Fortran), so
-        # surface a non-finite value immediately instead of letting it propagate
-        # to a later, unattributable nan-LL stop.
-        if not np.all(np.isfinite(self.mu)) or not np.all(np.isfinite(self.beta)):
-            self.logger.warning(
-                "Non-finite mu/beta at iter %d (mixture component mass likely "
-                "collapsed).",
-                self.iter,
-            )
-
-        # GG shape update with the 1/psi(1+1/rho) digamma factor (Fortran
-        # :2013-2014); the divisor is the per-component responsibility mass
-        # dalpha_n (floored so a near-empty component cannot poison rho). A NaN
-        # is reset to rho0 -- but logged first, so the reset does not silently
-        # erase the failure origin.
-        # Restricted to the live columns for the same reason as mu/beta/alpha
-        # (and as AMICATorchNG, which masks rho with ``used`` too): a merged-away
-        # column has no responsibility mass, so its rho would ratchet up on the
-        # floored denominator every iteration instead of staying at the value it
-        # was merged away with.
-        if not np.all(self.rho == 1.0) and not np.all(self.rho == 2.0):
-            rho_cols = self.rho[:, cols]
-            drho = updates["drho_n"][:, cols] / np.maximum(
-                updates["dalpha_n"][:, cols], 1e-8
-            )
-            psi = digamma(1.0 + 1.0 / rho_cols)
-            new_rho = rho_cols + self.rholrate * (1.0 - (rho_cols / psi) * drho)
-            nan_mask = np.isnan(new_rho)
-            if nan_mask.any():
-                self.logger.warning(
-                    "NaN in rho update at iter %d for %d component(s); resetting "
-                    "to rho0=%g.",
-                    self.iter,
-                    int(nan_mask.sum()),
-                    self.rho0,
-                )
-                new_rho = np.where(nan_mask, self.rho0, new_rho)
-            self.rho[:, cols] = np.clip(new_rho, self.minrho, self.maxrho)
-
-        # Update unmixing matrices
         newton_active = schedule.newton_active(
             self.do_newton, self.iter, self.newt_start
         )
@@ -2470,8 +2435,9 @@ class AMICA:
         # through A (Fortran dAk/zeta, amica15.f90:1749-1761): each contributing
         # model adds gm[h]/zeta of its step to the shared component's row, where
         # zeta = sum of gm over the models that reference the component. Weighted
-        # by gm_prev, the PRE-update model weights, because Fortran builds dAk
-        # before update_params reassigns gm (issue #219).
+        # by the PRE-update model weights (gm is not reassigned until
+        # _update_parameters), because Fortran builds dAk before update_params
+        # reassigns gm (issue #219).
         #
         # The weights are normalized per model (gm[h]/zeta) rather than summed and
         # then divided (Fortran's literal sum-then-divide, and AMICATorchNG's):
@@ -2489,7 +2455,7 @@ class AMICA:
         # there is no missing factor here.
         zeta = np.zeros(self.num_comps)
         for h in range(self.num_models):
-            zeta[self.comp_list[:, h]] += gm_prev[h]
+            zeta[self.comp_list[:, h]] += self.gm[h]
         dAk = np.zeros_like(self.A)
         for h in range(self.num_models):
             # comp_list[:, h] holds distinct indices within a model
@@ -2498,18 +2464,126 @@ class AMICA:
             # drop a contribution here. Row i of the model's step is source i's
             # component, comp_list[i, h] (issue #334).
             idx = self.comp_list[:, h]
-            weight = gm_prev[h] / np.maximum(zeta[idx], np.finfo(np.float64).tiny)
+            weight = self.gm[h] / np.maximum(zeta[idx], np.finfo(np.float64).tiny)
             dAk[idx, :] += weight[:, None] * np.dot(directions[h].T, self.A[idx, :])
         nd_value = float(
             np.sqrt(np.sum(dAk[used, :] ** 2) / (self.data_dim * int(used.sum())))
         )
 
+        return _UpdateStep(dAk, newton_active, no_newt, nd_value)
+
+    def _update_parameters(self, updates: Dict, step: Optional[_UpdateStep] = None):
+        """
+        Update model parameters using computed updates.
+
+        Parameters
+        ----------
+        updates : dict
+            Dictionary containing parameter updates
+        step : _UpdateStep, optional
+            The mixing-matrix step :meth:`_update_direction` computed from the
+            same ``updates``: :meth:`_optimize` passes the one its stopping
+            checks already read, so nothing is computed twice. A direct call
+            may omit it, and it is then computed here first; neither path
+            records anything in ``self.ll``/``self.nd``, which only
+            :meth:`_optimize` appends to.
+        """
+        assert (
+            self.data_dim is not None
+            and self.num_samples is not None
+            and self.c is not None
+            and self.mu is not None
+            and self.alpha is not None
+            and self.beta is not None
+            and self.rho is not None
+            and self.comp_list is not None
+            and self.A is not None
+        )
+        if step is None:
+            step = self._update_direction(updates)
+        # The step was built with the pre-update gm (_update_direction), so gm
+        # can be reassigned now (Fortran reassigns it in update_params,
+        # amica15.f90:1788, after accum_updates_and_likelihood; issue #219).
+
+        # Update model weights, normalizing by the number of samples the E-step
+        # actually summed over: the good set under do_reject, else all samples.
+        if self.do_reject:
+            assert self.num_good_samples is not None
+            self.gm = updates["dgm"] / self.num_good_samples
+        else:
+            self.gm = updates["dgm"] / self.num_samples
+
+        # Per-model data-space bias c (Fortran's `update_c` flag, amica17.f90:1423-
+        # 1429 numerator / :1899-1901 division): c[i,h] = sum_t v_h*x / sum_t v_h,
+        # the responsibility-weighted data mean for model h (the E-step centers
+        # each model at its own mean, b = W(x - c)). Skipped for a single model to
+        # keep the issue #24 parity bit-exact: with v==1 the update would add a
+        # ~1e-13 float-sum residual of the (mean-removed) data. dgm[h] = sum_t v_h
+        # is the denominator (Fortran `dc_denom`). A dead model (dgm[h]==0) gives
+        # 0/0; keep its prior c so a NaN cannot poison the next iteration's
+        # cross-model softmax for every model (mirrors the mu/beta/rho guards).
+        if self.num_models > 1:
+            dgm = updates["dgm"]
+            live = dgm > 0.0
+            new_c = (
+                updates["dc_numer"]
+                / np.maximum(dgm, np.finfo(np.float64).tiny)[None, :]
+            )
+            self.c = np.where(live[None, :], new_c, self.c)
+            if not np.all(live):
+                self.logger.warning(
+                    "Zero-responsibility model(s) at iter %d; kept prior bias c "
+                    "(dead-model guard).",
+                    self.iter,
+                )
+
+        # A component merged away by share_comps is no longer referenced by
+        # comp_list, so no sufficient statistic accumulates into its column and
+        # its mixture divisions would be 0/0 = NaN. Update only the used columns
+        # and leave the rest frozen at their last finite value, as AMICATorchNG
+        # does (Fortran instead carries the NaN harmlessly behind its comp_used
+        # mask; keeping them finite means a fit cannot report success while
+        # holding NaN parameters, issue #240).
+        #
+        # The dead columns are INDEXED OUT rather than computed and masked: a
+        # 0/0 that is never evaluated raises no RuntimeWarning, so nothing has to
+        # be suppressed with np.errstate and a genuine 0/0 in a LIVE column (a
+        # component whose responsibility mass collapses to exactly zero) still
+        # warns, as it does with sharing off. ``cols`` is a full slice whenever
+        # every column is live -- always so with the default comp_list -- which
+        # keeps the ordinary path bit-identical and copy-free. (comp_used is None
+        # until fit() sets it up, and the M-step is exercised directly in tests
+        # before that happens, so fall back to "all used".)
+        used = (
+            self.comp_used
+            if self.comp_used is not None
+            else np.ones(self.num_comps, dtype=bool)
+        )
+        cols = slice(None) if used.all() else np.flatnonzero(used)
+
+        # Update mixture weights
+        dalpha_n = updates["dalpha_n"][:, cols]
+        self.alpha[:, cols] = dalpha_n / np.sum(dalpha_n, axis=0)
+        # Fortran has no alpha canary, but a collapsed live component gives the
+        # same 0/0 the mu/beta canary below reports; surface it here too so the
+        # origin is not lost to a later unattributable nan-LL stop.
+        if not np.all(np.isfinite(self.alpha)):
+            self.logger.warning(
+                "Non-finite alpha at iter %d (component responsibility mass "
+                "collapsed).",
+                self.iter,
+            )
+
+        # The A branch, where the reference has it: after gm/alpha/c and before
+        # mu/sbeta/rho (amica15.f90:1803-1816).
+        #
         # A is stored as Fortran's A^T, one component per row (issue #334; true
         # unmixing = W^T = inv(block)^T), so the Fortran step on a model's block
         # A_fort(:, comp_list(:,h)) @ dir becomes dir^T @ A[comp_list[:, h], :]
-        # (LEFT-multiply by the TRANSPOSED direction). Right-multiply by the
-        # untransposed dir is invisible at the fixed point but sends the fit
-        # downhill -- issue #24 root cause.
+        # (LEFT-multiply by the TRANSPOSED direction), which _update_direction
+        # built into step.dAk. Right-multiply by the untransposed dir is
+        # invisible at the fixed point but sends the fit downhill -- issue #24
+        # root cause.
         #
         # ONE application of the averaged dAk (Fortran's single DAXPY,
         # amica15.f90:1807/1814), not the per-model loop this used to run: a
@@ -2517,14 +2591,15 @@ class AMICA:
         # the second against an already-stepped A, which is a different
         # operation from Fortran's single weighted average (issue #242). A
         # merged-away component has no contributor, so its dAk row stays
-        # exactly zero and it holds the value it was merged away with. When
-        # sharing holds A this iteration
-        # (the post-merge settle window) the step is skipped entirely, along with
-        # the lrate ramp and the Newton-fallback bookkeeping Fortran nests inside
-        # the same guarded block (amica15.f90:1803), so a discarded Newton
-        # direction cannot ratchet the learning rate.
+        # exactly zero and it holds the value it was merged away with. On an
+        # iteration the reference holds A (pamica.schedule.share_freeze),
+        # everything inside the branch is skipped together: the
+        # Newton-fallback message, the lrate ramp, the reset of the working rho
+        # rate to its ceiling and the step itself. The step was built from the
+        # parameters the E-step saw, so taking it before the mixture updates
+        # changes nothing they read.
         if not self._a_frozen():
-            if newton_active and no_newt:
+            if step.newton_active and step.no_newt:
                 # Fortran prints this whenever a model is not positive definite
                 # (amica17.f90:1911-1913); surface it rather than falling back
                 # silently.
@@ -2533,7 +2608,10 @@ class AMICA:
                     self.iter,
                 )
 
-            if newton_active and not no_newt:
+            # The ramp starts from this iteration's lrate, which a likelihood
+            # decrease has already halved (_optimize runs the response before
+            # the update, as the reference does, issue #339).
+            if step.newton_active and not step.no_newt:
                 self.lrate = min(
                     self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
                 )
@@ -2541,8 +2619,61 @@ class AMICA:
                 self.lrate = min(
                     self.lrate0, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
                 )
+            # rho moves at the ceiling (``rholrate = rholrate0``, :1806/:1813),
+            # so a decrease's scaling of the working rate reaches it only on a
+            # held iteration.
+            self.rholrate = self.rholrate_cap
 
-            self.A = self.A - self.lrate * dAk
+            self.A = self.A - self.lrate * step.dAk
+
+        # Exact-EM mixture location/scale (Fortran :1978/:1993). These are
+        # fixed-point updates -- mu += dmu_n/dmu_d, beta *= sqrt(dbeta_n/dbeta_d)
+        # -- NOT first-order gradient steps, so they carry no lrate.
+        dmu = updates["dmu_n"][:, cols] / updates["dmu_d"][:, cols]
+        self.mu[:, cols] = self.mu[:, cols] + dmu
+        self.beta[:, cols] = self.beta[:, cols] * np.sqrt(
+            updates["dbeta_n"][:, cols] / updates["dbeta_d"][:, cols]
+        )
+        self.beta = np.clip(self.beta, self.invsigmin, self.invsigmax)
+        # Fortran keeps a live "NaN in sbeta!" canary here (amica17.f90:1996-2000);
+        # the exact-EM mu/beta divisions are unguarded (matching Fortran), so
+        # surface a non-finite value immediately instead of letting it propagate
+        # to a later, unattributable nan-LL stop.
+        if not np.all(np.isfinite(self.mu)) or not np.all(np.isfinite(self.beta)):
+            self.logger.warning(
+                "Non-finite mu/beta at iter %d (mixture component mass likely "
+                "collapsed).",
+                self.iter,
+            )
+
+        # GG shape update with the 1/psi(1+1/rho) digamma factor (Fortran
+        # :2013-2014); the divisor is the per-component responsibility mass
+        # dalpha_n (floored so a near-empty component cannot poison rho). A NaN
+        # is reset to rho0 -- but logged first, so the reset does not silently
+        # erase the failure origin.
+        # Restricted to the live columns for the same reason as mu/beta/alpha
+        # (and as AMICATorchNG, which masks rho with ``used`` too): a merged-away
+        # column has no responsibility mass, so its rho would ratchet up on the
+        # floored denominator every iteration instead of staying at the value it
+        # was merged away with.
+        if not np.all(self.rho == 1.0) and not np.all(self.rho == 2.0):
+            rho_cols = self.rho[:, cols]
+            drho = updates["drho_n"][:, cols] / np.maximum(
+                updates["dalpha_n"][:, cols], 1e-8
+            )
+            psi = digamma(1.0 + 1.0 / rho_cols)
+            new_rho = rho_cols + self.rholrate * (1.0 - (rho_cols / psi) * drho)
+            nan_mask = np.isnan(new_rho)
+            if nan_mask.any():
+                self.logger.warning(
+                    "NaN in rho update at iter %d for %d component(s); resetting "
+                    "to rho0=%g.",
+                    self.iter,
+                    int(nan_mask.sum()),
+                    self.rho0,
+                )
+                new_rho = np.where(nan_mask, self.rho0, new_rho)
+            self.rho[:, cols] = np.clip(new_rho, self.minrho, self.maxrho)
 
         # (c was updated above, before the mixture/A updates, from dc_numer/dgm.)
 
@@ -2556,15 +2687,6 @@ class AMICA:
 
         # Update unmixing matrices
         self._update_unmixing_matrices()
-
-        # Store likelihood
-        self.ll.append(updates["ll"])
-
-        # The weight-gradient norm is computed above, before the A step, matching
-        # Fortran's ordering. _check_convergence uses it as the gradient floor in
-        # the decrease-stop condition regardless of use_grad_norm; the flag only
-        # gates the separate final gradient-norm stop.
-        self.nd.append(nd_value)
 
     def _component_sensor_maps(self) -> np.ndarray:
         """Every component's mixing vector in input-channel (sensor) space.
@@ -2638,25 +2760,18 @@ class AMICA:
         self.beta = self.beta / scale
 
     def _a_frozen(self) -> bool:
-        """Whether the A-update (and its lrate ramp) is held this iteration.
+        """Whether the reference holds the A update (with its lrate ramp and
+        rho-rate reset) this iteration: once ``iter >= share_start``, every
+        iteration with ``mod(iter, share_int) <= 5``, counted from 1
+        (amica15.f90:1803, :func:`pamica.schedule.share_freeze`), exactly as
+        ``AMICATorchNG._a_frozen`` decides it.
 
-        A is frozen for the first 6 iterations of every ``share_int``-length
-        window once the Fortran-style iteration reaches ``share_start`` -- the
-        merge iteration and the 5 after it -- so the density parameters can
-        settle onto a freshly merged component before the mixing matrix moves
-        again (Fortran A-freeze, amica15.f90:1803). Identical mechanism, anchor
-        and duration as ``AMICATorchNG._a_frozen``; the window fires each cycle
-        whether or not that cycle's merge pass actually merged a pair, matching
-        both the reference and the PyTorch backend.
-
-        Gated behind ``share_comps`` and ``num_models >= 2`` (a model cannot
-        share a component with itself), so with sharing off -- the default --
-        this is always False and the validated trajectory is untouched. The
-        constructor rejects ``share_int <= 6``, so the window can never consume a
-        whole cycle and freeze A permanently.
+        The reference applies this whether or not ``share_comps`` is on and for
+        any number of models (issue #345), so this does too: with the defaults
+        ``share_start = share_int = 100``, every fit of 100 or more iterations
+        holds A on iterations 100-105, 200-205, and so on. The constructor
+        rejects ``share_int < 7``, since a shorter cycle would hold A for good.
         """
-        if not self.share_comps or self.num_models < 2:
-            return False
         return schedule.share_freeze(self.iter, self.share_start, self.share_int)
 
     def _optimize(self):
@@ -2707,36 +2822,80 @@ class AMICA:
                 # an identical setting fires on the same iterations here, in
                 # AMICATorchNG, in AMICAMLXNG, and in the binary (issue #335).
 
-                # Get updates and likelihood
+                # One iteration follows the reference's main loop
+                # (amica15.f90:949-1142, issue #339): the E-step, which yields
+                # LL(iter) and the step with its norm; the restart-on-NaN window;
+                # the likelihood-decrease response and the stopping checks; an
+                # exit BEFORE any parameter moves if a check fired; otherwise the
+                # update with the rates the response just set, then the share
+                # merge, the checkpoints and rejection.
                 updates = self._get_updates_and_likelihood()
+                ll = float(updates["ll"])
 
-                # Update parameters
-                self._update_parameters(updates)
-
-                # Restart-on-NaN (Fortran amica15.f90:1022-1050): an early
-                # non-finite LL usually means an unlucky init, so redraw A and
-                # start over, up to maxrestarts times, within the first
-                # restartiter iterations (Fortran's absolute `iter <= restartiter`
-                # window over its 1-based counter; the iteration counter is not
-                # reset on restart here). A
-                # later NaN falls through to _check_convergence, which stops
-                # (Fortran exits too).
-                if (
-                    len(self.ll) > 0
-                    and not np.isfinite(self.ll[-1])
-                    and schedule.within_restart_window(iter, self.restartiter)
-                    and self.numrestarts < self.maxrestarts
-                ):
-                    self.numrestarts += 1
+                # A non-finite likelihood is never recorded in self.ll, as it is
+                # never recorded in the PyTorch and MLX ll_history: the history
+                # stays the finite trajectory of the parameters the fit
+                # actually visited, and every backend's has the same length for
+                # the same event. A singular W makes logdet -> -inf (not NaN), so
+                # the guard is isfinite, not isnan.
+                if not np.isfinite(ll):
+                    # Restart-on-NaN (Fortran amica15.f90:1022-1050): an early
+                    # non-finite LL usually means an unlucky init, so redraw A
+                    # and start over, up to maxrestarts times, within the first
+                    # restartiter iterations (Fortran's absolute
+                    # `iter <= restartiter` window over its 1-based counter; the
+                    # iteration counter is not reset on restart here). Checked
+                    # before the update, which the reference skips on a restart
+                    # too (``startover``, :1115).
+                    if (
+                        schedule.within_restart_window(iter, self.restartiter)
+                        and self.numrestarts < self.maxrestarts
+                    ):
+                        self.numrestarts += 1
+                        self.logger.warning(
+                            "Non-finite LL at iter %d; reinitializing and "
+                            "starting over (restart %d of %d).",
+                            iter + 1,
+                            self.numrestarts,
+                            self.maxrestarts,
+                        )
+                        self._reinitialize_for_restart()
+                        # The reference's checks still run on its restart
+                        # iteration, and its min_dll comparison with the NaN
+                        # likelihood is false (amica15.f90:1078-1090), so it
+                        # zeroes numincs; its decrease comparison is false too,
+                        # so numdecs is left as it was. Match that state, so
+                        # small gains before the restart cannot count toward a
+                        # min_dll stop after it (issue #339 review).
+                        numincs = 0
+                        continue
+                    # Past the window, or out of restarts: stop, as the
+                    # reference does (amica15.f90:1052-1055).
                     self.logger.warning(
-                        "Non-finite LL at iter %d; reinitializing and starting "
-                        "over (restart %d of %d).",
-                        iter + 1,
-                        self.numrestarts,
-                        self.maxrestarts,
+                        "Non-finite log-likelihood (%s) at iteration %d; stopping.",
+                        ll,
+                        iter,
                     )
-                    self._reinitialize_for_restart()
-                    continue
+                    convergence_reason = self._NONFINITE_LL_REASON
+                    break
+
+                step = self._update_direction(updates)
+                self.ll.append(ll)
+                self.nd.append(step.nd)
+
+                # A non-finite step or norm would pass both gradient-norm checks
+                # (NaN <= min_nd is False) and then be applied, so stop on it
+                # here, before any check reads it and before the update, with
+                # the parameters whose (finite) likelihood was just recorded.
+                if not (np.isfinite(step.nd) and np.all(np.isfinite(step.dAk))):
+                    self.logger.warning(
+                        "Non-finite update direction (ndtmpsum %s) at iteration "
+                        "%d; stopping before the update.",
+                        step.nd,
+                        iter,
+                    )
+                    convergence_reason = self._NONFINITE_DIRECTION_REASON
+                    break
 
                 # Calculate metrics for logging/progress
                 elapsed_time = time.time() - start_time
@@ -2770,32 +2929,66 @@ class AMICA:
                             self.logger.info(detailed_log)
 
                 # Check convergence (threads numdecs/numincs back so they
-                # accumulate across iterations, and ratchets the lrate ceiling).
+                # accumulate across iterations, and applies the likelihood-
+                # decrease response, including the ceiling ratchets).
                 converged, reason, numdecs, numincs = self._check_convergence(
                     numdecs, numincs
                 )
-                if converged:
-                    convergence_reason = reason
-                    break
 
                 # Reset the decrease counter when Newton turns on (Fortran
                 # amica15.f90:1099-1102).
                 if schedule.newton_switches_on(self.do_newton, iter, self.newt_start):
                     numdecs = 0
 
-                # Reject outliers if requested (Fortran amica15.f90:1136; the
-                # schedule, including its max(1, ...) clamp, is shared with
-                # AMICATorchNG and AMICAMLXNG in pamica.schedule).
-                if schedule.rejection_due(
-                    self.do_reject,
-                    iter,
-                    self.rejstart,
-                    self.rejint,
-                    self.numrej,
-                    self.maxrej,
-                ):
-                    self._reject_outliers()
-                    self.numrej += 1
+                # Stop before this iteration's update, as the reference does
+                # (amica15.f90:1111, ahead of update_params at :1122): the
+                # returned parameters are the ones whose likelihood is
+                # self.ll[-1].
+                if converged:
+                    convergence_reason = reason
+                    break
+
+                # Update parameters, with the rates the response above just set.
+                self._update_parameters(updates, step)
+
+                # Surface a corrupted update (a collapsed mixture component, a
+                # singular inverse) on the iteration it happens, with the same
+                # check and message as AMICAMLXNG and AMICATorchNG: otherwise a
+                # corruption on the last iteration would end as a max_iter fit
+                # holding non-finite parameters. One difference, for this
+                # backend's restart-on-NaN, which redraws A (and so W) and keeps
+                # the mixture parameters, as the reference's does
+                # (amica15.f90:1026-1046): when only A/W went non-finite and the
+                # next iteration still falls inside the restart window with a
+                # restart left, the next E-step's non-finite likelihood restarts
+                # the fit, as the reference's would, so the loop goes on to it.
+                # A restart could not repair any other parameter, so those stop.
+                bad = self._nonfinite_params(self._POST_UPDATE_CHECKED)
+                if bad:
+                    restartable = (
+                        set(bad) <= {"A", "W"}
+                        and iter + 1 < self.max_iter
+                        and schedule.within_restart_window(iter + 1, self.restartiter)
+                        and self.numrestarts < self.maxrestarts
+                    )
+                    if not restartable:
+                        self.logger.warning(
+                            "Non-finite %s at iter %d (a mixture component likely "
+                            "collapsed); stopping.",
+                            ", ".join(bad),
+                            iter,
+                        )
+                        convergence_reason = (
+                            f"{self._NONFINITE_PARAMS_REASON}: {', '.join(bad)}"
+                        )
+                        break
+                    self.logger.warning(
+                        "Non-finite %s at iter %d (a mixture component likely "
+                        "collapsed); the next iteration's restart-on-NaN will "
+                        "reinitialize.",
+                        ", ".join(bad),
+                        iter,
+                    )
 
                 # Share components if requested (Fortran identify_shared_comps
                 # schedule, amica15.f90:1856): once per share_int cycle from
@@ -2807,13 +3000,12 @@ class AMICA:
                 # by the merged comp_list. The schedule is pamica.schedule's, the
                 # one AMICATorchNG and AMICAMLXNG use, so an identical
                 # (share_start, share_int) fires on the same iterations in every
-                # backend and lines up with _a_frozen.
+                # backend.
                 #
-                # This runs AFTER self.ll.append(updates["ll"]) inside
-                # _update_parameters above, so a merge on the final iteration
-                # lands in self.A/comp_list but not in the ll value already
-                # stored -- see the final_ll_ note on self.ll's init (issue
-                # #269).
+                # This runs AFTER self.ll recorded this iteration's likelihood
+                # (above), so a merge on the final iteration lands
+                # in self.A/comp_list but not in the ll value already stored --
+                # see the final_ll_ note on self.ll's init (issue #269).
                 if self.share_comps and schedule.periodic_due(
                     iter, self.share_start, self.share_int
                 ):
@@ -2843,6 +3035,23 @@ class AMICA:
                     and schedule.every(iter, self.histstep)
                 ):
                     self._write_checkpoint("history")
+
+                # Reject outliers if requested, after the update and the
+                # checkpoints, as the reference does (amica15.f90:1136; the
+                # schedule, including its max(1, ...) clamp, is shared with
+                # AMICATorchNG and AMICAMLXNG in pamica.schedule). The statistic
+                # is this iteration's pre-update per-sample likelihood
+                # (_last_ll_samples, captured in the E-step).
+                if schedule.rejection_due(
+                    self.do_reject,
+                    iter,
+                    self.rejstart,
+                    self.rejint,
+                    self.numrej,
+                    self.maxrej,
+                ):
+                    self._reject_outliers()
+                    self.numrej += 1
         finally:
             # Close the progress bar if using tqdm
             if use_tqdm_progress:
@@ -2880,8 +3089,11 @@ class AMICA:
         rho rate once ``iter > newt_start``; ``newtrate`` under Newton) and
         continues, which is what keeps a long run from oscillating and drifting
         past its converged solution (issue #41). The rho ceiling is
-        ``self.rholrate`` here (reset to ``rholrate0`` each fit), ratcheted only
-        at ``maxdecs`` -- never per-decrease (issue #193). The updated
+        ``self.rholrate_cap`` here (reset to ``rholrate0`` each fit), ratcheted
+        only at ``maxdecs`` (issue #193); each decrease scales the working
+        ``self.rholrate``, which every A update resets to the ceiling. It runs
+        before the iteration's update, as the reference's checks do, so the
+        update already uses the new rates (issue #339). The updated
         ``numdecs``/``numincs`` counters are
         returned so they accumulate across iterations (they previously did not).
 
@@ -2906,14 +3118,10 @@ class AMICA:
 
         # Check for non-finite LL: a singular W makes logdet -> -inf (not NaN),
         # so guard on isfinite, not isnan alone, or a degenerate model would run
-        # to max_iter undetected.
+        # to max_iter undetected. _optimize stops on a non-finite likelihood
+        # before recording it, so this guards a direct caller's history.
         if not np.isfinite(self.ll[-1]):
-            return (
-                True,
-                "Non-finite likelihood (NaN/-inf) encountered",
-                numdecs,
-                numincs,
-            )
+            return (True, self._NONFINITE_LL_REASON, numdecs, numincs)
 
         # The remaining checks compare consecutive iterations; skip until there
         # are two LL values -- the first iteration, or the first iteration after
@@ -2942,17 +3150,19 @@ class AMICA:
                     numincs,
                 )
             self.lrate *= self.lratefact
+            # The working rho rate, as the reference scales it (:1063); every A
+            # update resets it to the ceiling before rho moves, so this reaches
+            # rho only on an iteration on which A is held.
+            self.rholrate *= self.rholratefact
             numdecs += 1
             if numdecs >= self.max_decs:
                 self.lrate0 *= self.lratefact
                 if schedule.past_newton_start(self.iter, self.newt_start):
-                    # rho rate is a ceiling reset to rholrate0 each iteration
-                    # (Fortran amica15.f90:1806/1813); it ratchets ONLY here at maxdecs
-                    # (amica15.f90:1068), never per LL-decrease. The old per-decrease
-                    # self.rholrate *= rholratefact was a monotone decay with no
-                    # reset that collapsed the rho rate and froze rho at a stale
-                    # shape (issue #193).
-                    self.rholrate *= self.rholratefact
+                    # The rho-rate CEILING ratchets only here, at maxdecs
+                    # (amica15.f90:1068), never per LL-decrease: a per-decrease
+                    # decay of the rate rho actually uses, with no reset, collapsed
+                    # the rho rate and froze rho at a stale shape (issue #193).
+                    self.rholrate_cap *= self.rholratefact
                 if self.do_newton and schedule.past_newton_start(
                     self.iter, self.newt_start
                 ):
