@@ -177,13 +177,23 @@ def write_amicaout(
     # this is byte-identical to the old plain C-order write, so single-model
     # output stays byte-compatible with the Fortran reference (issue #92); the
     # multi-model interleave it replaces was never MATLAB-readable (issue #159).
-    # The symmetric sphere S is order-agnostic; mean/gm/LL are 1-D.
+    # mean/gm/LL are 1-D, so their order does not matter.
     _w("W", np.asarray(W).transpose(2, 0, 1))
     # Fortran always writes S at recl = 2*nbyte*nx*nx (amica15.f90:2423): the
     # array is allocated (nx, nx) and zero-filled, and a rank-reduced sphere
     # occupies only its first `numeigs` rows. Pad to that shape so a reduced fit
     # is readable by loadmodout15.m and by loadmodout() below, which both reshape
     # to (nx, nx) and slice [:num_pcs] (issue #164/#223).
+    #
+    # S, like every 2-D file here, is written column-major (order="F") in both
+    # branches: that is what the Fortran reference writes and what both readers
+    # (loadmodout15.m and loadmodout() below) read. The square branch used to
+    # write C order on the reasoning that the default ZCA sphere is its own
+    # transpose (true to ~1e-17) so C order was "byte-identical to the Fortran
+    # reference" -- that reasoning was backwards: the reference itself is
+    # column-major, so C order only happened to match by the sphere's own
+    # symmetry, and diverges (transposed) whenever `do_approx_sphere=False`
+    # gives a genuinely asymmetric sphere (issue #336).
     sphere = np.asarray(sphere)
     if sphere.ndim != 2:
         raise ValueError(f"sphere must be 2-D (nw, nx); got shape {sphere.shape}")
@@ -196,14 +206,9 @@ def write_amicaout(
     if n_keep < n_in:
         padded = np.zeros((n_in, n_in), dtype=np.float64)
         padded[:n_keep] = sphere
-        # Column-major, because the padded array is not symmetric. The square
-        # branch below deliberately keeps its C-order write: the symmetric-ZCA
-        # sphere is its own transpose only to ~1e-17, so switching orders there
-        # would perturb bytes that are guaranteed identical to the Fortran
-        # reference (issue #92).
         _w("S", padded, order="F")
     else:
-        _w("S", sphere)
+        _w("S", sphere, order="F")
     _w("mean", mean)
     # The (num_mix, num_comps) mixture params and (num_comps, num_models) c /
     # comp_list are non-square, so their byte layout DOES depend on order: they
