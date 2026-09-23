@@ -67,7 +67,8 @@ and is not part of the default `import pamica` surface
 from pamica.mlx_impl import AMICAMLXNG  # requires the `mlx` extra
 ```
 
-Install it with `uv pip install mlx` or the `mlx` extra (`pip install pamica[mlx]`).
+Install it with the `mlx` extra (`uv add "pamica[mlx]"`, or `uv sync --extra mlx` from a source checkout)
+or with `uv pip install mlx`.
 Because it computes in float32, use the [PyTorch backend](torch-backend.md) on
 CUDA/CPU for float64 Fortran-parity runs.
 

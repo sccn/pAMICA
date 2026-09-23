@@ -5,7 +5,36 @@ Release notes are also published on the
 
 ## Unreleased
 
-- **Phase 12 of epic #324: the drawn initial mixing matrix has unit-norm components, as in the reference (issue #341).**
+MLX becomes a first-class backend, reachable through every wrapper feature (epic #324, completing the raw backend of epic #278),
+and every backend's fitting follows the Fortran reference more closely.
+
+!!! warning "Default fits differ from 0.3.3"
+    A default fit on any backend (PyTorch, NumPy or MLX) follows a different trajectory than in 0.3.3,
+    so its fitted parameters differ, and results computed with an earlier version do not reproduce bit for bit.
+    Five changes, each aligning a step with the reference and each described under
+    [Fitting follows the reference](#fitting-follows-the-reference-every-backend), reach every default fit:
+    `doscaling` normalizes each component's mixing vector, where it used to normalize stored columns (issue #333);
+    the drawn initial mixing matrix has unit-norm components (issue #341);
+    each iteration runs in the reference's order, so a likelihood decrease takes effect in the same iteration and a convergence stop returns the parameters its likelihood was computed from (issue #339);
+    the reference's A-freeze holds the mixing update on iterations 100-105, 200-205, and so on, of every fit (issue #345);
+    and the density normalizers are the reference's single-precision constants (issue #344).
+    Two more reach default fits in narrow cases.
+    With schedule gates counted from 1 (issue #335), a `maxdecs` ratchet that completes on iteration `newt_start + 1` tightens the rho-rate ceiling whether or not Newton is on,
+    and on NumPy a non-finite likelihood on iteration `restartiter + 1` ends the fit.
+    With components stored as rows (issue #334), the gradient norm `ndtmpsum` is summed per component,
+    which moves it by float round-off and can change a gradient-norm stop that falls within that round-off of `min_nd`.
+    Fits with Newton, outlier rejection or merging `share_comps` change further through the same two issues.
+    Seeded from the same initialization, `A`, `mu` and `sbeta` now match the native binary to float64 round-off over the first iterations;
+    before, they departed from its trajectory on the first iteration.
+    Scale-blind results, such as the log-likelihood, the component maps and the matched correlation with the reference, moved by small amounts in the measurements reported below.
+    To compare parameters element by element with the reference or with an earlier fit, refit.
+    Saved models load, converted where the storage changed;
+    `share_comps` models in which components had merged are refused and must be refit
+    ([Persistence](#persistence-and-exports)).
+
+### Fitting follows the reference (every backend)
+
+- **The drawn initial mixing matrix has unit-norm components, as in the reference** (issue #341, epic #324 Phase 12).
   The reference draws each model's block of `A` as `0.01 * (0.5 - u)`, sets its diagonal to one
   and divides every component by its Euclidean norm (amica15.f90:805-823);
   its restart after a non-finite likelihood redraws the same way (:1026-1044).
@@ -17,13 +46,6 @@ Release notes are also published on the
   The generator is called exactly as before, so `mu` and `beta` start from the same values.
   A supplied or loaded `A` is used as is, as the reference uses a loaded one (:793-802):
   an `A` set on a NumPy model before `fit`, a NumPy refit, a PyTorch `state_dict`, a saved `AMICA` model and an MLX save.
-  - **Behavior change (NumPy backend): a supplied initial `A` is checked at fit start.**
-    An `A` set before `fit`, or left by a previous fit on the same instance, now raises `ValueError` naming the problem
-    when its shape is not `(num_comps, n_channels)` (one row per component), when it holds a non-finite entry,
-    or when a model's block is numerically singular.
-    Before, a wrong shape or a singular block raised `LinAlgError` from deep in the fit,
-    and a NaN entry ended the fit with no stop reason.
-    The PyTorch and MLX backends take an `A` only through their saves, which are already validated.
   - **Behavior change: every fit from a drawn `A` starts from a different point.**
     Normalizing is not a compensated rescale, so it changes the first E-step and the trajectory after it.
     With `doscaling` on (the default), the first rescale used to normalize the components after the first iteration anyway,
@@ -32,9 +54,16 @@ Release notes are also published on the
     and the final one by 1.8e-6 and 4.5e-4.
     With `doscaling=False` the initial scale was never corrected, so the change reaches the whole fit
     (the final log-likelihood moves by 6.6e-7 and 9.2e-4).
-    The validation harness (100 iterations, all three backends, against the native binary from its own initialization) is unchanged at its precision:
+    When this change landed, the validation harness (100 iterations, all three backends, against the native binary from its own initialization) was unchanged at its precision:
     mean matched correlation 0.9991 and Amari distance 0.0038 before and after,
     and a log-likelihood gap of 2.7e-4 to 2.8e-4 (2.6e-4 to 2.7e-4 before).
+  - **Behavior change (NumPy backend): a supplied initial `A` is checked at fit start.**
+    An `A` set before `fit`, or left by a previous fit on the same instance, now raises `ValueError` naming the problem
+    when its shape is not `(num_comps, n_channels)` (one row per component), when it holds a non-finite entry,
+    or when a model's block is numerically singular.
+    Before, a wrong shape or a singular block raised `LinAlgError` from deep in the fit,
+    and a NaN entry ended the fit with no stop reason.
+    The PyTorch and MLX backends take an `A` only through their saves, which are already validated.
   - The draw itself still cannot match the reference's, whose generator is gfortran's `random_number`.
     Two new gated oracles check the two halves instead:
     the binary's own drawn initialization (written by a run with `max_iter=0`) has unit-norm components with the recipe's shape,
@@ -43,49 +72,20 @@ Release notes are also published on the
   - Tests: `pamica/tests/test_initial_mixing.py` checks the recipe, the start of every fit on every backend
     (with a control that fails on the code before this change), the supplied and loaded paths and the refused ones, NumPy's `fix_init`, the NumPy restart redraw, and the two gated oracles.
     The byte-identity tests that pin earlier changes against older commits now start the older code from the new initial `A`
-    (`pamica.tests.pre_change.with_normalized_initial_mixing`), while the live side keeps its pre-#344 constants (Phase 13),
+    (`pamica.tests.pre_change.with_normalized_initial_mixing`), while the live side keeps its pre-#344 constants,
     and still pass bit for bit.
     Data-driven tests whose trajectories moved were re-searched or re-recorded:
     the MLX `pdftype=1` restore recipe, the MLX MIR restore test, the MLX fit-path canary, the seed of the `doscaling` native oracle, and the early-merge collapse oracle.
-- **Phase 13 of epic #324: every backend uses the reference's single-precision constants (issue #344).**
-  The reference writes several density normalizers as default-kind Fortran literals widened with `dble`, for example `log(dble(2.506628274))`,
-  so the binary uses the float32 rounding of each decimal, not the decimal.
-  pamica used the decimals' double values.
-  The PyTorch, NumPy and MLX backends now take the reference's values from one module, `pamica/reference_constants.py`
-  ([the differences guide](guides/amica-differences.md#single-precision-constants-issue-344) has the table).
-  - **Behavior change: fits in which a mixture reaches `rho == 2` move slightly, toward the reference.**
-    The default `maxrho = 2` clamps mixtures there, where the reference's normalizer, `log(dble(1.772453851))`, is 3.0e-8 above the `0.5 * log(pi)` pamica used,
-    so default fits of the generalized Gaussian take this branch once a mixture reaches the clamp
-    (on 4096 samples of the bundled recording, a two-model fit gets there on its fifth iteration).
-    Seeded with a warm two-model state that has mixtures at `rho == 2`, the PyTorch and NumPy updates now match the native binary to float64 round-off:
-    after three iterations the log-likelihood differs by 1.6e-13, `A` by 3.8e-13 and `mu` by 5.7e-9,
-    where the previous code was off by 1.2e-8, 3.4e-8 and 8.4e-3.
-  - **Behavior change: the Gaussian (`pdftype` 2) and the sub- and super-Gaussian cosh families (`pdftype` 4 and 1) report a different log-likelihood**,
-    lower by 3.7e-10 and 2.0e-8 and higher by 2.1e-8, which now matches the binary's to 2.7e-15.
-    Their parameter updates move only by round-off, since a family's normalizer shifts every mixture alike.
-  - The underflow guard of the rho update, `epsdble`, is likewise the reference's `1.0e-16` in single precision (1.0000000168623835e-16).
-  - The NumPy plotting helper `pamica.numpy_impl.pdf.compute_pdf`, which `viz.plot_pdf_fits` draws, takes its normalizers from the same module,
-    so it draws the density the fit uses; its unused companion `compute_log_pdf` is removed.
-  - Row 16 of the differences page now records the one kind of single-precision literal pamica keeps at its decimal value:
-    the compiled-in defaults of `input.param` keys, which the binary uses only when the key is missing
-    (then its `comp_thresh` is 0.9900000095); a value given in `input.param` is read as double, and pamica's native engine gives every one.
-  - Tests: `pamica/tests/test_reference_constants.py` pins every constant against the float32 rounding of its literal on the cited reference line,
-    computed by exact rational arithmetic; pins the sweep of both reference sources; checks that no backend keeps its own copy;
-    and (opt-in, `AMICA_RUN_FORTRAN=1`) seeds the native binary for `pdftype` 2, 4 and 1.
-    The merged-state oracle in `pamica/tests/test_component_rows.py` no longer holds `maxrho` at 1.99.
-    The tests that compare a live backend bit for bit with code from before this change
-    (`test_component_rows.py`, `test_doscaling_rows.py` and `mlx_tests/test_mlx_fit_noop.py`)
-    give the live backend its old constants first, so they still isolate the change they were written for.
-
-- **Phase 11 of epic #324: every backend follows the reference's iteration order (issues #339 and #345).**
+- **Every backend follows the reference's iteration order** (issues #339 and #345, epic #324 Phase 11).
   Each iteration of every backend (PyTorch, NumPy and MLX) now runs in the reference's order (amica15.f90:949-1142,
-  [ADR 0008](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0008-iteration-order.md)):
+  [ADR 0008](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0008-iteration-order.md);
+  [How AMICA works](concepts/how-amica-works.md#the-algorithm) walks through it):
   the E-step computes the log-likelihood and the update direction,
   then the likelihood-decrease response and the stopping checks run,
   a fit that stops leaves before any update,
   and otherwise the parameters are updated with the rates those checks just set.
   Fits with a likelihood decrease, fits that stop on a convergence check, and fits that reach `share_start` (iteration 100 by default) now end elsewhere, closer to the reference;
-  every other fit is byte-identical to before.
+  every other fit is byte-identical to the code before this change.
   - **Behavior change: a likelihood decrease takes effect in the same iteration's update.**
     Before, the halved `lrate` and the scaled rho rate reached the update one iteration late.
     On a seeded 30-iteration run with eight decreases (`lrate=0.5`, no Newton, `doscaling` on),
@@ -99,7 +99,7 @@ Release notes are also published on the
   - **Behavior change: a fit that stops on a convergence check returns the parameters its `final_ll_` was computed from.**
     On a `min_dll`, gradient-norm or `lrate`-floor stop, the stopping iteration used to take its update anyway,
     so the returned parameters were one update past `final_ll_`, and the exported `LLt` one update behind them.
-    That iteration now also runs no share scan, kurtosis switch, `mir_history_` waypoint or rejection pass.
+    That iteration now also runs no kurtosis switch, share scan, `mir_history_` waypoint or rejection pass.
     A fit that runs to `max_iter` still updates on its last iteration, as the reference does.
   - **Behavior change: the reference's A-freeze applies to every fit.**
     Once `iter >= share_start`, the reference holds the `A` update, its `lrate` ramp and its rho-rate reset
@@ -108,12 +108,12 @@ Release notes are also published on the
     So every default fit of 100 or more iterations now holds `A` on iterations 100-105 (and 200-205, and so on), as the reference does.
     On a seeded 16-iteration run with `share_start=3` and `share_iter=10`,
     the gap to the binary fell from 6.1e-3 to 6.6e-7 in log-likelihood (binary floor 4.0e-7 to 4.3e-7) and from 0.19 to 5.0e-6 in `A`.
-  - Parity on the bundled sample, before and after, on all three backends:
-    against the bundled 200-iteration reference output, the log-likelihood gap falls from 2.2e-4 to 2.3e-4 down to 1.2e-4 to 1.3e-4,
-    the mean matched component correlation rises from 0.9972-0.9973 to 0.9982-0.9983 (minimum 0.969-0.970 to 0.981-0.982),
-    and the Amari distance falls from 6.3e-3 to 4.8e-3.
-    The validation harness's 100-iteration run keeps its final log-likelihood (gap 2.6e-4 to 2.7e-4),
-    and its mean matched correlation rises from 0.9988 to 0.9991 (Amari distance 0.0044 to 0.0038),
+  - Parity on the bundled sample when this change landed, before and after, on all three backends:
+    against the bundled 200-iteration reference output, the log-likelihood gap fell from 2.2e-4 to 2.3e-4 down to 1.2e-4 to 1.3e-4,
+    the mean matched component correlation rose from 0.9972-0.9973 to 0.9982-0.9983 (minimum 0.969-0.970 to 0.981-0.982),
+    and the Amari distance fell from 6.3e-3 to 4.8e-3.
+    The validation harness's 100-iteration run kept its final log-likelihood (gap 2.6e-4 to 2.7e-4),
+    and its mean matched correlation rose from 0.9988 to 0.9991 (Amari distance 0.0044 to 0.0038),
     because the reference holds `A` on its 100th iteration.
   - **Behavior change: every backend stops the same way on a non-finite value.**
     A non-finite log-likelihood is never recorded: the NumPy backend used to leave it as the last `self.ll` entry,
@@ -143,161 +143,34 @@ Release notes are also published on the
   - Tests: `pamica/tests/test_iteration_order.py` checks the order, the decrease timing, the stop semantics of every convergence stop and the freeze through real fits on every backend,
     `pamica/tests/test_nonfinite_stops.py` the non-finite stops by injection,
     and `pamica/tests/test_iteration_order_native_oracle.py` (opt-in, `AMICA_RUN_FORTRAN=1`) is the native-binary comparison above.
-
-- **Phase 14 of epic #324: `AMICA_NumPy` rejects unknown/unsupported keyword arguments (issue #346).**
-  `AMICA_NumPy(**kwargs)` used to forward every keyword into a params dict read with `params.get(...)`,
-  so a typo (`max_iters=50`) or an option the legacy backend does not implement (`keep_best=True`)
-  constructed silently and had no effect,
-  unlike the PyTorch/MLX constructors,
-  which take explicit keyword parameters and already raised `TypeError` on an unknown name.
-  - **Behavior change (legacy NumPy backend only): an unrecognized or unsupported keyword argument now raises `TypeError` instead of being silently ignored.**
-    A typo raises `TypeError` naming the offending keyword(s),
-    with a `difflib`-based "did you mean" suggestion when a close match exists.
-    An option implemented on the PyTorch backend (`AMICATorchNG`) but not this one
-    (for example `keep_best`, `device`, `dtype`, the kurtosis-switch schedule)
-    raises `TypeError` naming the option and pointing to `AMICA(backend='torch')`.
-  - The three settings this backend spells differently from `AMICATorchNG`
-    (`min_nd`/`maxdecs`/`share_iter`, the canonical spelling a params file already resolves either way)
-    are now also accepted as keyword arguments directly,
-    translated to this backend's own attribute name the same way the params-file route already translates them.
-    Passing both spellings of the same setting at once raises `TypeError` naming both,
-    rather than picking one silently.
-  - The accepted-keyword set is derived from the same source the params-file routing uses
-    (`_CONSUMED_KEYS`/`_CANONICAL_TO_NUMPY_KEY`),
-    and the unsupported-option list is derived from `AMICATorchNG`'s own constructor signature,
-    so neither can drift from what the constructor actually reads.
-  - **Review follow-up:** `files`/`data_dim`/`field_dim` (data-location metadata) now work as keyword
-    arguments directly, with the same meaning as in `params_file`, instead of passing the check but
-    staying silently inert; `n_models`/`n_mix` (`AMICATorchNG`'s spelling of this backend's own
-    `num_models`/`num_mix`) get a message naming the correct spelling rather than the generic
-    (and here wrong) "use `AMICA(backend='torch')`" message; `n_channels` gets its own message, since
-    it is inferred from the data passed to `fit()` on every backend, not a constructor keyword on any
-    of them; and every offending keyword in one call is now named in a single error, however many
-    different kinds are mixed together (a first version named only the first category it found).
-    The `AMICA` wrapper's own `backend='mlx'` keyword check had the same single-category drop and is
-    fixed the same way.
-
-- **Fix: tests no longer make a full clone shallow (issue #343).**
-  Tests that load historical code ran `git fetch origin <sha> --depth 1` to reach the pinned commit;
-  in a full clone that records a shallow boundary, after which `git gc` can prune history.
-  Every such test now goes through `pamica/tests/pre_change.py`, which only reads the repository:
-  when the pinned commit is missing it fails under `CI` and otherwise skips,
-  naming the command that fetches it (`git fetch origin <sha>`, or `git fetch --unshallow origin` in a shallow clone).
-  `pamica/tests/test_pre_change_loader.py` runs the loader behind a logging `git` wrapper and asserts that nothing is fetched.
-
-- **Phase 8 of epic #324: `share_comps` compares and merges components (issue #334).**
-  Every backend (PyTorch, NumPy and MLX) now stores the mixing matrix with one component per row,
-  `A` of shape `(n_comps, n_channels)`, the reference's `A` transposed ([ADR 0007](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0007-component-row-layout.md)).
-  A component id in `comp_list` now names the same component in `A` as in the density parameters,
-  so the share metric compares the components' scalp maps (`get_sensor_mixing_matrix`)
-  and a merge ties the two components' mixing vectors and densities, as the reference's `identify_shared_comps` does.
-  Before, both steps used stored columns of each model's block, which are not components.
-  - **Behavior change: fits with `share_comps=True` in which a merge fires now differ.**
-    Refit them.
-    Seeded with a merged `comp_list` through the reference's `load_comp_list`,
-    the PyTorch and NumPy updates match the native binary to float64 round-off
-    (after 3 iterations, worst of `doscaling` on and off: `A` 1.5e-12, `mu` 3.7e-9, log-likelihood 4.7e-14),
-    where the previous code was off by 0.21 in `A` and 4.3e-4 in log-likelihood.
-    On the bundled sample (2 models, 300 iterations, `share_start=100`, `comp_thresh=0.95`)
-    the scan now merges three pairs whose maps agree (|cos| 0.956 to 0.971), ending at log-likelihood -3.3416,
-    where it merged pairs whose maps did not (|cos| 0.06, 0.35 and 0.55) and ended at -3.3484 (-3.3387 with sharing off).
-    Because the metric now sees how similar the two models still are early in a fit, a scan in the first iterations merges most components,
-    and a model left with few components of its own can then collapse.
-    The reference behaves the same way: its similarity on its own early state merges the same pairs,
-    and its update from the same merged states collapses in step (its own scan never merges, because its similarity is NaN).
-    The reference's default `share_start=100` avoids that.
-  - Every fit without a merge is byte-identical to before on every backend, sharing off or scheduled but not firing,
-    with one exception at float round-off: the weight-gradient norm (`ndtmpsum`), which now sums per component like the reference.
-  - **Persistence:** the PyTorch `state_dict` is now `format_version` 4 and the MLX save format 2.
-    An older save loads unchanged in content, converted without loss, unless `share_comps` had merged components:
-    such a save raises `ValueError` asking for a refit, because its merges were computed under the old semantics.
-    `AMICA.save` files (still `format_version` 2) go through the same conversion and refusal.
-  - **EEGLAB export:** the `A` file is now the reference's `A(nw, num_comps)` in column-major order for any number of models
-    (EEGLAB's `loadmodout15.m` ignores it; single-model files are byte-identical to before).
-    `pamica.numpy_impl.data.load_results` reads it in that layout
-    and refuses a multi-model directory written by an earlier version, whose `A` does not invert the `W` beside it;
-    write such a directory again from the fitted or reloaded model.
-  - Row 16 of the differences page records that the reference's density normalizers are single-precision literals:
-    in the exact-Gaussian branch (`rho == 2`) 3.0e-8 away from the one pamica uses, and up to 2.1e-8 in the `pdftype` 1, 2 and 4 families.
-    Issue #344 decides whether to adopt them; the comments that called pamica's constants bit-for-bit with the binary are corrected.
-
-- **Phase 7 of epic #324: `doscaling` rescales components, as the reference does (issue #333).**
+- **`doscaling` rescales components, as the reference does** (issue #333, epic #324 Phase 7).
   **Behavior change:** default fits on every backend (PyTorch, NumPy and MLX) now follow the reference's trajectory,
   so their fitted parameters differ from those of earlier versions.
-  pamica stores each model's mixing block transposed relative to the reference (the issue #24 convention, now ADR 0006),
-  so a component is a row of the stored block,
+  Each model's mixing block was stored transposed relative to the reference (the issue #24 convention, ADR 0006),
+  so a component was a row of the stored block,
   but `doscaling` (on by default) normalized stored columns, which is not a change of scale of any component and perturbed every iteration.
   It now divides each component's mixing vector by its norm and rescales that component's `mu` and `beta` to match,
   an exact change of scale that leaves the log-likelihood unchanged.
+  Since issue #334 (below) a component is a row of the stored `A` itself.
   - Seeded from pamica's initialization, `A`, `mu` and `sbeta` now match the native reference binary to float64 round-off
     (after 1 iteration: `A` 5.0e-16, `mu` 7.8e-11, `sbeta` 1.1e-14, previously 7.2e-5, 6.6e-5 and 8.6e-5;
     after 3: 2.7e-13, 8.6e-10 and 2.7e-11, previously 1.4e-3, 6.7e-3 and 2.2e-3).
   - Fitted components now have unit norm, as in the reference;
     previously, after 100 seeded iterations, norms ranged over [0.94, 1.07] with one model and [0.05, 1.97] with two.
-  - Scale-blind results barely move: against the bundled `amicaout` fixture after 200 iterations,
-    the log-likelihood goes from -3.401777 to -3.401673 (fixture: -3.401873),
+  - Scale-blind results barely moved when this change landed: against the bundled `amicaout` fixture after 200 iterations,
+    the log-likelihood went from -3.401777 to -3.401673 (fixture: -3.401873),
     the matched correlation from 0.99752 to 0.99740 and the Amari distance from 5.95e-3 to 6.14e-3.
-    Two-model fits improve most: after 100 seeded iterations, the matched correlation with the reference rises from 0.850 to 0.99998.
-  - `doscaling=False` is byte-identical to before on every backend.
+    Two-model fits improve most: after 100 seeded iterations, the matched correlation with the reference rose from 0.850 to 0.99998.
+  - `doscaling=False` was byte-identical to the code before this change on every backend.
     Saved models load unchanged; refit only to compare parameters element by element with the reference.
   - `scalestep`, which the reference parses but never reads (it rescales every iteration), stays a pamica extension
     but now counts from 1: the rescale runs on iterations `scalestep`, `2*scalestep`, and so on, instead of 1, `1+scalestep`, and so on.
-    The default of 1 is unaffected (row 14 of the differences page).
+    The default of 1 is unaffected (row 14 of the [differences guide](guides/amica-differences.md#at-a-glance)).
     With `doscaling` on, every backend's constructor now raises `ValueError` for a `scalestep` that is not an integer of at least 1;
     `scalestep=0` used to fail mid-fit with a bare `ZeroDivisionError`.
   - New test helper `pamica/tests/native_oracle.py` seeds the native binary from a pamica state through its `load_*` files,
     for element-wise oracle tests (opt-in with `AMICA_RUN_FORTRAN=1`).
-- **Fix: the EEGLAB export wrote an asymmetric sphere transposed (Phase 10 of epic #324, issue #336).**
-  `write_amicaout` (`pamica/numpy_impl/load.py`), the shared writer called from `write_amica_output` on
-  `AMICATorchNG`, `AMICAMLXNG` and the `AMICA` wrapper, and from the NumPy backend's own `_write_results`,
-  wrote the square sphere matrix `S` in C order,
-  while the Fortran reference and both readers
-  (EEGLAB's `loadmodout15.m` and pamica's `loadmodout`) read it column-major.
-  The default symmetric zero-phase component analysis (ZCA) sphere is its own transpose to about 1e-17,
-  so the bug moved only that many bytes there;
-  with `do_approx_sphere=False` the sphere is genuinely asymmetric,
-  and the exported sphere came back exactly transposed
-  (measured on the bundled sample, torch, 3 iterations:
-  before the fix `max|S_loaded - S| = 0.51`, `max|S_loaded - S.T| = 0.0`;
-  after, `max|S_loaded - S| = 0.0`, `max|S_loaded - S.T| = 0.51`).
-  `S` is now written column-major in both the square and rank-reduced branches,
-  and `load_results` reads a square sphere the same way.
-  **Action needed for existing output:** a full-rank directory written with `do_approx_sphere=False`
-  by an earlier pamica holds a C-order `S`.
-  EEGLAB always read that transposed (this fix does not change EEGLAB's own reading, only pamica's),
-  and pamica's corrected `loadmodout`/`load_results` now also read it transposed, with no error raised.
-  Regenerate any such directory by re-running the fit and `write_amica_output` again;
-  there is no on-disk version marker to detect the old layout, and this repo carries no
-  compatibility shim to read it automatically.
-  Directories from the default (symmetric) sphere and from a rank-reduced (`pcakeep`) fit are unaffected.
-- **Phase 6 of epic #324: the validation harness covers every backend (issue #315).**
-  `validate_implementations.py --backend {torch,numpy,mlx}` (or a comma-separated list, or `all`)
-  compares each backend against one Fortran reference run with the same settings;
-  the default remains `torch` and prints the same report as before.
-  NumPy receives the settings through its own key-translation table, PyTorch and MLX through `AMICA(backend=...)`;
-  an explicit `--backend` also prints and saves a one-row-per-backend summary with runtimes (`parity_summary.md`),
-  and `--backend mlx` without MLX exits with status 2 and the install hint.
-  On the bundled sample all three backends meet the reference bar (log-likelihood within 3.2e-5, matched correlation 0.9992, Amari distance 0.004);
-  the rows and each backend's expected bar are in the validation guide, pinned by an `AMICA_RUN_FORTRAN`-gated test.
-  - The getting-started page gains a short Apple Silicon (MLX) route that links to the backends guide's full workflow,
-    and the differences page records two existing divergences:
-    `do_sphere=False` fits unscaled data where the reference divides each channel by its standard deviation (issue #328),
-    and a second `fit` on the same `AMICA_NumPy` instance continues from the first (related to issue #312).
-  - **Behavior change (legacy NumPy backend):** `AMICA_NumPy` writes files only when given an `outdir`.
-    Its default was `./output`, so every fit wrote `out.txt` at construction, `writestep` checkpoints and its final results into the caller's working directory.
-    The default is now `outdir=None`, which writes nothing, as the PyTorch and MLX backends never do unless asked.
-    An explicit `outdir` (keyword, params file, or the command-line interface's `--outdir`, which still defaults to `output`) writes exactly what it did before.
-  - **Fix:** `AMICA_NumPy.get_sensor_mixing_matrix` returned `pinv(sphere)` times the stored mixing matrix without the transpose the PyTorch and MLX backends apply,
-    so its columns were the rows of the true mixing matrix rather than the components' sensor maps
-    (about 10% away from the PyTorch backend's maps after five iterations on the bundled sample, and not an inverse of `get_weights() @ sphere`).
-    It now matches the PyTorch backend to round-off (4.6e-12 relative), pinned by a cross-backend test.
-    The NumPy backend's fit, `transform`, `get_weights` and EEGLAB export were not affected.
-  - **Fix:** the legacy plotting helpers in `pamica.numpy_impl.viz` had the same orientation slip.
-    `plot_components` drew rows of the mixing matrix as mixing vectors, and it and `plot_pdf_fits` formed activations from the raw data with no mean removal, no sphere and no transpose;
-    `plot_model_comparison` skipped the sphere.
-    They now plot the model's own sensor maps and sources (what `get_sensor_mixing_matrix` and `transform` return), checked against those accessors on a real fit.
-    `load_results` also reads a rank-reduced fit's zero-padded sphere, which it used to reject.
-- **Phase 9 of epic #324: iteration schedules count from 1, as the reference's do (issue #335).**
+- **Iteration schedules count from 1, as the reference's do** (issue #335, epic #324 Phase 9).
   **Behavior change:** `newt_start`, `rejstart` and (on NumPy) `restartiter` now name iterations counted from 1, like the reference's `iter` (amica15.f90:949):
   the first Newton M-step is the `newt_start`-th iteration's, the first rejection follows the `rejstart`-th,
   and a non-finite likelihood restarts the fit only within the first `restartiter` iterations.
@@ -335,61 +208,258 @@ Release notes are also published on the
   - `iteration`, `ll_history` and `mir_history_` keep their 0-based indexing.
   - Tests: `pamica/tests/test_schedule_gates.py` observes each gate through real fits on all three backends,
     and `pamica/tests/test_schedule_native_oracle.py` (opt-in, `AMICA_RUN_FORTRAN=1`) is the native-binary comparison above.
-- **Phase 4 of epic #324: backend selection in `AMICA` and `AMICAICA` (issue #313).**
+- **`share_comps` compares and merges components; `A` stores one component per row** (issue #334, epic #324 Phase 8).
+  Every backend (PyTorch, NumPy and MLX) now stores the mixing matrix with one component per row,
+  `A` of shape `(n_comps, n_channels)`, the reference's `A` transposed ([ADR 0007](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0007-component-row-layout.md)).
+  A component id in `comp_list` now names the same component in `A` as in the density parameters,
+  so the share metric compares the components' scalp maps (`get_sensor_mixing_matrix`)
+  and a merge ties the two components' mixing vectors and densities, as the reference's `identify_shared_comps` does.
+  Before, both steps used stored columns of each model's block, which are not components.
+  - **Behavior change: fits with `share_comps=True` in which a merge fires now differ.**
+    Refit them.
+    Seeded with a merged `comp_list` through the reference's `load_comp_list`,
+    the PyTorch and NumPy updates match the native binary to float64 round-off
+    (after 3 iterations, worst of `doscaling` on and off: `A` 1.5e-12, `mu` 3.7e-9, log-likelihood 4.7e-14),
+    where the previous code was off by 0.21 in `A` and 4.3e-4 in log-likelihood.
+    On the bundled sample (2 models, 300 iterations, `share_start=100`, `comp_thresh=0.95`)
+    the scan now merges three pairs whose maps agree (|cos| 0.956 to 0.971), ending at log-likelihood -3.3416,
+    where it merged pairs whose maps did not (|cos| 0.06, 0.35 and 0.55) and ended at -3.3484 (-3.3387 with sharing off).
+    Because the metric now sees how similar the two models still are early in a fit, a scan in the first iterations merges most components,
+    and a model left with few components of its own can then collapse.
+    The reference behaves the same way: its similarity on its own early state merges the same pairs,
+    and its update from the same merged states collapses in step (its own scan never merges, because its similarity is NaN).
+    The reference's default `share_start=100` avoids that.
+  - Every fit without a merge is byte-identical to the code before this change on every backend, sharing off or scheduled but not firing,
+    with one exception at float round-off: the weight-gradient norm (`ndtmpsum`), which now sums per component like the reference.
+  - Persistence and the EEGLAB `A` file change with the layout; see [Persistence and exports](#persistence-and-exports).
+- **Every backend uses the reference's single-precision constants** (issue #344, epic #324 Phase 13).
+  The reference writes several density normalizers as default-kind Fortran literals widened with `dble`, for example `log(dble(2.506628274))`,
+  so the binary uses the float32 rounding of each decimal, not the decimal.
+  pamica used the decimals' double values.
+  The PyTorch, NumPy and MLX backends now take the reference's values from one module, `pamica/reference_constants.py`
+  ([the differences guide](guides/amica-differences.md#single-precision-constants-issue-344) has the table).
+  - **Behavior change: fits in which a mixture reaches `rho == 2` move slightly, toward the reference.**
+    The default `maxrho = 2` clamps mixtures there, where the reference's normalizer, `log(dble(1.772453851))`, is 3.0e-8 above the `0.5 * log(pi)` pamica used,
+    so default fits of the generalized Gaussian take this branch once a mixture reaches the clamp
+    (on 4096 samples of the bundled recording, a two-model fit gets there on its fifth iteration).
+    Seeded with a warm two-model state that has mixtures at `rho == 2`, the PyTorch and NumPy updates now match the native binary to float64 round-off:
+    after three iterations the log-likelihood differs by 1.6e-13, `A` by 3.8e-13 and `mu` by 5.7e-9,
+    where the previous code was off by 1.2e-8, 3.4e-8 and 8.4e-3.
+  - **Behavior change: the Gaussian (`pdftype` 2) and the sub- and super-Gaussian cosh families (`pdftype` 4 and 1) report a different log-likelihood**,
+    lower by 3.7e-10 and 2.0e-8 and higher by 2.1e-8, which now matches the binary's to 2.7e-15.
+    Their parameter updates move only by round-off, since a family's normalizer shifts every mixture alike.
+  - The underflow guard of the rho update, `epsdble`, is likewise the reference's `1.0e-16` in single precision (1.0000000168623835e-16).
+  - The NumPy plotting helper `pamica.numpy_impl.pdf.compute_pdf`, which `viz.plot_pdf_fits` draws, takes its normalizers from the same module,
+    so it draws the density the fit uses; its unused companion `compute_log_pdf` is removed.
+  - Row 16 of the differences guide records the one kind of single-precision literal pamica keeps at its decimal value:
+    the compiled-in defaults of `input.param` keys, which the binary uses only when the key is missing
+    (then its `comp_thresh` is 0.9900000095); a value given in `input.param` is read as double, and pamica's native engine gives every one.
+  - Tests: `pamica/tests/test_reference_constants.py` pins every constant against the float32 rounding of its literal on the cited reference line,
+    computed by exact rational arithmetic; pins the sweep of both reference sources; checks that no backend keeps its own copy;
+    and (opt-in, `AMICA_RUN_FORTRAN=1`) seeds the native binary for `pdftype` 2, 4 and 1.
+    The merged-state oracle in `pamica/tests/test_component_rows.py` no longer holds `maxrho` at 1.99.
+    The tests that compare a live backend bit for bit with code from before this change
+    (`test_component_rows.py`, `test_doscaling_rows.py` and `mlx_tests/test_mlx_fit_noop.py`)
+    give the live backend its old constants first, so they still isolate the change they were written for.
+
+### MLX as a first-class backend, through every wrapper
+
+- **Backend selection in `AMICA` and `AMICAICA`** (issue #313, epic #324 Phase 4).
   `AMICA` and `AMICAICA` gain a `backend` parameter:
   `"torch"` (the default, `AMICATorchNG`, float64 Fortran parity) or `"mlx"` (`AMICAMLXNG`, Apple GPU, float32 only).
-  Every wrapper feature now runs on MLX:
-  `fit` with any backend keyword (including `pcakeep`, which closes #323's remaining item), `from_params_file(..., backend="mlx")` (#304's MLX path),
+  Every wrapper feature runs on MLX:
+  `fit` with any backend keyword (including `pcakeep`), `from_params_file(..., backend="mlx")`,
   the #50 degenerate-fit contract, `save`/`load`, the EEGLAB export and the MNE path.
   An unknown backend raises `ValueError`, `backend="mlx"` without MLX installed raises `ImportError` at construction,
   and `device` or a `dtype` fit keyword with `backend="mlx"` raises `ValueError`, since MLX runs only on its default device in float32.
   `import pamica` still never imports MLX.
+  The [backends guide](guides/backends.md#selecting-a-backend) has the rules and an Apple Silicon workflow.
   - The keywords `fit` takes from `**kwargs` and from a params file are derived from the selected backend class's own signature,
     and the "not applied" warning names that class.
     A keyword the selected backend does not take now raises `TypeError` from `AMICA.fit` itself, naming the backend,
-    instead of from the backend constructor.
+    instead of from the backend constructor;
+    every offending keyword of one call is named in that one error (issue #346 review).
   - The degenerate-fit contract uses each backend class's own `_DEGENERATE_STOP_REASONS`,
     so an MLX fit that stops on `nan_params` is refused like a PyTorch `nan_ll` fit.
-  - **Save format version 2:** `AMICA.save` records the backend in `wrapper["backend"]`,
-    and `AMICA.load` restores the model on that backend.
-    An MLX model's numpy arrays are stored as CPU tensors of the same dtype, so the file still loads with `torch.load(weights_only=True)`.
-    Version 1 files, written before this change, still load (always as PyTorch models).
-    Loading an MLX file needs MLX installed and `device=None`.
-  - **Fix:** a numpy scalar in the backend's config or fit record (for example `fit(X, seed=np.int64(42))`) is now saved as the equivalent Python number.
-    `AMICA.save` used to write such a file, which `AMICA.load` then refused (the `weights_only` unpickler rejects numpy scalars).
-    Any other value that loading could not read back now raises `TypeError` at save time.
   - **New accessors:** `get_sphere()`, `get_mean()` and `get_model_center(model_idx)` on `AMICATorchNG`, `AMICAMLXNG` and `AMICA`,
-    with the same names and shapes on both backends and float64 arrays from both.
-    The torch and MLX ones carry the degenerate-fit guard of the issue #306 entry below.
+    with the same names and shapes on both backends and float64 arrays from both,
+    guarded against degenerate fits like the other accessors (issue #306, below).
     `AMICA` also gains `get_sensor_mixing_matrix()`, which both backends already had.
   - `AMICAICA` reads the fitted mean, sphere and centers through those accessors, with no backend-specific array calls.
     An MLX export is float32-consistent (sources agree with the MLX `transform` within float32 tolerance),
     while `apply` with nothing excluded still returns the input to float64 round-off.
     A degenerate `AMICAICA` fit now leaves `pca_components_`/`pca_explained_variance_` as `None`; it was never exportable.
-- **Raw backend accessors now guard against degenerate fits and bad input shape** (issue #306, epic #324 Phase 5).
+- **Explicit `pcakeep`/`pcadb` on MLX, with one validation policy for every backend** (issue #323, epic #324 Phase 1).
+  `AMICAMLXNG` gains `pcakeep` and `pcadb` with `AMICATorchNG`'s names, defaults (`None`), position, validation and precedence.
+  They go through the shared `pamica.rank` policy, so all three array backends keep the same rank and build the same sphere
+  (cross-backend test on the bundled sample: torch vs NumPy sphere within 1e-10 relative, MLX within float32 rounding).
+  `fit(mir_step > 0)` gains the same upfront reduction gate and message as the PyTorch backend.
+  - **Behavior change: invalid `pcakeep`/`pcadb` raise `ValueError` at construction on every backend.**
+    `pcakeep` must be an integer of at least 1 (a `bool` or a float is rejected) and `pcadb` a finite number greater than 0;
+    a value assigned to the attribute after construction fails at fit time.
+    The PyTorch and NumPy backends used to accept these silently:
+    `pcakeep=-3` sliced from the end and fitted 29 of 32 sources on the bundled sample, `pcakeep=2.7` truncated to 2,
+    and `pcakeep=0` or `pcadb <= 0` ran to a degenerate `nan_ll` fit.
+    Because construction validates, a saved PyTorch model whose config carries such a value
+    (only possible before this change) fails to load with the same `ValueError`.
+    Setting both stays valid: `pcakeep` takes precedence and `pcadb` is ignored (one INFO log line),
+    as in the reference, which parses `pcadb` but never uses it.
+  - **Behavior change: `pcakeep`/`pcadb` with `do_sphere=False` are ignored with one warning.**
+    No backend reduces without sphering, as in the reference, which keeps every dimension there (amica15.f90:527).
+    The request used to be dropped silently, and the PyTorch `mir_step` gate still refused it.
+    Every backend now logs one WARNING at construction, and the gate no longer counts it as a reduction request.
+  - **Behavior change: `mir_step` no longer rejects `pcakeep >= n_channels`.**
+    The PyTorch backend's upfront gate refused any explicit `pcakeep`,
+    including the bundled `input.param`'s `pcakeep 32` on the 32-channel sample, which reduces nothing;
+    `AMICA.from_params_file("input.param").fit(X, mir_step=1)` raised.
+    The gate now rejects only a real request (`pcakeep` below the channel count, or any `pcadb`, while sphering),
+    identically on the PyTorch and MLX backends.
+- **One parameter-file reader for every backend** (issue #304, epic #324 Phase 3).
+  `pamica/fortran_params.py` gains `read_params_file`, the single params-file entry point every backend uses.
+  It content-sniffs JSON vs. the literal Fortran `input.param` text and returns pamica's canonical keys either way.
+  A JSON file's own alias spellings (`min_grad_norm`, `max_decs`, `numrej`, `num_mix_comps`, `share_int`)
+  are translated to the canonical/constructor names through one table, `JSON_ALIAS_TO_CANONICAL`;
+  a file carrying both an alias and its canonical key raises `ValueError` naming both.
+  `writestep`/`do_history`/`histstep` are translated (identity) keys:
+  the legacy NumPy backend implements periodic on-disk checkpointing under these names,
+  and the reader translates what any backend supports;
+  the PyTorch and MLX backends have no such mechanism yet (issue #312), so `AMICA.fit` names them as not applied.
+  The [parameter-files section](guides/validation.md#parameter-files) has the tables.
+  - **Behavior change:** a fit from `AMICA.from_params_file` now applies `sample_params.json`'s own
+    `max_decs`/`min_grad_norm`/`share_int` settings (as `maxdecs`/`min_nd`/`share_iter`).
+    Under their raw JSON spelling they matched neither a named `fit()` parameter nor an `AMICATorchNG` keyword,
+    so they were only named in the "not applied" warning.
+  - **Behavior change (legacy NumPy backend):** `AMICA_NumPy(params_file=...)` accepts the literal Fortran `input.param` text format, not just JSON;
+    a non-JSON file used to raise a raw `json.JSONDecodeError`.
+    A params-file setting this backend does not consume is named in one `logger.warning` instead of silently vanishing.
+    The NumPy CLI (`python -m pamica.numpy_impl.cli`) accepts both formats too, through the same reader, instead of its own separate `json.load`.
+  - **Breaking change (legacy NumPy backend):** `AMICA_NumPy.from_json_file` is renamed to `from_params_file`
+    (matching the wrapper's classmethod name, and accepting both formats), with no alias left behind.
+  - **Breaking change (legacy NumPy backend):** `AMICA_NumPy(pdftype=...)` with anything other than `0` raises `NotImplementedError` at construction:
+    this backend implements only the generalized-Gaussian source density, and used to ignore the setting silently
+    (`pdftype` was read but never consulted by the fit path).
+    The constructor's default and the bundled `numpy_impl/params.json`'s both changed from `1` to `0` to match;
+    since the value was never read, no previously passing fit's numerics change.
+  - `validate_implementations.py`'s own JSON-schema-to-Fortran-keyword alias table
+    (`_FORTRAN_ALIASES`) is composed from the two shared tables (`JSON_ALIAS_TO_CANONICAL`, then `PAMICA_KEY_TO_FORTRAN_KEY`)
+    instead of one hand-maintained entry, and its `max_decs` special case is gone:
+    `load_sample_data` reads through `read_params_file`, so canonical keys reach `run_pytorch_amica`'s `ng_kwargs` automatically.
+- **Raw backend accessors guard against degenerate fits and bad input shape** (issue #306, epic #324 Phase 5).
   **Behavior change:**
-  `AMICATorchNG`, `AMICAMLXNG` and the legacy NumPy `AMICA` backend's fitted-output accessors
+  `AMICATorchNG`, `AMICAMLXNG` and the legacy NumPy backend's fitted-output accessors
   (`transform`, `get_mixing_matrix`, `get_unmixing_matrix`, `get_sensor_mixing_matrix`, `get_rho`,
   `get_pdftype`, `shared_components`, `variance_order`, `model_loglik`, `model_probability`,
-  `mir` and `pmi` on torch/MLX, plus Phase 4's `get_sphere`, `get_mean` and `get_model_center`;
+  `mir` and `pmi` on torch/MLX, plus `get_sphere`, `get_mean` and `get_model_center`;
   `transform`, `get_weights` and `get_sensor_mixing_matrix` on NumPy)
-  now raise `RuntimeError` when called on a fit the backend itself classified as degenerate,
+  raise `RuntimeError` when called on a fit the backend itself classified as degenerate,
   or when a fitted parameter holds a non-finite value,
   instead of silently returning NaN-tainted output.
   The accessors that take data (`transform`, `model_loglik`, `model_probability`, `mir` and `pmi`)
-  now also validate that the input is a 2D array with the model's fitted input channel count,
-  raising the same named `ValueError` that `fit()` already raises for the identical mistake,
+  also validate that the input is a 2D array with the model's fitted input channel count,
+  raising the same named `ValueError` that `fit()` raises for the identical mistake,
   instead of a raw matmul/broadcast error.
-  `model_probability` also now tells apart a NaN log-likelihood (numerical corruption)
-  from every model underflowing to `-inf` (an extreme outlier), where it previously reported both the same way.
+  `model_probability` also tells apart a NaN log-likelihood (numerical corruption)
+  from every model underflowing to `-inf` (an extreme outlier), where it used to report both the same way.
   `AMICATorchNG.from_state_dict` and `AMICAMLXNG.from_state_dict`
-  now raise `ValueError` naming the payload as the culprit when the saved config does not match the constructor,
+  raise `ValueError` naming the payload as the culprit when the saved config does not match the constructor,
   such as a missing or unexpected key,
   chaining the original `TypeError` instead of letting it propagate bare.
   This closes the gap the `AMICA` wrapper's own degenerate-fit guard (issue #50) never covered:
-  a caller using a raw backend directly now gets the same protection.
-  See `docs/guides/amica-differences.md` row 5.
-- **`AMICAICA.apply` restores the PCA residual of rank-reduced fits** (issue #322, epic #324).
+  a caller using a raw backend directly gets the same protection.
+  See row 5 of the [differences guide](guides/amica-differences.md#at-a-glance).
+- **The validation harness covers every backend** (issue #315, epic #324 Phase 6).
+  `validate_implementations.py --backend {torch,numpy,mlx}` (or a comma-separated list, or `all`)
+  compares each backend against one Fortran reference run with the same settings;
+  the default remains `torch` and prints the same report as before.
+  NumPy receives the settings through its own key-translation table, PyTorch and MLX through `AMICA(backend=...)`;
+  an explicit `--backend` also prints and saves a one-row-per-backend summary with runtimes (`parity_summary.md`),
+  and `--backend mlx` without MLX exits with status 2 and the install hint.
+  When the harness landed, before the fitting changes above, all three backends met the reference bar on the bundled sample
+  (log-likelihood within 3.2e-5, matched correlation 0.9992, Amari distance 0.004);
+  the [validation guide](guides/validation.md#parity-rows-per-backend) has the current rows and each backend's expected bar,
+  pinned by an `AMICA_RUN_FORTRAN`-gated test.
+  An end-to-end workflow test (`pamica/tests/mne_tests/test_end_to_end_workflow.py`) runs a per-session workflow on both wrapper backends:
+  average-referenced EEG with `pcakeep = n_channels - 1`, `AMICAICA`, the EEGLAB export and reload, `save`/`load` and an `input.param`-driven fit.
+  - The getting-started page gains a short Apple Silicon (MLX) route that links to the backends guide's full workflow,
+    and the differences guide records two existing divergences:
+    `do_sphere=False` fits unscaled data where the reference divides each channel by its standard deviation (issue #328),
+    and a second `fit` on the same `AMICA_NumPy` instance continues from the first (related to issue #312).
+  - **Behavior change (legacy NumPy backend):** `AMICA_NumPy` writes files only when given an `outdir`.
+    Its default was `./output`, so every fit wrote `out.txt` at construction, `writestep` checkpoints and its final results into the caller's working directory.
+    The default is now `outdir=None`, which writes nothing, as the PyTorch and MLX backends never do unless asked.
+    An explicit `outdir` (keyword, params file, or the command-line interface's `--outdir`, which still defaults to `output`) writes exactly what it did before.
+  - **Fix:** `AMICA_NumPy.get_sensor_mixing_matrix` returned `pinv(sphere)` times the stored mixing matrix without the transpose the PyTorch and MLX backends apply,
+    so its columns were the rows of the true mixing matrix rather than the components' sensor maps
+    (about 10% away from the PyTorch backend's maps after five iterations on the bundled sample, and not an inverse of `get_weights() @ sphere`).
+    It now matches the PyTorch backend to round-off (4.6e-12 relative), pinned by a cross-backend test.
+    The NumPy backend's fit, `transform`, `get_weights` and EEGLAB export were not affected.
+  - **Fix:** the legacy plotting helpers in `pamica.numpy_impl.viz` had the same orientation slip.
+    `plot_components` drew rows of the mixing matrix as mixing vectors, and it and `plot_pdf_fits` formed activations from the raw data with no mean removal, no sphere and no transpose;
+    `plot_model_comparison` skipped the sphere.
+    They now plot the model's own sensor maps and sources (what `get_sensor_mixing_matrix` and `transform` return), checked against those accessors on a real fit.
+    `load_results` also reads a rank-reduced fit's zero-padded sphere, which it used to reject.
+- **`AMICA_NumPy` rejects unknown and unsupported keyword arguments** (issue #346, epic #324 Phase 14).
+  `AMICA_NumPy(**kwargs)` used to forward every keyword into a params dict read with `params.get(...)`,
+  so a typo (`max_iters=50`) or an option the legacy backend does not implement (`keep_best=True`)
+  constructed silently and had no effect,
+  unlike the PyTorch/MLX constructors, which take explicit keyword parameters and raise `TypeError` on an unknown name.
+  - **Behavior change (legacy NumPy backend only): an unrecognized or unsupported keyword argument raises `TypeError` instead of being silently ignored.**
+    A typo raises `TypeError` naming the offending keyword(s),
+    with a `difflib`-based "did you mean" suggestion when a close match exists.
+    An option implemented on the PyTorch backend (`AMICATorchNG`) but not this one
+    (for example `keep_best`, `device`, `dtype`, the kurtosis-switch schedule)
+    raises `TypeError` naming the option and pointing to `AMICA(backend='torch')`.
+    `n_models`/`n_mix` (`AMICATorchNG`'s spelling of this backend's `num_models`/`num_mix`) get a message naming the correct spelling,
+    and `n_channels` its own message, since this backend, like the `AMICA` wrapper, infers it from the data passed to `fit()`.
+    Every offending keyword in one call is named in a single error, however many different kinds are mixed together.
+  - The three settings this backend spells differently from `AMICATorchNG`
+    (`min_nd`/`maxdecs`/`share_iter`, the canonical spelling a params file already resolves either way)
+    are also accepted as keyword arguments directly,
+    translated to this backend's own attribute name the same way the params-file route translates them.
+    Passing both spellings of the same setting at once raises `TypeError` naming both, rather than picking one silently.
+  - `files`/`data_dim`/`field_dim` (data-location metadata) work as keyword arguments directly, with the same meaning as in `params_file`;
+    a params file and a keyword argument that set one of them to different values raise `TypeError`.
+  - The accepted-keyword set is derived from the same source the params-file routing uses
+    (`_CONSUMED_KEYS`/`_CANONICAL_TO_NUMPY_KEY`),
+    and the unsupported-option list from `AMICATorchNG`'s own constructor signature,
+    so neither can drift from what the constructor actually reads.
+- **The MLX backend gains `AMICATorchNG`'s full surface** (epic #278).
+  With it, the only difference between the raw MLX and PyTorch backends is precision (float32 only on Apple GPUs).
+  - **`transform` and save/load** (issue #287, epic #278 Phase 1):
+    source extraction (`transform`, plus the `get_mixing_matrix`/`get_unmixing_matrix`/`get_sensor_mixing_matrix`/`get_rho` accessors,
+    mirroring `AMICATorchNG`'s issue #24/#27/#142/#223 conventions)
+    and persistence (`state_dict`/`from_state_dict`, plus a device- and framework-agnostic `.npz` `save`/`load`:
+    `config`/`extra` as JSON-encoded scalars, params as native arrays, no torch coupling, no pickle).
+    `transform` derives the unmixing composition from MLX's own `_forward` rather than transcribing torch's tensor layout:
+    MLX's `W` is `(n_models, n, n)`, not torch's `(n, n, n_models)`.
+    Fitting was untouched (a default fit was bit-identical to before this phase).
+  - **`keep_best` best-iterate safeguard** (issue #288, epic #278 Phase 2):
+    `fit` tracks the highest-log-likelihood iterate and, if the run ends more than `_KEEP_BEST_TOL` (1e-9, the same constant as `AMICATorchNG`) below that peak,
+    restores it instead of returning the last iterate.
+    Same name, default (`keep_best=True`) and semantics as the PyTorch backend,
+    including its inactivity under `share_comps` and `do_reject`.
+    `ll_history` is never rewritten; only `final_ll_` and the twelve fitted-parameter arrays roll back.
+    Persisted additively in `state_dict`'s config (a payload without the key loads with the default).
+  - **Outlier rejection, the LLt stash, the EEGLAB export and MIR/PMI** (issue #289, epic #278 Phase 3):
+    the LLt stash (issue #157), filled per block by the E-step (never a second forward pass) and rolled back on a `keep_best` restore;
+    `do_reject` (issue #123's `good_idx` mechanism), with the rejection statistic read from the stash rather than a second forward pass,
+    the NumPy backend's design, ahead of `AMICATorchNG`'s open follow-up to drop its own extra `_sample_ll` pass (issue #298);
+    `model_loglik`/`model_probability` (issue #141);
+    `write_amica_output` (issue #92), a thin adapter over the shared `numpy_impl.load.write_amicaout`;
+    and `mir`/`pmi` plus `fit(mir_step=...)` waypoints (issue #137), including the #300 fitted-geometry PCA guard.
+    Rejection state (`numrej`/`good_idx`) persists additively in `state_dict`'s `extra`;
+    `mir_history_` stays out of both the `keep_best` snapshot and `state_dict` (a diagnostic trajectory, not a fitted parameter).
+    A default fit (`do_reject` off, `mir_step=0`) was unaffected, verified bit-identical to the code before this phase,
+    and MLX and PyTorch reject the same sample set on the same real data and configuration.
+    `write_amica_output` also gained `state_dict`'s two-layer degenerate/non-finite refusal guard, on both the MLX and PyTorch backends:
+    a caller using either backend class directly could previously write a NaN model to disk silently.
+  - **`variance_order`** (issue #92, the epic's polish round): the EEGLAB back-projected-variance component order,
+    validated on real data against a float64 `AMICATorchNG` twin holding identical fitted parameters
+    (the component order matches exactly on a configuration with non-degenerate variance gaps).
+
+### MNE wrapper
+
+- **`AMICAICA.apply` restores the PCA residual of rank-reduced fits** (issue #322).
   **Behavior change for `pcakeep`/`pcadb` and rank-deficient fits:**
   `AMICAICA.fit` now computes the full orthonormal PCA basis once
   (`pca_components_`, `n_channels x n_channels`, with `pca_explained_variance_`),
@@ -402,37 +472,58 @@ Release notes are also published on the
   pass `n_pca_components=ica.n_components_` to `apply` for the reference's rank-reduced reconstruction.
   Sources, component maps and the log-likelihood are unchanged, and full-rank fits export bit-identically.
   `to_mne_ica` logs the residual's dimension and the opt-out at INFO.
-  Recorded in ADR 0005 and `docs/guides/amica-differences.md`.
-- **MLX backend: explicit `pcakeep`/`pcadb`** (issue #323, epic #324 Phase 1).
-  `AMICAMLXNG` gained `pcakeep` and `pcadb` with `AMICATorchNG`'s names, defaults (`None`), position, validation and precedence.
-  They go through the shared `pamica.rank` policy, so all three array backends keep the same rank and build the same sphere
-  (cross-backend test on the bundled sample: torch vs NumPy sphere within 1e-10 relative, MLX within float32 rounding).
-  `fit(mir_step > 0)` gained the same upfront reduction gate and message as the PyTorch backend.
-  Both parameters persist additively in `state_dict()["config"]`:
-  a payload written before this change loads with `None`, and there is no `format_version` bump.
-- **Behavior change: invalid `pcakeep`/`pcadb` now raise `ValueError` at construction on every backend.**
-  `pcakeep` must be an integer of at least 1 (a `bool` or a float is rejected) and `pcadb` a finite number greater than 0;
-  a value assigned to the attribute after construction fails at fit time.
-  The PyTorch and NumPy backends used to accept these silently:
-  `pcakeep=-3` sliced from the end and fitted 29 of 32 sources on the bundled sample, `pcakeep=2.7` truncated to 2,
-  and `pcakeep=0` or `pcadb <= 0` ran to a degenerate `nan_ll` fit.
-  Because construction validates, a saved PyTorch model whose config carries such a value
-  (only possible before this change) now fails to load with the same `ValueError`.
-  Setting both stays valid: `pcakeep` takes precedence and `pcadb` is ignored (one INFO log line),
-  as in the reference, which parses `pcadb` but never uses it.
-  `state_dict` now stores both as plain `int`/`float`,
-  so a numpy-scalar request survives `AMICA.save`/`load` (whose `weights_only` load refuses numpy scalars).
-- **Behavior change: `pcakeep`/`pcadb` with `do_sphere=False` are ignored with one warning.**
-  No backend reduces without sphering, as in the reference, which keeps every dimension there (amica15.f90:527).
-  The request used to be dropped silently, and the PyTorch `mir_step` gate still refused it.
-  Every backend now logs one WARNING at construction, and the gate no longer counts it as a reduction request.
-- **Behavior change: `mir_step` no longer rejects `pcakeep >= n_channels`.**
-  The PyTorch backend's upfront gate refused any explicit `pcakeep`,
-  including the bundled `input.param`'s `pcakeep 32` on the 32-channel sample, which reduces nothing;
-  `AMICA.from_params_file("input.param").fit(X, mir_step=1)` raised.
-  The gate now rejects only a real request (`pcakeep` below the channel count, or any `pcadb`, while sphering),
-  identically on the PyTorch and MLX backends.
-- **Fix: refits and best-of-N restarts after a rank reduction** (PyTorch and MLX backends).
+  Recorded in ADR 0005 and the [differences guide](guides/amica-differences.md#amicaicaapply-restores-the-pca-residual-issue-322).
+
+### Persistence and exports
+
+- **Saved models convert to the component-row layout** (issue #334).
+  The PyTorch `state_dict` is now `format_version` 4 and the MLX save format 2.
+  An older save loads unchanged in content, converted without loss, unless `share_comps` had merged components:
+  such a save raises `ValueError` asking for a refit, because its merges were computed under the old semantics.
+- **`AMICA.save` format version 2 records the backend** (issue #313).
+  `AMICA.save` records the backend in `wrapper["backend"]`, and `AMICA.load` restores the model on that backend.
+  An MLX model's numpy arrays are stored as CPU tensors of the same dtype, so the file still loads with `torch.load(weights_only=True)`.
+  Version 1 files, written before this change, still load (always as PyTorch models),
+  and both versions go through the component-row conversion and refusal above.
+  Loading an MLX file needs MLX installed and `device=None`.
+  - **Fix:** a numpy scalar in the backend's config or fit record (for example `fit(X, seed=np.int64(42))`) is now saved as the equivalent Python number.
+    `AMICA.save` used to write such a file, which `AMICA.load` then refused (the `weights_only` unpickler rejects numpy scalars).
+    Any other value that loading could not read back now raises `TypeError` at save time.
+- **Additive fields in the backend saves.**
+  PyTorch and MLX saves store `rholrate_cap` (issue #339), a payload without it loading with the ceiling equal to its saved `rholrate`.
+  MLX saves gain `pcakeep`/`pcadb` in `state_dict()["config"]` (issue #323), a payload without them loading with `None`, and no `format_version` bump.
+  Both backends store `pcakeep`/`pcadb` as plain `int`/`float`, so a numpy-scalar request survives `AMICA.save`/`load`.
+  Loading a PyTorch `state_dict` or an MLX save refuses a missing or non-finite learning rate with a `ValueError` naming the field.
+- **EEGLAB export: the `A` file is in the reference's layout for any number of models** (issue #334).
+  It is the reference's `A(nw, num_comps)` in column-major order
+  (EEGLAB's `loadmodout15.m` ignores it; single-model files are byte-identical to before).
+  `pamica.numpy_impl.data.load_results` reads it in that layout
+  and refuses a multi-model directory written by an earlier version, whose `A` does not invert the `W` beside it;
+  write such a directory again from the fitted or reloaded model.
+- **Fix: the EEGLAB export wrote an asymmetric sphere transposed** (issue #336, epic #324 Phase 10).
+  `write_amicaout` (`pamica/numpy_impl/load.py`), the shared writer called from `write_amica_output` on
+  `AMICATorchNG`, `AMICAMLXNG` and the `AMICA` wrapper, and from the NumPy backend's own `_write_results`,
+  wrote the square sphere matrix `S` in C order,
+  while the Fortran reference and both readers (EEGLAB's `loadmodout15.m` and pamica's `loadmodout`) read it column-major.
+  The default symmetric zero-phase component analysis (ZCA) sphere is its own transpose to about 1e-17,
+  so the bug moved only that many bytes there;
+  with `do_approx_sphere=False` the sphere is genuinely asymmetric, and the exported sphere came back exactly transposed
+  (measured on the bundled sample, torch, 3 iterations:
+  before the fix `max|S_loaded - S| = 0.51`, `max|S_loaded - S.T| = 0.0`;
+  after, `max|S_loaded - S| = 0.0`, `max|S_loaded - S.T| = 0.51`).
+  `S` is now written column-major in both the square and rank-reduced branches,
+  and `load_results` reads a square sphere the same way.
+  **Action needed for existing output:** a full-rank directory written with `do_approx_sphere=False`
+  by an earlier pamica holds a C-order `S`.
+  EEGLAB always read that transposed (this fix does not change EEGLAB's own reading, only pamica's),
+  and pamica's corrected `loadmodout`/`load_results` now also read it transposed, with no error raised.
+  Regenerate any such directory by re-running the fit and `write_amica_output` again;
+  there is no on-disk version marker to detect the old layout, and this repository carries no compatibility shim to read it automatically.
+  Directories from the default (symmetric) sphere and from a rank-reduced (`pcakeep`) fit are unaffected.
+
+### Other fixes
+
+- **Refits and best-of-N restarts after a rank reduction** (PyTorch and MLX backends).
   A rank reduction, explicit or automatic (`mineig`/`mineig_rel`, for example on Maxwell-filtered MEG),
   shrinks the model's `n_channels` to the kept rank, and the next fit validated its data against that shrunk count.
   A second `fit()` on the same instance, and the second restart of any `n_restarts > 1` fit,
@@ -440,125 +531,35 @@ Release notes are also published on the
   Every fit now starts from the constructor's input channel count,
   including a fit on a model reloaded from `state_dict`/`save`.
   The NumPy backend was not affected.
-- **Phase 3 of epic #324: shared params-file reader for every backend (issue #304).**
-  `pamica/fortran_params.py` gains `read_params_file`, the single params-file entry point
-  every backend now uses.
-  It content-sniffs JSON vs. the literal Fortran `input.param` text and returns pamica's
-  canonical keys either way.
-  A JSON file's own alias spellings (`min_grad_norm`, `max_decs`, `numrej`, `num_mix_comps`,
-  `share_int`) are translated to the canonical/constructor names via one table,
-  `JSON_ALIAS_TO_CANONICAL`;
-  a file carrying both an alias and its canonical key raises `ValueError` naming both.
-  `writestep`/`do_history`/`histstep` moved from `FORTRAN_UNSUPPORTED_KEYS` to translated
-  (identity) keys -- the legacy NumPy backend already implements periodic on-disk
-  checkpointing under these names, and the reader now translates what any backend supports
-  rather than only what its one production caller (the PyTorch wrapper) did;
-  torch/MLX have no matching mechanism yet (issue #312).
-  - **Behavior change:** `AMICA.from_params_file` now applies `sample_params.json`'s own
-    `max_decs`/`min_grad_norm`/`share_int` settings (as `maxdecs`/`min_nd`/`share_iter`)
-    instead of only naming them in the "not applied" warning.
-    Their raw JSON spelling previously matched neither a named `fit()` parameter nor an
-    `AMICATorchNG` keyword, so they were only named in the "not applied" warning rather
-    than actually applied.
-  - **Behavior change (legacy NumPy backend):** `AMICA_NumPy(params_file=...)` now accepts
-    the literal Fortran `input.param` text format, not just JSON -- previously a non-JSON
-    file raised a raw `json.JSONDecodeError`.
-    A params-file setting this backend does not consume is now named in one
-    `logger.warning` instead of silently vanishing.
-    The NumPy CLI (`python -m pamica.numpy_impl.cli`) accepts both formats too, through
-    the same reader, instead of its own separate `json.load`.
-  - **Breaking change (legacy NumPy backend):** `AMICA_NumPy.from_json_file` is renamed to
-    `from_params_file` (matching the PyTorch wrapper's classmethod name, and now accepting
-    both formats), with no alias left behind.
-  - **Breaking change (legacy NumPy backend):** `AMICA_NumPy(pdftype=...)` with anything
-    other than `0` now raises `NotImplementedError` at construction -- this backend
-    implements only the generalized-Gaussian source density, and previously silently
-    ignored the setting (`pdftype` is read but never consulted by the fit path).
-    `numpy_impl/params.json`'s bundled default `pdftype` changed `1` -> `0` to match;
-    since the value was never read, no previously-passing fit's numerics change.
-  - `validate_implementations.py`'s own JSON-schema-to-Fortran-keyword alias table
-    (`_FORTRAN_ALIASES`) is now composed from the two shared tables (`JSON_ALIAS_TO_CANONICAL`
-    then `PAMICA_KEY_TO_FORTRAN_KEY`) instead of one hand-maintained entry, and its
-    `max_decs` special case is gone -- `load_sample_data` reads through `read_params_file`,
-    so canonical keys reach `run_pytorch_amica`'s `ng_kwargs` automatically.
-- **Epic #278 polish round: audit-driven fixes ahead of merge to `dev`.**
-  `AMICAMLXNG` gained `variance_order` (issue #92), the EEGLAB
-  back-projected-variance component order, closing the one accessor gap the
-  epic's feature-parity audit found in an otherwise-complete Phase 3
-  (validated on real data against a float64 `AMICATorchNG` twin holding
-  identical fitted parameters: the component order matches exactly on a
-  config with non-degenerate variance gaps). The audit also found several
-  stale/misattributed doc claims, fixed here: `docs/guides/amica-differences.md`
-  now attributes the degenerate-fit refusal to the `AMICA` wrapper rather than
-  the raw PyTorch backend (the raw-backend gap is issue #306), and gained an
-  "Unmapped Fortran keywords" section pointing to `fortran_params.py`'s
-  `FORTRAN_UNSUPPORTED_KEYS` as the enumeration, naming three keywords dead in
-  the reference itself (`filter_length`/`dft_length`/`decwindow`), and
-  recording the `do_rho`-vs-`pdftype` divergence explicitly; `AGENTS.md` and
-  `.context/progress_summary.md` no longer claim `validate_implementations.py`
-  covers the NumPy/MLX backends (it is torch-vs-Fortran only; extending it is
-  issue #315); `.context/feature_parity.md` and `.context/progress_summary.md`
-  no longer claim the runtime-vs-Fortran benchmark is unmeasured or that issue
-  #15 (save/load and `plot_components` test coverage) is open, both stale
-  since earlier work landed; and `fortran_params.py`'s unsupported-keys table
-  no longer claims `writestep`/`do_history`/`histstep` have no pamica
-  equivalent -- they are implemented on the legacy NumPy backend, just not
-  yet on torch/MLX (issue #312). Also aligned the legacy NumPy backend's
-  inert `pdftype` constructor default to 0, matching torch/MLX (the value is
-  never read, so this is a documentation-equivalent surface fix, not a
-  behavior change).
-- **MLX backend: outlier rejection, LLt stash, EEGLAB export, MIR/PMI**
-  (issue #289, epic #278 Phase 3 -- see the polish-round entry above for the
-  `variance_order` accessor gap this phase left open and the epic-completing
-  follow-up). `AMICAMLXNG` gains:
-  the LLt stash (issue #157), filled per-block by the E-step (never a second
-  forward pass) and rolled back on a `keep_best` restore; `do_reject`
-  (issue #123's `good_idx` mechanism), with the rejection statistic read FROM
-  the stash rather than a second forward pass -- the NumPy backend's design,
-  pre-empting `AMICATorchNG`'s open follow-up to drop its own extra
-  `_sample_ll` pass (issue #298); `model_loglik`/`model_probability`
-  (issue #141); `write_amica_output` (issue #92), a thin adapter over the
-  shared `numpy_impl.load.write_amicaout` with MLX's `W` transposed from
-  `(n_models, n, n)` to the writer's `(nw, nw, num_models)` contract; and
-  `mir`/`pmi` plus `fit(mir_step=...)` waypoints (issue #137), including the
-  #300 fitted-geometry PCA guard. `do_reject`/rejection state (`numrej`/
-  `good_idx`) persists additively in `state_dict`'s `extra` (`extra.get`
-  fallback for pre-Phase-3 payloads); `mir_history_` stays out of both the
-  `keep_best` snapshot and `state_dict` (a diagnostic trajectory, not a
-  fitted parameter). A default fit (`do_reject` off, `mir_step=0`) is
-  unaffected, verified bit-identical to the epic tip before this phase.
-  Cross-backend agreement (same real data/config, MLX vs PyTorch reject the
-  same sample set) is the evidence for the stash-based design decision.
-  `write_amica_output` also gained `state_dict`'s two-layer degenerate/
-  non-finite refusal guard, on **both** the MLX and PyTorch backends: a
-  caller using either backend class directly (bypassing the `AMICA`
-  wrapper's own usability gate) could previously write a NaN model to disk
-  silently.
-- **MLX backend: `keep_best` best-iterate safeguard** (issue #288, epic #278
-  Phase 2). `AMICAMLXNG` gained the #51 best-iterate restore: `fit` now tracks
-  the highest-log-likelihood iterate and, if the run ends more than
-  `_KEEP_BEST_TOL` (1e-9, same constant as `AMICATorchNG`) below that peak,
-  restores it instead of returning the last iterate. Same name, default
-  (`keep_best=True`) and semantics as the PyTorch backend, including the
-  `share_comps` interaction (a merge changes the parameter count, so the
-  safeguard is inactive under sharing -- `do_reject` joined that exclusion
-  when it landed in Phase 3, see above). `ll_history` is never rewritten; only
-  `final_ll_` and the twelve fitted-parameter arrays roll back. Persisted
-  additively in `state_dict`'s config (no format_version bump -- a Phase-1-era
-  payload without the key loads with the default).
-- **MLX backend: `transform` and save/load** (issue #287, epic #278 Phase 1).
-  `AMICAMLXNG` gained source extraction (`transform`, plus the
-  `get_mixing_matrix`/`get_unmixing_matrix`/`get_sensor_mixing_matrix`/
-  `get_rho` accessors, mirroring `AMICATorchNG`'s issue #24/#27/#142/#223
-  conventions) and persistence (`state_dict`/`from_state_dict`, plus a
-  device- and framework-agnostic `.npz` `save`/`load` -- `config`/`extra` as
-  JSON-encoded scalars, params as native arrays, no torch coupling, no
-  pickle). `transform` derives the unmixing composition from MLX's own
-  `_forward` rather than transcribing torch's tensor layout: MLX's `W` is
-  `(n_models, n, n)`, not torch's `(n, n, n_models)`. Fitting is untouched
-  (`_fit_once` and its call graph are unmodified; a default fit is
-  bit-identical to before this phase). Remaining MLX gap -- outlier rejection
-  + LLt/MIR (Phase 3, #289) -- is tracked under epic #278.
+- **Tests no longer make a full clone shallow** (issue #343).
+  Tests that load historical code ran `git fetch origin <sha> --depth 1` to reach the pinned commit;
+  in a full clone that records a shallow boundary, after which `git gc` can prune history.
+  Every such test now goes through `pamica/tests/pre_change.py`, which only reads the repository:
+  when the pinned commit is missing it fails under `CI` and otherwise skips,
+  naming the command that fetches it (`git fetch origin <sha>`, or `git fetch --unshallow origin` in a shallow clone).
+  `pamica/tests/test_pre_change_loader.py` runs the loader behind a logging `git` wrapper and asserts that nothing is fetched.
+
+### Removed
+
+- **Dead legacy code in `pamica.numpy_impl.pdf`** (issue #352).
+  `choose_pdf_type`, which nothing called, is removed,
+  and `compute_pdf` loses its `pdftype` argument and the branches for three legacy densities no backend fits:
+  `compute_pdf(y, rho)` draws the generalized Gaussian, the only density the NumPy backend fits,
+  and every existing call already used it.
+
+### Documentation
+
+- **The documentation describes the finished epic** (issue #352, epic #324 Phase 16).
+  The concept pages walk one iteration in the reference's order
+  (E-step, the likelihood-decrease response and the stopping checks, the exit before any update, then the update,
+  with the Newton start, the A-freeze windows and the `doscaling` rescale),
+  and the algorithm-flow figure shows the checks before the update.
+  The API pages no longer render docstring lines that began with an issue number as headings,
+  and the entry pages give the PyPI install.
+  During epic #278's polish round the differences guide gained its
+  [Unmapped Fortran keywords](guides/amica-differences.md#unmapped-fortran-keywords) section,
+  which names three keywords that are dead in the reference itself (`filter_length`/`dft_length`/`decwindow`)
+  and records the `do_rho`-vs-`pdftype` divergence.
 
 ## 0.3.3
 

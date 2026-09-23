@@ -392,9 +392,11 @@ class _UpdateStep(NamedTuple):
 class AMICAMLXNG:
     """MLX natural-gradient EM backend, full torch-equivalent surface (#76/#81, epic #278).
 
-    Parameters mirror the subset of :class:`AMICATorchNG` that is supported;
-    the same ``seed`` produces the same initial parameters as the PyTorch/NumPy
-    backends, so cross-backend equivalence is testable.
+    Parameters are :class:`AMICATorchNG`'s, with the same names, defaults and
+    validation, except ``device`` and ``dtype``: MLX runs on its default
+    device (the Apple GPU) in float32 only. The same ``seed`` produces the same
+    initial parameters as the PyTorch/NumPy backends, so cross-backend
+    equivalence is testable.
 
     The convergence-stop parameters (issue #248) carry AMICATorchNG's names,
     defaults and semantics exactly, so the two backends stop on the same
@@ -414,8 +416,8 @@ class AMICAMLXNG:
         regardless of ``use_grad_norm``. Under the shipped defaults
         ``"grad_norm"`` shadows ``"grad_norm_floor"`` -- see AMICATorchNG's
         ``use_grad_norm`` docstring, whose precedence note applies verbatim.
-        ``min_nd`` is not reachable on small recordings in any backend (issue
-        #218); the Fortran-faithful default is kept rather than retuned.
+        ``min_nd`` is not reachable on small recordings in any backend
+        (issue #218); the Fortran-faithful default is kept rather than retuned.
 
     All three checks require two log-likelihood values, so none can fire on the
     first iteration (Fortran's ``if (iter > 1)``, amica15.f90:1051).
@@ -465,9 +467,10 @@ class AMICAMLXNG:
         Precondition the ``A``/``W`` natural gradient with the approximate
         Hessian from iteration ``newt_start`` on (Fortran ``do_newton``: the
         2x2 solve and its positive-definiteness guard at amica15.f90:1718-1741,
-        the ramp and fallback at :1803-1816). Natural gradient alone plateaus
-        short of the Fortran solution; the Newton step is what closes the gap.
-        OFF by default, and every accumulator it needs is gated on it, so a
+        the ramp and fallback at :1803-1816), which converges faster near the
+        optimum. OFF by default, as in the reference's compiled default (the
+        bundled reference ``input.param`` turns it on), and every accumulator
+        it needs is gated on it, so a
         default fit is bit-for-bit what it was before #264.
     ``newt_start`` (20)
         Iteration at which the Newton step switches on (natural gradient runs
@@ -566,8 +569,8 @@ class AMICAMLXNG:
     ``n_restarts`` (1)
         Number of independent fits to run from different seeds, keeping the one
         with the highest ``final_ll_``. ``1`` (the default) bypasses the restart
-        machinery entirely, so a default fit is bit-for-bit what it was before
-        #198. ``n_restarts > 1`` requires a base ``seed`` (or explicit
+        machinery entirely, so a default fit is bit-for-bit what it was
+        before #198. ``n_restarts > 1`` requires a base ``seed`` (or explicit
         ``restart_seeds``) so the winner can be reproduced, and costs
         ``n_restarts`` times as long (restarts run serially). This is a pamica
         extension: Fortran has no search over seeds. See
@@ -3458,8 +3461,8 @@ class AMICAMLXNG:
     def get_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """True mixing matrix of model ``model_idx``: the reference's
         ``A(:, comp_list(:, h))``, i.e. that model's component rows of the
-        stored ``A`` transposed (issue #24 convention; issue #334 layout; issue
-        #287 port of ``AMICATorchNG.get_mixing_matrix``)."""
+        stored ``A`` transposed (issue #24 convention; issue #334 layout;
+        issue #287 port of ``AMICATorchNG.get_mixing_matrix``)."""
         if self.A is None or self.comp_list is None:
             raise RuntimeError(
                 "AMICAMLXNG.get_mixing_matrix() requires a fitted model; call "
@@ -3565,8 +3568,8 @@ class AMICAMLXNG:
         """Model ``model_idx``'s center ``c`` in sphered space, shape
         ``(n_channels,)`` (port of ``AMICATorchNG.get_model_center``).
 
-        The per-model offset :meth:`transform` subtracts after sphering (issue
-        #27). Identically zero for a single-model fit, since the ``c`` update
+        The per-model offset :meth:`transform` subtracts after sphering
+        (issue #27). Identically zero for a single-model fit, since the ``c`` update
         is gated to ``n_models > 1``. Returned as an independent float64 copy
         of the stored float32 values.
         """
@@ -3691,8 +3694,8 @@ class AMICAMLXNG:
         """Whether the explicit ``pcakeep``/``pcadb`` asks to fit fewer than
         ``n_channels`` dimensions (port of
         ``AMICATorchNG._pca_reduction_requested``;
-        both delegate to :func:`pamica.rank.pca_reduction_requested`, issue
-        #323).
+        both delegate to :func:`pamica.rank.pca_reduction_requested`,
+        issue #323).
 
         ``n_channels`` is the channel count of the data being fitted, not
         ``self.n_channels``, which :meth:`_preprocess` shrinks to the kept
@@ -3726,7 +3729,7 @@ class AMICAMLXNG:
         """Mutual Information Reduction (issue #137) of this model's unmixing
         on ``X``.
 
-        Composes the full raw-data-to-sources transform ``W_fort @ sphere``
+        Composes the linear part of the raw-data-to-sources transform, ``W_fort @ sphere``
         -- i.e. ``get_unmixing_matrix(model_idx) @ sphere`` -- and delegates
         to :func:`pamica.metrics.mir`. MIR is shift-invariant, so the
         data-space mean/``c`` centering :meth:`transform` applies is
@@ -3751,8 +3754,8 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted, or the fit ended degenerate (issue
-            #306).
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306).
         ValueError
             If ``X`` is not a 2D array of the fitted input channel count, or
             if the fitted sphere is rank-reduced (non-square): whether from
@@ -3805,8 +3808,8 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted, or the fit ended degenerate (issue
-            #306), both via :meth:`transform`.
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306), both via :meth:`transform`.
         ValueError
             If ``X`` is not a 2D array of the fitted input channel count
             (via :meth:`transform`).
@@ -3848,8 +3851,8 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted, or the fit ended degenerate (issue
-            #306).
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306).
         ValueError
             If ``X`` is not a 2D array of the fitted input channel count, or
             contains non-finite (NaN/Inf) values.
@@ -3864,8 +3867,8 @@ class AMICAMLXNG:
 
     def _model_loglik_unchecked(self, X: np.ndarray) -> np.ndarray:
         """Core ``Lht`` computation for :meth:`model_loglik`, with no
-        degenerate-fit guard or shape validation of its own (issue #306 PR
-        #329 review; port of ``AMICATorchNG._model_loglik_unchecked``):
+        degenerate-fit guard or shape validation of its own (issue #306
+        PR #329 review; port of ``AMICATorchNG._model_loglik_unchecked``):
         :meth:`model_loglik` and :meth:`model_probability` each do their own
         single guard + shape check, with their own action wording, then
         both call this -- so the guard no longer runs twice on a
@@ -3909,8 +3912,8 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted, or the fit ended degenerate (issue
-            #306).
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306).
         ValueError
             If ``X`` is not a 2D array of the fitted input channel count, if
             ``X`` is non-finite, if every model underflows to ``-inf``
@@ -3954,8 +3957,8 @@ class AMICAMLXNG:
         order. Single-model output is byte-compatible with the Fortran
         reference.
 
-        Also writes ``LLt`` (the per-sample/per-model log-likelihood, issue
-        #155) for a model that was just :meth:`fit` in this process, from the
+        Also writes ``LLt`` (the per-sample/per-model log-likelihood,
+        issue #155) for a model that was just :meth:`fit` in this process, from the
         stash the training E-step filled (issue #157) -- so, exactly as in
         the reference, ``LLt`` is the E-step of the returned iterate: one
         M-step older than the ``W``/``A`` written beside it after a fit that ran

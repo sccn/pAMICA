@@ -36,6 +36,8 @@
       (`stop_reason` nan_ll/singular_ll) as usable. `fit` sets `is_fitted_` only on a converged fit
       and exposes `converged_`/`stop_reason_`; `transform`/`get_mixing_matrix`/`get_unmixing_matrix`/
       `save` raise a clear degenerate error (mirroring `state_dict`) instead of returning NaN sources.
+      Extended to the raw backends' accessors (#306) and to non-finite steps and updates
+      (`nan_direction`/`nan_params`, #339).
 - [x] Best-iterate safeguard (issue #51): `AMICATorchNG.fit` returns the highest-LL iterate
       (`keep_best`, `final_ll_`), not the last, so a late Newton-fallback overshoot no longer leaves
       the model below a peak it reached. Root cause was return-last, not a bad basin (the sole
@@ -44,10 +46,11 @@
       `.context/issue-51/`.
 - [x] Component sharing (issue #60): `share_comps` multi-model reassignment ported to
       `AMICATorchNG` (de-sphered cosine-similarity merge, `share_start`/`share_iter`/`comp_thresh`
-      schedule). OFF by default so single-model (#24)/default multi-model (#27) parity is
-      byte-for-byte. No bit-exact oracle (reference `Spinv2` metric is dead code, like #26);
-      behavior-validated. See `tests/torch_tests/test_ng_sharing.py`. The A-freeze is not part of
-      sharing: it is the reference's schedule, applied to every fit (ADR 0008, #345).
+      schedule), on all three backends. OFF by default. The reference's scan never merges
+      (`Spinv2` is dead code, like #26), but since #334 (component-row `A`, ADR 0007) the update
+      from a merged `load_comp_list` state matches the binary to float64 round-off. See
+      `tests/torch_tests/test_ng_sharing.py` and `tests/test_component_rows.py`. The A-freeze is
+      not part of sharing: it is the reference's schedule, applied to every fit (ADR 0008, #345).
 
 ### Priority 3: Testing & validation
 - [x] Real-data test suite exercising the PyTorch backend end-to-end (issue #7) - Phase 1, issue #10:
@@ -55,7 +58,7 @@
 - [x] Integration tests comparing against Fortran outputs (`tests/torch_tests/`) - Phase 1, issue #10
 - [ ] Numerical-stability regression tests (mincond/minlog/maxdble/mineig)
 - [ ] Edge cases (single channel, single sample)
-- [ ] `AMICA.save`/`load` and `plot_components` coverage (issue #15)
+- [x] `AMICA.save`/`load` and `plot_components` coverage (issue #15, closed)
 - [x] Performance benchmark: NG runtime vs Fortran binary (#77/#84): CUDA float64 ~4.5x over a
       16-thread CPU; MLX ~7x on Apple Silicon; runtime criterion met (see below)
 
@@ -73,6 +76,16 @@
 - [x] No NaN/Inf during optimization (degenerate-fit contract #50)
 - [x] Runtime within 2-3x of Fortran (met/exceeded: CUDA float64 ~4.5x faster, MLX ~7x, #77/#84)
 - [x] Real (non-mock) test suite green
+
+### Epic #324: MLX first-class, end to end (plan of record: `.context/issue-324/plan.md`)
+- [x] Phases 1-14: MLX `pcakeep`/`pcadb` (#323), params-file reader for every backend (#304),
+      wrapper backend selection (#313), raw accessor guards (#306), every backend in
+      `validate_implementations.py` (#315), `doscaling` rows (#333), component rows and sharing
+      (#334), 1-based schedules (#335), column-major sphere export (#336), the reference's
+      iteration order and A-freeze (#339, #345), single-precision constants (#344), strict
+      NumPy options (#346), normalized initial `A` (#341); the PCA residual (#322) on `dev`.
+- [~] Phase 15: re-measure every parity figure (#351).
+- [~] Phase 16: documentation audit against the finished epic (#352).
 
 ## Notes
 - Correctness is defined by parity with the Fortran binary, not by convergence alone.
@@ -96,18 +109,17 @@ will be hosted at `eeglab.org/pyAMICA`.
       and fixed a column-major mixture-param format bug (see [[amica92-eeglab-dropin]] /
       `.context/scratch_history.md`).
 
-### Phase R2: Documentation — content DONE, standup remains
+### Phase R2: Documentation (done)
 - [x] MkDocs Material site + concepts/API/guides, `docs` extra, `docs.yml` Pages
       workflow, and community health files (CONTRIBUTING, CODE_OF_CONDUCT, CITATION.cff)
       built in #97; README de-WIP'd and modernized in #102. `site_url:
       https://eeglab.org/pyAMICA/` (numpy docstrings, git-revision-date fallback).
-- [ ] **Standup (needs the transfer):** deploy Pages at `eeglab.org/pyAMICA` under the
-      sccn org custom domain (`sccn/pyAMICA` project Pages at the `/pamica` subpath).
+- [x] **Standup:** Pages deploy at `https://eeglab.org/pAMICA/` from `sccn/pAMICA`
+      (`mkdocs.yml` `site_url`, `docs.yml`).
 
-### Phase R3: Transfer to github.com/sccn — REMAINS (user)
-- [ ] GitHub repo transfer (preserves issues/PRs/stars/history; auto-redirects old
-      URLs). Post-transfer: update badge/repo URLs (README, CITATION.cff, paper.md),
-      wire up the `eeglab.org/pyAMICA` docs deploy target.
+### Phase R3: Transfer to github.com/sccn (done)
+- [x] The repository lives at `github.com/sccn/pAMICA`; README badges and the docs deploy target
+      point there.
 
 ### Phase R4: JOSS paper — DONE
 - [x] `paper.md` + `paper.bib` (PR #102, #101): summary, statement of need, validation,
@@ -116,10 +128,9 @@ will be hosted at `eeglab.org/pyAMICA`.
       (corresponding), Delorme, Makeig. See [[amica-release-readiness]].
 
 ### Remaining before actual JOSS submission (user)
-- [ ] R3 transfer + R2 docs standup (above).
-- [ ] Archived release (Zenodo/Software Heritage) with a matching version.
-- [ ] PyPI distribution name (the name `pyamica`/`pamica` is taken on PyPI; the
-      `import pamica` name is unaffected; deferred to release).
+- [x] R3 transfer + R2 docs standup (above).
+- [x] Archived release (Zenodo DOI badge in README) with a matching version.
+- [x] PyPI distribution: `pamica` is published (0.3.3 is the latest release).
 - [ ] Fill the `paper.md` corresponding-author ORCID / confirm co-author details at
       submission (ORCIDs set: Shirazi 0000-0001-5557-259X, Delorme 0000-0002-0799-3557,
       Makeig 0000-0002-9048-8438).

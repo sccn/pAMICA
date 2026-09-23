@@ -2,14 +2,14 @@
 
 ## Project Context
 **Purpose:** Python implementation of AMICA (Adaptive Mixture Independent Component Analysis) that reproduces the results of the reference Fortran binary. Targets EEG/EMG source separation with GPU/MPS/CPU support.
-**Tech Stack:** Python 3.12+, PyTorch (primary backend, MPS/CUDA/CPU), NumPy/SciPy (legacy backend), matplotlib. Reference implementation is Fortran (`amica17.f90`, `funmod2.f90`).
+**Tech Stack:** Python 3.12+, PyTorch (primary backend, MPS/CUDA/CPU), NumPy/SciPy (legacy backend), matplotlib. Reference implementation is Fortran (`amica15.f90`, the source of the validation binary; `funmod2.f90`).
 **Architecture:** The scikit-learn-style `AMICA` interface wraps `AMICATorchNG` (`torch_impl/core.py`) by default, or `AMICAMLXNG` (`mlx_impl/core.py`) with `backend="mlx"` (#313); `AMICATorchNG` is the natural-gradient EM port that reaches Fortran parity (Newton, exact-EM mixture updates, symmetric-ZCA sphere, Jacobian LL). This is the single PyTorch backend: the earlier Adam/autograd backends (`AMICATorch`, `AMICATorchV2`) and their mixture/optimizer/PDF helper modules were removed in issue #32 as superseded. The legacy NumPy implementation (`numpy_impl/core.py`, retained as `AMICA_NumPy`) carries the same parity fixes plus baralpha and outlier rejection (`do_reject`, ported from the PyTorch backend's `good_idx` mechanism in issue #123). Correctness is defined by parity with the Fortran binary, validated by `validate_implementations.py`.
 
 ## Architecture Map
 ```
 pamica/
 ├── amica.py                 # Main scikit-learn-style AMICA interface (wraps AMICATorchNG, or AMICAMLXNG with backend="mlx")
-├── __init__.py              # Exposes AMICA (PyTorch), AMICA_NumPy (legacy), numpy_impl, torch_impl
+├── __init__.py              # Exposes AMICA, AMICATorchNG, AMICA_NumPy (legacy), AMICANative, metrics, viz plots
 ├── torch_impl/              # PyTorch backend
 │   ├── core.py              #   Natural-gradient EM port (AMICATorchNG); Fortran-parity, primary backend
 │   └── utils.py             #   Preprocessing (sphering, PCA), device selection
@@ -18,10 +18,19 @@ pamica/
 ├── numpy_impl/              # Legacy NumPy reference (topic-named modules, issue #34)
 │   ├── core.py              #   AMICA_NumPy (incl. inlined Newton); pdf.py, data.py, load.py, viz.py, utils.py, cli.py
 │   └── ...
-├── blocktune.py             # Shared block-size auto-tuner policy (#232, all backends)
-├── restarts.py              # Shared best-of-N restart policy (#198, all backends)
-├── fortran_params.py        # Shared params-file reader (JSON + Fortran input.param, #132/#304) for AMICA.from_params_file, AMICA_NumPy and the NumPy CLI
-├── amica17.f90, funmod2.f90 # Fortran reference source (read-only, for parity)
+├── mne_compat/core.py       # AMICAICA: MNE Raw/Epochs wrapper over AMICA (either backend), to_mne_ica, PCA residual (#322)
+├── native/                  # AMICANative: runs the released Fortran binary as a backend (engine.py, resolver.py)
+├── metrics/, viz.py         # MIR/PMI metrics and backend-agnostic plots
+│   # Shared decisions every array backend calls (.rules/backend_parity.md):
+├── rank.py                  #   numerical rank and pcakeep/pcadb policy (#223, #323)
+├── schedule.py              #   1-based iteration gates: Newton, rejection, share/A-freeze, scalestep (#335, #345)
+├── initialization.py        #   the reference's normalized initial A (#341)
+├── component_layout.py      #   component-row A and legacy-save conversion (#334, ADR 0007)
+├── reference_constants.py   #   the reference's single-precision density constants (#344)
+├── blocktune.py             #   block-size auto-tuner policy (#232)
+├── restarts.py              #   best-of-N restart policy (#198)
+├── fortran_params.py        #   params-file reader (JSON + Fortran input.param, #132/#304) for every backend
+├── amica15.f90, funmod2.f90 # Fortran reference source (read-only, for parity; amica17.f90 is a later GG-only trim)
 ├── sample_data/             # Sample EEG data + Fortran binary (amica15mac)
 └── tests/                   # Tests, incl. tests/torch_tests/ (vs-Fortran parity)
 
@@ -88,11 +97,9 @@ non-GG pdf families (#265, including the adaptive switcher; see `.context/issue-
 ported; source extraction (`transform` and the mixing/unmixing/`rho` accessors) and persistence
 (`state_dict`/`.npz` save-load) landed in epic #278 Phase 1 (#287); the best-iterate safeguard
 (`keep_best`) landed in Phase 2 (#288); outlier rejection, the LLt-stash-backed scoring accessors,
-the EEGLAB export, and MIR/PMI landed in Phase 3 (#289); `variance_order` (the EEGLAB
-back-projected-variance component order) landed in the epic's post-Phase-3 polish round, ahead of
-merge to `dev`, closing the one accessor gap Phase 3 left open -- epic #278 is complete; the
-remaining MLX gap vs the PyTorch backend is none, other than float32-only precision (Apple GPUs
-have no float64).
+the EEGLAB export, and MIR/PMI landed in Phase 3 (#289), and `variance_order` in the polish round.
+With explicit `pcakeep`/`pcadb` (#323) and the wrappers' `backend="mlx"` (#313, epic #324), the only
+remaining MLX gap vs the PyTorch backend is float32-only precision (Apple GPUs have no float64).
 
 ## Key Files
 - **Main interface:** `pamica/amica.py` (thin wrapper over `AMICATorchNG`, or `AMICAMLXNG` with
@@ -118,6 +125,11 @@ have no float64).
   the bundled sample (LL within 3.2e-5, correlation 0.9992, Amari 0.004; rows and bars in
   `docs/guides/validation.md`), pinned by the `AMICA_RUN_FORTRAN`-gated test in
   `test_fortran_param_forwarding.py`.
+- Epic #324 aligned every backend's default fit with the reference, so default trajectories differ
+  from 0.3.3 (changelog warning): the reference's per-iteration order, with the exit before the update
+  and the A-freeze on every fit (ADR 0008), `doscaling` of component rows (ADR 0006), component-row
+  storage (ADR 0007), 1-based schedule gates, a normalized initial `A` and the reference's
+  single-precision constants, each decided once in a shared module (map above).
 - Newton and exact-EM updates are implemented in `AMICATorchNG` and the legacy NumPy `numpy_impl/core.py`
   (both Fortran-faithful). Adaptive PDF (#26) is DONE (all five `pdftype` families + ext-Infomax
   switcher); full multi-model matching (#27) is validated by distributional equivalence.
@@ -131,7 +143,8 @@ correlation ~0.997, > 0.95 gate cleared; root cause in `.context/issue-24/`). Al
 stability (posdef, 0 fallbacks), backend consolidation (#32/#31), NumPy CLI save/load format (#30),
 NG save/load persistence (#36), and the degenerate-fit contract (#50: the `AMICA` wrapper marks a
 degenerate fit unusable via `converged_`/`stop_reason_` and refuses `transform`/`get_*`/`save`,
-instead of returning NaN sources).
+instead of returning NaN sources; since #306 the raw backends refuse their own accessors too, and
+since #339 every backend stops on a non-finite likelihood, direction or parameter before using it).
 
 **Adaptive-PDF selection: DONE (#26).** `AMICATorchNG` now supports all five `amica15.f90`
 source-density families via `pdftype`: 0 generalized Gaussian (default, unchanged), 2 Gaussian,

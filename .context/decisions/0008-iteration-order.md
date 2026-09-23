@@ -50,7 +50,7 @@ Both new reasons are degenerate, like `nan_ll`.
   on a convergence stop the returned parameters are the ones whose likelihood is `ll_history[-1]`,
   and after a restore they are an earlier iterate's, whose likelihood is an earlier `ll_history` entry.
   At `max_iter` the last iteration still takes its update, as in the reference, so there `final_ll_ == ll_history[-1]` is one update behind the returned parameters.
-  A convergence stop no longer runs a share scan, a kurtosis switch, a `mir_history_` waypoint or a rejection pass on its stopping iteration.
+  A convergence stop no longer runs a kurtosis switch, a share scan, a `mir_history_` waypoint or a rejection pass on its stopping iteration.
 - `share_iter` values from 1 to 6, and `share_start` values below 1, that were accepted with sharing off now raise.
   No bundled configuration or parameter file used one.
 - A non-finite value that used to be applied or returned now ends the fit as degenerate:

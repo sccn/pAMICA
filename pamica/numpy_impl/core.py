@@ -69,7 +69,7 @@ The algorithm automatically:
 
 See Also
 --------
-pdf : PDF implementations
+pdf : Generalized Gaussian density for plotting
 utils : Utility functions
 viz : Visualization tools
 cli : Command-line interface
@@ -547,8 +547,8 @@ class AMICA:
 
             ``doscaling`` (True) and ``scalestep`` (1) carry AMICATorchNG's
             names, defaults, validation and semantics (issue #333): each
-            component's mixing vector (a row of its model's stored ``A``
-            block) is rescaled to unit norm, with the matching ``mu``/``beta``
+            component's mixing vector (a row of the stored ``A``, issue #334)
+            is rescaled to unit norm, with the matching ``mu``/``beta``
             rescale, on iterations ``scalestep``, ``2*scalestep``, ...
             counted from 1 (see :meth:`_rescale_components`). ``scalestep`` is
             validated only when ``doscaling`` is on (an integer >= 1, or the
@@ -588,8 +588,9 @@ class AMICA:
             unrecognized name gets one of: the correct name, for
             ``n_models``/``n_mix`` (this backend's own spelling of the same
             setting); an explanation, for ``n_channels`` (inferred from the
-            data passed to :meth:`fit` on every backend, not a constructor
-            keyword on any of them); a name implemented on the PyTorch
+            data passed to :meth:`fit`, here and in the ``AMICA`` wrapper,
+            which builds the raw PyTorch and MLX constructors with it); a
+            name implemented on the PyTorch
             backend but not this one (e.g. ``keep_best``, ``device``,
             ``dtype``), pointing to ``AMICA(backend='torch')``; or a generic
             "unexpected keyword argument" message with a ``difflib``-based

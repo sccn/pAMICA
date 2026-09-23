@@ -2,7 +2,7 @@
 
 Internal status snapshot for the PyTorch AMICA effort. The living source of truth for parity
 status is the **Known Issues** section of `../AGENTS.md`; this file summarizes what has landed and
-what remains as of the v0.1.0 preparation.
+what remains, as of epic #324 (after v0.3.3). User-facing detail is in `docs/changelog.md`.
 
 ## Delivered
 
@@ -41,11 +41,14 @@ what remains as of the v0.1.0 preparation.
   matched 100-iter budget. Single-model #24 parity stays bit-exact (monotone => no restore). See
   ADR 0003.
 
-### Degenerate-fit contract (issue #50)
-- The `AMICA` wrapper no longer treats a degenerate fit (`stop_reason` nan_ll / singular_ll) as
-  usable. `fit` sets `is_fitted_` only on a converged fit and exposes `converged_` /
-  `stop_reason_`; `transform` / `get_mixing_matrix` / `get_unmixing_matrix` / `save` raise a clear
-  degenerate error instead of returning NaN sources.
+### Degenerate-fit contract (issues #50, #306, #339)
+- The `AMICA` wrapper no longer treats a degenerate fit (`stop_reason` nan_ll / singular_ll /
+  nan_direction / nan_params, or restart_error under best-of-N) as usable. `fit` sets `is_fitted_`
+  only on a non-degenerate stop and exposes `converged_` / `stop_reason_`; `transform` / `get_*` /
+  `write_amica_output` / `save` raise a clear degenerate error instead of returning NaN sources.
+- Since #306 the raw `AMICATorchNG`, `AMICAMLXNG` and `AMICA_NumPy` accessors refuse a degenerate
+  fit too; since #339 every backend stops on a non-finite likelihood, update direction or
+  parameter before using it.
 
 ### Component sharing (issues #60, #334)
 - `share_comps` runs on all three backends. Since #334 (ADR 0007) `A` stores one component per row,
@@ -65,9 +68,20 @@ what remains as of the v0.1.0 preparation.
   seeded through `load_comp_list` matches PyTorch and NumPy to float64 round-off
   (`pamica/tests/test_component_rows.py`, opt-in with `AMICA_RUN_FORTRAN=1`).
 
+### MLX first-class and reference fidelity (epic #324)
+- `AMICA(backend="mlx")` and `AMICAICA(backend="mlx")` run every wrapper feature on MLX (#313);
+  MLX has explicit `pcakeep`/`pcadb` (#323); one params-file reader serves every backend (#304).
+- Default fits on every backend follow the reference more closely, so trajectories differ from
+  0.3.3: the reference's iteration order and unconditional A-freeze (#339, #345, ADR 0008),
+  `doscaling` of component rows (#333, ADR 0006), component-row storage and correct sharing (#334,
+  ADR 0007), 1-based schedule gates (#335), a normalized initial `A` (#341) and the reference's
+  single-precision constants (#344), each decided in one shared module (`schedule.py`,
+  `component_layout.py`, `initialization.py`, `reference_constants.py`, with `rank.py`).
+- `AMICAICA.apply` restores the PCA residual of rank-reduced fits (#322, on `dev`).
+
 ### Structure and infrastructure
 - Module rename into `numpy_impl/` and `torch_impl/` with topic-based names (issue #34); the public
-  import surface (`from pamica import AMICA, AMICA_NumPy, AMICATorchNG`) is stable.
+  import surface (`from pamica import AMICA, AMICA_NumPy, AMICATorchNG, AMICANative`) is stable.
 - UV is the canonical environment (`pyproject.toml` + `uv.lock`); the legacy conda env is retired.
 - CI is live and green on `main`: ruff lint/format, pytest (excluding slow/Fortran-binary parity),
   and a build + clean-env import matrix on Python 3.12 and 3.13. Typos check green.
@@ -78,7 +92,7 @@ what remains as of the v0.1.0 preparation.
   correlation 0.9992, Amari 0.004; rows and bars in `docs/guides/validation.md`), pinned by the
   `AMICA_RUN_FORTRAN`-gated test in `test_fortran_param_forwarding.py`.
 
-## Remaining before / around v0.1.0
+## Remaining
 
 - **Performance benchmark:** DONE. The "runtime within 2-3x of Fortran" success criterion has been
   measured and met/exceeded: CUDA float64 ~4.5x over a 16-thread CPU, MLX ~7x on Apple Silicon
