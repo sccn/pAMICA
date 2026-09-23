@@ -755,11 +755,17 @@ class AMICA:
         ``Spinv`` mapping (amica15.f90:568-578), and the only way to recover
         sensor maps when rank reduction has made the sphere non-square
         (issue #223). Mirrors ``AMICATorchNG.get_sensor_mixing_matrix``.
+
+        ``A`` here is the true mixing matrix, the stored ``A`` transposed: the
+        stored ``W = inv(stored A)`` is itself the transpose of the unmixing
+        (:meth:`get_weights`, issue #24 convention). So the result inverts the
+        spatial filter the sources come from, ``get_weights() @ sphere @ result
+        == I``, and each column is one component's sensor map.
         """
         if self.sphere is None or self.A is None or self.comp_list is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
         self._check_usable("get the sensor mixing matrix")
-        A = self.A[:, self.comp_list[:, model_idx]]
+        A = self.A[:, self.comp_list[:, model_idx]].T
         return self._pinv_sphere() @ A
 
     def get_weights(self) -> np.ndarray:

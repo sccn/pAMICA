@@ -18,6 +18,11 @@ Release notes are also published on the
     and the differences page records two existing divergences:
     `do_sphere=False` fits unscaled data where the reference divides each channel by its standard deviation (issue #328),
     and a second `fit` on the same `AMICA_NumPy` instance continues from the first (related to issue #312).
+  - **Fix:** `AMICA_NumPy.get_sensor_mixing_matrix` returned `pinv(sphere)` times the stored mixing matrix without the transpose the PyTorch and MLX backends apply,
+    so its columns were the rows of the true mixing matrix rather than the components' sensor maps
+    (about 10% away from the PyTorch backend's maps after five iterations on the bundled sample, and not an inverse of `get_weights() @ sphere`).
+    It now matches the PyTorch backend to round-off (4.6e-12 relative), pinned by a cross-backend test.
+    The NumPy backend's fit, `transform`, `get_weights` and EEGLAB export were not affected.
 - **Phase 4 of epic #324: backend selection in `AMICA` and `AMICAICA` (issue #313).**
   `AMICA` and `AMICAICA` gain a `backend` parameter:
   `"torch"` (the default, `AMICATorchNG`, float64 Fortran parity) or `"mlx"` (`AMICAMLXNG`, Apple GPU, float32 only).
