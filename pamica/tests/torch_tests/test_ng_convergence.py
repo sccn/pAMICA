@@ -468,8 +468,11 @@ def test_grad_norm_floor_stop_leaves_wrapper_usable(real_data, tmp_path):
 
 # --- keep_best / do_reject interaction (early stopping must not break them) -
 
-# The genuine-overshoot recipe (real 2-model data, aggressive Newton): it peaks
-# and then stops via the loosened min_dll a couple of iterations later (see
+# The genuine-overshoot recipe (real 2-model data, aggressive Newton). With
+# maxincs=0 and min_dll=1e-8 the min_dll stop fires on the first iteration
+# whose gain is below 1e-8, which on this trajectory is its first likelihood
+# decrease: the overshoot is built into the stop, not left to where a chaotic
+# trajectory happens to end (see
 # test_keep_best_restores_genuine_overshoot_under_min_dll_stop). newt_start
 # counts from 1 since issue #335, so 2 is the trajectory measured as 1 before.
 _OVERSHOOT_KWARGS: dict[str, Any] = dict(
@@ -481,8 +484,8 @@ _OVERSHOOT_KWARGS: dict[str, Any] = dict(
     newtrate=3.0,
     block_size=1024,
     use_min_dll=True,
-    min_dll=1e-4,
-    maxincs=2,
+    min_dll=1e-8,
+    maxincs=0,
     use_grad_norm=False,
 )
 _OVERSHOOT_MAX_ITER = 150
@@ -500,12 +503,16 @@ def test_keep_best_restores_genuine_overshoot_under_min_dll_stop(real_data):
     ``test_write_amica_output_ll_matches_kept_iterate`` (issue #92,
     ``test_amica_ng_wrapper.py``: real 2-model data, aggressive
     ``do_newton``/``lrate``/``newtrate``), combined with a loosened ``min_dll``
-    so the run stops via the NEW ``min_dll`` stop_reason a few iterations
-    after its peak, not via ``max_iter`` and not via a monotone approach to
-    that peak. ``newtrate=3.0`` and the 150-iteration budget were added for
-    issue #333: with ``doscaling`` rescaling components (not stored columns)
-    the old ``newtrate=0.5``/60-iteration recipe runs monotone to
-    ``max_iter``; this one peaks at iteration 70 and stops at 71.
+    so the run stops via the NEW ``min_dll`` stop_reason right after its peak,
+    not via ``max_iter`` and not via a monotone approach to that peak.
+    ``newtrate=3.0`` dates from issue #333: with ``doscaling`` rescaling
+    components (not stored columns) the old ``newtrate=0.5``/60-iteration
+    recipe runs monotone to ``max_iter``. ``maxincs=0``/``min_dll=1e-8`` date
+    from issue #339: the ``min_dll=1e-4``/``maxincs=2`` stop ended wherever
+    three small gains in a row fell, below the peak or at it depending on
+    round-off (it ended at its peak on the macOS CI runner, and in 1 of 12
+    relative data perturbations of 1e-13 here). This one stops on the first
+    likelihood decrease, iteration 14, 1.6e-3 below the peak at 13, in all 12.
     """
     x = real_data[:, :4096]
     ng = _fresh_ng(**_OVERSHOOT_KWARGS, keep_best=True)
@@ -794,7 +801,7 @@ def test_mir_history_survives_keep_best_restore(real_data):
     with ``mir_step=1`` added.
 
     ``mir_step=1`` is load-bearing, not incidental. The ``min_dll``/``maxincs``
-    stop halts one or two iterations past the peak, so with any coarser step
+    stop halts one iteration past the peak, so with any coarser step
     the last waypoint lands *before* the best iterate and the window a
     truncating restore would damage is never sampled -- a restore that dropped
     every waypoint after the best iterate would leave this fixture unchanged

@@ -241,9 +241,11 @@ def test_write_amica_output_ll_matches_kept_iterate(real_data, tmp_path):
     likelihood (review finding, #92)."""
     model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
     # The overshoot recipe of test_ng_convergence.py (same data, block size
-    # and settings, so the same trajectory): it peaks at iteration 70 and stops
-    # via the loosened min_dll at 71. A fixed 60-iteration budget overshot on
-    # the development machine only; on the CI runners that run was monotone.
+    # and settings, so the same trajectory): maxincs=0/min_dll=1e-8 stop it on
+    # its first likelihood decrease (peak at iteration 13, stop at 14). Endings
+    # left to the trajectory (a fixed 60-iteration budget, then
+    # min_dll=1e-4/maxincs=2) overshot on one machine and ended at the peak on
+    # another.
     model.fit(
         real_data[:, :4096],
         max_iter=150,
@@ -252,8 +254,8 @@ def test_write_amica_output_ll_matches_kept_iterate(real_data, tmp_path):
         lrate=0.5,
         newtrate=3.0,
         use_min_dll=True,
-        min_dll=1e-4,
-        maxincs=2,
+        min_dll=1e-8,
+        maxincs=0,
         use_grad_norm=False,
         seed=0,
         block_size=1024,

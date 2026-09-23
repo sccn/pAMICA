@@ -1402,16 +1402,18 @@ def test_keep_best_snapshot_restore_roundtrip():
 
 
 def _multimodel_keep_best(keep_best: bool) -> AMICATorchNG:
-    """The aggressive-Newton overshoot recipe of ``test_ng_convergence.py`` on
-    the same 4096 real samples, so the same trajectory: it peaks at iteration
-    70 and stops via the loosened ``min_dll`` at 71 (``newt_start=2``, counted
-    from 1 since issue #335, is the run measured as 1 before it). A fixed 60-iteration
-    budget without that stop overshot on the development machine only; on the
-    CI runners that run was monotone."""
+    """The aggressive-Newton overshoot recipe of ``test_ng_convergence.py``
+    (``_OVERSHOOT_KWARGS``) on the same 4096 real samples, so the same
+    trajectory: ``maxincs=0``/``min_dll=1e-8`` stop it on its first likelihood
+    decrease, iteration 14, 1.6e-3 below the peak at 13 (``newt_start=2``,
+    counted from 1 since issue #335, is the run measured as 1 before it).
+    Endings left to the trajectory were not portable: a fixed 60-iteration
+    budget, and later a ``min_dll=1e-4``/``maxincs=2`` stop, each overshot on
+    one machine and ended at the peak on another."""
     m = AMICATorchNG(
         n_channels=NW, n_models=2, n_mix=NMIX, seed=0, device="cpu",
         dtype=torch.float64, block_size=1024, do_newton=True, newt_start=2,
-        lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-4, maxincs=2,
+        lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-8, maxincs=0,
         use_grad_norm=False, keep_best=keep_best,
     )  # fmt: skip
     m.fit(_load_real_data()[:, :4096], max_iter=150, verbose=False)
@@ -1474,18 +1476,18 @@ def test_keep_best_inactive_under_reject():
 
     Non-vacuous on both counts: the recipe (the aggressive-Newton overshoot
     recipe of ``test_ng_convergence.py``, ``_OVERSHOOT_KWARGS``, with its
-    loosened ``min_dll`` stop) restores without
-    ``do_reject`` (peak at iteration 70, stop at 71, 1.9e-4 below the peak),
+    first-decrease ``min_dll`` stop) restores without
+    ``do_reject`` (peak at iteration 13, stop at 14, 1.6e-3 below the peak),
     and with ``do_reject`` its own trajectory also ends below an earlier peak
-    (iteration 57, stop at 59, 2.2e-4 below), so a restore would fire if the
-    safeguard were active. The previous config (``lrate=0.1`` natural
+    (the one rejection pass at iteration 6, then peak at 13, stop at 14,
+    9.3e-3 below), so a restore would fire if the safeguard were active. The previous config (``lrate=0.1`` natural
     gradient, 12 iterations) was monotone, so it could not have failed.
     """
     x = _load_real_data()[:, :4096]
     kwargs: dict[str, Any] = dict(
         n_channels=NW, n_models=2, n_mix=NMIX, seed=0, device="cpu",
         dtype=torch.float64, block_size=1024, do_newton=True, newt_start=2,
-        lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-4, maxincs=2,
+        lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-8, maxincs=0,
         use_grad_norm=False, keep_best=True,
     )  # fmt: skip
     plain = AMICATorchNG(**kwargs)

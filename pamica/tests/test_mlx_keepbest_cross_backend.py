@@ -70,7 +70,8 @@ def real_data() -> np.ndarray:
 # independently verified, on MLX too (test_mlx_keepbest.py's module
 # docstring) -- but this module does not rely on that coincidence holding
 # forever, only on the CONTRACT below, which holds regardless. (newtrate=3.0
-# and the 150-iteration budget since issue #333, as in those recipes.)
+# since issue #333 and the first-decrease min_dll stop since issue #339, as in
+# those recipes.)
 _AGGRESSIVE_KWARGS: dict[str, Any] = dict(
     n_models=2,
     n_mix=NMIX,
@@ -81,8 +82,8 @@ _AGGRESSIVE_KWARGS: dict[str, Any] = dict(
     lrate=0.5,
     newtrate=3.0,
     use_min_dll=True,
-    min_dll=1e-4,
-    maxincs=2,
+    min_dll=1e-8,
+    maxincs=0,
     use_grad_norm=False,
 )
 _MAX_ITER = 150
