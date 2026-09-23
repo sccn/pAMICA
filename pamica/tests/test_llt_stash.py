@@ -42,7 +42,7 @@ import torch
 from pamica import AMICA_NumPy
 from pamica.numpy_impl.data import load_data_file
 from pamica.numpy_impl.load import loadmodout
-from pamica.torch_impl.core import AMICATorchNG
+from pamica.torch_impl.core import _KEEP_BEST_TOL, AMICATorchNG
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
 _FDT = SAMPLE_DIR / "eeglab_data.fdt"
@@ -399,10 +399,13 @@ def test_keep_best_restore_rolls_the_llt_stash_back(real_data, tmp_path):
         # never fires; with it the run peaks at iteration 57 of 60.
         newtrate=3.0,
     )
-    if m.stop_reason in AMICATorchNG._DEGENERATE_STOP_REASONS:
-        pytest.skip("aggressive run ended degenerate; not the case under test")
-    if np.isclose(m.ll_history[-1], m.final_ll_):
-        pytest.skip("run was monotone; keep_best restore did not fire")
+    assert m.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS, (
+        "the overshoot recipe ended degenerate: retune it"
+    )
+    assert m.final_ll_ is not None
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
 
     assert m._llt_lt is not None and m._llt_lht is not None
     inv = _llt_invariant(m._llt_lt, m._llt_lt.size, NW)

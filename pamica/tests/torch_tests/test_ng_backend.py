@@ -1446,10 +1446,10 @@ def test_keep_best_returns_within_tol_of_peak():
     assert abs(on.final_ll_ - peak) <= _KEEP_BEST_TOL
     assert on.final_ll_ >= on.ll_history[-1]
 
-    # Make branch coverage visible rather than silently vacuous: if this run did
-    # not overshoot on this platform, the restore branch was not exercised.
-    if peak - on.ll_history[-1] <= _KEEP_BEST_TOL:
-        pytest.skip("the recipe did not overshoot here; restore branch not exercised")
+    # The restore branch must run, or this test is vacuous: fail, not skip.
+    assert peak - on.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
     # It did overshoot, so keep_best strictly beat return-last ...
     assert on.final_ll_ > off.final_ll_
     # ... and the restored parameters really sit at final_ll_ (recompute the

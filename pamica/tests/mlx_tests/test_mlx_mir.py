@@ -29,6 +29,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from pamica.mlx_impl import AMICAMLXNG  # noqa: E402  (after the MLX importorskip)
+from pamica.mlx_impl.core import _KEEP_BEST_TOL  # noqa: E402
 from pamica.metrics import mir as mir_metric  # noqa: E402
 from pamica.metrics import pairwise_mi  # noqa: E402
 
@@ -381,11 +382,13 @@ def test_mir_history_survives_keep_best_restore(real_data):
         keep_best=True,
     )
     m.fit(real_data, max_iter=150, verbose=False, mir_step=1)
-    if m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS:
-        pytest.skip("aggressive run ended degenerate; not the case under test")
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS, (
+        "the overshoot recipe ended degenerate: retune it"
+    )
     assert m.final_ll_ is not None
-    if np.isclose(m.ll_history[-1], m.final_ll_):
-        pytest.skip("run was monotone; keep_best restore did not fire")
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
 
     assert m.mir_history_, "test setup: mir_step recorded nothing"
     final_it = len(m.ll_history) - 1

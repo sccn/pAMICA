@@ -29,6 +29,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from pamica.mlx_impl import AMICAMLXNG  # noqa: E402  (after the MLX importorskip)
+from pamica.mlx_impl.core import _KEEP_BEST_TOL  # noqa: E402
 from pamica.numpy_impl.load import loadmodout  # noqa: E402
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
@@ -158,11 +159,13 @@ def test_written_ll_ends_at_the_keep_best_restored_iterate(real_data):
     )
     m = AMICAMLXNG(n_channels=NW, **kwargs)
     m.fit(real_data, max_iter=150, verbose=False)
-    if m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS:
-        pytest.skip("aggressive run ended degenerate; not the case under test")
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS, (
+        "the overshoot recipe ended degenerate: retune it"
+    )
     assert m.final_ll_ is not None
-    if np.isclose(m.ll_history[-1], m.final_ll_):
-        pytest.skip("run was monotone; keep_best restore did not fire")
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
 
     with tempfile.TemporaryDirectory() as d:
         m.write_amica_output(d)

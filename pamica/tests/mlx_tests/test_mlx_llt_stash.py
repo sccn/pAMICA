@@ -24,6 +24,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from pamica.mlx_impl import AMICAMLXNG  # noqa: E402  (after the MLX importorskip)
+from pamica.mlx_impl.core import _KEEP_BEST_TOL  # noqa: E402
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
 DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
@@ -176,11 +177,13 @@ def test_keep_best_restore_rolls_the_llt_stash_back(real_data):
     torch-backend pin of the same name)."""
     m = AMICAMLXNG(n_channels=NW, **_FORCED_RESTORE_KWARGS)
     m.fit(real_data, max_iter=150, verbose=False)
-    if m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS:
-        pytest.skip("aggressive run ended degenerate; not the case under test")
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS, (
+        "the overshoot recipe ended degenerate: retune it"
+    )
     assert m.final_ll_ is not None
-    if np.isclose(m.ll_history[-1], m.final_ll_):
-        pytest.skip("run was monotone; keep_best restore did not fire")
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
 
     assert m._llt_lt is not None and m._llt_lht is not None
     inv = _llt_invariant(m._llt_lt, m._llt_lt.size, NW)
