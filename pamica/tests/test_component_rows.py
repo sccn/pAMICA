@@ -15,9 +15,10 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
 
 1. every configuration without a merge is byte-identical to the pre-change code
    (the package at commit ``0930c0e`` is loaded from git): one, two and three
-   models, ``doscaling`` and Newton on and off, ``pdftype`` 0 and 1,
-   ``do_reject``; the old ``A`` maps onto the new one through the conversion
-   the persistence layer uses;
+   models, ``doscaling`` and Newton on and off, every ``pdftype``,
+   ``do_reject``, several blocks, a ``keep_best`` restore and best-of-two
+   restarts, each on every backend that supports it; the old ``A`` maps onto
+   the new one through the conversion the persistence layer uses;
 2. the semantics: (a) sources grouped by a real merge share one component map;
    (b) a planted exact duplicate is merged at the default and at a strict
    threshold, and the merge leaves the log-likelihood, ``transform`` and the
@@ -130,10 +131,18 @@ _BYTE_ID_SAMPLES = 4096
 _BYTE_ID_ITERS = 6
 
 
+_ALL = ("torch", "numpy", "mlx")
+# The NumPy backend implements only the generalized-Gaussian density (it raises
+# NotImplementedError for any other pdftype; test_numpy_rejects_other_pdftypes
+# below) and has no keep_best option, so those configurations run on PyTorch
+# and MLX only.
+_NOT_NUMPY = ("torch", "mlx")
+
+
 def _byte_id_configs() -> List[Any]:
-    """``(backend, n_models, cfg)`` params; the NumPy backend supports
-    ``pdftype=0`` only (it raises otherwise), so it gets no ``pdftype=1`` case."""
-    configs = []
+    """``(backend, n_models, cfg)`` params, each configuration on every backend
+    that supports it (see ``_NOT_NUMPY``)."""
+    configs: List[Tuple[str, int, Dict[str, Any], Tuple[str, ...]]] = []
     for n_models in (1, 2):
         for doscaling in (True, False):
             for newton in (False, True):
@@ -145,32 +154,56 @@ def _byte_id_configs() -> List[Any]:
                         f"m{n_models}-{'scale' if doscaling else 'noscale'}-"
                         f"{'newton' if newton else 'ng'}-pdf{pdftype}"
                     )
-                    configs.append((name, n_models, cfg))
+                    configs.append(
+                        (name, n_models, cfg, _ALL if pdftype == 0 else _NOT_NUMPY)
+                    )
+    newton: Dict[str, Any] = dict(do_newton=True, newt_start=2)
     configs += [
         (
             "m2-reject-newton",
             2,
-            dict(do_newton=True, newt_start=2, do_reject=True, rejstart=2, rejint=2),
+            dict(newton, do_reject=True, rejstart=2, rejint=2),
+            _ALL,
         ),
-        ("m3-scale-newton-pdf0", 3, dict(do_newton=True, newt_start=2)),
-        ("m3-noscale-ng-pdf1", 3, dict(doscaling=False, pdftype=1)),
+        ("m3-scale-newton-pdf0", 3, newton, _ALL),
+        ("m3-noscale-ng-pdf1", 3, dict(doscaling=False, pdftype=1), _NOT_NUMPY),
+        # The other fixed density families (n_mix 1 for the single-component
+        # sub-Gaussian cosh+, family 4; see _fit_arrays).
+        ("m1-ng-pdf2", 1, dict(pdftype=2), _NOT_NUMPY),
+        ("m1-ng-pdf3", 1, dict(pdftype=3), _NOT_NUMPY),
+        ("m1-ng-pdf4", 1, dict(pdftype=4), _NOT_NUMPY),
+        # Four blocks of 1024 samples: the per-block accumulation.
+        ("m2-newton-4blocks", 2, dict(newton, block_size=1024), _ALL),
+        # The best-iterate safeguard, with a learning rate high enough that the
+        # log-likelihood falls, so it restores an earlier snapshot of A.
+        # (lrate 1.5: from 2.0 the float32 MLX fit goes non-finite.)
+        ("m2-keepbest-restores", 2, dict(keep_best=True, lrate=1.5), _NOT_NUMPY),
+        # Best-of-two restarts, which re-initializes A and keeps the winner.
+        ("m2-restarts", 2, dict(n_restarts=2), _ALL),
     ]
     return [
         pytest.param(backend, n_models, cfg, id=f"{backend}-{name}")
-        for backend in ("torch", "numpy", "mlx")
-        for name, n_models, cfg in configs
-        if not (backend == "numpy" and cfg.get("pdftype", 0) != 0)
+        for name, n_models, cfg, backends in configs
+        for backend in backends
     ]
+
+
+def test_numpy_rejects_other_pdftypes():
+    """The reason the non-GG byte-identity cases run on PyTorch and MLX only."""
+    for pdftype in (1, 2, 3, 4):
+        with pytest.raises(NotImplementedError, match="pdftype=0"):
+            AMICA_NumPy(num_models=1, max_iter=1, use_tqdm=False, pdftype=pdftype)
 
 
 def _fit_arrays(
     backend: str, cls: Any, n_models: int, cfg: Dict[str, Any], X: np.ndarray, out: Path
 ) -> Dict[str, np.ndarray]:
     """A short fit of ``cls``: its log-likelihood and gradient-norm record and
-    every fitted array, as numpy."""
-    n_mix = 1 if cfg.get("pdftype", 0) == 1 else NMIX
+    every fitted array, as numpy. ``cfg`` overrides the defaults here (one
+    block of the whole slice; ``keep_best`` off on PyTorch and MLX)."""
+    n_mix = 1 if cfg.get("pdftype", 0) in (1, 4) else NMIX
     if backend == "numpy":
-        model = cls(
+        params: Dict[str, Any] = dict(
             num_models=n_models,
             num_mix=n_mix,
             max_iter=_BYTE_ID_ITERS,
@@ -180,8 +213,9 @@ def _fit_arrays(
             do_opt_block=False,
             block_size=_BYTE_ID_SAMPLES,
             writestep=10000,
-            **cfg,
         )
+        params.update(cfg)
+        model = cls(**params)
         model.fit(X)
         ll, nd = model.ll, model.nd
     else:
@@ -192,8 +226,8 @@ def _fit_arrays(
             seed=SEED,
             block_size=_BYTE_ID_SAMPLES,
             keep_best=False,
-            **cfg,
         )
+        kwargs.update(cfg)
         if backend == "torch":
             kwargs.update(device="cpu", dtype=torch.float64)
         model = cls(**kwargs)
@@ -203,6 +237,7 @@ def _fit_arrays(
     names = ["A", "W", "mu", "beta", "alpha", "rho", "gm", "c", "comp_list"]
     if backend != "numpy":
         names.append("pdtype")
+        arrays["final_ll"] = np.asarray(model.final_ll_, dtype=np.float64)
     for name in names:
         arrays[name] = _np(getattr(model, name))
     return arrays
@@ -236,6 +271,8 @@ def test_unshared_fits_are_byte_identical_to_the_column_layout(
     assert not changed, f"results changed: {changed}"
     # Six iterations ran, so no stop fired (the premise of the nd note above).
     assert len(new["ll"]) == _BYTE_ID_ITERS
+    if cfg.get("keep_best"):
+        assert new["final_ll"] != new["ll"][-1], "setup: keep_best restored nothing"
     eps = np.finfo(np.float32 if backend == "mlx" else np.float64).eps
     np.testing.assert_allclose(new["nd"], old["nd"], rtol=float(2 * eps), atol=0)
 
