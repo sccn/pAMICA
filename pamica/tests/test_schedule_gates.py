@@ -679,6 +679,72 @@ def test_numpy_restart_clears_the_small_gain_count_as_the_reference_does(X, tmp_
     assert len(m.ll) == 5
 
 
+# The epic base before issue #339, the last NumPy loop that updated before its
+# restart check.
+_PRE_339 = "5b6ae4f69eacf6aa18002ce336ed904f73438516"
+
+
+def _updates_around_a_restart(base: Any, X: np.ndarray, tmp_path: Path) -> tuple:
+    """Fit ``base`` with a NaN likelihood on iteration 2 inside the restart
+    window, recording the iteration of every ``_update_parameters`` call with a
+    pass-through recorder (it records, then calls the real method with the same
+    arguments). Returns the recorded iterations and the restart count."""
+
+    class _NaNOnTwo(base):
+        def _get_updates_and_likelihood(self):
+            upd = super()._get_updates_and_likelihood()
+            if self.iter == 2:
+                upd["ll"] = float("nan")
+            return upd
+
+    m = _NaNOnTwo(
+        num_models=1,
+        num_mix=NMIX,
+        seed=SEED,
+        block_size=BLOCK,
+        max_iter=5,
+        use_tqdm=False,
+        do_opt_block=False,
+        writestep=10**7,
+        restartiter=10,
+        maxrestarts=3,
+        outdir=str(tmp_path / "out"),
+    )
+    updated: list = []
+    real_update = m._update_parameters
+
+    def record(*args, **kwargs):
+        updated.append(m.iter)
+        return real_update(*args, **kwargs)
+
+    m._update_parameters = record
+    m.fit(X)
+    return updated, m.numrestarts
+
+
+def test_numpy_restart_iteration_applies_no_update(X, tmp_path, tmp_path_factory):
+    """The reference checks for a restart before ``update_params`` and skips
+    the update on a restarting iteration (``startover``, amica15.f90:1115-1122).
+    Since issue #339 the NumPy loop does the same: iteration 2, whose
+    likelihood is NaN, redraws A and applies no update, while every other
+    iteration updates. The same fit of the code before issue #339, the control,
+    updated on iteration 2 too, from the parameters whose likelihood was NaN."""
+    updated, restarts = _updates_around_a_restart(AMICA_NumPy, X, tmp_path / "now")
+    assert restarts == 1
+    assert updated == [0, 1, 3, 4]
+
+    from pamica.tests.pre_change import load_pre_change_package
+
+    pre = load_pre_change_package(
+        _PRE_339, "pamica_pre339_gates", tmp_path_factory.mktemp("pre339")
+    )
+    old, old_restarts = _updates_around_a_restart(
+        pre.numpy_impl.core.AMICA, X, tmp_path / "pre"
+    )
+    assert old_restarts == 1
+    assert old == [0, 1, 2, 3, 4], "control: the old loop no longer updates first"
+
+
 # --- validation of the settings the gates read ------------------------------
 
 
