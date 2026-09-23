@@ -122,8 +122,8 @@ B's two means lie 0.0002 apart on a ~0.02 axis.\label{fig:ensemble}](docs/assets
 
 From a shared start with the harness settings, the single-precision MLX backend and the double-precision PyTorch backend differ by $5\times10^{-6}$ in log-likelihood after 100 iterations,
 with mean matched component correlation 0.9999999 and Amari distance $5\times10^{-5}$.
-With the same settings and start, the backends' 25-iteration log-likelihoods agree to $10^{-5}$ on 32 and 48 channels of the external recording;
-on a 70-channel excerpt of 30,000 frames ($k\approx6$) they differ by up to $10^{-3}$, about the effect of perturbing one sample by $10^{-9}$ µV.
+In the throughput benchmark's runs on a 30,000-frame excerpt of the external recording, the backends that share a start agree after 25 iterations to $10^{-5}$ in log-likelihood on 32 and 48 channels;
+with 70 channels ($k\approx6$) they differ by up to $10^{-3}$, about the effect of perturbing one sample by $10^{-9}$ µV.
 Double precision remains the default for parity work, and double-precision CUDA is the reproducible NVIDIA path.
 
 On real 70-channel EEG at `block_size=512`, per-iteration cost is 25 ms for MLX on an Apple GPU, 39 ms for double-precision CUDA on an RTX 4090,
