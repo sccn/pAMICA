@@ -514,8 +514,11 @@ _REF_OPT: Dict[str, Any] = {
 }
 # Tolerances per iteration count. The reference itself carries round-off that
 # the ill-conditioned exact-EM mu update amplifies (mu of a low-mass mixture
-# component), so each bound sits at the doscaling-OFF noise floor with margin;
-# measured maxima over both backends and both model counts (on / off):
+# component), so each bound sits at the doscaling-OFF noise floor with margin.
+# Measured maxima (doscaling on / off), each taken over both backends (PyTorch
+# and NumPy) and both model counts, which is why they are wider than the
+# single-configuration figures in the changelog and PR (PyTorch, one model:
+# A 5.0e-16, mu 7.8e-11, sbeta 1.1e-14 after 1 iteration):
 #   1 iteration:  A 2.2e-15 / 2.4e-15, mu 7.8e-11 / 8.0e-11, sbeta 2.4e-14
 #   3 iterations: A 6.1e-12 / 3.1e-11, mu 3.6e-8 / 1.3e-8, sbeta 2.8e-10
 # The column rule this replaced was off by A 7.2e-5, mu 6.6e-5, sbeta 8.6e-5
