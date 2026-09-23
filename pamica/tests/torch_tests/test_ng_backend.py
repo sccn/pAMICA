@@ -521,7 +521,9 @@ def test_newton_posdef_mstep_composition():
     A_expected = A_before.clone()
     A_expected[:, idx] = A_before[:, idx] - lrate_after * (H.T @ A_before[:, idx])
     block = A_expected[:, idx]
-    A_expected[:, idx] = block / torch.sqrt((block**2).sum(dim=1, keepdim=True))
+    norm = torch.sqrt((block**2).sum(dim=1, keepdim=True))
+    # The production zero-norm guard: a zero-norm row is left as it is.
+    A_expected[:, idx] = block / torch.where(norm > 0, norm, torch.ones_like(norm))
 
     with mock.patch.object(ng, "_finalize_newton_stats", side_effect=forced):
         ng._update_parameters(acc, blk)
