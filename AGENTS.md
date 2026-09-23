@@ -115,9 +115,10 @@ have no float64).
 - `validate_implementations.py --backend {torch,numpy,mlx}` (a comma-separated list, or `all`; default
   `torch`, whose report is unchanged) runs each backend against one Fortran reference run with the same
   settings and matches components via the Hungarian algorithm (#315). All three meet the Fortran bar on
-  the bundled sample (LL within 3.2e-5, correlation 0.9992, Amari 0.004; rows and bars in
-  `docs/guides/validation.md`), pinned by the `AMICA_RUN_FORTRAN`-gated test in
-  `test_fortran_param_forwarding.py`.
+  the bundled sample (re-measured under epic #324 in #351: LL within 2.8e-4, correlation 0.9991, Amari
+  0.004 from independent starts, where the reference's own seed-to-seed LL sd is 2.6e-4; from a shared
+  start LL within 1.6e-6, correlation 0.99999993; rows and bars in `docs/guides/validation.md`), pinned
+  by the `AMICA_RUN_FORTRAN`-gated test in `test_fortran_param_forwarding.py`.
 - Newton and exact-EM updates are implemented in `AMICATorchNG` and the legacy NumPy `numpy_impl/core.py`
   (both Fortran-faithful). Adaptive PDF (#26) is DONE (all five `pdftype` families + ext-Infomax
   switcher); full multi-model matching (#27) is validated by distributional equivalence.

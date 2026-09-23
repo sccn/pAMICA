@@ -74,8 +74,10 @@ what remains as of the v0.1.0 preparation.
 - Validation harness (`validate_implementations.py --backend {torch,numpy,mlx}`, a comma-separated
   list, or `all`; default `torch`, whose report is unchanged) runs each backend against one Fortran
   reference run with the same settings and matches components via the Hungarian algorithm, on real
-  sample EEG (#315). All three meet the Fortran bar on the bundled sample (LL within 3.2e-5,
-  correlation 0.9992, Amari 0.004; rows and bars in `docs/guides/validation.md`), pinned by the
+  sample EEG (#315). All three meet the Fortran bar on the bundled sample (re-measured under epic
+  #324 in #351: LL within 2.8e-4, correlation 0.9991, Amari 0.004 from independent starts, inside the
+  reference's own seed-to-seed LL sd of 2.6e-4; from a shared start LL within 1.6e-6; rows and bars
+  in `docs/guides/validation.md`, run records in `.context/issue-351/`), pinned by the
   `AMICA_RUN_FORTRAN`-gated test in `test_fortran_param_forwarding.py`.
 
 ## Remaining before / around v0.1.0
