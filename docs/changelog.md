@@ -17,7 +17,7 @@ Release notes are also published on the
     (after 1 iteration: `A` 5.0e-16, `mu` 7.8e-11, `sbeta` 1.1e-14, previously 7.2e-5, 6.6e-5 and 8.6e-5;
     after 3: 2.7e-13, 8.6e-10 and 2.7e-11, previously 1.4e-3, 6.7e-3 and 2.2e-3).
   - Fitted components now have unit norm, as in the reference;
-    after 100 seeded iterations they ranged over [0.94, 1.07] with one model and [0.05, 1.97] with two.
+    previously, after 100 seeded iterations, norms ranged over [0.94, 1.07] with one model and [0.05, 1.97] with two.
   - Scale-blind results barely move: against the bundled `amicaout` fixture after 200 iterations,
     the log-likelihood goes from -3.401777 to -3.401673 (fixture: -3.401873),
     the matched correlation from 0.99752 to 0.99740 and the Amari distance from 5.95e-3 to 6.14e-3.
