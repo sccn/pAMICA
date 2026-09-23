@@ -247,9 +247,10 @@ The per-block sufficient statistics and one M-step agree with the reference to r
 The final log-likelihoods agree too: pamica $-3.3541 \pm 0.003$, Fortran $-3.3543 \pm 0.002$ (Kolmogorov-Smirnov $p = 0.83$).
 The ensembles of this study measured before epic #324's changes to the fit differed on this one metric
 (pamica $-3.363 \pm 0.006$ against Fortran $-3.354 \pm 0.003$, $p \approx 6\times10^{-5}$), a gap attributed then to convergence speed.
-Refitting the pamica half with that code (e38aa11) against the same 20 reference fits gives $-3.3627 \pm 0.006$ ($p = 1\times10^{-5}$),
-and 7 of those 20 fits stop early on `min_dll`, whose check counted likelihood dips as small gains until issue #339
+Refitting the pamica half with that code (e38aa11) against the same 20 reference fits gives $-3.3627 \pm 0.006$ ($p = 1\times10^{-5}$)
 (`.context/issue-351/multimodel_pamica_fits.py`).
+Seven of those 20 fits stop early on `min_dll`, whose check counted likelihood dips as small gains until issue #339 (mean $-3.3679$),
+and the 13 that run the full 100 iterations average $-3.3600$, so the old gap came partly from the early stops and partly from the update rule of that code.
 A seeded ensemble with the same settings (the reference seeded 0-19 and single-threaded) agrees within $8\times10^{-4}$ at 100 iterations and within $2\times10^{-4}$ at 200 and 300
 ([ADR 0003](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0003-best-iterate-safeguard.md)).
 
@@ -586,7 +587,7 @@ guarded to a no-op so the parity results above stay byte-for-byte unchanged.
 
 | Behavior | Status | Validation |
 |---|---|---|
-| Best-iterate safeguard (`keep_best`, #51) | on by default | returns the highest-LL iterate; cuts multi-model LL sd from 12.7x to 2.0x Fortran's. Single-model parity stays bit-exact (monotone, no restore). ADR 0003 |
+| Best-iterate safeguard (`keep_best`, #51) | on by default | returns the highest-LL iterate. It cut the multi-model LL sd from 12.7x to 2.0x Fortran's before epic #324; re-measured with the epic's code, the sd ratio is 1.0x with or without it and a restore fired in one of 20 seeded fits, at the 300-iteration budget only (gain 4.2e-6). Single-model parity stays bit-exact (monotone, no restore). ADR 0003 |
 | Per-model bias `c` update (#27) | on for `n_models>1` | Fortran `update_c`; per-block stats bit-exact; no-op for `n_models=1` |
 | Component sharing (`share_comps`, #60, #334) | off by default | Fortran `identify_shared_comps` ported; the scan itself has no bit-exact oracle (`Spinv2` is never allocated, so the reference's scan computes NaN similarities and never merges), but the update from a merged state seeded through the reference's `load_comp_list` matches the native binary to float64 round-off on PyTorch and NumPy (`test_component_rows.py`, opt-in with `AMICA_RUN_FORTRAN=1`); byte-identical when unshared |
 | Outlier rejection (`do_reject`, #123) | off by default | `good_idx` mechanism on all three backends (NumPy, PyTorch, MLX -- the last landed epic #278 Phase 3, #289); MLX/NumPy ports validated vs the PyTorch backend |

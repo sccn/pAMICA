@@ -28,18 +28,20 @@ what remains, as of epic #324 (after v0.3.3). User-facing detail is in `docs/cha
 
 ### Multi-model AMICA (issue #27)
 - Validated by **distributional equivalence**: multi-model AMICA is not partition-identifiable, so
-  the NG-vs-Fortran partition cross-correlation distribution is statistically indistinguishable
-  from Fortran's own run-to-run spread (Mann-Whitney p=0.97, TOST within +/-0.05). Per-block
-  sufficient stats are bit-exact vs Fortran.
+  the NG-vs-Fortran partition cross-correlation distribution is compared with Fortran's own
+  run-to-run spread. Re-measured under epic #324 (#351): between minus within-Fortran +0.006
+  (run-level permutation p=0.88; Amari +0.005, p=0.051), final LL -3.3541 vs -3.3543 (KS p=0.83).
+  Per-block sufficient stats agree with Fortran to round-off.
 - Per-model bias `c` update (`update_c`) ported to both backends, guarded to a no-op for
   `n_models=1` so single-model parity stays bit-exact. See `.context/issue-27/`.
 
 ### Best-iterate safeguard (issue #51)
 - `AMICATorchNG.fit` returns the highest-LL iterate (`keep_best`, default on; `final_ll_` reports
   the returned iterate's LL, `ll_history` keeps the true trajectory), not the last iterate under
-  the non-monotone lrate schedule. Cuts multi-model LL sd from 12.7x to 2.0x Fortran's at a
-  matched 100-iter budget. Single-model #24 parity stays bit-exact (monotone => no restore). See
-  ADR 0003.
+  the non-monotone lrate schedule. It cut multi-model LL sd from 12.7x to 2.0x Fortran's at a
+  matched 100-iter budget; re-measured under epic #324 (#351) the sd ratio is 1.0x with or without
+  it, and a restore fired in one of 20 seeded fits (300-iteration budget only). Single-model #24 parity stays bit-exact
+  (monotone => no restore). See ADR 0003.
 
 ### Degenerate-fit contract (issues #50, #306, #339)
 - The `AMICA` wrapper no longer treats a degenerate fit (`stop_reason` nan_ll / singular_ll /

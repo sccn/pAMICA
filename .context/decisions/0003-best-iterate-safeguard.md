@@ -104,7 +104,7 @@ on and off, on two seeds on both sides).
   their spread equals the reference's (sd ratio 1.0x, where #51 measured 12.7x
   and 2.0x). Phase 7 of the epic (#340) traced most of the old overshoots to
   the column-rule `doscaling` (#333).
-- A restore fired once in the 60 fit-budget pairs: seed 3 at 300 iterations,
+- A restore fired in one of the 20 fits, and only at the 300-iteration budget: seed 3,
   whose best iterate (iteration 299) beat its last by 4.2e-6.
 - The mean gap is gone at every budget: pamica's mean is within 8e-4 of the
   reference's at 100 iterations and within 2e-4 at 200 and 300, where #51
@@ -113,8 +113,11 @@ on and off, on two seeds on both sides).
   `AMICA` seeds 1-20) agrees: -3.3541 against -3.3543, KS p 0.83. Refitting
   that ensemble's pamica half with the code before the epic's changes to the fit (e38aa11) against
   the same 20 reference fits gives -3.3627 (sd 0.006, KS p 1e-5), close to
-  the #27/#51 figures; 7 of those 20 fits stopped early on `min_dll`, which
-  counted likelihood dips as small gains until #339.
+  the #27/#51 figures. Seven of those 20 fits stopped early on `min_dll`,
+  whose check counted likelihood dips as small gains until #339 (their mean
+  -3.3679), and the 13 that ran the full 100 iterations average -3.3600, so
+  the old gap came partly from the early stops and partly from the update
+  rule of that code.
 - The decision stands: `keep_best` stays on by default. With these fits it
   rarely acts, and when it does the gain is small, but a run that ends below
   its peak (a likelihood decrease near the end, or a Newton fallback) still

@@ -179,12 +179,14 @@ update from a merged state seeded through `load_comp_list` matches it to float64
 - **Multi-model (#27): VALIDATED by distributional equivalence.** Multi-model AMICA is not
   partition-identifiable, so exact partition parity with Fortran is the wrong acceptance bar (the
   `>0.95` cross-corr in #27's title asks the algorithm to be more identifiable than it is). The right
-  test is whether the two implementations sample the same distribution over solutions. On an
-  N=20-each ensemble (real sample EEG, `n_models=2`), the NG-vs-Fortran partition cross-corr
-  distribution is **statistically equivalent to Fortran's own run-to-run distribution** (Mann-Whitney
-  p=0.97, TOST equivalent within ±0.05; within-Fortran/within-NG/between all ~0.63-0.64). The
-  single-run ~0.64 cross-corr is intrinsic estimator spread, not a defect -- Fortran agrees with
-  *itself* at 0.63. See `.context/issue-27/multimodel_distributional_equivalence.md` (+ figure).
+  test is whether the two implementations sample the same distribution over solutions. Re-measured
+  under epic #324 (#351, N=20 each, real sample EEG, `n_models=2`, pinned v0.3.3 binary): mean
+  pairwise cross-corr within-Fortran 0.626, within-pamica 0.638, between 0.632; between minus
+  within-Fortran +0.006 (inside the ±0.05 margin; run-level permutation p=0.88; by Amari distance
+  +0.005, p=0.051, pamica's ensemble spreading slightly more than Fortran's); final LL -3.3541 vs
+  -3.3543 (KS p=0.83). The single-run ~0.63 cross-corr matches Fortran's agreement with itself.
+  See `docs/guides/validation.md`, `.context/issue-351/` and, for the pre-epic record,
+  `.context/issue-27/multimodel_distributional_equivalence.md`.
   Supporting: per-block sufficient stats are bit-exact vs Fortran; the per-model bias `c` update
   (Fortran `update_c`: `c[i,h] = sum_t v_h*x / sum_t v_h`) is ported to both backends, guarded to a
   no-op for `n_models=1` (single-model parity stays bit-exact), see
@@ -194,11 +196,15 @@ update from a merged state seeded through `load_comp_list` matches it to float64
   variance was driven by late Newton-fallback overshoots (one seed peaked at -3.357 then crashed to
   -3.545 in its final iterations). `AMICATorchNG.fit` now returns the highest-LL iterate (`keep_best`,
   default on; `final_ll_` reports the returned iterate's LL, `ll_history` stays the true trajectory).
-  At matched 100-iter budget this cuts the LL sd from 12.7x to 2.0x Fortran's; the residual ~0.009
-  mean gap is convergence speed, not a worse optimum (at 200 iters NG reaches Fortran's exact mean
-  -3.3541, at 300 it exceeds it -- the M-step is bit-exact vs Fortran). Single-model #24 parity stays
-  byte-for-byte (monotone => no restore). Inactive under `do_reject`. See ADR 0003 and
-  `.context/issue-51/`.
+  At a matched 100-iter budget it cut the LL sd from 12.7x to 2.0x Fortran's (the residual ~0.009 mean
+  gap was then read as convergence speed). Re-measured under epic #324 (#351, seeded 20-run ensemble
+  against the pinned binary): the late overshoots are gone (largest LL dip 1.2e-5 in 20 trajectories,
+  no Newton fallbacks), the sd ratio is 1.0x at 100 iterations with or without `keep_best`, a restore
+  fired in one of 20 seeded fits, at the 300-iteration budget only (gain 4.2e-6), and the mean gap is
+  +8e-4 at 100 iterations and within 2e-4 at 200 and 300. The pre-epic code on the same seeds
+  reproduces the old gap; 7 of its 20 fits stopped early on a `min_dll` check that counted LL dips as
+  small gains (fixed in #339), and its full-length fits trail by 0.006. `keep_best` stays on. Single-model #24 parity stays byte-for-byte (monotone => no
+  restore). Inactive under `do_reject`. See ADR 0003 and `.context/issue-351/`.
 
 ## Development Workflow
 1. **Check context:** `.context/plan.md` for current tasks and priorities.
