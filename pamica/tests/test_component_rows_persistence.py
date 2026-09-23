@@ -248,9 +248,20 @@ def test_old_mlx_save_converts_losslessly(pre, real_data, recipe, tmp_path):
         assert int(raw["format_version"]) == 1
     n_models = _RECIPES[recipe]["n_models"]
     want = _outputs(old_cls.load(path), real_data, n_models)
-    _assert_same_outputs(_outputs(new_cls.load(path), real_data, n_models), want)
+    loaded = new_cls.load(path)
+    _assert_same_outputs(_outputs(loaded, real_data, n_models), want)
     converted = new_cls.from_state_dict(old.state_dict())
     _assert_same_outputs(_outputs(converted, real_data, n_models), want)
+    # And it saves again in the current format, and reloads unchanged: a
+    # second load must not convert the already-converted A again.
+    again_path = str(tmp_path / "again.npz")
+    loaded.save(again_path)
+    with np.load(again_path) as raw:
+        assert int(raw["format_version"]) == 2
+        assert raw["A"].shape == (loaded.n_comps, loaded.n_channels)
+    again = new_cls.load(again_path)
+    np.testing.assert_array_equal(np.array(again.A), np.array(loaded.A))
+    _assert_same_outputs(_outputs(again, real_data, n_models), want)
 
 
 @pytest.mark.parametrize("recipe", ["single", "unmerged"])
