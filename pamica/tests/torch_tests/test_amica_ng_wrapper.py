@@ -242,6 +242,9 @@ def test_write_amica_output_ll_matches_kept_iterate(real_data, tmp_path):
         do_newton=True,
         newt_start=1,
         lrate=0.5,
+        # Without it the run is monotone since issue #333 and the restore
+        # never fires; with it the run peaks at iteration 57 of 60.
+        newtrate=3.0,
         seed=0,
         block_size=1024,
     )

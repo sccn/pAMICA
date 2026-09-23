@@ -151,13 +151,14 @@ def test_written_ll_ends_at_the_keep_best_restored_iterate(real_data):
         do_newton=True,
         newt_start=1,
         lrate=0.5,
+        newtrate=3.0,  # overshoots since issue #333 (test_mlx_keepbest.py)
         use_min_dll=True,
         min_dll=1e-4,
         maxincs=2,
         use_grad_norm=False,
     )
     m = AMICAMLXNG(n_channels=NW, **kwargs)
-    m.fit(real_data, max_iter=60, verbose=False)
+    m.fit(real_data, max_iter=150, verbose=False)
     if m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS:
         pytest.skip("aggressive run ended degenerate; not the case under test")
     assert m.final_ll_ is not None

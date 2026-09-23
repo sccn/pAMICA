@@ -151,7 +151,8 @@ def test_llt_stash_is_none_before_any_estep_ran():
 # Reuses the aggressive-Newton recipe test_mlx_keepbest.py measured to
 # genuinely overshoot on this backend (module docstring there): n_models=2,
 # seed=0, block_size=1024, do_newton=True, newt_start=1, lrate=0.5,
-# use_min_dll=True, min_dll=1e-4, maxincs=2, use_grad_norm=False, max_iter=60.
+# newtrate=3.0, use_min_dll=True, min_dll=1e-4, maxincs=2,
+# use_grad_norm=False, max_iter=150 (newtrate and the budget since issue #333).
 _FORCED_RESTORE_KWARGS: dict[str, Any] = dict(
     n_models=2,
     n_mix=NMIX,
@@ -160,6 +161,7 @@ _FORCED_RESTORE_KWARGS: dict[str, Any] = dict(
     do_newton=True,
     newt_start=1,
     lrate=0.5,
+    newtrate=3.0,
     use_min_dll=True,
     min_dll=1e-4,
     maxincs=2,
@@ -173,7 +175,7 @@ def test_keep_best_restore_rolls_the_llt_stash_back(real_data):
     discarded last one (port of ``pamica/tests/test_llt_stash.py``'s
     torch-backend pin of the same name)."""
     m = AMICAMLXNG(n_channels=NW, **_FORCED_RESTORE_KWARGS)
-    m.fit(real_data, max_iter=60, verbose=False)
+    m.fit(real_data, max_iter=150, verbose=False)
     if m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS:
         pytest.skip("aggressive run ended degenerate; not the case under test")
     assert m.final_ll_ is not None

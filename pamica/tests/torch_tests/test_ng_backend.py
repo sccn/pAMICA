@@ -1400,14 +1400,16 @@ def test_keep_best_snapshot_restore_roundtrip():
         assert torch.equal(getattr(m, name), snap_val), name
 
 
-def _multimodel_keep_best(seed: int, keep_best: bool) -> AMICATorchNG:
+def _multimodel_keep_best(keep_best: bool) -> AMICATorchNG:
+    """The aggressive-Newton recipe of ``test_ng_convergence.py``'s
+    overshoot tests on 4096 real samples, without their loosened early stop:
+    it peaks at iteration 57 and ends lower at 59."""
     m = AMICATorchNG(
-        n_channels=NW, n_models=2, n_mix=NMIX, seed=seed, device="cpu",
-        dtype=torch.float64, block_size=512, lrate=0.05, maxdecs=3,
-        do_newton=True, newt_start=50, newt_ramp=10, newtrate=1.0,
-        keep_best=keep_best,
+        n_channels=NW, n_models=2, n_mix=NMIX, seed=0, device="cpu",
+        dtype=torch.float64, block_size=1024, do_newton=True, newt_start=1,
+        lrate=0.5, newtrate=3.0, keep_best=keep_best,
     )  # fmt: skip
-    m.fit(_load_real_data(), max_iter=100, verbose=False)
+    m.fit(_load_real_data()[:, :4096], max_iter=60, verbose=False)
     return m
 
 
@@ -1419,11 +1421,18 @@ def test_keep_best_returns_within_tol_of_peak():
     the raw ``ll_history[-1]``, which stays the true trajectory). keep_best does
     not change the optimization path, only which iterate is returned, so the
     ``keep_best=False`` run has the same trajectory but returns the (lower) last
-    iterate. seed 8 reaches the plateau where natural-gradient AMICA dips below
-    its own peak, so the restore branch runs; the invariants also hold if a
-    platform's BLAS makes the run monotone (see the explicit skip below)."""
-    on = _multimodel_keep_best(8, keep_best=True)
-    off = _multimodel_keep_best(8, keep_best=False)
+    iterate.
+
+    Issue #333 changed the config. The #51 one (seed 8, ``lrate=0.05``, Newton
+    from iteration 50, 100 iterations on the whole record) dipped below its
+    own peak only because ``doscaling`` normalized stored columns; with
+    components rescaled it runs monotone (as do seeds 0 to 5), so the restore
+    branch never ran. The aggressive-Newton recipe used instead genuinely
+    overshoots. The recompute check now also comes after the overshoot guard:
+    it holds only for a restored iterate, whose parameters are the ones that
+    produced ``final_ll_``, not for a monotone run's post-update parameters."""
+    on = _multimodel_keep_best(keep_best=True)
+    off = _multimodel_keep_best(keep_best=False)
 
     # keep_best does not alter the trajectory, only the returned iterate.
     assert on.ll_history == off.ll_history
@@ -1436,19 +1445,19 @@ def test_keep_best_returns_within_tol_of_peak():
     # The returned LL is within tolerance of the peak and never below the last.
     assert abs(on.final_ll_ - peak) <= _KEEP_BEST_TOL
     assert on.final_ll_ >= on.ll_history[-1]
-    # The returned parameters really sit at final_ll_ (recompute the E-step LL).
-    data = _load_real_data()
-    X_t = on._preprocess(data)
-    acc = on._accumulate_blocks(X_t)
-    ll_model = float(acc["ll"] / (X_t.shape[1] * NW))
-    assert abs(ll_model - on.final_ll_) < 1e-9
 
     # Make branch coverage visible rather than silently vacuous: if this run did
     # not overshoot on this platform, the restore branch was not exercised.
     if peak - on.ll_history[-1] <= _KEEP_BEST_TOL:
-        pytest.skip("seed 8 did not overshoot here; restore branch not exercised")
-    # It did overshoot, so keep_best strictly beat return-last.
+        pytest.skip("the recipe did not overshoot here; restore branch not exercised")
+    # It did overshoot, so keep_best strictly beat return-last ...
     assert on.final_ll_ > off.final_ll_
+    # ... and the restored parameters really sit at final_ll_ (recompute the
+    # E-step LL).
+    X_t = on._preprocess(_load_real_data()[:, :4096])
+    acc = on._accumulate_blocks(X_t)
+    ll_model = float(acc["ll"] / (X_t.shape[1] * NW))
+    assert abs(ll_model - on.final_ll_) < 1e-9
 
 
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
@@ -1569,10 +1578,15 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
     several LL decreases. The surviving ``rholrate`` must have ratcheted exactly
     as often as ``newtrate`` (both gated on ``iter > newt_start`` at ``maxdecs``,
     matched 0.5 factor here), NOT once per decrease.
+
+    ``newtrate=3.0`` since issue #333: with ``doscaling`` rescaling components
+    instead of stored columns, the ``newtrate=1.0`` run is monotone through all
+    300 iterations (no decrease, so no ratchet to test); at 3.0 it decreases 6
+    times and both ceilings ratchet twice.
     """
     data = _load_real_data()
     m = _fresh_ng(
-        block_size=512, do_newton=True, newt_start=50, newtrate=1.0, lrate=0.05,
+        block_size=512, do_newton=True, newt_start=50, newtrate=3.0, lrate=0.05,
         lratefact=0.5, rholrate=0.05, rholratefact=0.5, maxdecs=3,
     )  # fmt: skip
     m.fit(data, max_iter=300, verbose=False)

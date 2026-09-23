@@ -395,6 +395,9 @@ def test_keep_best_restore_rolls_the_llt_stash_back(real_data, tmp_path):
         do_newton=True,
         newt_start=1,
         lrate=0.5,
+        # Without it the run is monotone since issue #333 and the restore
+        # never fires; with it the run peaks at iteration 57 of 60.
+        newtrate=3.0,
     )
     if m.stop_reason in AMICATorchNG._DEGENERATE_STOP_REASONS:
         pytest.skip("aggressive run ended degenerate; not the case under test")
