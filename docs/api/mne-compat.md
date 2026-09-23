@@ -84,7 +84,7 @@ The wrapper's `get_sources`, `apply`, `get_components`, `plot_components` and
 `plot_sources` delegate to this object, so they reproduce `AMICA.transform`
 exactly: MNE
 computes sources as
-`unmixing_matrix_ @ pca_components_[:n_components_] @ (X - pca_mean_)`, and
+`unmixing_matrix_ @ pca_components_[:n_components_] @ (X / pre_whitener_ - pca_mean_)`, and
 the export maps pamica's mean, symmetric-ZCA sphere and unmixing into those
 matrices (writing the sphere as `V diag(1/√e) Vᵀ` with `V` orthonormal so MNE's
 scalp maps come out in channel space). The equivalence
