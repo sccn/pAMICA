@@ -60,6 +60,7 @@ _OVERSHOOT: dict[str, Any] = dict(lrate=0.6, lratefact=0.5, maxdecs=2)
 _OVERSHOOT_NEWTRATE = 2.0
 _PROBE_ITERS = 40
 _NEWTON_ITERS = 120
+_ZERO_ONE_ITERS = 40
 
 
 @pytest.fixture(scope="module")
@@ -233,25 +234,58 @@ def test_every_gate_fires_on_the_reference_iteration():
     def first(pred) -> int:
         return next(i for i in idx if pred(i))
 
+    def fires(pred) -> list[int]:
+        return [i for i in idx if pred(i)]
+
     # iter .ge. newt_start (amica15.f90:1804): the 5th iteration is index 4.
     assert first(lambda i: schedule.newton_active(True, i, 5)) == 4
     assert not any(schedule.newton_active(False, i, 5) for i in idx)
     # newt_start 0 and 1 both mean "from the first iteration".
     assert first(lambda i: schedule.newton_active(True, i, 1)) == 0
     assert first(lambda i: schedule.newton_active(True, i, 0)) == 0
-    # iter == newt_start (amica15.f90:1099): exactly once, on index 4.
-    assert [i for i in idx if schedule.newton_switches_on(True, i, 5)] == [4]
-    # iter > newt_start (amica15.f90:1067): from the 6th iteration, index 5.
+    # iter == newt_start (amica15.f90:1099): exactly once, on index 4; at
+    # newt_start=1 on the first iteration, and never at newt_start=0 (the
+    # reference's 1-based counter never equals 0).
+    assert fires(lambda i: schedule.newton_switches_on(True, i, 5)) == [4]
+    assert fires(lambda i: schedule.newton_switches_on(True, i, 1)) == [0]
+    assert fires(lambda i: schedule.newton_switches_on(True, i, 0)) == []
+    assert fires(lambda i: schedule.newton_switches_on(False, i, 1)) == []
+    # iter > newt_start (amica15.f90:1067): closed on iteration newt_start
+    # itself, open from the next one.
+    assert not schedule.past_newton_start(4, 5)  # iteration 5
+    assert schedule.past_newton_start(5, 5)  # iteration 6
     assert first(lambda i: schedule.past_newton_start(i, 5)) == 5
+    assert not schedule.past_newton_start(0, 1)  # iteration 1
+    assert schedule.past_newton_start(1, 1)  # iteration 2
+    assert first(lambda i: schedule.past_newton_start(i, 0)) == 0
     # Rejection (amica15.f90:1136) with rejstart=4, rejint=3: the 4th
     # iteration (index 3), then every 3rd while numrej < maxrej (held at 0
     # here, so the modulo arm keeps firing).
     assert [i for i in idx if schedule.rejection_due(True, i, 4, 3, 0, 2)] == [3, 6, 9]
     assert not any(schedule.rejection_due(True, i, 4, 3, 0, 0) for i in idx)
+    assert not any(schedule.rejection_due(False, i, 4, 3, 0, 2) for i in idx)
+
+    # rejstart=1, rejint=1: every iteration from the first until maxrej passes
+    # are spent, with numrej advancing as the fit loops advance it.
+    def passes(rejstart: int, rejint: int, maxrej: int) -> list[int]:
+        numrej, out = 0, []
+        for i in idx:
+            if schedule.rejection_due(True, i, rejstart, rejint, numrej, maxrej):
+                out.append(i)
+                numrej += 1
+        return out
+
+    assert passes(1, 1, 3) == [0, 1, 2]
+    assert passes(1, 1, 1) == [0]
+    # The ``iter == rejstart`` arm is unconditional: it fires even once the
+    # modulo arm's budget is spent (here by an earlier modulo pass).
+    assert passes(4, 1, 1) == [0, 3]
     # mod(iter, writestep) == 0 (amica15.f90:1124): the 5th and 10th, not the 1st.
     assert [i for i in idx if schedule.every(i, 5)] == [4, 9]
+    assert fires(lambda i: schedule.every(i, 1)) == list(idx)
     # Share merges from share_start=3 every 4 (amica15.f90:1856): 3, 7, 11.
     assert [i for i in idx if schedule.periodic_due(i, 3, 4)] == [2, 6, 10]
+    assert fires(lambda i: schedule.periodic_due(i, 1, 1)) == list(idx)
     # The A-freeze: the merge iteration and the 5 after it, anchored on
     # share_start (a documented pamica decision), share_start=3, share_iter=8.
     assert [i for i in idx if schedule.share_freeze(i, 3, 8)] == [
@@ -264,8 +298,11 @@ def test_every_gate_fires_on_the_reference_iteration():
         10,
         11,
     ]
-    # iter .le. restartiter (amica15.f90:1022): the first 3 iterations.
+    # iter .le. restartiter (amica15.f90:1022): the first 3 iterations; 0 turns
+    # the recovery off.
     assert [i for i in idx if schedule.within_restart_window(i, 3)] == [0, 1, 2]
+    assert fires(lambda i: schedule.within_restart_window(i, 1)) == [0]
+    assert fires(lambda i: schedule.within_restart_window(i, 0)) == []
 
 
 @pytest.mark.parametrize("interval", [0, -2])
@@ -282,20 +319,25 @@ def test_a_non_positive_interval_is_a_value_error_not_a_zero_division(interval):
 # --- Newton switch -----------------------------------------------------------
 
 
+@pytest.mark.parametrize("newt_start", [1, 5])
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_newton_takes_its_first_step_on_iteration_newt_start(backend, X, tmp_path):
-    """With ``newt_start=5`` the first Newton M-step is the 5th iteration's (0-based
-    index 4), as ``iter .ge. newt_start`` puts it in the reference.
+def test_newton_takes_its_first_step_on_iteration_newt_start(
+    backend, newt_start, X, tmp_path
+):
+    """The first Newton M-step is iteration ``newt_start``'s (0-based index
+    ``newt_start - 1``), as ``iter .ge. newt_start`` puts it in the reference.
 
     Seen two ways on a real fit against its ``do_newton=False`` twin: the
-    likelihood trajectories are bit-identical through index 4 (computed before
-    that iteration's M-step) and first differ at index 5; and the learning rate
-    has climbed the Newton ramp (``min(newtrate, lrate + min(1/newt_ramp,
-    lrate))``, amica15.f90:1805) once per Newton iteration run, iterations 5
-    through 7, instead of sitting at its natural-gradient ceiling. Before issue
-    #335 the first difference was at index 6 and the ramp had run twice.
+    likelihood trajectories are bit-identical through index ``newt_start - 1``
+    (computed before that iteration's M-step) and first differ at index
+    ``newt_start``; and the learning rate has climbed the Newton ramp
+    (``min(newtrate, lrate + min(1/newt_ramp, lrate))``, amica15.f90:1805) once
+    per Newton iteration run, iterations ``newt_start`` through
+    ``newt_start + 2``, instead of sitting at its natural-gradient ceiling.
+    Before issue #335 the first difference was one index later and the ramp had
+    run twice.
     """
-    newt_start, max_iter = 5, 7
+    max_iter = newt_start + 2
     cfg = dict(lrate=0.05, newtrate=1.0, newt_ramp=10, newt_start=newt_start)
     ng = _fit(backend, X, max_iter, tmp_path, do_newton=False, **cfg)
     nt = _fit(backend, X, max_iter, tmp_path, do_newton=True, **cfg)
@@ -314,10 +356,37 @@ def test_newton_takes_its_first_step_on_iteration_newt_start(backend, X, tmp_pat
     if nt.n_newton_fallbacks is not None:
         assert nt.n_newton_fallbacks == 0
     lrate = 0.05
-    for _ in range(max_iter - newt_start + 1):  # Newton iterations 5, 6, 7
+    for _ in range(max_iter - newt_start + 1):  # Newton iterations run
         lrate = min(1.0, lrate + min(1.0 / 10, lrate))
     assert nt.lrate == pytest.approx(lrate, rel=1e-12)
     assert ng.lrate == pytest.approx(0.05, rel=1e-12)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_newt_start_zero_fits_exactly_as_one(backend, X, tmp_path):
+    """``newt_start=0`` and ``newt_start=1`` give bit-identical fits, as the
+    docstrings state.
+
+    Newton is active from the first iteration either way. The two settings
+    differ only in gates that cannot act on iteration 1: the switch-on reset
+    (``iter == newt_start``) fires there for ``1`` and never for ``0``, but it
+    clears a decrease counter that no comparison has touched yet; and the
+    ``iter > newt_start`` ratchet gate is closed on iteration 1 for ``1``, where
+    no ``maxdecs`` cycle can complete because iteration 1 has no predecessor to
+    compare against. Checked on the overshooting configuration, so ratchets
+    do fire later in the run and both of those gates are live.
+    """
+    cfg = dict(do_newton=True, newtrate=_OVERSHOOT_NEWTRATE, **_OVERSHOOT)
+    zero = _fit(backend, X, _ZERO_ONE_ITERS, tmp_path, newt_start=0, **cfg)
+    one = _fit(backend, X, _ZERO_ONE_ITERS, tmp_path, newt_start=1, **cfg)
+
+    assert zero.ll == one.ll
+    for name in ("lrate", "lrate_ceiling", "rholrate", "newtrate"):
+        assert getattr(zero, name) == getattr(one, name), name
+    # Not vacuous: the run completed maxdecs cycles past iteration 1, so the
+    # ratchet gate both settings read was exercised.
+    assert _ratchets(one.lrate_ceiling, one.lrate_ceiling0, 0.5) > 0
+    assert _ratchets(one.newtrate, one.newtrate0, 0.5) > 0
 
 
 # --- the iter > newt_start ceiling ratchet -----------------------------------
