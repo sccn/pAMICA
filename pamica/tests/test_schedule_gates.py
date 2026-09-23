@@ -446,17 +446,20 @@ def test_rho_rate_ratchet_opens_only_after_iteration_newt_start(backend, X, tmp_
 # A natural-gradient run whose second maxdecs cycle completes on iteration 21,
 # one past the shipped default newt_start=20. Found by sweeping seeds 0-5,
 # lrate 0.5/0.6/0.8, maxdecs 2/3, newt_ramp 10/1 and 4096/8192 frames for a
-# ratchet at ll index 20; this one ratchets at indices 9 and 20 on all three
-# backends, the second on decreases of 5.1e-3 and 3.5e-3, far above round-off.
+# ratchet at ll index 20, first on PyTorch and then checked on NumPy and MLX;
+# re-searched when issue #333's component-row doscaling changed the default
+# trajectories. This one decreases at ll indices 4, 5, 8 and 9, 19, 20 on all
+# three backends, so it ratchets at 8 and 20; the smallest of those decreases
+# is 4.7e-4, far above round-off, float32 included.
 _DEFAULT_GATE_FRAMES = 4096
-_DEFAULT_GATE_SEED = 4
-_DEFAULT_GATE: dict[str, Any] = dict(lrate=0.5, lratefact=0.5, maxdecs=2)
+_DEFAULT_GATE_SEED = 1
+_DEFAULT_GATE: dict[str, Any] = dict(lrate=0.6, lratefact=0.5, maxdecs=3, newt_ramp=1)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_rho_rate_ratchet_gate_at_the_shipped_default_newt_start(backend, X, tmp_path):
     """The same gate at ``newt_start=20``, the default of every backend: a
-    ratchet on iteration 21 tightens the rho-rate ceiling, one on iteration 10
+    ratchet on iteration 21 tightens the rho-rate ceiling, one on iteration 9
     does not, and with ``newt_start=21`` neither does. This is the one
     default-path behavior issue #335 changes (``do_newton=False``)."""
     x = X[:, :_DEFAULT_GATE_FRAMES]
