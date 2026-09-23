@@ -65,21 +65,31 @@ def validate_share_iter(value: object, name: str = "share_iter") -> None:
     Every backend validates it whether or not ``share_comps`` is on, because
     the freeze it sets (:func:`share_freeze`) applies either way, from
     ``share_start`` on, and whether a fit reaches ``share_start`` is not known
-    at construction. ``name`` is the keyword the backend takes (the NumPy
-    backend spells it ``share_int``).
+    at construction. ``name`` is how the message names the keyword: the NumPy
+    backend takes both ``share_int`` and ``share_iter`` and names both.
     """
     validate_iteration_setting(
         name,
         value,
         SHARE_ITER_MIN,
         why=(
-            "the reference holds the mixing-matrix update on every iteration "
-            f"whose remainder mod {name} is 0 to {_SHARE_FREEZE_LAST_REMAINDER} "
-            "once the iteration reaches share_start (amica15.f90:1803), whether "
-            f"or not share_comps is on, so a {name} below {SHARE_ITER_MIN} would "
-            "never update A again"
+            f"below {SHARE_ITER_MIN}, every iteration's remainder is "
+            f"{_SHARE_FREEZE_LAST_REMAINDER} or less, so the reference's A-freeze "
+            "(amica15.f90:1803), which applies whether or not share_comps is "
+            "on, would hold the mixing matrix permanently from share_start on"
         ),
     )
+
+
+def validate_share_start(value: object) -> None:
+    """Raise ``ValueError`` unless ``share_start`` is an integer of at least 1.
+
+    Validated whether or not ``share_comps`` is on, for the same reason as
+    :func:`validate_share_iter`: the A-freeze reads it on every fit, and
+    ``share_start=0`` would hold A from the very first iteration. Checked
+    with the plain message of the other iteration settings.
+    """
+    validate_iteration_setting("share_start", value, 1)
 
 
 def _check_interval(where: str, name: str, interval: int) -> None:

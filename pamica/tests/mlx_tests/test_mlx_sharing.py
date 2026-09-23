@@ -558,16 +558,19 @@ def test_share_constructor_validation(kwargs, match):
 
 
 def test_share_settings_are_not_validated_when_sharing_is_off():
-    """The merge settings are validated only with ``share_comps`` on, as in
-    AMICATorchNG, so they are carried untouched otherwise. ``share_iter`` is the
-    exception: the reference's A-freeze reads it whether or not sharing is on
-    (issue #345), so it is validated always."""
+    """The merge threshold is validated only with ``share_comps`` on, as in
+    AMICATorchNG, so it is carried untouched otherwise. The schedule is the
+    exception: the reference's A-freeze reads ``share_start`` and
+    ``share_iter`` whether or not sharing is on (issue #345), so both are
+    validated always."""
     from pamica.mlx_impl import AMICAMLXNG
 
-    model = AMICAMLXNG(n_channels=8, n_models=2, share_start=0, comp_thresh=0.0)
-    assert model.share_comps is False and model.share_start == 0
+    model = AMICAMLXNG(n_channels=8, n_models=2, comp_thresh=0.0)
+    assert model.share_comps is False and model.comp_thresh == 0.0
     with pytest.raises(ValueError, match="share_iter must be an integer >= 7"):
         AMICAMLXNG(n_channels=8, n_models=2, share_iter=1)
+    with pytest.raises(ValueError, match="share_start must be an integer >= 1"):
+        AMICAMLXNG(n_channels=8, n_models=2, share_start=0)
 
 
 def test_single_model_sharing_is_accepted_and_inert():

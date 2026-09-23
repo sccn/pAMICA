@@ -705,14 +705,22 @@ def _construct(backend: str, **kwargs: Any):
         ("rejstart", 0, 1, {"do_reject": True}),
         ("rejstart", -2, 1, {"do_reject": True}),
         ("rejstart", 2.0, 1, {"do_reject": True}),
+        # Checked whether or not share_comps is on: the reference's A-freeze
+        # reads it on every fit, and 0 would hold A from the first iteration
+        # (issue #339 review).
+        ("share_start", 0, 1, {}),
+        ("share_start", -5, 1, {"share_comps": True}),
+        ("share_start", 2.5, 1, {}),
+        ("share_start", True, 1, {}),
     ],
 )
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_schedule_settings_are_rejected_with_one_message(
     backend, setting, value, minimum, extra
 ):
-    """Every backend refuses the same ``newt_start``/``rejstart`` values with
-    the same message (``pamica.schedule.validate_iteration_setting``)."""
+    """Every backend refuses the same ``newt_start``/``rejstart``/
+    ``share_start`` values with the same message
+    (``pamica.schedule.validate_iteration_setting``)."""
     with pytest.raises(ValueError) as exc:
         _construct(backend, **{setting: value}, **extra)
     assert str(exc.value) == f"{setting} must be an integer >= {minimum}, got {value!r}"
@@ -721,13 +729,15 @@ def test_schedule_settings_are_rejected_with_one_message(
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_boundary_schedule_settings_are_accepted(backend):
     """The smallest meaningful values construct, numpy integers included, and
-    ``rejstart`` is inert (unchecked) while ``do_reject`` is off, the pattern
-    ``share_start`` follows."""
+    ``rejstart`` is inert (unchecked) while ``do_reject`` is off.
+    ``share_start`` is not inert without sharing: the A-freeze reads it."""
     for kwargs in (
         {"newt_start": 0},
         {"newt_start": np.int64(3)},
         {"do_reject": True, "rejstart": 1},
         {"rejstart": 0},
+        {"share_start": 1},
+        {"share_start": np.int64(1), "share_comps": True},
     ):
         _construct(backend, **kwargs)
 

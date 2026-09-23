@@ -627,8 +627,10 @@ class AMICATorchNG:
         is held on every iteration whose number, counted from 1, has a
         remainder of 0 to 5 modulo ``share_iter`` (amica15.f90:1803), so with
         the defaults on iterations 100-105, 200-205, and so on.
-        ``share_iter`` must be an integer >= 7, whether or not ``share_comps``
-        is on, or A would never move again.
+        Both are validated whether or not ``share_comps`` is on:
+        ``share_start`` must be an integer >= 1, and ``share_iter`` an
+        integer >= 7, or the freeze would hold A permanently from
+        ``share_start`` on.
     comp_thresh : float, default=0.99
         Cosine-similarity cutoff (in the de-sphered/sensor-space metric) above
         which two components' mixing vectors are identified and merged. The
@@ -920,11 +922,10 @@ class AMICATorchNG:
         # back-map, shared by get_sensor_mixing_matrix and the sharing metric.
         self._sphere_pinv = None
         # The A-freeze schedule reads share_start/share_iter whether or not
-        # share_comps is on (issue #345), so share_iter is validated always.
+        # share_comps is on (issue #345), so both are validated always.
+        schedule.validate_share_start(share_start)
         schedule.validate_share_iter(share_iter)
         if share_comps:
-            if share_start < 1:
-                raise ValueError(f"share_start must be >= 1, got {share_start}")
             if not 0.0 < comp_thresh <= 1.0:
                 raise ValueError(f"comp_thresh must be in (0, 1], got {comp_thresh}")
 

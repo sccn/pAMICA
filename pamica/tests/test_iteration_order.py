@@ -30,12 +30,14 @@ import numpy as np
 import pytest
 import torch
 
+from pamica.amica import AMICA
 from pamica.numpy_impl.core import AMICA as AMICA_NumPy
 from pamica.torch_impl.core import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
 DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
+PARAM_FILE = SAMPLE_DIR / "input.param"
 NW = 32
 FIELD = 30504
 NMIX = 3
@@ -255,14 +257,58 @@ def test_every_backend_rejects_a_share_iter_below_7(
     """``share_iter <= 6`` would hold ``A`` on every iteration from
     ``share_start`` on (every remainder is 0-5), and the freeze applies with
     sharing off too, so every constructor rejects it either way, with one
-    message that says why. 7 is accepted."""
-    name = "share_int" if backend == "numpy" else "share_iter"
-    with pytest.raises(ValueError, match=rf"{name} must be an integer >= 7") as err:
+    message that says why. The NumPy backend takes both ``share_int`` and
+    ``share_iter`` and names both. 7 is accepted."""
+    name = "share_int/share_iter" if backend == "numpy" else "share_iter"
+    head = f"{name} must be an integer >= 7, got {bad!r}: below 7, "
+    with pytest.raises(ValueError) as err:
         _model(backend, 1, tmp_path, share_comps=share_comps, share_iter=bad)
-    assert "would never update A again" in str(err.value)
+    assert str(err.value).startswith(head)
+    assert "hold the mixing matrix permanently from share_start on" in str(err.value)
     assert "amica15.f90:1803" in str(err.value)
+    if backend == "numpy":
+        # The canonical spelling reaches the same check and message.
+        with pytest.raises(ValueError) as err:
+            AMICA_NumPy(use_tqdm=False, share_comps=share_comps, share_iter=bad)
+        assert str(err.value).startswith(head)
     ok = _model(backend, 1, tmp_path, share_comps=share_comps, share_iter=7)
     assert _share_iter(ok, backend) == 7
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "message"),
+    [
+        (
+            "share_iter",
+            6,
+            "must be an integer >= 7, got 6: below 7",
+        ),
+        ("share_start", 0, "share_start must be an integer >= 1, got 0"),
+    ],
+)
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_a_params_file_reaches_the_share_validation(
+    backend, setting, value, message, X, tmp_path
+):
+    """A Fortran ``input.param`` that sets ``share_iter`` below 7 or
+    ``share_start`` below 1 is refused by the same checks as a keyword, on
+    every backend: through ``AMICA.from_params_file`` (PyTorch, MLX), whose
+    backend is built in ``fit``, and through the NumPy constructor's
+    ``params_file``."""
+    text = PARAM_FILE.read_text()
+    line = f"{setting} 100\n"
+    assert line in text, f"setup: {PARAM_FILE.name} no longer sets {setting} 100"
+    path = tmp_path / "input.param"
+    path.write_text(text.replace(line, f"{setting} {value}\n"))
+    if backend == "numpy":
+        with pytest.raises(ValueError, match=message):
+            AMICA_NumPy(params_file=str(path), use_tqdm=False)
+        return
+    if backend == "mlx":
+        _mlx_class()
+    wrapper = AMICA.from_params_file(str(path), backend=backend, verbose=False)
+    with pytest.raises(ValueError, match=message):
+        wrapper.fit(X[:, :512], max_iter=1)
 
 
 # --- #339: the decrease response acts on the same iteration's update ---------

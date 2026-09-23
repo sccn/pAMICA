@@ -716,16 +716,16 @@ class AMICA:
         self.share_start = params.get("share_start", 100)
         self.share_int = params.get("share_int", 100)
         # The reference's A-freeze reads share_start/share_int whether or not
-        # share_comps is on (issue #345), so a share_int below 7, which would
-        # hold A for every iteration of every cycle, is rejected always, with
-        # AMICATorchNG's message (pamica.schedule.validate_share_iter).
-        schedule.validate_share_iter(self.share_int, "share_int")
+        # share_comps is on (issue #345), so both are validated always, with
+        # AMICATorchNG's messages (pamica.schedule): share_start >= 1, and a
+        # share_int below 7, which would hold A for every iteration of every
+        # cycle, is rejected under both of this backend's spellings.
+        schedule.validate_share_start(self.share_start)
+        schedule.validate_share_iter(self.share_int, "share_int/share_iter")
         if self.share_comps:
-            # Same validation (and the same reasons) as AMICATorchNG: the merge
-            # schedule is 1-indexed, and comp_thresh is a cosine cutoff, so it is
-            # only meaningful in (0, 1]; at 0 every pair of columns merges.
-            if self.share_start < 1:
-                raise ValueError(f"share_start must be >= 1, got {self.share_start}")
+            # Same validation (and the same reason) as AMICATorchNG: comp_thresh
+            # is a cosine cutoff, so it is only meaningful in (0, 1]; at 0 every
+            # pair of columns merges.
             if not 0.0 < self.comp_thresh <= 1.0:
                 raise ValueError(
                     f"comp_thresh must be in (0, 1], got {self.comp_thresh}"

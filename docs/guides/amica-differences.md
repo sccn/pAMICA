@@ -45,8 +45,10 @@ so with the defaults (`share_start = share_iter = 100`) every backend holds `A` 
 Until issue #345 pamica held `A` only under `share_comps` with two or more models, on each scan iteration and the five after it, counted from `share_start`.
 The literal remainder starts the window on the scan iteration only when `share_start` is a multiple of `share_iter`, as with the defaults;
 otherwise the window and the scan fall on different iterations, in the reference and in pamica alike.
-A `share_iter` below 7 would never update `A` again, so every backend rejects it, sharing on or off
-(the NumPy backend spells it `share_int`).
+A `share_iter` below 7 would leave every remainder at 5 or less, holding `A` permanently from `share_start` on,
+so every backend rejects it, sharing on or off (the NumPy backend takes it as `share_int` or `share_iter`).
+For the same reason every backend requires `share_start >= 1` whether or not sharing is on:
+`share_start=0` would start the freeze on the first iteration.
 
 One `share_comps` detail is pamica's own because the reference cannot decide it:
 the merge similarity metric has no bit-exact oracle, because the reference's `Spinv2` is declared but never allocated.
