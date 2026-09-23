@@ -99,6 +99,8 @@ Release notes are also published on the
   Over 100 iterations with the reference's own `newt_start=50`, the largest log-likelihood deviation drops from 1.33e-3 to 6.7e-6 (PyTorch) and 4.1e-6 (NumPy).
   That is the floor this recording sets before Newton even starts:
   one mixture component's shape sits at `rho=1`, where the location update divides by `|y|` and amplifies round-off from one iteration to the next.
+  With `doscaling` on as well (the default, component rows since issue #333), the same 100-iteration comparison stays within 3.9e-6 (PyTorch) and 7.0e-6 (NumPy);
+  with only the #333 fix it was 2.1e-4 apart, the gap ADR 0006 attributed to this Newton start.
   - Default fits (`do_newton=False`, `do_reject=False`) change in two narrow cases only.
     A `maxdecs` ratchet that completes on exactly iteration `newt_start + 1` (21 by default) now tightens the rho-rate ceiling, as the reference's does.
     On NumPy, a non-finite likelihood on iteration `restartiter + 1` (11 by default) now ends the fit instead of restarting it.
@@ -112,7 +114,8 @@ Release notes are also published on the
     NumPy's restart-on-NaN recovery itself differs from the reference's, which never resumes fitting after a restart;
     that is now recorded as row 15 of the differences guide.
   - Every schedule gate now lives in one shared module, `pamica/schedule.py`, which all three backends call.
-    The share-merge, A-freeze, kurtosis-switch and `writestep`/`histstep` schedules already counted from 1 and are unchanged.
+    The share-merge, A-freeze, kurtosis-switch and `writestep`/`histstep` schedules already counted from 1 and are unchanged,
+    and `scalestep` (1-based since issue #333) uses the same helper and validator.
   - `iteration`, `ll_history` and `mir_history_` keep their 0-based indexing.
   - Tests: `pamica/tests/test_schedule_gates.py` observes each gate through real fits on all three backends,
     and `pamica/tests/test_schedule_native_oracle.py` (opt-in, `AMICA_RUN_FORTRAN=1`) is the native-binary comparison above.
