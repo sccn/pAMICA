@@ -325,13 +325,56 @@ def test_main_writes_one_report_per_backend_and_a_summary(tmp_path):
     assert "| NumPy | float64 | 1 |" in summary
 
 
+def test_default_run_is_the_historical_torch_only_run(tmp_path):
+    """No ``--backend``: exactly the run the harness has always made, one
+    PyTorch report under its historical name and no summary table."""
+    from validate_implementations import main
+
+    out = tmp_path / "out"
+    argv = ["--skip-fortran", "--max-iter", "1", "--output-dir", str(out)]
+    assert main(argv) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["validation_report.txt"]
+
+
+def test_parity_summary_renders_every_numeric_column(dispatch_results):
+    """``format_parity_summary`` with populated rows, from two real backend
+    runs and no binary: the float64 PyTorch run stands in for the reference
+    and the NumPy run is compared with it through ``compare_results``, so
+    every column holds a number (they are the same trajectory, so the values
+    are known too)."""
+    from validate_implementations import compare_results, format_parity_summary
+
+    reference, numpy_res = dispatch_results["torch"], dispatch_results["numpy"]
+    comparison = compare_results(reference, numpy_res, "NumPy")
+    table = format_parity_summary(reference, [("numpy", numpy_res, comparison)])
+    header, rule, ref_row, numpy_row = table.splitlines()
+    assert header.count("|") == rule.count("|") == ref_row.count("|") == 10
+
+    ref_cells = [c.strip() for c in ref_row.strip("|").split("|")]
+    assert ref_cells[:3] == ["Fortran (reference)", "float64", "2"]
+    assert float(ref_cells[3]) == pytest.approx(reference["final_ll"], abs=1e-6)
+    assert ref_cells[4:8] == ["", "", "", ""]
+    assert float(ref_cells[8]) >= 0
+
+    cells = [c.strip() for c in numpy_row.strip("|").split("|")]
+    assert cells[:3] == ["NumPy", "float64", "2"]
+    ll, ll_diff, mean_corr, min_corr, amari, runtime = map(float, cells[3:])
+    assert ll == pytest.approx(numpy_res["final_ll"], abs=1e-6)
+    assert ll_diff == 0.0  # 1e-13 in fact, rendered to six decimals
+    assert mean_corr == min_corr == 1.0
+    assert amari == 0.0
+    assert runtime == pytest.approx(numpy_res["runtime_s"], abs=0.05)
+
+
+@pytest.mark.parametrize("backend", ["torch,mlx", "all"])
 def test_mlx_backend_without_mlx_exits_with_the_install_hint(
-    tmp_path, monkeypatch, capsys
+    backend, tmp_path, monkeypatch, capsys
 ):
-    """``--backend mlx`` on a host without MLX stops before any work, naming
-    the extra to install. Where MLX is installed, the ImportError its absence
-    raises is reproduced at the real import site (``None`` in
-    ``sys.modules``); the harness code path itself is unmodified."""
+    """Any request that includes MLX (``torch,mlx`` or ``all``) on a host
+    without MLX stops before any work, naming the extra to install. Where MLX
+    is installed, the ImportError its absence raises is reproduced at the real
+    import site (``None`` in ``sys.modules``); the harness code path itself is
+    unmodified."""
     from validate_implementations import main
 
     try:
@@ -341,7 +384,7 @@ def test_mlx_backend_without_mlx_exits_with_the_install_hint(
     else:
         monkeypatch.setitem(sys.modules, "pamica.mlx_impl", None)
     out = tmp_path / "never"
-    assert main(["--backend", "torch,mlx", "--output-dir", str(out)]) == 2
+    assert main(["--backend", backend, "--output-dir", str(out)]) == 2
     err = capsys.readouterr().err
     assert "--backend mlx" in err and "uv sync --extra mlx" in err
     assert not out.exists(), "nothing may run before the MLX check"
