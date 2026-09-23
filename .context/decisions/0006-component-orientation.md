@@ -56,6 +56,7 @@ it is applied uniformly, model by model, and Phase 8 replaces it.
   Refit only when comparing parameters element by element with the reference.
 - Several test recipes that relied on a non-monotone trajectory (the `keep_best` overshoot, the `min_dll` stop) no longer overshoot at their old settings:
   the column rule's perturbation was part of what made them overshoot. They were retuned (see the Phase 7 pull request).
+  ADR 0003's `keep_best` variance figures were measured under the column rule and will be re-measured in the epic's final parity re-measurement.
 - `scalestep > 1` now rescales on iterations `scalestep`, `2*scalestep`, ... instead of 1, `1+scalestep`, ...; the default is unaffected.
 - Remaining known difference: pamica does not normalize its drawn initial `A` (the reference normalizes a drawn one, amica15.f90:818-819, but not a loaded one).
   The two draws come from different random generators anyway, and the first iteration's rescale normalizes every component.
