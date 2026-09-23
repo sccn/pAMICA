@@ -86,6 +86,7 @@ import numpy as np
 from scipy import linalg
 from scipy.special import digamma
 import logging
+import numbers
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -420,6 +421,16 @@ class AMICA:
                 )
         self.doscaling = params.get("doscaling", True)
         self.scalestep = params.get("scalestep", 1)
+        if self.doscaling and (
+            isinstance(self.scalestep, bool)
+            or not isinstance(self.scalestep, numbers.Integral)
+            or self.scalestep < 1
+        ):
+            # Same check and message as AMICATorchNG: a zero cadence divides by
+            # zero mid-fit; the reference never reads scalestep.
+            raise ValueError(
+                f"scalestep must be an integer >= 1, got {self.scalestep!r}"
+            )
         self.do_sphere = params.get("do_sphere", True)
         self.do_mean = params.get("do_mean", True)
         self.do_approx_sphere = params.get("do_approx_sphere", True)
@@ -2179,8 +2190,13 @@ class AMICA:
 
         # (c was updated above, before the mixture/A updates, from dc_numer/dgm.)
 
-        # Rescale parameters if requested
-        if self.doscaling and self.iter % self.scalestep == 0:
+        # Rescale parameters if requested. The reference rescales every
+        # iteration (it parses ``scalestep`` but never reads it,
+        # amica15.f90:1843/3686); pamica keeps ``scalestep`` as an extension
+        # counted from 1 like the reference's other cadences (iterations s, 2s,
+        # ...), so the default 1 is the reference. The 1-based rule moves to
+        # ``schedule.every`` when epic #324 Phase 9 (issue #335) lands.
+        if self.doscaling and (self.iter + 1) % self.scalestep == 0:
             self._rescale_components()
 
         # Update unmixing matrices

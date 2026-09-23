@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import math
+import numbers
 import time
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -492,7 +493,10 @@ class AMICATorchNG:
         Whether/how often to rescale each component's mixing vector (a row of
         its model's stored ``A`` block) to unit norm, with the matching
         ``mu``/``beta`` rescale, an exact change of scale
-        (see :meth:`_rescale_components`).
+        (see :meth:`_rescale_components`). The rescale runs on iterations
+        ``scalestep``, ``2*scalestep``, ... counted from 1; the default 1
+        rescales every iteration, as the reference always does (it ignores
+        ``scalestep``).
     share_comps : bool, default=False
         Enable multi-model component sharing (Fortran ``share_comps`` /
         ``identify_shared_comps``, amica15.f90:1916): components that are
@@ -764,6 +768,14 @@ class AMICATorchNG:
 
         self.doscaling = doscaling
         self.scalestep = scalestep
+        if doscaling and (
+            isinstance(scalestep, bool)
+            or not isinstance(scalestep, numbers.Integral)
+            or scalestep < 1
+        ):
+            # A zero cadence divides by zero mid-fit; a fractional one fires on
+            # no meaningful schedule. The reference never reads scalestep.
+            raise ValueError(f"scalestep must be an integer >= 1, got {scalestep!r}")
 
         # Component sharing (Fortran share_comps / identify_shared_comps trigger
         # amica15.f90:1856, subroutine :1916-1963): periodically merge mixing
@@ -1823,7 +1835,13 @@ class AMICATorchNG:
 
             self.A = self.A - self.lrate * dAk
 
-        if self.doscaling and (self.iteration % self.scalestep == 0):
+        # The reference rescales every iteration (it parses ``scalestep`` but
+        # never reads it, amica15.f90:1843/3686); pamica keeps ``scalestep`` as
+        # an extension counted from 1 like the reference's other cadences
+        # (iterations s, 2s, ...), so the default 1 is the reference. The
+        # 1-based rule moves to ``schedule.every`` when epic #324 Phase 9
+        # (issue #335) lands.
+        if self.doscaling and (self.iteration + 1) % self.scalestep == 0:
             self._rescale_components()
 
         self._update_unmixing_matrices()

@@ -23,7 +23,11 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
    component-row layout of Phase 8 (issue #334) replaces it;
 3. ``doscaling=False`` is byte-identical to the pre-fix code: each backend class
    at commit ``fb13d76`` is loaded from git and fitted in the same process;
-4. (opt-in, ``AMICA_RUN_FORTRAN=1``) the native reference binary, seeded from
+4. ``scalestep``, a pamica extension the reference parses but never reads,
+   counts iterations from 1, so its default of 1 is the reference's
+   every-iteration rescale, and every constructor rejects a ``scalestep`` that
+   is not an integer >= 1 while the rescale is on;
+5. (opt-in, ``AMICA_RUN_FORTRAN=1``) the native reference binary, seeded from
    pamica's initialization, matches pamica's ``A``/``mu``/``sbeta`` after one
    and three iterations to float64 round-off.
 
@@ -392,7 +396,94 @@ def test_doscaling_off_is_byte_identical_to_the_pre_fix_code(
     assert not changed, f"doscaling=False results changed: {changed}"
 
 
-# --- 4. seeded native reference oracle (opt-in) -----------------------------
+# --- 4. scalestep cadence, counted from 1 -----------------------------------
+def _fit_rows_dev(backend: str, scalestep: int, max_iter: int, X, tmp_path) -> float:
+    """Largest component-row norm deviation after a real two-model fit of
+    ``max_iter`` iterations (``keep_best`` off, so it is the last iterate)."""
+    if backend == "numpy":
+        n = AMICA_NumPy(
+            num_models=2,
+            num_mix=NMIX,
+            max_iter=max_iter,
+            seed=SEED,
+            use_tqdm=False,
+            outdir=str(tmp_path / f"s{scalestep}_k{max_iter}"),
+            do_opt_block=False,
+            block_size=4096,
+            scalestep=scalestep,
+            writestep=10000,
+        )
+        n.fit(X)
+        assert n.A is not None and n.comp_list is not None
+        return _row_norm_dev(n.A, n.comp_list)
+    kwargs: Dict[str, Any] = dict(
+        n_channels=NW,
+        n_models=2,
+        n_mix=NMIX,
+        seed=SEED,
+        block_size=4096,
+        keep_best=False,
+        scalestep=scalestep,
+    )
+    if backend == "torch":
+        m = AMICATorchNG(device="cpu", dtype=torch.float64, **kwargs)
+        m.fit(X, max_iter=max_iter, verbose=False)
+        assert m.A is not None and m.comp_list is not None
+        return _row_norm_dev(m.A.numpy(), m.comp_list.numpy())
+    m = _mlx_core().AMICAMLXNG(**kwargs)
+    m.fit(X, max_iter=max_iter, verbose=False)
+    return _row_norm_dev(np.array(m.A, dtype=np.float64), np.array(m.comp_list))
+
+
+@pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
+@pytest.mark.parametrize("scalestep", [1, 3])
+def test_scalestep_counts_iterations_from_one(real_slice, backend, scalestep, tmp_path):
+    """The reference rescales every iteration: it parses ``scalestep`` but never
+    reads it (amica15.f90:1843, :3686). pamica keeps ``scalestep`` as an
+    extension counted from 1 like the reference's other cadences, so the rescale
+    runs on 1-based iterations ``scalestep``, ``2*scalestep``, ...; the default 1
+    is the reference.
+
+    Observed on real fits of 1 to 6 iterations: right after a rescale iteration
+    every component row has unit norm, and one unscaled iteration already moves
+    the rows by 1.7e-2 to 9.5e-2 (measured).
+    """
+    if backend == "mlx":
+        _mlx_core()
+    unit = 1e-6 if backend == "mlx" else 1e-14
+    X = real_slice[:, :4096]
+    for k in range(1, 7):
+        dev = _fit_rows_dev(backend, scalestep, k, X, tmp_path)
+        if k % scalestep == 0:
+            assert dev <= unit, f"1-based iteration {k}: rows not rescaled ({dev})"
+        else:
+            assert dev > 1e-3, f"1-based iteration {k}: rows rescaled ({dev})"
+
+
+def _construct(backend: str, outdir: Path, **kwargs: Any) -> Any:
+    if backend == "numpy":
+        return AMICA_NumPy(
+            num_models=1, num_mix=NMIX, use_tqdm=False, outdir=str(outdir), **kwargs
+        )
+    if backend == "torch":
+        return AMICATorchNG(n_channels=NW, n_mix=NMIX, device="cpu", **kwargs)
+    return _mlx_core().AMICAMLXNG(n_channels=NW, n_mix=NMIX, **kwargs)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 2.5, True])
+@pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
+def test_every_backend_rejects_an_invalid_scalestep(backend, bad, tmp_path):
+    """A zero ``scalestep`` used to surface as a bare ``ZeroDivisionError``
+    mid-fit on every backend; each constructor now rejects anything but an
+    integer >= 1, with one message, while the rescale is on."""
+    with pytest.raises(ValueError, match="scalestep must be an integer >= 1"):
+        _construct(backend, tmp_path, doscaling=True, scalestep=bad)
+    # With the rescale off, scalestep is never read, so it is not validated.
+    off = _construct(backend, tmp_path, doscaling=False, scalestep=bad)
+    assert off.scalestep == bad
+
+
+# --- 5. seeded native reference oracle (opt-in) -----------------------------
 # The reference's input.param optimizer (natural gradient only here: the Newton
 # start is epic #324 Phase 9, issue #335) with the block size pinned on both
 # sides. pamica keyword -> reference keyword where the names differ.

@@ -24,11 +24,12 @@ that is not listed, that is a bug worth
 | 10 | Restarts across seeds | none (its `maxrestarts` only *recovers* from an early NaN) | available as `n_restarts`, **off by default** (`n_restarts=1`) | the weakest under-determined components are init-basin sensitive, so best-of-N buys robustness; but a default that ran N fits would change every result and cost N times as long | `n_restarts=1` (the default) |
 | 11 | Reconstruction after rank reduction (`AMICAICA.apply`) | output has no representation of the discarded principal component analysis (PCA) subspace (sphere rows past `numeigs` are zero), so any back-projection drops it | the MNE export carries the full PCA basis, so `apply` restores the residual | MNE's own `ICA` does; the residual was never part of the independent component analysis (ICA) decomposition, so it is not ICA's to remove | `apply(..., n_pca_components=ica.n_components_)` |
 | 12 | `pcadb` | parsed (amica15.f90:3459-3461), never used | unset by default; when set alone, keeps the dimensions within `pcadb` dB of the largest eigenvalue; ignored when `pcakeep` is also set | a dB cut is a scale-free way to drop low-variance directions; letting `pcakeep` win preserves what a reference `input.param` that sets both (both bundled files do) means to the binary | leave `pcadb` unset (the default), or set `pcakeep` |
+| 13 | `scalestep` | parsed (amica15.f90:3686), never used; rescales every iteration (:1843) | rescales every `scalestep` iterations counted from 1; default 1 matches the reference | pamica has always honored the keyword, and keeping it costs nothing; since issue #333 it counts from 1 like the reference's live cadences (`writestep`, `histstep`) instead of firing on the first iteration | `scalestep=1`, the default |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
 row 3 with ADR 0003; row 5 with issue #50, extended to the raw backends by issue #306; row 8 with issues #60 and #240;
 row 9 with issue #232; row 10 with issue #198; row 11 with issue #322 (ADR 0005);
-row 12 with issue #323.
+row 12 with issue #323; row 13 with issue #333 (ADR 0006).
 
 Two `share_comps` details are pamica's own because the reference cannot decide
 them: the A-freeze window after a merge is anchored on `share_start` (the literal
