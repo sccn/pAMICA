@@ -305,6 +305,16 @@ class AMICA:
             one WARNING, when ``do_sphere`` is False, as in the reference. See
             :mod:`pamica.rank`.
 
+            ``doscaling`` (True) and ``scalestep`` (1) carry AMICATorchNG's
+            names, defaults, validation and semantics (issue #333): each
+            component's mixing vector (a row of its model's stored ``A``
+            block) is rescaled to unit norm, with the matching ``mu``/``beta``
+            rescale, on iterations ``scalestep``, ``2*scalestep``, ...
+            counted from 1 (see :meth:`_rescale_components`). ``scalestep`` is
+            validated only when ``doscaling`` is on (an integer >= 1, or the
+            constructor raises ``ValueError``); with ``doscaling`` off it is
+            inert, never read.
+
             ``outdir`` (None) is where the fit writes its ``out.txt`` log,
             its ``writestep`` checkpoints, its ``do_history`` snapshots and its
             final results, in the Fortran ``amicaout`` layout. The default

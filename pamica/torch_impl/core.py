@@ -496,7 +496,9 @@ class AMICATorchNG:
         (see :meth:`_rescale_components`). The rescale runs on iterations
         ``scalestep``, ``2*scalestep``, ... counted from 1; the default 1
         rescales every iteration, as the reference always does (it ignores
-        ``scalestep``).
+        ``scalestep``). ``scalestep`` is validated only when ``doscaling`` is
+        on (an integer >= 1, or the constructor raises ``ValueError``); with
+        ``doscaling`` off it is inert, never read.
     share_comps : bool, default=False
         Enable multi-model component sharing (Fortran ``share_comps`` /
         ``identify_shared_comps``, amica15.f90:1916): components that are

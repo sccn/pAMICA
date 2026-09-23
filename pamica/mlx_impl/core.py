@@ -555,6 +555,20 @@ class AMICAMLXNG:
     back to the input channels with :meth:`get_sensor_mixing_matrix`.
     ``fit(mir_step > 0)`` rejects an explicit reduction request up front, as
     AMICATorchNG does (see :meth:`_fit_once`).
+
+    The rescale parameters (issue #333) likewise carry AMICATorchNG's names,
+    defaults, validation and semantics:
+
+    ``doscaling`` (True)
+        Rescale each component's mixing vector (a row of its model's stored
+        ``A`` block) to unit norm, with the matching ``mu``/``beta`` rescale,
+        an exact change of scale (see :meth:`_rescale_components`).
+    ``scalestep`` (1)
+        Run the rescale on iterations ``scalestep``, ``2*scalestep``, ...
+        counted from 1; the default 1 rescales every iteration, as the
+        reference always does (it ignores ``scalestep``). Validated only when
+        ``doscaling`` is on (an integer >= 1, or the constructor raises
+        ``ValueError``); with ``doscaling`` off it is inert, never read.
     """
 
     def __init__(
