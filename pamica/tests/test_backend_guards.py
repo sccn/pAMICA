@@ -124,6 +124,10 @@ _TORCH_MLX_ACCESSORS: List[Accessor] = [
     ("get_pdftype", lambda m, X: m.get_pdftype(), False),
     ("shared_components", lambda m, X: m.shared_components(), False),
     ("variance_order", lambda m, X: m.variance_order(), False),
+    # The preprocessing accessors (issue #313).
+    ("get_sphere", lambda m, X: m.get_sphere(), False),
+    ("get_mean", lambda m, X: m.get_mean(), False),
+    ("get_model_center", lambda m, X: m.get_model_center(model_idx=0), False),
     ("model_loglik", lambda m, X: m.model_loglik(X), True),
     ("model_probability", lambda m, X: m.model_probability(X), True),
     ("mir", lambda m, X: m.mir(X), True),

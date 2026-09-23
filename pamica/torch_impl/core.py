@@ -3114,6 +3114,57 @@ class AMICATorchNG:
         self._check_usable("get the unmixing matrix")
         return self.W[:, :, model_idx].T.cpu().numpy()
 
+    # ------------------------------------------------------------------
+    # Preprocessing accessors (issue #313). Same names, shapes and float64
+    # return type as AMICAMLXNG's, so a consumer that composes the transform
+    # itself (the MNE export, pamica.mne_compat) reads every backend alike.
+    # ------------------------------------------------------------------
+    def get_sphere(self) -> np.ndarray:
+        """Fitted sphering matrix, shape ``(n_channels, n_channels_in)``.
+
+        Square for a full-rank fit and ``(n_kept, n_channels_in)`` after rank
+        reduction (issue #223). Together with :meth:`get_mean`,
+        :meth:`get_model_center` and :meth:`get_unmixing_matrix` it composes
+        :meth:`transform`: ``S = W_fort @ (sphere @ (X - mean) - c)``.
+        Returned as an independent float64 copy whatever the fit ``dtype``.
+        """
+        if self.sphere is None:
+            raise RuntimeError(
+                "AMICATorchNG.get_sphere() requires a fitted model; call fit() first."
+            )
+        self._check_usable("get the sphere")
+        return self.sphere.detach().cpu().numpy().astype(np.float64)
+
+    def get_mean(self) -> np.ndarray:
+        """Per-channel mean removed before sphering, shape ``(n_channels_in,)``.
+
+        All zeros for a ``do_mean=False`` fit. Returned as an independent
+        float64 copy whatever the fit ``dtype``.
+        """
+        if self.mean is None:
+            raise RuntimeError(
+                "AMICATorchNG.get_mean() requires a fitted model; call fit() first."
+            )
+        self._check_usable("get the mean")
+        return self.mean.detach().cpu().numpy().astype(np.float64).ravel()
+
+    def get_model_center(self, model_idx: int = 0) -> np.ndarray:
+        """Model ``model_idx``'s center ``c`` in sphered space, shape ``(n_channels,)``.
+
+        The per-model offset :meth:`transform` subtracts after sphering (issue
+        #27). Identically zero for a single-model fit, since the ``c`` update
+        is gated to ``n_models > 1``. Returned as an independent float64 copy
+        whatever the fit ``dtype``.
+        """
+        if self.c is None:
+            raise RuntimeError(
+                "AMICATorchNG.get_model_center() requires a fitted model; call "
+                "fit() first."
+            )
+        self._check_model_idx(model_idx)
+        self._check_usable("get the model center")
+        return self.c[:, model_idx].detach().cpu().numpy().astype(np.float64)
+
     def _pca_reduction_requested(self, n_channels: int) -> bool:
         """Whether the explicit ``pcakeep``/``pcadb`` asks to fit fewer than
         ``n_channels`` dimensions (the shared predicate,

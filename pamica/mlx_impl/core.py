@@ -3260,6 +3260,63 @@ class AMICAMLXNG:
         self._check_usable("get the unmixing matrix")
         return np.array(self.W[model_idx].T)
 
+    # ------------------------------------------------------------------
+    # Preprocessing accessors (issue #313). Same names, shapes and float64
+    # return type as AMICATorchNG's, so a consumer that composes the transform
+    # itself (the MNE export, pamica.mne_compat) reads every backend alike.
+    # ------------------------------------------------------------------
+    def get_sphere(self) -> np.ndarray:
+        """Fitted sphering matrix, shape ``(n_channels, n_channels_in)``
+        (port of ``AMICATorchNG.get_sphere``).
+
+        Square for a full-rank fit and ``(n_kept, n_channels_in)`` after rank
+        reduction (issue #223). Read from ``_sphere_np``, the float64 host
+        copy: after :meth:`fit` it is the float64 sphere :meth:`_preprocess`
+        computed (the GPU computes with its float32 cast, which agrees to
+        float32 rounding), and after :meth:`load` it is the persisted float32
+        sphere upcast (see :meth:`_load_params`). Returned as an independent
+        float64 copy.
+        """
+        if self.sphere is None or self._sphere_np is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_sphere() requires a fitted model; call fit() first."
+            )
+        self._check_usable("get the sphere")
+        return np.array(self._sphere_np, dtype=np.float64)
+
+    def get_mean(self) -> np.ndarray:
+        """Per-channel mean removed before sphering, shape ``(n_channels_in,)``
+        (port of ``AMICATorchNG.get_mean``).
+
+        All zeros for a ``do_mean=False`` fit. The stored mean is float32
+        (this backend's only precision); it is returned as an independent
+        float64 copy of those float32 values.
+        """
+        if self.mean is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_mean() requires a fitted model; call fit() first."
+            )
+        self._check_usable("get the mean")
+        return np.array(self.mean, dtype=np.float64).ravel()
+
+    def get_model_center(self, model_idx: int = 0) -> np.ndarray:
+        """Model ``model_idx``'s center ``c`` in sphered space, shape
+        ``(n_channels,)`` (port of ``AMICATorchNG.get_model_center``).
+
+        The per-model offset :meth:`transform` subtracts after sphering (issue
+        #27). Identically zero for a single-model fit, since the ``c`` update
+        is gated to ``n_models > 1``. Returned as an independent float64 copy
+        of the stored float32 values.
+        """
+        if self.c is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_model_center() requires a fitted model; call "
+                "fit() first."
+            )
+        self._check_model_idx(model_idx)
+        self._check_usable("get the model center")
+        return np.array(self.c[:, int(model_idx)], dtype=np.float64)
+
     def get_rho(self, model_idx: int = 0) -> np.ndarray:
         """Generalized-Gaussian shape parameter ``rho`` for model
         ``model_idx`` (issue #287 port of ``AMICATorchNG.get_rho``; issue #142).
@@ -3651,10 +3708,11 @@ class AMICAMLXNG:
 
         Raises if the model is unfitted or degenerate (a fit that ended on a
         non-finite log-likelihood): a NaN model must not be written silently.
-        This backend has no scikit-learn-style wrapper in front of it (unlike
-        :class:`~pamica.AMICA`, which already refuses this via its own
-        usability gate for the PyTorch backend), so the guard has to live
-        here -- mirrors :meth:`state_dict`'s two-layer guard (stop_reason
+        The scikit-learn-style :class:`~pamica.AMICA` wrapper
+        (``backend="mlx"``, issue #313) already refuses this via its own
+        usability gate, but a caller using :class:`AMICAMLXNG` directly has
+        no such gate in front of this method, so the guard lives here too --
+        mirrors :meth:`state_dict`'s two-layer guard (stop_reason
         refusal, then a defense-in-depth isfinite sweep over the parameter
         arrays) so the same protection applies to a direct
         ``write_amica_output`` call (PR #311 review).

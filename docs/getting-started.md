@@ -25,6 +25,10 @@ pamica` never requires it.
 uv sync --extra mlx   # or, in an existing environment: uv pip install mlx
 ```
 
+Then select it with `AMICA(backend="mlx")` (or `AMICAICA(backend="mlx")` for MNE users);
+it computes in float32.
+See [Selecting a backend](guides/backends.md#selecting-a-backend).
+
 ## Quickstart
 
 The main entry point is the scikit-learn-style [`AMICA`](api/amica.md) class,
