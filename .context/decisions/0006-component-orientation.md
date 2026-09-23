@@ -73,7 +73,7 @@ it was applied uniformly, model by model.
   ADR 0003's `keep_best` variance figures were measured under the column rule and will be re-measured in the epic's final parity re-measurement.
 - `scalestep > 1` now rescales on iterations `scalestep`, `2*scalestep`, ... instead of 1, `1+scalestep`, ...;
   the default is unaffected.
-- Remaining known difference, since resolved: pamica did not normalize its drawn initial `A`
+- Former known difference, now resolved: pamica did not normalize its drawn initial `A`
   (the reference normalizes a drawn one, amica15.f90:818-819, but not a loaded one).
   The two draws come from different random generators anyway, and the first iteration's rescale normalizes every component.
   Aligning it changes default trajectories, so it was its own change, issue #341, not part of the layout change of Phase 8.

@@ -215,6 +215,9 @@ def with_normalized_initial_mixing(cls: Any) -> Any:
                     A = np.array(self.A, dtype=np.float64)
                     n, m = self.data_dim, self.num_models
                     for idx in blocks(A.shape, n, m):
+                        # A component is a row of the per-model block in both
+                        # layouts; only the axis of the full A that carves the
+                        # block out differs (columns before #334, rows after).
                         block = A[idx].copy()
                         block[np.diag_indices(n)] = 1.0
                         A[idx] = normalize_components(block)

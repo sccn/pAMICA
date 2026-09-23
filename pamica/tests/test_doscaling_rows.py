@@ -621,9 +621,9 @@ _ORACLE_TOL = {
 }
 # The seeded state's round-off floor, measured in the test as the largest
 # disagreement between PyTorch and NumPy (the same float64 arithmetic in two
-# operation orders), must sit this many times below each bound, as the
-# doscaling-off deviations the bounds were set on did (3.2 to 42 times below):
-# a state whose floor reaches a bound cannot test that bound.
+# operation orders), must sit this many times below each bound, as the worse
+# of the doscaling on and off deviations the bounds were set on did (3.2 to 42
+# times below): a state whose floor reaches a bound cannot test that bound.
 _FLOOR_MARGIN = 3.0
 # The seed of the oracle's initialization. Seed 42 served until issue #341: from
 # its normalized initial A, the two-model state puts one sample 2.3e-7 from a
