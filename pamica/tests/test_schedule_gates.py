@@ -491,19 +491,19 @@ def test_rho_rate_ratchet_gate_at_the_shipped_default_newt_start(backend, X, tmp
 # --- the switch-on counter reset ---------------------------------------------
 
 
-# The switch-on reset is observable only when a likelihood decrease follows
-# the switch-on iteration while the counter is one short of ``maxdecs``, and on
-# this recording the first Newton step, when positive definite, has never been
-# seen to lower the likelihood. The search that found this configuration (PyTorch; one
-# model; 4096 and 8192 frames; seeds 0-3; lrate 0.3/0.5/0.6/0.8; maxdecs 2 and
-# 3; newt_ramp 10 and 1; newtrate 2 and 4; every newt_start in the first
-# 40 iterations whose natural-gradient prefix left the counter one short of maxdecs, probe runs of 60
-# iterations) turned up only runs like this one: natural gradient at
-# lrate=0.8 overshoots from the first iteration, ``newt_ramp=1`` restores the
-# rate after each halving, and the switch-on step's Hessian is not yet
-# positive definite, so it falls back to the natural gradient and lowers the
-# likelihood a third time. Decreases of 3.8e-3, 2.0e-2 and 3.0e-2, far above
-# round-off, and the same on seeds 0-5 and all three backends.
+# The switch-on reset is observable only when the likelihood decreases right
+# after the switch-on iteration while the decrease counter is partly filled,
+# which asks the first Newton M-step to overshoot. A search on PyTorch, about 45
+# CPU-minutes (1 and 2 models; 4096 and 8192 frames; seeds 0-3; lrate 0.3 to
+# 0.8; maxdecs 2 and 3; newt_ramp 10 and 1; newtrate 2 and 4; up to 8 candidate
+# newt_start values per configuration, read off 60-iteration probes), found such
+# runs only at lrate=0.8 with newt_start=3, where the natural gradient
+# overshoots from the first iteration and the switch-on Hessian is not yet
+# positive definite, so the step falls back to the natural gradient and
+# overshoots again, plus one two-model run at lrate=0.5 and newt_start=11. This
+# one-model configuration is the most robust of them: ``newt_ramp=1`` restores
+# the rate after each halving, the decreases are 3.8e-3, 2.0e-2 and 3.0e-2, far
+# above round-off, and the pattern holds on seeds 0-5 and all three backends.
 _RESET_FRAMES = 4096
 _RESET: dict[str, Any] = dict(
     do_newton=True,
