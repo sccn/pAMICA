@@ -8,21 +8,25 @@ with PyTorch's and NumPy's, iteration by iteration, together with the
 log-likelihood trajectory.
 
 The comparison bound is the reference's own round-off noise in the same setup,
-measured in the same test: the binary is run a second time with 4 threads
-instead of 1, which only changes the order of its reductions. On this
+measured in the same test: the binary is run again with 2 and with 4 threads
+instead of 1, which only changes the order of its reductions, and the floor is
+the larger of the two deviations from the 1-thread run. On this
 recording that noise grows quickly (one mixture shape sits at ``rho=1``, where
 the location update divides by ``|y|``), so it is the honest floor; each backend
-must stay within 10 times it. Measured (maximum over the trajectory, PyTorch /
-NumPy against the binary, then the binary against itself):
+must stay within 10 times it. The multi-threaded runs are not reproducible from
+one run to the next (their reduction order is scheduled at run time), so the
+floor varies; the table gives its range over three runs. Measured (maximum over
+the trajectory, PyTorch / NumPy against the binary, which are reproducible,
+then the binary against itself):
 
-=====================  ===============================  ==================
-configuration          LL deviation                     ``A`` deviation
-=====================  ===============================  ==================
-decreases, 30 its      2.7e-5 / 8.2e-5 (floor 1.9e-5)   8.1e-4 / 6.8e-4 (floor 6.0e-4)
-maxdecs ratchet        6.6e-6 / 8.6e-6 (floor 4.2e-6)   3.0e-4 / 2.7e-4 (floor 2.3e-4)
-A-freeze, doscaling    6.6e-7 / 4.4e-7 (floor 4.3e-7)   5.0e-6 / 5.6e-6 (floor 4.3e-6)
-A-freeze, no scaling   4.0e-7 / 8.0e-7 (floor 6.1e-7)   1.3e-5 / 1.2e-5 (floor 1.2e-5)
-=====================  ===============================  ==================
+=====================  =========================================  ================================================
+configuration          LL deviation                               ``A`` deviation
+=====================  =========================================  ================================================
+decreases, 30 its      2.7e-5 / 8.2e-5 (floor 4.1e-5 to 1.3e-4)   8.1e-4 / 6.8e-4 (floor 5.3e-4 to 1.2e-3)
+maxdecs ratchet        6.6e-6 / 8.6e-6 (floor 5.7e-6 to 9.6e-6)   3.0e-4 / 2.7e-4 (floor 1.4e-4 to 4.2e-4)
+A-freeze, doscaling    6.6e-7 / 4.4e-7 (floor 4.0e-7 to 4.3e-7)   5.0e-6 / 5.6e-6 (floor 4.3e-6 to 7.5e-6)
+A-freeze, no scaling   4.0e-7 / 8.0e-7 (floor 4.3e-7 to 6.1e-7)   1.3e-5 / 1.2e-5 (floor 1.2e-5 to 1.5e-5)
+=====================  =========================================  ================================================
 
 Before the fix the same comparisons were 1.4e-2 / 2.2e-1 (decreases),
 1.3e-2 / 1.4e-1 (ratchet) and 6.1e-3 / 1.9e-1 (A-freeze), hundreds to tens of
@@ -55,6 +59,8 @@ SEED = 42
 PRE_CHANGE_COMMIT = "5b6ae4f69eacf6aa18002ce336ed904f73438516"
 # Each backend within this many times the reference's own round-off noise.
 NOISE_FACTOR = 10.0
+# The thread counts whose deviation from the 1-thread run sets the floor.
+_FLOOR_THREADS = (2, 4)
 # The pre-change code at least this many times the noise, so the bound above
 # discriminates.
 CONTROL_FACTOR = 100.0
@@ -180,7 +186,7 @@ def _decreases(ll) -> List[int]:
 
 
 def _run(name: str, X: np.ndarray, workdir: Path, max_iter: int, pre: Any) -> dict:
-    """The reference (1 and 4 threads), PyTorch, NumPy and the pre-change
+    """The reference (1, 2 and 4 threads), PyTorch, NumPy and the pre-change
     PyTorch, all from one seeded state."""
     from pamica.tests.native_oracle import (
         history_mixing,
@@ -195,7 +201,7 @@ def _run(name: str, X: np.ndarray, workdir: Path, max_iter: int, pre: Any) -> di
     init._initialize_parameters()
     state = seed_from_torch(init)
     ref: Dict[int, Any] = {}
-    for threads in (1, 4):
+    for threads in (1, *_FLOOR_THREADS):
         wd = workdir / f"t{threads}"
         out = run_seeded_reference(
             state,
@@ -252,20 +258,28 @@ def _run(name: str, X: np.ndarray, workdir: Path, max_iter: int, pre: Any) -> di
 
 
 def _floor(run: dict) -> Tuple[float, float]:
-    """The reference's own round-off noise: 1 thread against 4."""
-    (ll1, a1), (ll4, a4) = run["ref"][1], run["ref"][4]
-    dll, da = _deviation(list(ll4), [a4[i] for i in sorted(a4)], ll1, a1)
-    return float(dll.max()), float(da.max())
+    """The reference's own round-off noise: the largest deviation of a 2- or
+    4-thread run from the 1-thread run, so no single reduction order sets it."""
+    ll1, a1 = run["ref"][1]
+    floor_ll = floor_a = 0.0
+    for threads in _FLOOR_THREADS:
+        ll_t, a_t = run["ref"][threads]
+        dll, da = _deviation(list(ll_t), [a_t[i] for i in sorted(a_t)], ll1, a1)
+        floor_ll = max(floor_ll, float(dll.max()))
+        floor_a = max(floor_a, float(da.max()))
+    return floor_ll, floor_a
 
 
 def _check_against_floor(run: dict) -> None:
     ref_ll, ref_a = run["ref"][1]
     floor_ll, floor_a = _floor(run)
     assert 0.0 < floor_ll and 0.0 < floor_a, "the reference noise was not measured"
+    print(f"reference noise floor: LL {floor_ll:.2e}, A {floor_a:.2e}")
     for backend in ("torch", "numpy"):
         ll, a = run["fits"][backend]
         assert len(ll) == len(ref_ll), f"{backend} ran {len(ll)} iterations"
         dll, da = _deviation(ll, a, ref_ll, ref_a)
+        print(f"{backend}: LL {dll.max():.2e}, A {da.max():.2e}")
         assert dll.max() <= NOISE_FACTOR * floor_ll, (
             f"{backend}: LL off by {dll.max():.2e}, reference noise {floor_ll:.2e}"
         )
@@ -274,6 +288,7 @@ def _check_against_floor(run: dict) -> None:
         )
     ll, a = run["fits"]["pre-change"]
     dll, da = _deviation(ll, a, ref_ll, ref_a)
+    print(f"pre-change: LL {dll.max():.2e}, A {da.max():.2e}")
     assert max(dll.max() / floor_ll, da.max() / floor_a) > CONTROL_FACTOR, (
         "the pre-change code also sits at the noise floor: the configuration "
         "does not exercise this change"
