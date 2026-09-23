@@ -456,19 +456,21 @@ and indexed its COLUMNS by component id, but a stored column is one sphered chan
 Seeded from a merged state through the reference's `load_comp_list`,
 the PyTorch and NumPy updates match the native binary to float64 round-off after one and three iterations,
 with `doscaling` on and off (`pamica/tests/test_component_rows.py`, opt-in with `AMICA_RUN_FORTRAN=1`).
-On the bundled sample (2 models, 300 iterations, `share_start=100`, `comp_thresh=0.95`)
-the scan merges three pairs whose maps agree (|cos| 0.956 to 0.971),
-where the old metric merged three whose maps did not (|cos| 0.06, 0.35 and 0.55).
+On the bundled sample (2 models, seed 42, Newton on, 300 iterations, `share_start=100`, `share_iter=100`, `comp_thresh=0.95`)
+the scan at iteration 100 merges one pair whose maps agree (|cos| 0.970) and the scans at 200 and 300 merge nothing,
+so the fit ends with 63 of 64 components at log-likelihood -3.3410 (-3.3394 with sharing off; measured with the finished epic #324, issue #351).
+Right after this change, before the reference's iteration order (issue #339) and the later changes of epic #324, the same fit merged three such pairs (|cos| 0.956 to 0.971),
+and the old metric three whose maps did not (|cos| 0.06, 0.35 and 0.55).
 
 Two consequences to know:
 
 - A scan early in a fit merges most components, and the reference's formula does the same.
   Both models start near the identity, so their components stay near-collinear for the first iterations
-  (on the sample with 2 models and seed 42, a scan at iteration 8 merges all 32 at `comp_thresh=0.95` and 24 at 0.99;
-  one at iteration 20 merges 24 and 5).
+  (on the sample with 2 models, seed 42 and PyTorch's defaults, a scan at iteration 8 merges 30 of 32 at `comp_thresh=0.95` and 17 at 0.99;
+  one at iteration 20 merges 22 and 5).
   The reference's own scan cannot show this (it never merges, above),
   but its similarity with `Spinv2 = Spinv^T Spinv`, applied to the binary's own state after 8 iterations from pamica's initialization,
-  merges exactly the pairs the PyTorch and NumPy scans merge: 32, 32 and 30 at `comp_thresh` 0.9, 0.95 and 0.99.
+  merges exactly the pairs the PyTorch and NumPy scans merge: 32, 32 and 29 at `comp_thresh` 0.9, 0.95 and 0.99.
 - A model left with few components of its own then loses its responsibility, and can end in a non-finite fit.
   In a short recipe (4096 samples, seed 23, `share_start=11`, `share_iter=11`, `comp_thresh=0.9`), 28 merges at iteration 11
   dropped the second model's `gm` from 0.57 to 9.0e-4 within two iterations
