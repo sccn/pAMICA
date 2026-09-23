@@ -500,16 +500,35 @@ class AMICA:
         _check_backend(self.backend, self.device)
         backend_cls = _backend_class(self.backend)
         ctor_params = _ctor_params(backend_cls)
-        if self.backend == "mlx":
-            torch_only = sorted(set(kwargs) & set(_TORCH_ONLY_PARAMS))
-            if torch_only:
-                raise ValueError(
-                    f"{torch_only} apply only to backend='torch'. The MLX "
-                    "backend computes in float32 only (Apple GPUs have no "
-                    "float64) on MLX's default device; use backend='torch' "
-                    "for float64 Fortran-parity runs."
-                )
-        unknown = sorted(set(kwargs) - ctor_params)
+        # Both categories computed before either is raised (PR #347 review
+        # item 4, the same fix as AMICA_NumPy's _reject_unknown_kwargs): a
+        # first version of this check raised on torch_only alone, so
+        # backend='mlx' with fit(dtype=..., blocksize=...) named only
+        # 'dtype' and silently dropped 'blocksize' from the message.
+        # unknown excludes torch_only so a torch-only name (which is not in
+        # ctor_params for backend='mlx' either) is not double-counted.
+        torch_only = (
+            sorted(set(kwargs) & set(_TORCH_ONLY_PARAMS))
+            if self.backend == "mlx"
+            else []
+        )
+        unknown = sorted(set(kwargs) - ctor_params - set(torch_only))
+        if torch_only and unknown:
+            raise TypeError(
+                f"AMICA.fit got invalid keyword argument(s): {torch_only} "
+                "apply only to backend='torch' (the MLX backend computes in "
+                "float32 only, on its default device; use backend='torch' "
+                f"for float64 Fortran-parity runs), and {unknown} is "
+                "neither a fit() parameter nor a constructor keyword of "
+                f"{backend_cls.__name__}."
+            )
+        if torch_only:
+            raise ValueError(
+                f"{torch_only} apply only to backend='torch'. The MLX "
+                "backend computes in float32 only (Apple GPUs have no "
+                "float64) on MLX's default device; use backend='torch' "
+                "for float64 Fortran-parity runs."
+            )
         if unknown:
             raise TypeError(
                 f"AMICA.fit got unexpected keyword argument(s) {unknown}: "

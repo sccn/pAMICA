@@ -82,14 +82,19 @@ References
    Component Analyzers with Shared Components." 2012.
 """
 
-import numpy as np
-from scipy import linalg
-from scipy.special import digamma
+import difflib
+import functools
+import inspect
 import logging
 import time
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple, Union
+
+import numpy as np
+from scipy import linalg
+from scipy.special import digamma
 from tqdm import tqdm
+
 from .. import blocktune
 from .. import restarts
 from .. import schedule
@@ -214,6 +219,200 @@ _CONSUMED_KEYS = frozenset(
         "field_dim",
     }
 )
+
+# The canonical spelling of the three settings _CANONICAL_TO_NUMPY_KEY renames
+# (min_nd, maxdecs, share_iter -- AMICATorchNG's own constructor spelling, and
+# the name a params file's JSON_ALIAS_TO_CANONICAL/FORTRAN_TO_PAMICA_KEY
+# resolve to). The params-file route already accepts either spelling and
+# lands on the same setting (_read_numpy_keyed_params translates it); a
+# keyword argument now does too (issue #346), so passing the canonical name
+# directly -- as AMICATorchNG itself spells it -- is not treated as unknown.
+# Passing both spellings of the same setting at once is ambiguous, so
+# __init__ rejects that the same way fortran_params._apply_json_aliases
+# rejects it for a params file (see _translate_canonical_kwargs).
+_CANONICAL_ALIAS_KWARGS = frozenset(_CANONICAL_TO_NUMPY_KEY)
+
+# This constructor's own explicit (non-**kwargs) parameters. They can never
+# actually land inside **kwargs when spelled correctly -- Python binds a
+# matching keyword to the named parameter directly -- but are included in
+# _ACCEPTED_KWARGS below so a typo of one (e.g. ``verbos=True``) is named and
+# gets a "did you mean" suggestion instead of silently vanishing into the
+# ignored params dict, which is exactly the failure mode issue #346 is about.
+_CONSTRUCTOR_ONLY_KWARGS = frozenset({"params_file", "use_tqdm", "verbose"})
+
+# Every keyword name AMICA_NumPy(**kwargs) accepts (issue #346). Derived from
+# the same _CONSUMED_KEYS/_CANONICAL_TO_NUMPY_KEY the params-file routing
+# uses, plus this constructor's own named parameters, so the kwargs-accepted
+# set and the params-file-accepted set cannot drift apart.
+_ACCEPTED_KWARGS = _CONSUMED_KEYS | _CANONICAL_ALIAS_KWARGS | _CONSTRUCTOR_ONLY_KWARGS
+
+# AMICATorchNG constructor names that mean the same setting as one of this
+# backend's own names, just spelled differently -- not "unsupported" (PR
+# #347 review): the generic torch-only message ("use AMICA(backend='torch')")
+# would be actively wrong here, since this backend *does* support the
+# setting, just under a different name. Keyed by the torch spelling, valued
+# by this backend's spelling.
+_ALTERNATE_SPELLING = {
+    "n_models": "num_models",
+    "n_mix": "num_mix",
+}
+
+# n_channels gets its own message rather than landing in _ALTERNATE_SPELLING
+# or the torch-only bucket below: it is not a settable hyperparameter on any
+# backend's public fit path, torch included. AMICATorchNG's raw constructor
+# takes it, but the AMICA wrapper's own fit(**kwargs) deliberately excludes
+# it (amica.py's _ctor_params subtracts {"n_channels", "n_models", "n_mix",
+# "device"} -- the wrapper infers it from the data and passes it itself), so
+# "use AMICA(backend='torch')" would be wrong. This backend infers it from
+# the data the same way.
+_N_CHANNELS_OPTION = "n_channels"
+
+
+@functools.cache
+def _torch_only_options() -> frozenset:
+    """Constructor keywords ``AMICATorchNG`` accepts that this backend
+    genuinely does not implement at all (PR #347 review item 2/5) -- not a
+    spelling difference (``_ALTERNATE_SPELLING``) or a shape difference
+    (``_N_CHANNELS_OPTION``), which get their own messages in
+    ``_reject_unknown_kwargs`` instead of this one:
+
+    - ``device``: this backend always runs on CPU; there is no device to
+      select.
+    - ``dtype``: this backend always computes in float64; there is no dtype
+      to choose.
+    - ``keep_best``: the best-iterate restore (issue #51) is not ported to
+      this backend's fit loop.
+    - ``kurt_start``/``num_kurt``/``kurt_int``: the kurtosis-switch schedule
+      for the extended-Infomax adaptive pdf family (``pdftype=1``) -- this
+      backend implements only the generalized-Gaussian density
+      (``pdftype=0``), so the switch schedule has nothing to switch (see the
+      ``pdftype != 0`` guard below).
+
+    Computed from ``AMICATorchNG``'s own signature minus everything else
+    this backend recognizes, so it stays in sync with that constructor
+    instead of drifting as options are added there (rather than a hand-
+    picked list -- the assertion in ``TestKeySetMatchesReadSites`` that every
+    member here really has no NumPy equivalent is the actual anti-drift
+    check; this docstring is not it).
+
+    Imports ``AMICATorchNG`` lazily and only on the error path (PR #347
+    review item 5): ``__init__`` calls this only after already finding an
+    unrecognized keyword, so a normal, valid construction of
+    ``AMICA_NumPy`` never imports ``torch_impl`` -- ``numpy_impl`` keeps no
+    module-level dependency on the PyTorch backend. ``functools.cache``
+    means the import, and the signature introspection, run at most once per
+    process.
+    """
+    from ..torch_impl.core import AMICATorchNG
+
+    return (
+        frozenset(inspect.signature(AMICATorchNG).parameters)
+        - _ACCEPTED_KWARGS
+        - frozenset(_ALTERNATE_SPELLING)
+        - {_N_CHANNELS_OPTION}
+    )
+
+
+def _reject_unknown_kwargs(kwargs: Dict) -> None:
+    """Reject keyword arguments ``AMICA_NumPy(**kwargs)`` does not recognize
+    (issue #346), before any other constructor processing runs.
+
+    Every offending name is categorized -- alternate spelling
+    (``_ALTERNATE_SPELLING``), ``n_channels``, genuinely torch-only
+    (``_torch_only_options()``), or unrecognized -- *before* anything is
+    raised, and every category present is named in ONE ``TypeError`` (PR
+    #347 review item 3): a first version of this function raised on the
+    first category it found, so ``AMICA_NumPy(n_models=2, totally_bogus=1)``
+    named only ``n_models`` and silently dropped ``totally_bogus`` from the
+    message, which is the same silent-drop failure mode issue #346 itself is
+    about, just one layer in.
+
+    ``TypeError`` throughout (matching the ``AMICA.fit`` cross-backend
+    keyword check in ``pamica/amica.py``'s single-category branches: every
+    unrecognized name here is a keyword argument this callable does not
+    accept, which is what ``TypeError`` means in Python's own calling
+    convention). Distinct from the existing ``pdftype != 0``
+    ``NotImplementedError`` (a *value* of an accepted keyword this backend
+    cannot honor, not an unrecognized keyword).
+
+    An unrecognized name with no close match, or one that is not one of the
+    special cases above, gets a "did you mean" suggestion
+    (``difflib.get_close_matches``) against every name this constructor does
+    accept, when one exists.
+    """
+    unknown = sorted(set(kwargs) - _ACCEPTED_KWARGS)
+    if not unknown:
+        return
+
+    alt_spelling = [name for name in unknown if name in _ALTERNATE_SPELLING]
+    n_channels = [name for name in unknown if name == _N_CHANNELS_OPTION]
+    torch_only_names = _torch_only_options()
+    torch_only = [name for name in unknown if name in torch_only_names]
+    categorized = set(alt_spelling) | set(n_channels) | set(torch_only)
+    remaining = [name for name in unknown if name not in categorized]
+
+    segments = []
+    if alt_spelling:
+        renames = ", ".join(
+            f"{name!r} -> {_ALTERNATE_SPELLING[name]!r}" for name in alt_spelling
+        )
+        segments.append(
+            f"{alt_spelling} name the same setting AMICATorchNG spells that "
+            f"way; this backend uses its own name instead ({renames})"
+        )
+    if n_channels:
+        segments.append(
+            "'n_channels' is inferred from the data passed to fit() on "
+            "every pamica backend, this one included; it is not a "
+            "constructor keyword here, nor on AMICA(backend='torch') "
+            "(AMICA.fit's own **kwargs surface excludes it too, for the "
+            "same reason)"
+        )
+    if torch_only:
+        segments.append(
+            f"{torch_only} implemented on the PyTorch backend (AMICATorchNG) "
+            "but not the legacy NumPy backend; use AMICA(backend='torch') "
+            "for these options"
+        )
+    if remaining:
+        hints = []
+        for name in remaining:
+            match = difflib.get_close_matches(name, _ACCEPTED_KWARGS, n=1)
+            hints.append(
+                f"{name!r}" + (f" (did you mean {match[0]!r}?)" if match else "")
+            )
+        segments.append(
+            f"unexpected keyword argument(s) {remaining}: {'; '.join(hints)}"
+        )
+
+    raise TypeError(
+        "AMICA_NumPy got invalid keyword argument(s): " + "; ".join(segments)
+    )
+
+
+def _translate_canonical_kwargs(kwargs: Dict) -> Dict:
+    """Map a keyword argument spelled with the canonical name
+    (``min_nd``/``maxdecs``/``share_iter``) to this backend's own attribute
+    name (``_CANONICAL_TO_NUMPY_KEY``), the same translation
+    ``_read_numpy_keyed_params`` already applies to a params file.
+
+    Passing both spellings of the same setting at once is ambiguous -- which
+    one would silently win is an arbitrary choice -- so, mirroring
+    ``fortran_params._apply_json_aliases``'s identical guard for a params
+    file, this raises rather than picking one.
+    """
+    conflicts = sorted(
+        (canonical, numpy_key)
+        for canonical, numpy_key in _CANONICAL_TO_NUMPY_KEY.items()
+        if canonical in kwargs and numpy_key in kwargs
+    )
+    if conflicts:
+        names = ", ".join(f"{c!r}/{n!r}" for c, n in conflicts)
+        raise TypeError(
+            f"AMICA_NumPy got both the canonical and this backend's own "
+            f"spelling of the same setting ({names}); keep only one."
+        )
+    return {_CANONICAL_TO_NUMPY_KEY.get(k, k): v for k, v in kwargs.items()}
 
 
 def _read_numpy_keyed_params(params_file: Optional[Union[str, Path]]) -> Dict:
@@ -357,7 +556,47 @@ class AMICA:
             writes no files at all, like the PyTorch and MLX backends; set it
             (here, in a params file, or with the CLI's ``--outdir``) to get the
             reference's on-disk output.
+
+            ``min_nd``, ``maxdecs`` and ``share_iter`` -- the canonical
+            spelling of ``min_grad_norm``, ``max_decs`` and ``share_int``
+            (this backend's own names), which matches ``AMICATorchNG``'s
+            constructor and the spelling a params file already resolves
+            either way -- are also accepted here directly (issue #346) and
+            translated to this backend's own attribute. Passing both
+            spellings of the same setting at once raises ``TypeError``
+            rather than silently picking one.
+
+            ``files``, ``data_dim`` and ``field_dim`` -- data-location
+            metadata (used by :meth:`fit` when it is called with no data),
+            normally read from ``params_file`` -- are also accepted here
+            directly, with the same meaning (issue #346). Setting both
+            ``params_file`` and a keyword argument to a *different* value
+            for the same one of these three raises ``TypeError``; the same
+            value from both is not a conflict.
+
+        Raises
+        ------
+        TypeError
+            If ``**kwargs`` holds a name this constructor does not recognize
+            (issue #346), or both ``params_file`` and a keyword argument set
+            ``files``/``data_dim``/``field_dim`` to different values. An
+            unrecognized name gets one of: the correct name, for
+            ``n_models``/``n_mix`` (this backend's own spelling of the same
+            setting); an explanation, for ``n_channels`` (inferred from the
+            data passed to :meth:`fit` on every backend, not a constructor
+            keyword on any of them); a name implemented on the PyTorch
+            backend but not this one (e.g. ``keep_best``, ``device``,
+            ``dtype``), pointing to ``AMICA(backend='torch')``; or a generic
+            "unexpected keyword argument" message with a ``difflib``-based
+            "did you mean" suggestion when one exists. Every offending name
+            is checked and named in ONE error, whatever mix of these applies.
+            Checked before any other keyword is applied, so a typo (e.g.
+            ``max_iters=50``) can no longer construct silently.
         """
+        # Reject an unrecognized keyword before anything else runs (issue
+        # #346): a typo or a cross-backend-only option used to construct
+        # silently and have no effect.
+        _reject_unknown_kwargs(kwargs)
         # Store progress bar settings
         self.use_tqdm = use_tqdm
         self.verbose = verbose
@@ -383,8 +622,12 @@ class AMICA:
                 unconsumed,
             )
 
-        # Override with any provided parameters
-        params.update(kwargs)
+        # Override with any provided parameters. A canonical-spelling kwarg
+        # (min_nd/maxdecs/share_iter) is translated to this backend's own
+        # name first, exactly as a params file's setting already is (issue
+        # #346), so it takes effect instead of landing under a key nothing
+        # reads.
+        params.update(_translate_canonical_kwargs(kwargs))
 
         # Store parameters
         self.num_models = params.get("num_models", 1)
@@ -566,17 +809,54 @@ class AMICA:
         self.outdir: Optional[Path] = None if outdir is None else Path(outdir)
 
         # Data-source config (used by fit() when called without explicit
-        # data), read off the same parsed dict as the hyperparameters above
-        # (issue #304: no second file read) -- files/data_dim/field_dim are
-        # data-specific, not hyperparameters, so load_default_params()/the
-        # _DATA_LOCATION_KEYS filter above strips them from `params`.
-        self._config_files = None
-        self._config_data_dim = None
-        self._config_field_dim = None
-        if params_file is not None:
-            self._config_files = raw_params.get("files")
-            self._config_data_dim = raw_params.get("data_dim")
-            self._config_field_dim = raw_params.get("field_dim")
+        # data): files/data_dim/field_dim are data-specific, not
+        # hyperparameters, so load_default_params()/the _DATA_LOCATION_KEYS
+        # filter above strips them out of `params`, and **kwargs is never
+        # routed through `params`/`raw_params` for these three -- they are
+        # read directly off `raw_params` (a params file, issue #304: no
+        # second file read) and off `kwargs` itself here instead. Accepting
+        # them as keyword arguments directly, with the same meaning as in a
+        # params file, is PR #347 review item 1: before this, a kwarg of one
+        # of these three names passed the unknown-kwarg check (they are in
+        # _CONSUMED_KEYS/_ACCEPTED_KWARGS) but was silently inert, so
+        # fit()'s no-data path still said "no 'files' configured" even
+        # though the caller had just set one. Setting both a params file and
+        # a keyword argument to different values is ambiguous, so this
+        # raises rather than picking one, following the same precedent as
+        # the min_nd/maxdecs/share_iter alias conflict above
+        # (_translate_canonical_kwargs) -- unlike that guard, this one is
+        # "different values", not "either given", since a params file and an
+        # explicit kwarg agreeing is not a conflict.
+        file_files = raw_params.get("files") if params_file is not None else None
+        file_data_dim = raw_params.get("data_dim") if params_file is not None else None
+        file_field_dim = (
+            raw_params.get("field_dim") if params_file is not None else None
+        )
+        kwarg_files = kwargs.get("files")
+        kwarg_data_dim = kwargs.get("data_dim")
+        kwarg_field_dim = kwargs.get("field_dim")
+        for name, from_file, from_kwarg in (
+            ("files", file_files, kwarg_files),
+            ("data_dim", file_data_dim, kwarg_data_dim),
+            ("field_dim", file_field_dim, kwarg_field_dim),
+        ):
+            if (
+                from_file is not None
+                and from_kwarg is not None
+                and from_file != from_kwarg
+            ):
+                raise TypeError(
+                    f"AMICA_NumPy got {name!r} from both params_file and a "
+                    f"keyword argument, with different values ({from_file!r} "
+                    f"vs {from_kwarg!r}); keep only one."
+                )
+        self._config_files = kwarg_files if kwarg_files is not None else file_files
+        self._config_data_dim = (
+            kwarg_data_dim if kwarg_data_dim is not None else file_data_dim
+        )
+        self._config_field_dim = (
+            kwarg_field_dim if kwarg_field_dim is not None else file_field_dim
+        )
 
         # Initialize random state
         self.seed = params.get("seed")
@@ -925,14 +1205,16 @@ class AMICA:
         if data is None:
             if not self._config_files:
                 raise ValueError(
-                    "No data provided and no 'files' configured in params_file; "
-                    "either pass data explicitly or set 'files'/'data_dim'/'field_dim'."
+                    "No data provided and no 'files' configured (via "
+                    "params_file or as a keyword argument); either pass "
+                    "data explicitly or set 'files'/'data_dim'/'field_dim'."
                 )
             if self._config_data_dim is None or self._config_field_dim is None:
                 raise ValueError(
-                    "No data provided and 'data_dim'/'field_dim' are not both "
-                    "configured in params_file; either pass data explicitly or "
-                    "set 'files'/'data_dim'/'field_dim'."
+                    "No data provided and 'data_dim'/'field_dim' are not "
+                    "both configured (via params_file or as a keyword "
+                    "argument); either pass data explicitly or set "
+                    "'files'/'data_dim'/'field_dim'."
                 )
             if len(self._config_files) != len(self._config_field_dim):
                 raise ValueError(
