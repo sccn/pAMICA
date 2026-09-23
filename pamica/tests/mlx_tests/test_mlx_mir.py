@@ -356,7 +356,7 @@ def test_mir_history_survives_keep_best_restore(real_data):
     """mir_history_ is a TRUE trajectory that a keep_best restore does NOT
     rewrite: its last entry is computed from the pre-restore, discarded
     parameters, not the restored ones fit() actually returns. Uses the
-    same forced-overshoot recipe as test_mlx_llt_stash.py, with
+    same forced-overshoot recipe as test_mlx_llt_stash.py (from seed 7), with
     mir_step=1 so a waypoint lands strictly inside the truncation window a
     buggy restore would damage (mirrors test_ng_convergence.py's
     identically-named test and its mir_step=1 rationale).
@@ -364,17 +364,21 @@ def test_mir_history_survives_keep_best_restore(real_data):
     Since issue #339 the min_dll stop exits before its own update, so the
     last waypoint is the one right after the restored iterate, and the
     recipe stops on its first likelihood decrease (``maxincs=0``,
-    ``min_dll=1e-8``): iteration 14, 1.6e-3 below the peak at 13. The MIR of
-    that one discarded step moves by 9.4e-4 relative, well past the 1e-4
-    float32 margin below, and by 8.2e-4 to 1.1e-3 across 8 relative data
-    perturbations of 1e-6. Seed 1 with ``min_dll=1e-4``/``maxincs=2``, the
-    choice from issue #333 until then, moved it by 2.5e-5 under the new
-    order."""
+    ``min_dll=1e-8``): iteration 15, 2.5e-2 below the peak at 14. The MIR of
+    that one discarded step moves by 2.5e-3 relative, well past the 1e-4
+    float32 margin below, and by 2.3e-3 to 2.9e-3 across 8 relative data
+    perturbations of 1e-6. Seed 0 served until issue #341: from its
+    normalized initial A the step moved the MIR by only 2.1e-4 (3.4e-5 to
+    2.1e-3 across the same perturbations, and inside the margin on a CI
+    GPU), where it had moved it by 9.4e-4 before; of seeds 0-11, seed 7 has
+    the largest smallest shift over the perturbations. Seed 1 with
+    ``min_dll=1e-4``/``maxincs=2``, the choice from issue #333 until issue
+    #339, moved it by 2.5e-5 under the new order."""
     m = AMICAMLXNG(
         n_channels=NW,
         n_models=2,
         n_mix=NMIX,
-        seed=0,
+        seed=7,
         block_size=BLOCK,
         do_newton=True,
         newt_start=2,
