@@ -28,6 +28,7 @@ for bit against the pre-Phase-3 tip. The rescale itself is pinned by
 ``pamica/tests/test_doscaling_rows.py``.
 """
 
+import os
 import subprocess
 import sys
 import types
@@ -82,14 +83,15 @@ def historical_amicamlxng():
     this test module and removed afterward, so it cannot leak into any
     other test's import cache.
 
-    CI runs from a shallow (depth-1) checkout, where ``_EPIC_TIP`` is not
-    a reachable object and a bare ``git show`` fails with "bad object" --
-    reproduced empirically on the macOS job. ``git fetch --depth 1`` that
-    one commit first (deepening the clone by exactly the object needed,
-    tolerating failure -- e.g. no network, or a remote that has since been
-    pruned) and only then read it; if the object is still unreachable,
-    skip loudly naming the shallow-clone cause rather than erroring the
-    whole module.
+    In a shallow (depth-1) clone ``_EPIC_TIP`` is not a reachable object
+    and a bare ``git show`` fails with "bad object" -- reproduced
+    empirically on the macOS job before the CI jobs checked out full
+    history (``fetch-depth: 0``). ``git fetch --depth 1`` that one commit
+    first (deepening the clone by exactly the object needed, tolerating
+    failure -- e.g. no network, or a remote that has since been pruned) and
+    only then read it; if the object is still unreachable, fail under CI
+    (the ``CI`` environment variable) and otherwise skip loudly naming the
+    shallow-clone cause rather than erroring the whole module.
     """
     repo_root = Path(__file__).resolve().parents[3]
     subprocess.run(
@@ -107,12 +109,18 @@ def historical_amicamlxng():
         text=True,
     )
     if result.returncode != 0:
-        pytest.skip(
+        reason = (
             f"git object {_EPIC_TIP} is not reachable in this checkout "
             f"(likely a shallow/depth-1 clone that the fetch above could "
             f"not deepen -- e.g. no network or the remote history was "
             f"pruned); git show stderr: {result.stderr.strip()!r}"
         )
+        # As in test_doscaling_rows.py: the CI jobs check out full history
+        # (fetch-depth: 0), so there an unreachable pin fails instead of
+        # silently dropping this regression guard.
+        if os.environ.get("CI"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     module = types.ModuleType(_HISTORICAL_MODULE_NAME)
     module.__package__ = "pamica.mlx_impl"
     module.__name__ = _HISTORICAL_MODULE_NAME

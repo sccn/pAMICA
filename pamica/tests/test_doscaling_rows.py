@@ -397,8 +397,8 @@ def _pre_fix_class(backend: str) -> Any:
     one machine, so the comparison is exact without recorded constants."""
     path, package, cls_name = _BACKEND_MODULES[backend]
     repo_root = Path(__file__).resolve().parents[2]
-    # A shallow CI checkout may lack the commit: fetch just that object first
-    # (best effort, e.g. no network), and let `git show` be the real check.
+    # A shallow clone may lack the commit: fetch just that object first (best
+    # effort, e.g. no network), and let `git show` be the real check.
     subprocess.run(
         ["git", "fetch", "origin", _PRE_FIX_COMMIT, "--depth", "1"],
         cwd=repo_root,
@@ -412,10 +412,16 @@ def _pre_fix_class(backend: str) -> Any:
         text=True,
     )
     if result.returncode != 0:
-        pytest.skip(
+        reason = (
             f"git object {_PRE_FIX_COMMIT[:7]} is not reachable in this checkout; "
             f"git show stderr: {result.stderr.strip()!r}"
         )
+        # A skip in CI would silently drop this regression guard, and the CI
+        # jobs check out full history (fetch-depth: 0), so there it fails.
+        # Only a local shallow clone skips.
+        if os.environ.get("CI"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     name = f"{package}._pre_issue_333_core"
     module = types.ModuleType(name)
     module.__package__ = package
