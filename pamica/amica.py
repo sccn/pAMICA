@@ -734,13 +734,11 @@ class AMICA:
 
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """
-        Get the mixing matrix mapped back to the input channels.
+        Get the mixing matrix in input-channel space, ``pinv(sphere) @ A``.
 
-        :meth:`get_mixing_matrix` is in the sphered space; these are the
-        corresponding sensor-space maps (EEGLAB/MNE scalp maps),
-        ``pinv(sphere) @ A``. It is the only way to recover sensor maps after
-        rank reduction (``pcakeep``/``pcadb`` or automatic rank detection),
-        where the sphere is non-square (issue #223).
+        These are the scalp maps. Unlike :meth:`get_mixing_matrix` (sphered
+        space), they stay valid after rank reduction, where the sphere is
+        non-square (issue #223).
 
         Parameters
         ----------
@@ -750,7 +748,16 @@ class AMICA:
         Returns
         -------
         A_sensor : np.ndarray
-            Shape (n_channels_in, n_sources).
+            Mixing matrix of shape (n_channels_in, n_sources)
+
+        Raises
+        ------
+        ValueError
+            If the model is unfitted, or ``model_idx`` is out of range.
+        TypeError
+            If ``model_idx`` is not an integer.
+        RuntimeError
+            If the fit ended degenerate (issue #50).
         """
         self._check_usable("get the sensor mixing matrix")
         assert self.model_ is not None
@@ -763,15 +770,21 @@ class AMICA:
 
         With :meth:`get_mean`, :meth:`get_model_center` and
         :meth:`get_unmixing_matrix` it composes :meth:`transform`:
-        ``S = W @ (sphere @ (X - mean) - c)``. The same float64 array type
-        from either backend; an MLX fit's sphere is its float64 host copy,
-        which its float32 GPU computation agrees with to float32 rounding.
+        ``S = W @ (sphere @ (X - mean) - c)``.
 
         Returns
         -------
         sphere : np.ndarray of float64
-            Shape (n_sources, n_channels_in): square unless the fit was
-            rank-reduced.
+            Shape (n_sources, n_channels_in), square unless the fit was
+            rank-reduced. An MLX fit returns the float64 sphere its float32
+            GPU copy was cast from.
+
+        Raises
+        ------
+        ValueError
+            If the model is unfitted.
+        RuntimeError
+            If the fit ended degenerate (issue #50).
         """
         self._check_usable("get the sphere")
         assert self.model_ is not None
@@ -785,9 +798,15 @@ class AMICA:
         Returns
         -------
         mean : np.ndarray of float64
-            Shape (n_channels_in,). All zeros for a ``do_mean=False`` fit. An
-            MLX fit stores it in float32, so its values carry float32
-            rounding.
+            Shape (n_channels_in,); zeros for a ``do_mean=False`` fit, and
+            float32 values for an MLX fit.
+
+        Raises
+        ------
+        ValueError
+            If the model is unfitted.
+        RuntimeError
+            If the fit ended degenerate (issue #50).
         """
         self._check_usable("get the mean")
         assert self.model_ is not None
@@ -798,9 +817,6 @@ class AMICA:
         """
         Get model ``model_idx``'s center ``c`` in the sphered space (issue #313).
 
-        The per-model offset :meth:`transform` subtracts after sphering
-        (issue #27); identically zero for a single-model fit.
-
         Parameters
         ----------
         model_idx : int, default=0
@@ -809,8 +825,17 @@ class AMICA:
         Returns
         -------
         c : np.ndarray of float64
-            Shape (n_sources,). An MLX fit stores it in float32, so its values
-            carry float32 rounding.
+            Shape (n_sources,); zeros for a single-model fit, and float32
+            values for an MLX fit.
+
+        Raises
+        ------
+        ValueError
+            If the model is unfitted, or ``model_idx`` is out of range.
+        TypeError
+            If ``model_idx`` is not an integer.
+        RuntimeError
+            If the fit ended degenerate (issue #50).
         """
         self._check_usable("get the model center")
         assert self.model_ is not None
