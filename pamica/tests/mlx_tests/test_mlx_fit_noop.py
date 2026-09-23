@@ -26,6 +26,12 @@ deliberately changed the rescale from stored columns to component rows, so a
 with the rescale off, every other part of the fit path is still compared bit
 for bit against the pre-Phase-3 tip. The rescale itself is pinned by
 ``pamica/tests/test_doscaling_rows.py``.
+
+Issue #334 (epic #324 Phase 8) stores ``A`` with one component per row, so the
+historical ``A`` (components as stored columns) is mapped onto rows with the
+same lossless conversion a pre-#334 save goes through
+(:func:`pamica.component_layout.rows_from_legacy_columns`) before the bit-for-bit
+comparison; every per-model block, and so every other array, is unchanged.
 """
 
 import os
@@ -40,6 +46,7 @@ import pytest
 
 mx = pytest.importorskip("mlx.core")
 
+from pamica.component_layout import rows_from_legacy_columns  # noqa: E402
 from pamica.mlx_impl.core import AMICAMLXNG as CurrentAMICAMLXNG  # noqa: E402
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
@@ -94,14 +101,23 @@ def historical_amicamlxng():
     shallow-clone cause rather than erroring the whole module.
     """
     repo_root = Path(__file__).resolve().parents[3]
-    subprocess.run(
-        ["git", "fetch", "origin", _EPIC_TIP, "--depth", "1"],
+    present = subprocess.run(
+        ["git", "cat-file", "-e", f"{_EPIC_TIP}^{{commit}}"],
         cwd=repo_root,
         capture_output=True,
-        text=True,
-    )  # best-effort: a shallow CI checkout may not have `origin`, or may
-    # already have the object; either way the git show below is the real
-    # check, so a fetch failure here is not itself fatal.
+    )
+    if present.returncode != 0:
+        # Only a clone lacking the object fetches it: `git fetch --depth 1`
+        # records the commit as a shallow boundary, which would hide the
+        # history behind it in a complete clone.
+        subprocess.run(
+            ["git", "fetch", "origin", _EPIC_TIP, "--depth", "1"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )  # best-effort: a shallow CI checkout may not have `origin`; either
+        # way the git show below is the real check, so a fetch failure here
+        # is not itself fatal.
     result = subprocess.run(
         ["git", "show", f"{_EPIC_TIP}:pamica/mlx_impl/core.py"],
         cwd=repo_root,
@@ -152,6 +168,17 @@ _PARAM_NAMES = (
 # list is what makes that literally true rather than a subset.
 
 
+def _historical(model: Any, name: str) -> np.ndarray:
+    """A fitted array of the historical model, ``A`` mapped onto the
+    component rows the live backend stores (issue #334)."""
+    value = np.array(getattr(model, name))
+    if name == "A":
+        return rows_from_legacy_columns(
+            value, np.array(model.comp_list), owner="AMICAMLXNG"
+        )
+    return value
+
+
 @pytest.mark.parametrize("n_models", [1, 2])
 def test_unscaled_fit_is_bit_identical_to_the_pre_phase3_epic_tip(
     real_data, historical_amicamlxng, n_models
@@ -177,7 +204,7 @@ def test_unscaled_fit_is_bit_identical_to_the_pre_phase3_epic_tip(
     assert old.final_ll_ == new.final_ll_
     assert old.ll_history == new.ll_history
     for name in _PARAM_NAMES:
-        a = np.array(getattr(old, name))
+        a = _historical(old, name)
         b = np.array(getattr(new, name))
         assert np.array_equal(a, b), f"{name}: diverged from the pre-phase-3 fit"
 
@@ -203,5 +230,5 @@ def test_unscaled_fit_with_keep_best_off_is_also_bit_identical(
     assert old.ll_history == new.ll_history
     for name in _PARAM_NAMES:
         np.testing.assert_array_equal(
-            np.array(getattr(old, name)), np.array(getattr(new, name)), err_msg=name
+            _historical(old, name), np.array(getattr(new, name)), err_msg=name
         )

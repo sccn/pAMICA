@@ -568,7 +568,8 @@ class AMICA:
         }
 
         # Initialize model parameters
-        self.A: Optional[np.ndarray] = None  # Mixing matrix
+        # Mixing matrix, one component per row: (num_comps, data_dim) (#334)
+        self.A: Optional[np.ndarray] = None
         self.W: Optional[np.ndarray] = None  # Unmixing matrix
         self.c: Optional[np.ndarray] = None  # Bias terms
         self.mu: Optional[np.ndarray] = None  # Means of mixture components
@@ -794,8 +795,9 @@ class AMICA:
         sensor maps when rank reduction has made the sphere non-square
         (issue #223). Mirrors ``AMICATorchNG.get_sensor_mixing_matrix``.
 
-        ``A`` here is the true mixing matrix, the stored ``A`` transposed: the
-        stored ``W = inv(stored A)`` is itself the transpose of the unmixing
+        ``A`` here is the true mixing matrix, the model's component rows of the
+        stored ``A`` transposed (issue #334 layout): the stored ``W =
+        inv(A[comp_list[:, h], :])`` is itself the transpose of the unmixing
         (:meth:`get_weights`, issue #24 convention). So the result inverts the
         spatial filter the sources come from, ``get_weights() @ sphere @ result
         == I``, and each column is one component's sensor map.
@@ -803,7 +805,7 @@ class AMICA:
         if self.sphere is None or self.A is None or self.comp_list is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
         self._check_usable("get the sensor mixing matrix")
-        A = self.A[:, self.comp_list[:, model_idx]].T
+        A = self.A[self.comp_list[:, model_idx], :].T
         return self._pinv_sphere() @ A
 
     def get_weights(self) -> np.ndarray:
@@ -1336,16 +1338,18 @@ class AMICA:
     def _initialize_parameters(self):
         """Initialize all model parameters."""
         assert self.data_dim is not None
-        # Initialize mixing/unmixing matrices
+        # Initialize mixing/unmixing matrices. A holds one component per row
+        # (issue #334, pamica.component_layout): model h's block is rows
+        # h*data_dim..(h+1)*data_dim-1 under the default comp_list below.
         if self.A is None:
-            self.A = np.zeros((self.data_dim, self.num_comps))
+            self.A = np.zeros((self.num_comps, self.data_dim))
             for h in range(self.num_models):
                 if not hasattr(self, "fix_init") or not self.fix_init:
-                    self.A[:, h * self.data_dim : (h + 1) * self.data_dim] = np.eye(
+                    self.A[h * self.data_dim : (h + 1) * self.data_dim, :] = np.eye(
                         self.data_dim
                     ) + 0.01 * (0.5 - self.rng.rand(self.data_dim, self.data_dim))
                 else:
-                    self.A[:, h * self.data_dim : (h + 1) * self.data_dim] = np.eye(
+                    self.A[h * self.data_dim : (h + 1) * self.data_dim, :] = np.eye(
                         self.data_dim
                     )
 
@@ -2149,22 +2153,22 @@ class AMICA:
         #
         # dAk is the gm-weighted average of the per-model directions mapped
         # through A (Fortran dAk/zeta, amica15.f90:1749-1761): each contributing
-        # model adds gm[h]/zeta of its direction to the shared column, where
-        # zeta = sum of gm over the models that reference the column. Weighted by
-        # gm_prev, the PRE-update model weights, because Fortran builds dAk before
-        # update_params reassigns gm (issue #219).
+        # model adds gm[h]/zeta of its step to the shared component's row, where
+        # zeta = sum of gm over the models that reference the component. Weighted
+        # by gm_prev, the PRE-update model weights, because Fortran builds dAk
+        # before update_params reassigns gm (issue #219).
         #
         # The weights are normalized per model (gm[h]/zeta) rather than summed and
         # then divided (Fortran's literal sum-then-divide, and AMICATorchNG's):
-        # mathematically the same average, but a column with a single contributor
-        # then has weight exactly gm[h]/gm[h] == 1.0, so the step is bit-identical
-        # to the pre-#242 per-model update instead of drifting by the ULP that a
-        # multiply-then-divide round trip can introduce. Every column has exactly
-        # one contributor unless share_comps merged one, so this keeps the default
-        # multi-model trajectory byte-for-byte.
+        # mathematically the same average, but a component with a single
+        # contributor then has weight exactly gm[h]/gm[h] == 1.0, so the step is
+        # bit-identical to the pre-#242 per-model update instead of drifting by
+        # the ULP that a multiply-then-divide round trip can introduce. Every
+        # component has exactly one contributor unless share_comps merged one,
+        # so this keeps the default multi-model trajectory byte-for-byte.
         #
-        # ndtmpsum is then the RMS of the used columns of dAk:
-        # ||dAk[:, used]|| / sqrt(nw * n_used), with NO lrate factor. Fortran
+        # ndtmpsum is then the RMS of the used rows of dAk:
+        # ||dAk[used, :]|| / sqrt(nw * n_used), with NO lrate factor. Fortran
         # measures the gradient direction before the step, not the applied update
         # lrate*dAk, and does not divide by lrate either (amica15.f90:1760-1761) --
         # there is no missing factor here.
@@ -2174,29 +2178,32 @@ class AMICA:
         dAk = np.zeros_like(self.A)
         for h in range(self.num_models):
             # comp_list[:, h] holds distinct indices within a model
-            # (identify_shared_components never merges two columns that appear in
-            # the same model), so buffered `+=` on fancy indices cannot drop a
-            # contribution here.
+            # (identify_shared_components never merges two components that
+            # appear in the same model), so buffered `+=` on fancy indices cannot
+            # drop a contribution here. Row i of the model's step is source i's
+            # component, comp_list[i, h] (issue #334).
             idx = self.comp_list[:, h]
             weight = gm_prev[h] / np.maximum(zeta[idx], np.finfo(np.float64).tiny)
-            dAk[:, idx] += weight * np.dot(directions[h].T, self.A[:, idx])
+            dAk[idx, :] += weight[:, None] * np.dot(directions[h].T, self.A[idx, :])
         nd_value = float(
-            np.sqrt(np.sum(dAk[:, used] ** 2) / (self.data_dim * int(used.sum())))
+            np.sqrt(np.sum(dAk[used, :] ** 2) / (self.data_dim * int(used.sum())))
         )
 
-        # A is stored as Fortran's A^T (true unmixing = W^T = inv(A)^T), so the
-        # Fortran step A_fort -= lrate*A_fort @ dir becomes A -= lrate*dir^T @ A
+        # A is stored as Fortran's A^T, one component per row (issue #334; true
+        # unmixing = W^T = inv(block)^T), so the Fortran step on a model's block
+        # A_fort(:, comp_list(:,h)) @ dir becomes dir^T @ A[comp_list[:, h], :]
         # (LEFT-multiply by the TRANSPOSED direction). Right-multiply by the
         # untransposed dir is invisible at the fixed point but sends the fit
         # downhill -- issue #24 root cause.
         #
         # ONE application of the averaged dAk (Fortran's single DAXPY,
         # amica15.f90:1807/1814), not the per-model loop this used to run: a
-        # column shared by two models took one step per contributing model, the
-        # second against an already-stepped A, which is a different operation
-        # from Fortran's single weighted average (issue #242). A merged-away
-        # column has no contributor, so its dAk stays exactly zero and it holds
-        # the value it was merged away with. When sharing holds A this iteration
+        # component shared by two models took one step per contributing model,
+        # the second against an already-stepped A, which is a different
+        # operation from Fortran's single weighted average (issue #242). A
+        # merged-away component has no contributor, so its dAk row stays
+        # exactly zero and it holds the value it was merged away with. When
+        # sharing holds A this iteration
         # (the post-merge settle window) the step is skipped entirely, along with
         # the lrate ramp and the Newton-fallback bookkeeping Fortran nests inside
         # the same guarded block (amica15.f90:1803), so a discarded Newton
@@ -2245,40 +2252,76 @@ class AMICA:
         # gates the separate final gradient-norm stop.
         self.nd.append(nd_value)
 
+    def _component_sensor_maps(self) -> np.ndarray:
+        """Every component's mixing vector in input-channel (sensor) space.
+
+        ``pinv(sphere) @ A.T``, shape ``(data_dim_in, num_comps)``: column
+        ``comp_list[i, h]`` is column ``i`` of ``get_sensor_mixing_matrix(h)``
+        (issue #334). These are the vectors the share metric compares.
+        """
+        assert self.A is not None
+        return self._pinv_sphere() @ self.A.T
+
+    def _identify_shared_comps(self) -> None:
+        """Merge near-collinear components across models (Fortran
+        ``identify_shared_comps``, amica15.f90:1916).
+
+        Runs the shared kernel
+        :func:`pamica.numpy_impl.utils.identify_shared_components` on the
+        sensor-space component maps (:meth:`_component_sensor_maps`, issue
+        #258), the metric ``AMICATorchNG._identify_shared_comps`` computes, so
+        both backends make the same merge decision from the same fitted state.
+        A merge folds one component id into another in ``comp_list`` and
+        ``comp_used``; the caller rebuilds ``W``, as the reference's
+        ``get_unmixing_matrices`` follows the scan (amica15.f90:1858,1863).
+        """
+        assert self.comp_list is not None
+        unique_before = int(np.unique(self.comp_list).size)
+        self.comp_list, self.comp_used = identify_shared_components(
+            self._component_sensor_maps(), self.comp_list, self.comp_thresh
+        )
+        unique_after = int(np.unique(self.comp_list).size)
+        # identify_shared_components is stateless, so the merge log (matching
+        # AMICATorchNG's) is emitted here from the before/after unique-component
+        # count instead.
+        if unique_after < unique_before:
+            self.logger.info(
+                "Component sharing (iter %d): %d merge(s), %d unique components.",
+                self.iter,
+                unique_before - unique_after,
+                unique_after,
+            )
+
     def _rescale_components(self) -> None:
         """Rescale every component to a unit-norm mixing vector (Fortran
         ``doscaling``, amica15.f90:1843-1851), an exact change of scale.
 
-        Each model's stored block ``A[:, comp_list[:, h]]`` is the transpose of
-        the reference's per-model mixing matrix (issue #24 convention), so
-        source ``i`` of model ``h`` is ROW ``i`` of that block, the reference's
-        column ``A(:,k)``. Dividing that row by its norm scales source ``i`` up
-        by the norm; ``mu[:, comp_list[i, h]] *= norm`` and
-        ``beta[:, comp_list[i, h]] /= norm`` rescale its density to match, so
-        the log-likelihood is unchanged. Normalizing stored COLUMNS instead
-        (the rule before issue #333) is not a change of scale of any component
-        and perturbed the fit every iteration. A zero-norm row is left
-        untouched, as in the reference (``Anrmk > 0``). Same rule, order and
-        guard as ``AMICATorchNG._rescale_components``.
-
-        Models are rescaled in order. Their blocks are disjoint unless
-        ``share_comps`` merged a column; a shared stored column then belongs to
-        rows of several blocks, where this per-block rule is not well defined.
-        It is applied uniformly anyway: the component-row layout of epic #324
-        Phase 8 (issue #334) replaces it. ADR 0006 records the convention.
+        Component ``k`` is row ``k`` of ``A`` (issue #334, ADR 0007), the
+        reference's column ``A(:,k)``. Dividing that row by its norm scales the
+        source up by the norm; ``mu[:, k] *= norm`` and ``beta[:, k] /= norm``
+        rescale its density to match, so the log-likelihood is unchanged. A
+        zero-norm row is left untouched, as in the reference (``Anrmk > 0``).
+        Each component is rescaled once, including a shared one, and a
+        merged-away row is left untouched. Same rule, norms and guard as
+        ``AMICATorchNG._rescale_components``.
         """
         assert self.A is not None and self.mu is not None and self.beta is not None
         assert self.comp_list is not None
+        scale = np.ones(self.A.shape[0])
         for h in range(self.num_models):
-            # comp_list[:, h] holds distinct indices within a model, so the
-            # fancy-index assignments below write every element exactly once.
+            # The per-model block, as the A-update and W gather it; a shared row
+            # gets the same norm from every block that holds it. Laid out
+            # column-major, numpy sums each row's squares column by column, the
+            # order the pre-#334 block (a column fancy-index, which numpy lays
+            # out column-major) was reduced in, so the default trajectory stays
+            # bit-identical; a row-major block would sum pairwise instead.
             idx = self.comp_list[:, h]
-            block = self.A[:, idx]  # row i = source i of model h
+            block = np.asfortranarray(self.A[idx, :])
             norm = np.sqrt(np.sum(block**2, axis=1))  # (data_dim,)
-            scale = np.where(norm > 0, norm, 1.0)
-            self.A[:, idx] = block / scale[:, None]
-            self.mu[:, idx] = self.mu[:, idx] * scale
-            self.beta[:, idx] = self.beta[:, idx] / scale
+            scale[idx] = np.where(norm > 0, norm, 1.0)
+        self.A = self.A / scale[:, None]
+        self.mu = self.mu * scale
+        self.beta = self.beta / scale
 
     def _a_frozen(self) -> bool:
         """Whether the A-update (and its lrate ramp) is held this iteration.
@@ -2450,7 +2493,7 @@ class AMICA:
 
                 # Share components if requested (Fortran identify_shared_comps
                 # schedule, amica15.f90:1856): once per share_int cycle from
-                # share_start, merging near-collinear mixing columns across
+                # share_start, merging near-collinear components across
                 # models using the just-updated A, then rebuilding W from the
                 # merged comp_list (Fortran runs identify_shared_comps before
                 # get_unmixing_matrices, amica15.f90:1858,1863) -- otherwise the
@@ -2470,26 +2513,7 @@ class AMICA:
                     and itf >= self.share_start
                     and (itf - self.share_start) % self.share_int == 0
                 ):
-                    # Sensor-space maps (issue #258): pinv(sphere) @ A, matching
-                    # AMICATorchNG._identify_shared_comps so both backends make
-                    # the same merge decision from the same fitted state.
-                    assert self.comp_list is not None
-                    unique_before = int(np.unique(self.comp_list).size)
-                    self.comp_list, self.comp_used = identify_shared_components(
-                        self._pinv_sphere() @ self.A, self.comp_list, self.comp_thresh
-                    )
-                    unique_after = int(np.unique(self.comp_list).size)
-                    # identify_shared_components is stateless, so the merge log
-                    # (matching AMICATorchNG's) is emitted here from the
-                    # before/after unique-component count instead.
-                    if unique_after < unique_before:
-                        self.logger.info(
-                            "Component sharing (iter %d): %d merge(s), %d unique "
-                            "components.",
-                            self.iter,
-                            unique_before - unique_after,
-                            unique_after,
-                        )
+                    self._identify_shared_comps()
                     self._update_unmixing_matrices()
 
                 # Write intermediate results/history if requested, on Fortran's
@@ -2754,6 +2778,7 @@ class AMICA:
         from .load import write_amicaout
 
         assert self.outdir is not None, "_write_results needs an outdir"
+        assert self.A is not None, "_write_results needs a fitted A"
         Lht, Lt = self._llt_arrays()
 
         write_amicaout(
@@ -2769,7 +2794,9 @@ class AMICA:
             rho=self.rho,
             comp_list=self.comp_list,
             ll=np.asarray(self.ll),
-            A=self.A,
+            # The reference layout, (nw, num_comps) with component k in column
+            # k: the component-row A transposed (issue #334).
+            A=self.A.T,
             Lht=Lht,
             Lt=Lt,
         )

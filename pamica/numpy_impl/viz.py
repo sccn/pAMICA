@@ -48,9 +48,10 @@ def _component_maps_and_sources(
     The same quantities :meth:`AMICA_NumPy.get_sensor_mixing_matrix` and
     :meth:`AMICA_NumPy.transform` return for the fitted model the directory was
     written from. ``load_results`` hands back the stored arrays, whose ``W`` is
-    the unmixing transposed and whose ``A`` is the mixing transposed (issue #24
-    convention), so the maps are ``pinv(sphere) @ A[:, comps].T`` and the
-    sources are ``W.T @ (sphere @ (data - mean) - c)``.
+    the unmixing transposed and whose ``A`` holds one component per row (issue
+    #24 convention, issue #334 layout), so the maps are
+    ``pinv(sphere) @ A[comps, :].T`` and the sources are
+    ``W.T @ (sphere @ (data - mean) - c)``.
 
     Returns
     -------
@@ -67,7 +68,7 @@ def _component_maps_and_sources(
         )
     comps = results["comp_list"][:, model_idx]
     sphere = results["sphere"]
-    maps = np.linalg.pinv(sphere) @ results["A"][:, comps].T
+    maps = np.linalg.pinv(sphere) @ results["A"][comps, :].T
     if data is None:
         return maps, None
     sphered = sphere @ (data - results["mean"][:, None])
@@ -269,7 +270,7 @@ def plot_component_sharing(
 
     # Create sharing matrix
     n_models = results["comp_list"].shape[1]
-    n_comps = results["A"].shape[1]
+    n_comps = results["A"].shape[0]
     sharing = np.zeros((n_comps, n_models))
 
     for h in range(n_models):

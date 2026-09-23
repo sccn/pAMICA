@@ -250,11 +250,12 @@ def load_results(indir: Union[str, Path], compressed: bool = False) -> dict:
     W_fortran = W.reshape(nw, nw, num_models, order="F")
     results = {"gm": gm, "W": np.transpose(W_fortran, (1, 0, 2))}
 
+    # On disk A is the reference's A(nw, num_comps), column-major (issue #334,
+    # write_amicaout); the backends hold its transpose, one component per row,
+    # which is exactly a C-order read of the same bytes: (num_comps, nw).
     A = _read("A")
     if A is not None:
-        results["A"] = A.reshape(
-            len(A) // num_comps, num_comps
-        )  # (data_dim, num_comps)
+        results["A"] = A.reshape(num_comps, len(A) // num_comps)
 
     # Mixture params are stored (num_mix, num_comps) column-major (Fortran names
     # 'sbeta'); reshape order="F" matches the write_amicaout writer and Fortran

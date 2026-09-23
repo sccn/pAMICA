@@ -10,9 +10,12 @@ FULL public surface (every accessor, both persistence paths, and the EEGLAB
 export), in one pass. This file is that one composition pin, not a substitute
 for the isolated tests.
 
-Combination fitted: ``n_models=2``, ``share_comps=True`` (aggressive enough
-to force a genuine merge, the same recipe as
-``test_mlx_sharing.py::test_two_model_share_fit_completes_and_merges``),
+Combination fitted: ``n_models=2``, ``share_comps=True`` (a genuine merge:
+the winning restart's first scan, at iteration 8 with ``comp_thresh=0.99``,
+merges six components; since issue #334 the metric compares the models' true component
+maps, which are near-identical for the first few iterations, so the earlier
+``share_start=4``/``comp_thresh=0.9`` recipe merged 27 of 32 pairs and the
+losing model's remaining components collapsed to a non-finite ``mu``),
 ``do_reject=True`` (a genuine rejection), ``n_restarts=2`` (a genuine
 restart-state round trip), ``pdftype=1`` (the adaptive kurtosis switcher,
 which requires ``n_mix=1``), and ``keep_best=True`` passed explicitly even
@@ -70,9 +73,9 @@ def test_kitchen_sink_lifecycle(real_data, caplog):
         seed=7,
         block_size=BLOCK,
         share_comps=True,
-        share_start=4,
+        share_start=8,
         share_iter=8,
-        comp_thresh=0.9,
+        comp_thresh=0.99,
         do_reject=True,
         rejsig=2.0,
         rejstart=2,

@@ -63,7 +63,7 @@ def _force_merged_column(model):
     cl = np.array(model.comp_list)
     kept, dead = int(cl[0, 0]), int(cl[0, 1])
     a_np = np.array(model.A)
-    a_np[:, dead] = a_np[:, kept]
+    a_np[dead, :] = a_np[kept, :]  # the retired component row (issue #334)
     model.A = mx.array(a_np)
     cl[cl == dead] = kept
     model.comp_list = mx.array(cl)
@@ -426,7 +426,7 @@ def test_from_state_dict_rejects_shape_drift():
     raises rather than failing later with a confusing matmul error."""
     m = _fitted_model(n_models=1, max_iter=3)
     state = m.state_dict()
-    state["params"]["A"] = state["params"]["A"][:, :-1]  # drop one column
+    state["params"]["A"] = state["params"]["A"][:, :-1]  # drop one channel
     with pytest.raises(ValueError, match="shape"):
         AMICAMLXNG.from_state_dict(state)
 

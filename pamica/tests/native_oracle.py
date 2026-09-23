@@ -13,9 +13,9 @@ gate on ``AMICA_RUN_FORTRAN=1`` like the other binary-driven tests.
 Reference facts this relies on (``amica15.f90``):
 
 * Layout: the reference mixing matrix ``A(nw, num_comps)`` holds source ``i`` of
-  model ``h`` in column ``comp_list(i, h)``. pamica stores each model's block
-  transposed (issue #24 convention, ADR 0006), so the reference block is the
-  transpose of pamica's stored block.
+  model ``h`` in column ``comp_list(i, h)``. pamica stores one component per
+  row (issue #334, ADR 0007), so the reference ``A`` is pamica's stored ``A``
+  transposed, merged ``comp_list`` or not.
 * Every ``load_*`` file is a raw little-endian float64 array in column-major
   order under ``indir``. A loaded ``A`` is used as is (no normalization,
   :793-800), unlike a drawn one (:818-819).
@@ -100,27 +100,20 @@ class ReferenceOutput:
     stdout: str
 
 
-def reference_mixing(A_stored: np.ndarray, comp_list: np.ndarray) -> np.ndarray:
-    """pamica's stored ``A`` in the reference layout: block ``h`` transposed.
-
-    Only defined for a disjoint ``comp_list`` (no shared columns): in pamica's
-    current layout a merged column belongs to rows of several blocks, which has
-    no reference counterpart (issue #334).
-    """
-    if np.unique(comp_list).size != comp_list.size:
-        raise ValueError("reference_mixing needs a comp_list without shared columns")
-    A_ref = np.empty_like(A_stored)
-    for h in range(comp_list.shape[1]):
-        idx = comp_list[:, h]
-        A_ref[:, idx] = A_stored[:, idx].T
-    return A_ref
+def reference_mixing(A_stored: np.ndarray) -> np.ndarray:
+    """pamica's stored component-row ``A`` in the reference layout
+    ``(nw, num_comps)``: its transpose (issue #334), for any ``comp_list``."""
+    return np.ascontiguousarray(np.asarray(A_stored).T)
 
 
 def seed_from_torch(model) -> SeedState:
-    """The reference-layout state of an initialized (or fitted) ``AMICATorchNG``."""
-    comp_list = model.comp_list.cpu().numpy()
+    """The reference-layout state of an initialized (or fitted) ``AMICATorchNG``.
+
+    ``comp_list`` is left at the reference's default; pass a merged one with
+    ``dataclasses.replace`` (the ``load_comp_list`` path, which needs ``c == 0``).
+    """
     return SeedState(
-        A=reference_mixing(model.A.cpu().numpy(), comp_list),
+        A=reference_mixing(model.A.cpu().numpy()),
         mean=model.mean.cpu().numpy().reshape(-1),
         mu=model.mu.cpu().numpy(),
         sbeta=model.beta.cpu().numpy(),

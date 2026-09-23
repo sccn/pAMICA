@@ -120,8 +120,9 @@ def write_amicaout(
     ``(num_mix, num_comps)`` mixture params column-major) is laid out so EEGLAB's
     ``loadmodout15.m`` reads it correctly. The earlier model-interleaved ``W``
     layout, which round-tripped through :func:`loadmodout` but was not
-    MATLAB-readable, was fixed in #159. (``A`` is exempt: ``loadmodout15`` derives
-    it from ``W``/``S`` and ignores the file; see below.)
+    MATLAB-readable, was fixed in #159. ``A``, which ``loadmodout15`` ignores
+    (it derives the mixing from ``W``/``S``), is written in the reference's
+    layout too, since issue #334.
 
     Parameters
     ----------
@@ -134,10 +135,13 @@ def write_amicaout(
         0-based component ids; written 1-based to match the Fortran format.
     ll : array-like
         Per-iteration log-likelihood history.
-    A : array-like, optional
-        Mixing matrix. ``loadmodout15`` derives ``A`` from ``W`` and ``S`` and
-        ignores this file; it is written (when given) only so pamica's own
-        ``load_results`` can restore ``A`` directly for the viz helpers.
+    A : array-like of shape (nw, num_comps), optional
+        Mixing matrix in the reference's layout: component ``k``'s sphered-space
+        mixing vector in column ``k`` (the backends' component-row ``A``
+        transposed, issue #334). Written column-major, so the file holds exactly
+        the bytes the reference writes for its ``A``. ``loadmodout15`` derives
+        ``A`` from ``W`` and ``S`` and ignores this file; pamica's own
+        ``load_results`` reads it back for the viz helpers.
     Lht : array-like of shape (num_models, n_samples), optional
         Per-model per-sample log-likelihood (Fortran ``modloglik``). Written
         together with ``Lt`` as the ``LLt`` file (issue #155); omitted (as
@@ -169,14 +173,20 @@ def write_amicaout(
     # mean/gm/LL are 1-D, so their order does not matter.
     _w("gm", gm)
     if A is not None:
-        # A is the one 2-D file here NOT written column-major: loadmodout15.m
-        # ignores it entirely (it derives A from W and S instead, per the
-        # docstring above), so nothing outside pamica ever reads these bytes.
-        # `_w`'s C-order default is kept, and `load_results` reads it back the
-        # same way (`data.py`'s plain `.reshape(...)`, no `order="F"`) -- the
-        # only contract this file has to satisfy is pamica-writes/pamica-reads
-        # self-consistency, not the Fortran/EEGLAB layout.
-        _w("A", A)
+        # The reference's A(nw, num_comps), column-major like every other 2-D
+        # file here (issue #334). loadmodout15.m ignores it (it derives A from W
+        # and S instead); `load_results` reads the same bytes in C order as the
+        # component-row A, (num_comps, nw), which is this array transposed. Before
+        # #334 this file was the backends' component-column A in C order: the
+        # same bytes for one model, a different layout for several.
+        A = np.asarray(A)
+        expected = (W.shape[0], W.shape[0] * W.shape[2])
+        if A.shape != expected:
+            raise ValueError(
+                f"A must be the reference-layout (nw, num_comps) mixing matrix "
+                f"{expected}; got shape {A.shape}"
+            )
+        _w("A", A, order="F")
     # W is the internal-backend unmixing (b = W.T @ x); Fortran/EEGLAB store the
     # true unmixing W_fortran = W.T with the model axis slowest, column-major
     # within each model. Moving the model axis to the front and writing C-order
@@ -195,8 +205,7 @@ def write_amicaout(
     # S is written column-major (order="F") in both branches, like every other
     # EEGLAB-read 2-D file here (c, alpha, mu, sbeta, rho, comp_list below): that
     # is what the Fortran reference writes and what both readers (loadmodout15.m
-    # and loadmodout() below) read. (A, above, is the one 2-D file that is NOT
-    # column-major, and for a different reason: EEGLAB never reads it.) The
+    # and loadmodout() below) read. (A, above, is column-major too.) The
     # square branch used to write C order on the reasoning that the default
     # zero-phase component analysis (ZCA) sphere is its own transpose (true to
     # ~1e-17) so C order was "byte-identical to the Fortran reference" -- that

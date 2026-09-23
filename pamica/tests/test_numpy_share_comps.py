@@ -81,7 +81,7 @@ def _force_merged_column(model):
     """
     kept = int(model.comp_list[0, 0])
     dead = int(model.comp_list[0, 1])
-    model.A[:, dead] = model.A[:, kept]
+    model.A[dead, :] = model.A[kept, :]  # the retired component row (issue #334)
     model.comp_list[model.comp_list == dead] = kept
     model.comp_used = np.zeros(model.num_comps, dtype=bool)
     model.comp_used[np.unique(model.comp_list)] = True
@@ -120,8 +120,9 @@ def test_comp_used_survives_a_second_identify_call():
     A mask built during that loop comes back all-True.
     """
     model = _shared_fit(max_iter=3, share_comps=False)
-    model.A[:, int(model.comp_list[0, 1])] = model.A[:, int(model.comp_list[0, 0])]
-    atil = model._pinv_sphere() @ model.A
+    # Source 0 of model 1 gets model 0's source-0 component (a row, issue #334).
+    model.A[int(model.comp_list[0, 1]), :] = model.A[int(model.comp_list[0, 0]), :]
+    atil = model._component_sensor_maps()
 
     comp_list_after, used_first = identify_shared_components(
         atil, model.comp_list.copy(), model.comp_thresh
@@ -175,14 +176,16 @@ def test_sharing_leaves_finite_mixture_parameters():
 
 
 def test_unused_columns_keep_their_last_finite_value():
-    """Frozen, not zeroed: an unused column keeps the value it last held.
+    """Frozen, not zeroed: an unused component keeps the value it last held.
 
     The merge is forced rather than hoped for, so a stale all-True mask fails
-    here instead of skipping. ``doscaling`` is off so the comparison can be
-    exact: the rescale pass normalizes every column, dead ones included, which
-    multiplies their mu by a norm that is 1.0 only to within a ULP.
+    here instead of skipping. The rescale runs (``doscaling`` on, the
+    default): a merged-away row is in no model's block, so its scale is
+    exactly 1 and the comparison is exact. (Before issue #334 this test turned
+    ``doscaling`` off, because the rescale then renormalized such a stored
+    column at ULP scale.)
     """
-    model = _shared_fit(max_iter=3, share_comps=False, doscaling=False)
+    model = _shared_fit(max_iter=3, share_comps=False)
     _, dead = _force_merged_column(model)
     unused = ~model.comp_used
     assert unused.any(), "setup failed: no column was merged away"
@@ -346,15 +349,17 @@ def test_shared_column_takes_one_gm_weighted_step():
     # Fortran: one dAk, gm-weighted across contributing models, divided by
     # zeta = sum_h gm[h], applied once (amica15.f90:1749-1761 build, DAXPY at
     # :1807/:1814).
+    # Row k of A is component k (issue #334), so model h's step
+    # dir_h^T @ A[comp_list[:, h], :] lands on the rows comp_list[:, h] names.
     dAk = np.zeros_like(A_before)
     zeta = np.zeros(model.num_comps)
     for h in range(model.num_models):
         zeta[model.comp_list[:, h]] += gm_before[h]
     for h in range(model.num_models):
         idx = model.comp_list[:, h]
-        dAk[:, idx] += gm_before[h] * np.dot(directions[h].T, A_before[:, idx])
+        dAk[idx, :] += gm_before[h] * np.dot(directions[h].T, A_before[idx, :])
     nonzero = zeta > 0
-    dAk[:, nonzero] /= zeta[nonzero]
+    dAk[nonzero, :] /= zeta[nonzero][:, None]
     expected = A_before - lrate * dAk
 
     # Same arithmetic in a different association order, so the agreement is at
@@ -365,24 +370,25 @@ def test_shared_column_takes_one_gm_weighted_step():
     sequential = A_before.copy()
     for h in range(model.num_models):
         idx = model.comp_list[:, h]
-        sequential[:, idx] = sequential[:, idx] - lrate * np.dot(
-            directions[h].T, sequential[:, idx]
+        sequential[idx, :] = sequential[idx, :] - lrate * np.dot(
+            directions[h].T, sequential[idx, :]
         )
-    assert np.abs(model.A[:, kept] - sequential[:, kept]).max() > 1e-3, (
+    assert np.abs(model.A[kept, :] - sequential[kept, :]).max() > 1e-3, (
         "the two A-update semantics are indistinguishable on this state, so the "
         "test above would pass with the per-model loop restored"
     )
 
 
 def test_merged_away_column_does_not_move():
-    """A column no contributor references gets exactly zero dAk, so it holds."""
-    model = _shared_fit(max_iter=3, share_comps=False, doscaling=False)
+    """A component no contributor references gets exactly zero dAk, so its
+    row holds, the rescale included (its scale is exactly 1)."""
+    model = _shared_fit(max_iter=3, share_comps=False)
     _, dead = _force_merged_column(model)
-    dead_before = model.A[:, dead].copy()
+    dead_before = model.A[dead, :].copy()
 
     model._update_parameters(model._get_updates_and_likelihood())
 
-    np.testing.assert_array_equal(model.A[:, dead], dead_before)
+    np.testing.assert_array_equal(model.A[dead, :], dead_before)
 
 
 # --- post-merge A-freeze (#242) ---------------------------------------------
@@ -479,14 +485,14 @@ def test_shared_column_update_matches_the_torch_backend():
 
     assert ng.A is not None
     A_torch = ng.A.numpy()
-    assert np.abs(model.A[:, kept] - A_before[:, kept]).max() > 1e-6, (
-        "the shared column did not move, so this compares nothing"
+    assert np.abs(model.A[kept, :] - A_before[kept, :]).max() > 1e-6, (
+        "the shared component did not move, so this compares nothing"
     )
-    np.testing.assert_allclose(model.A[:, kept], A_torch[:, kept], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(model.A[kept, :], A_torch[kept, :], rtol=0, atol=1e-12)
     np.testing.assert_allclose(model.A, A_torch, rtol=0, atol=1e-12)
-    # The dead column is frozen in both, but both still run it through their own
-    # rescale, whose column norm agrees only to a ULP across array libraries.
-    np.testing.assert_allclose(model.A[:, dead], A_torch[:, dead], rtol=0, atol=1e-12)
+    # The dead row is frozen in both, the rescale included (its scale is 1).
+    np.testing.assert_array_equal(model.A[dead, :], A_before[dead, :])
+    np.testing.assert_array_equal(A_torch[dead, :], A_before[dead, :])
 
 
 def test_forced_merge_fit_is_finite_in_both_backends():
@@ -561,7 +567,7 @@ def test_numpy_merge_decision_matches_torch_backend():
     i0 = int(model.comp_list[0, 0])
     i1 = int(model.comp_list[0, 1])
     rng = np.random.RandomState(0)
-    model.A[:, i1] = model.A[:, i0] + 1e-3 * rng.standard_normal(model.A.shape[0])
+    model.A[i1, :] = model.A[i0, :] + 1e-3 * rng.standard_normal(model.A.shape[1])
     model._update_unmixing_matrices()
     thresh = 0.9
 
@@ -582,7 +588,7 @@ def test_numpy_merge_decision_matches_torch_backend():
     ng.comp_thresh = thresh
 
     numpy_comp_list, _ = identify_shared_components(
-        model._pinv_sphere() @ model.A, model.comp_list.copy(), thresh
+        model._component_sensor_maps(), model.comp_list.copy(), thresh
     )
     ng._identify_shared_comps()
 
@@ -642,8 +648,8 @@ def test_zero_norm_column_is_not_merged_and_raises_no_warning():
     model = _shared_fit(max_iter=3, share_comps=False)
     zero_idx = int(model.comp_list[0, 1])
     other_idx = int(model.comp_list[0, 0])
-    model.A[:, zero_idx] = 0.0
-    atil = model._pinv_sphere() @ model.A
+    model.A[zero_idx, :] = 0.0
+    atil = model._component_sensor_maps()
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
