@@ -51,10 +51,18 @@ An adaptive source density (solid) as a weighted sum of generalized Gaussian
 mixture components (dashed).
 ///
 
-pamica supports all five source-density families of the reference
-implementation (generalized Gaussian is the default), plus an extended-Infomax
-switcher that flips each source between super- and sub-Gaussian by the sign of
-its kurtosis.
+pamica supports all five source-density families of the reference implementation
+(generalized Gaussian is the default),
+plus an extended-Infomax switcher that flips each source between super- and sub-Gaussian by the sign of its kurtosis.
+The legacy NumPy backend fits the generalized Gaussian only.
+
+AMICA settles ICA's scale ambiguity
+([What ICA cannot pin down](what-is-ica.md#what-ica-cannot-pin-down)) by convention:
+each component's mixing vector is kept at unit norm,
+and the source's amplitude is carried by the locations $\mu_{ij}$ and scales $\beta_{ij}$ of its density.
+AMICA restores that convention after every update by rescaling each component (`doscaling`),
+an exact change of scale that leaves the likelihood unchanged
+(see [How AMICA works](how-amica-works.md#3-exit-or-update)).
 
 ## Idea 2: multiple ICA models
 
@@ -78,12 +86,15 @@ $\mathbf{w}_{hi}^{\top}$ is the $i$-th row of $\mathbf{W}_h$, and the
 $|\det \mathbf{W}_h|$ (Jacobian) term accounts for the change of variables from
 $\mathbf{x}$ to the sources.
 
-With $H = 1$ this reduces to ordinary ICA with adaptive source densities; that
-single-model case is the default and reaches bit-level parity with the Fortran
-reference.
+With $H = 1$ this reduces to ordinary ICA with adaptive source densities.
+That single-model case is the default,
+and it is where pamica's parity with the Fortran reference is established
+(see [Validation & Parity](../guides/validation.md)).
 
-AMICA also supports **shared components** across models (merging near-collinear
-sources) and **outlier rejection**. These are off by default.
+AMICA also supports **shared components** across models
+(components whose scalp maps are nearly identical in two models are merged, so the models share one mixing vector and one density)
+and **outlier rejection** (samples whose likelihood is far below the rest are dropped from the fit).
+Both are off by default.
 
 Next: [How AMICA works](how-amica-works.md), which fits this model by maximizing
 its likelihood.
