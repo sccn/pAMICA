@@ -1181,6 +1181,20 @@ class AMICA:
 
         Notes
         -----
+        Iteration order (issue #339), as in ``AMICATorchNG.fit`` and
+        ``AMICAMLXNG.fit``: each iteration runs the E-step, then the
+        restart-on-NaN window, the likelihood-decrease response and the
+        stopping checks, and only then, unless a check fired, the update with
+        the rates just set, followed by the share merge, the checkpoints and
+        rejection. ``self.ll`` and ``self.nd`` record every iteration whose
+        likelihood was finite, and nothing else. A convergence stop takes no
+        update on its stopping iteration, so the returned parameters are the
+        ones whose likelihood is ``self.ll[-1]``; a fit that runs to
+        ``max_iter`` updates on its last iteration, as the reference does. A
+        non-finite likelihood outside the restart window, a non-finite update
+        direction, and non-finite parameters after an update each stop the fit
+        with ``converged=False`` (see ``_DEGENERATE_STOP_REASONS``).
+
         Under ``share_comps``, if a merge fires on the LAST iteration, the
         returned ``A``/``comp_list`` are already post-merge but ``self.ll[-1]``
         still reports the pre-merge log-likelihood -- the merge's effect on
@@ -2848,7 +2862,7 @@ class AMICA:
                         self._reinitialize_for_restart()
                         # The reference's checks still run on its restart
                         # iteration, and its min_dll comparison with the NaN
-                        # likelihood is false (amica15.f90:1078-1089), so it
+                        # likelihood is false (amica15.f90:1078-1090), so it
                         # zeroes numincs; its decrease comparison is false too,
                         # so numdecs is left as it was. Match that state, so
                         # small gains before the restart cannot count toward a

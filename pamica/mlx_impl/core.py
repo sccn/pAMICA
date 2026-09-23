@@ -495,6 +495,20 @@ class AMICAMLXNG:
     ``n_newton_fallbacks`` counts it (as AMICATorchNG does), so an all-fallback
     run is visible without re-instrumenting.
 
+    The rho learning rate carries AMICATorchNG's names and semantics too:
+
+    ``rholrate`` (0.05) / ``rholratefact`` (0.1)
+        Learning rate of the generalized-Gaussian shape ``rho``. As in the
+        reference (``rholrate``/``rholrate0``, amica15.f90:1063-1068), it has
+        a working value (``rholrate``), which each likelihood decrease
+        multiplies by ``rholratefact``, and a ceiling (``rholrate_cap``),
+        which the ``maxdecs`` ratchet multiplies by ``rholratefact`` after
+        ``newt_start``; every update of ``A`` resets the working value to the
+        ceiling before ``rho`` moves (:1806/:1813), so the decrease scaling
+        reaches ``rho`` only on an iteration on which ``A`` is held (see
+        ``share_iter``). Both are reset to the constructor value at the start
+        of every fit and saved with the model (issue #339).
+
     The source-density family parameters (issue #265, porting AMICATorchNG's
     issue #26) likewise carry AMICATorchNG's names, defaults and semantics:
 
@@ -3212,7 +3226,7 @@ class AMICAMLXNG:
                     self.mir_history_.append((it, mir_nats, mir_var))
 
             # Outlier rejection, after the parameter update (Fortran order,
-            # amica15.f90:1141-1146) but using the pre-update per-sample LL
+            # amica15.f90:1136-1140) but using the pre-update per-sample LL
             # captured above.
             if will_reject:
                 assert reject_ll is not None

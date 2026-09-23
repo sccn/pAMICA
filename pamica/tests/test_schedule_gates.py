@@ -646,7 +646,7 @@ def test_numpy_restart_window_is_the_first_restartiter_iterations(
 def test_numpy_restart_clears_the_small_gain_count_as_the_reference_does(X, tmp_path):
     """The reference's checks still run on its restart iteration, and its
     ``min_dll`` comparison with the NaN likelihood is false, so it zeroes
-    ``numincs`` (amica15.f90:1078-1089). With every gain counted as small
+    ``numincs`` (amica15.f90:1078-1090). With every gain counted as small
     (``min_dll=10``) and ``maxincs=3``, two small gains before a restart on the
     4th iteration (index 3) must not count after it: the fit stops on the 5th
     small gain after the restart, at index 8, not at index 6, where the gains

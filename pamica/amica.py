@@ -313,6 +313,9 @@ class AMICA:
         Not index-aligned with ``ll_history_``: entry ``i`` is computed after
         iteration ``i``'s update, while ``ll_history_[i]`` is the likelihood of
         the parameters before it, so the two are one update apart (issue #161).
+        An iteration that ends the fit on a stop (a convergence check or a
+        degenerate value) takes no update and so records no waypoint: the last
+        waypoint then belongs to the iteration before it (issue #339).
     restart_seeds_ : list
         The seed each restart ran from (issue #198). One entry for a default
         ``n_restarts=1`` fit, ``n_restarts`` entries otherwise.

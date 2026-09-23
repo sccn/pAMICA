@@ -432,7 +432,7 @@ class AMICATorchNG:
         Fortran-style ``numdecs``/``maxdecs`` ratchet. The response runs on
         the iteration whose E-step saw the decrease, before that iteration's
         update, so the step it takes already uses the halved rate, as in the
-        reference (amica15.f90:1055-1122, issue #339).
+        reference (amica15.f90:1056-1122, issue #339).
     maxdecs : int, default=5
         Number of consecutive log-likelihood decreases after which the
         learning-rate *ceiling* is ratcheted down (Fortran ``maxdecs``).
@@ -3126,7 +3126,7 @@ class AMICATorchNG:
                     self.mir_history_.append((it, mir_nats, mir_var))
 
             # Outlier rejection, after the parameter update (Fortran order,
-            # amica17.f90:1141-1146) but using the pre-update per-sample LL
+            # amica15.f90:1136-1140) but using the pre-update per-sample LL
             # captured above.
             if will_reject:
                 assert reject_ll is not None
