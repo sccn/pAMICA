@@ -60,8 +60,9 @@ def rows_from_legacy_columns(
     Raises
     ------
     ValueError
-        If the shapes disagree, a component id is out of range or repeated
-        within one model (a malformed payload), or a component id is shared by
+        If the shapes disagree, ``comp_list`` is not an integer array, a
+        component id is out of range or repeated within one model (a malformed
+        payload), or a component id is shared by
         two or more models: a ``share_comps`` merge computed on stored columns
         (issue #334), which cannot be converted and needs a refit.
     """
@@ -71,6 +72,11 @@ def rows_from_legacy_columns(
         raise ValueError(
             f"malformed {owner} state: comp_list has shape {comp_list.shape}, "
             "expected (n_channels, n_models)"
+        )
+    if not np.issubdtype(comp_list.dtype, np.integer):
+        raise ValueError(
+            f"malformed {owner} state: comp_list has dtype {comp_list.dtype}, "
+            "expected integer component ids"
         )
     n, n_models = comp_list.shape
     n_comps = n * n_models
