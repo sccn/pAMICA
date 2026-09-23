@@ -113,8 +113,9 @@ remaining MLX gap vs the PyTorch backend is float32-only precision (Apple GPUs h
 
 ## Current Status
 - PyTorch backend with GPU/MPS/CPU support; the `AMICATorchNG` natural-gradient EM backend now
-  matches the Fortran reference (LL ~ -3.40, component correlation ~0.997) with Newton enabled
-  and positive-definite (issue #24).
+  matches the Fortran reference with Newton enabled and positive-definite (issue #24): against the
+  bundled 200-iteration `amicaout` fixture, LL -3.4017 vs -3.4019 and component correlation 0.998 on
+  all three backends (re-measured under epic #324 in #351; ~0.997 when #24 closed).
 - `AMICA(backend="mlx")` and `AMICAICA(backend="mlx")` (epic #324 Phase 4, #313) run the MLX backend end to
   end: fit, `from_params_file`, `pcakeep`, the #50 degenerate-fit contract, `.pt` save/load (wrapper
   `format_version` 2 records the backend; version 1 still loads as torch), EEGLAB export and MNE `apply`.
@@ -140,7 +141,8 @@ remaining MLX gap vs the PyTorch backend is float32-only precision (Apple GPUs h
 **Single-model parity: DONE (#24).** The natural-gradient A-update transpose fix (plus exact-EM
 mixture updates, digamma rho update, symmetric-ZCA sphere, Jacobian LL) brought both `AMICATorchNG`
 and the legacy NumPy `numpy_impl/core.py` to Fortran's solution (LL ~ -3.40, Hungarian-matched component
-correlation ~0.997, > 0.95 gate cleared; root cause in `.context/issue-24/`). Also resolved: Newton
+correlation ~0.997 at the time and 0.998 re-measured under epic #324, > 0.95 gate cleared; root cause
+in `.context/issue-24/`). Also resolved: Newton
 stability (posdef, 0 fallbacks), backend consolidation (#32/#31), NumPy CLI save/load format (#30),
 NG save/load persistence (#36), and the degenerate-fit contract (#50: the `AMICA` wrapper marks a
 degenerate fit unusable via `converged_`/`stop_reason_` and refuses `transform`/`get_*`/`save`,

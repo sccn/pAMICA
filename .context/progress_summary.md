@@ -16,7 +16,8 @@ what remains, as of epic #324 (after v0.3.3). User-facing detail is in `docs/cha
 - Newton is ported from the NumPy reference and stays positive-definite (0 fallbacks on the
   sample data).
 - **Metrics:** single-model LL ~ -3.40 (Fortran -3.4018); Hungarian-matched component correlation
-  ~0.997, clearing the >0.95 gate.
+  ~0.997, clearing the >0.95 gate. Re-measured under epic #324 (#351) against the bundled
+  200-iteration fixture: LL -3.4017 vs -3.4019, correlation 0.998, Amari 4.8e-3, on all three backends.
 
 ### Adaptive PDF selection (issue #26)
 - All five `amica15.f90` `pdftype` density families ported to `AMICATorchNG`: 0 generalized
