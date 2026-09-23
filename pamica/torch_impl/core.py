@@ -521,9 +521,9 @@ class AMICATorchNG:
         per-source-pair 2x2 solve that preconditions the natural gradient by
         an approximate Hessian, which converges faster near the optimum. An
         iteration whose Hessian is not positive definite falls back to the
-        natural gradient (counted in ``n_newton_fallbacks``). The reference
-        runs Newton by default (``do_newton 1``); pamica defaults it off (see
-        ``docs/guides/amica-differences.md``).
+        natural gradient (counted in ``n_newton_fallbacks``). Off by default,
+        as in the reference's compiled default; the bundled reference
+        ``input.param`` turns it on (``do_newton 1``).
     newt_start : int, default=20
         Iteration at which the Newton step switches on (natural gradient is
         used before it, letting the mixture parameters settle first). Counted

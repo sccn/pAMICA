@@ -468,8 +468,9 @@ class AMICAMLXNG:
         Hessian from iteration ``newt_start`` on (Fortran ``do_newton``: the
         2x2 solve and its positive-definiteness guard at amica15.f90:1718-1741,
         the ramp and fallback at :1803-1816), which converges faster near the
-        optimum. The reference runs Newton by default; pamica defaults it
-        OFF, and every accumulator it needs is gated on it, so a
+        optimum. OFF by default, as in the reference's compiled default (the
+        bundled reference ``input.param`` turns it on), and every accumulator
+        it needs is gated on it, so a
         default fit is bit-for-bit what it was before #264.
     ``newt_start`` (20)
         Iteration at which the Newton step switches on (natural gradient runs

@@ -96,8 +96,8 @@ $$
   With Newton enabled, from iteration `newt_start` on, AMICA replaces the natural-gradient direction with a **Newton step**,
   which uses the per-source curvature of the likelihood and converges faster near the optimum.
   An iteration whose curvature is not positive definite falls back to the natural gradient, which keeps the step stable.
-  The reference runs Newton by default; pamica leaves it off unless `do_newton=True`
-  (see [the differences guide](../guides/amica-differences.md#at-a-glance)).
+  Newton is off by default, as in the reference binary's compiled default;
+  pass `do_newton=True` to turn it on, as the reference's bundled `input.param` does.
 - **A-freeze windows.**
   From iteration `share_start` on, AMICA holds the unmixing update, and its learning-rate climb,
   on the six iterations that start at each multiple of `share_iter`:
