@@ -25,7 +25,7 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 | Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | from independent starts: LL within 2.8e-4 (the reference's own seed-to-seed standard deviation is 2.6e-4), correlation 0.9991, Amari distance 0.004, for all three; from a shared start: LL within 1.6e-6, correlation 0.99999993 ([per-backend rows](#parity-rows-per-backend)) |
 | Multi-model solution | distributional similarity over 20-run ensembles | indistinguishable from Fortran's own run-to-run spread ($p = 0.96$) |
 | Device and precision invariance | same independent components across CPU/CUDA/MPS/MLX, float32/float64, Linux/macOS | identical (1.000) across all eight torch/MLX combinations |
-| Cross-backend log-likelihood | converged LL across every backend | agree to ~3 significant digits (max pairwise ~0.003) |
+| Cross-backend log-likelihood | same settings and start, 25 iterations, every backend | agree to 1e-5 at 32 and 48 channels; at 70 channels ($k\approx6$) within 1.1e-3, the size of a round-off perturbation's effect ([details](#cross-backend-log-likelihood-agreement-single-model)) |
 | EEGLAB output | `write_amica_output` round-trip through `loadmodout15` | single-model bytes are an exact serialization; loads with correct layout |
 | Degenerate fits | NaN or singular log-likelihood | refused, never returned as NaN sources |
 
@@ -514,14 +514,27 @@ narrows here too is untested.
 
 ### Cross-backend log-likelihood agreement (single-model)
 
-Every backend converges to the same log-likelihood to ~3 significant digits on real EEG,
-across device and precision, confirming the whole backend family end-to-end:
+The log-likelihood each backend reaches with the same settings and the same start,
+from the throughput sweep's own runs (`benchmark_dimsweep.py`: the first 30000 frames of ds002718 sub-002,
+the first 32, 48 or 70 channels, 25 iterations, `block_size=512`, no Newton, seed 42;
+re-measured on 2026-09-23 with the code of epic #324, issue #351, on the Apple M4 Pro and, for CUDA, the RTX 4090 host):
 
-| channels | MLX f32 | CUDA f64 | torch-CPU f64 | torch-MPS f32 | NumPy f64 |
-|---:|---:|---:|---:|---:|---:|
-| 32 | -3.28634 | -3.28635 | -3.28636 | -3.28635 | -3.28620 |
-| 48 | -3.20951 | -3.20952 | -3.20953 | -3.20951 | -3.21019 |
-| 70 | -3.21579 | -3.21562 | -3.21560 | -3.21570 | -3.21315 |
+| channels | MLX f32 | CUDA f64 | CUDA f32 | torch-CPU f64 | torch-MPS f32 | NumPy f64 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 | -3.28488 | -3.28489 | -3.28488 | -3.28489 | -3.28488 | -3.28478 |
+| 48 | -3.20839 | -3.20838 | -3.20839 | -3.20838 | -3.20839 | -3.20893 |
+| 70 | -3.21643 | -3.21723 | -3.21689 | -3.21746 | -3.21638 | -3.22054 |
+
+At 32 and 48 channels every backend that starts from the shared draw agrees to 1e-5, so float32 matches float64 to five significant digits.
+At 70 channels the sweep's 30000 frames give $k\approx6$, and 25 iterations at `lrate=0.1` amplify round-off:
+two float64 runs of the same code on CPU and CUDA differ by 2.3e-4, the backends by up to 1.1e-3,
+and adding 1e-9 µV to one sample changes the torch-CPU value by 1.3e-15 after one iteration and 4.4e-4 after 25
+(the trajectory has a likelihood decrease on its 25th iteration).
+So the 70-channel column measures that sensitivity, not a difference between the backends' arithmetic;
+the code before epic #324 shows the same growth.
+NumPy is called without a seed here, so it starts from its own draw, which is why its column sits apart (by up to 4.2e-3 at 70 channels).
+The component-level float32 comparison is in [the per-backend rows](#parity-rows-per-backend):
+from a shared start, MLX float32 and PyTorch float64 agree to a mean matched correlation of 0.99999991 after 100 iterations.
 
 ## Other validated behaviors
 
