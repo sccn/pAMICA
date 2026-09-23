@@ -118,42 +118,6 @@ def compute_pdf(
     return pdf, dpdf
 
 
-def compute_log_pdf(
-    y: np.ndarray, rho: float, pdftype: int = 1
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Compute logarithm of PDF value and its derivative.
-
-    Working in log space provides better numerical stability, especially for:
-    1. Very small probability densities
-    2. Product of probabilities (becomes sum of log probabilities)
-    3. Computing likelihood ratios
-
-    The derivative of log PDF (score function) is used in natural gradient
-    calculations for more efficient optimization.
-
-    Parameters
-    ----------
-    y : ndarray
-        Activation values
-    rho : float
-        Shape parameter
-    pdftype : int
-        PDF type (see compute_pdf for details)
-
-    Returns
-    -------
-    log_pdf : ndarray
-        Log PDF values
-    dlog_pdf : ndarray
-        Log PDF derivatives
-    """
-    pdf, dpdf = compute_pdf(y, rho, pdftype)
-    log_pdf = np.log(pdf)
-    dlog_pdf = dpdf / pdf
-    return log_pdf, dlog_pdf
-
-
 def choose_pdf_type(data: np.ndarray, rho: float = 1.5) -> int:
     """
     Choose best PDF type based on data statistics.
