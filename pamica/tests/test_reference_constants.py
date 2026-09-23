@@ -19,7 +19,9 @@ always run; the MLX checks skip individually without MLX or an Apple GPU):
    of default-kind literals that are not exact in single precision, and what
    each one is (a density normalizer, an initialization scale, a sentinel, a
    default of an ``input.param`` key, or a declared variable nothing reads);
-3. no backend keeps a copy of any of these constants;
+3. no module of the three backend packages keeps a copy of any of these
+   constants, in log or linear form, and the scanner flags every definition
+   this change removed;
 4. every backend's ``rho == 2`` log-density uses the reference's normalizer,
    and the NumPy plotting helper draws the density the fit uses;
 5. (opt-in, ``AMICA_RUN_FORTRAN=1``) the native reference binary, seeded from
@@ -36,9 +38,11 @@ The density checks evaluate the formulas on a grid of activations, as
 
 from __future__ import annotations
 
+import io
 import math
 import os
 import re
+import tokenize
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict
@@ -264,27 +268,94 @@ def test_every_inexact_default_in_the_reference_header_is_accounted_for():
 
 
 # --- 3. no backend keeps its own copy --------------------------------------------
-_BACKENDS = {
-    "torch": PACKAGE / "torch_impl" / "core.py",
-    "numpy": PACKAGE / "numpy_impl" / "core.py",
-    "mlx": PACKAGE / "mlx_impl" / "core.py",
-}
-_COPIES = re.compile(
-    r"1\.772453851|2\.506628274|4\.132731354|1\.858073988|1\.0?e-16\b"
-    r"|(?:math|np)\.log\((?:math|np)\.pi\)|(?:math|np)\.log\((?:2|4)\.0\)"
+# Every Python module of the three backend packages, not just their cores (the
+# NumPy plotting helper pdf.py once carried its own sqrt(pi)).
+_BACKEND_PACKAGES = ("torch_impl", "numpy_impl", "mlx_impl")
+_BACKEND_FILES = sorted(
+    path for package in _BACKEND_PACKAGES for path in (PACKAGE / package).rglob("*.py")
 )
+_MOD = r"(?:math|np|numpy|torch|mx)"
+_PI = rf"{_MOD}\.pi\b"
+_TWO = r"2(?:\.0*)?"
+# A constant written into a backend instead of imported: the decimal literals
+# (and truncations of them), epsdble, and the normalizers in log or linear form.
+_COPIES = re.compile(
+    "|".join(
+        [
+            r"1\.77245|2\.50662|4\.13273|1\.85807",
+            r"\b1(?:\.0*)?e-16\b",
+            rf"log\(\s*{_PI}\s*\)",  # log(pi)
+            rf"log\(\s*{_TWO}\s*\*\s*{_PI}",  # log(2*pi...)
+            rf"log\(\s*{_PI}\s*\*\s*{_TWO}\b",  # log(pi*2)
+            rf"log\(\s*(?:{_MOD}\.)?sqrt\(",  # log(sqrt(...))
+            r"log\(\s*[24](?:\.0*)?\s*\)",  # log(2), log(4.0)
+            rf"sqrt\(\s*{_PI}\s*\)",  # sqrt(pi)
+            rf"sqrt\(\s*{_TWO}\s*\*\s*{_PI}",  # sqrt(2*pi), sqrt(2 * np.pi * rho)
+            rf"sqrt\(\s*{_PI}\s*\*\s*{_TWO}\b",  # sqrt(pi*2)
+            rf"{_PI}\s*\*\*\s*0?\.5",  # pi ** 0.5
+        ]
+    )
+)
+# Code that the scanner must flag: the definitions this change removed.
+_OLD_DEFINITIONS = [
+    "_HALF_LOG_PI = 0.5 * math.log(math.pi)",
+    "_LOG_SQRT_2PI = math.log(2.506628274)",
+    "_LOG_NORM_COSH_SUB = math.log(4.132731354)",
+    "_LOG_NORM_COSH_SUP = math.log(1.858073988)",
+    "_EPSDBLE = 1e-16",
+    "_LOG2 = math.log(2.0)",
+    "_LOG4 = math.log(4.0)",
+    "log_pdf = -np.abs(y) - np.log(2.0)",
+    "log_pdf = -y * y - 0.5 * np.log(np.pi)",
+    "logab = np.where(ayrho < 1e-16, 0.0, logab)",
+    "pdf = np.exp(-y * y) / np.sqrt(np.pi)",
+    "pdf1 = np.exp(-0.5 * y * y) / np.sqrt(2 * np.pi)",
+    "pdf2 = np.exp(-0.5 * y * y / rho) / np.sqrt(2 * np.pi * rho)",
+]
 
 
-@pytest.mark.parametrize("backend", sorted(_BACKENDS))
-def test_no_backend_keeps_a_copy_of_the_constants(backend):
-    source = _BACKENDS[backend].read_text()
+def _python_code(source: str) -> list[str]:
+    """``source``'s lines with comments, strings and docstrings blanked out, so
+    prose that names a constant is not mistaken for a copy of it."""
+    lines = [list(line) for line in source.splitlines(keepends=True)]
+    prose = {tokenize.COMMENT, tokenize.STRING}
+    if hasattr(tokenize, "FSTRING_MIDDLE"):
+        prose.add(tokenize.FSTRING_MIDDLE)
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type not in prose:
+            continue
+        (row, col), (end_row, end_col) = tok.start, tok.end
+        for r in range(row, end_row + 1):
+            line = lines[r - 1]
+            stop = end_col if r == end_row else len(line)
+            for c in range(col if r == row else 0, stop):
+                if line[c] != "\n":
+                    line[c] = " "
+    return ["".join(line) for line in lines]
+
+
+@pytest.mark.parametrize("code", _OLD_DEFINITIONS)
+def test_the_copy_scanner_flags_the_removed_definitions(code):
+    """The scanner below is not vacuous: it flags each definition this change
+    removed from the backends."""
+    assert _COPIES.search(_python_code(code + "\n")[0])
+
+
+@pytest.mark.parametrize(
+    "path", _BACKEND_FILES, ids=[str(p.relative_to(PACKAGE)) for p in _BACKEND_FILES]
+)
+def test_no_backend_keeps_a_copy_of_the_constants(path):
     copies = [
         f"{n}: {line.strip()}"
-        for n, line in enumerate(source.splitlines(), 1)
-        if _COPIES.search(line.split("#", 1)[0])
+        for n, line in enumerate(_python_code(path.read_text()), 1)
+        if _COPIES.search(line)
     ]
-    assert not copies, f"{backend} defines its own: {copies}"
-    assert "reference_constants import" in source
+    assert not copies, f"{path.relative_to(PACKAGE)} defines its own: {copies}"
+
+
+@pytest.mark.parametrize("package", _BACKEND_PACKAGES)
+def test_every_backend_imports_the_shared_constants(package):
+    assert "reference_constants import" in (PACKAGE / package / "core.py").read_text()
 
 
 # --- 4. the rho == 2 branch uses the reference's normalizer, on every backend ---
