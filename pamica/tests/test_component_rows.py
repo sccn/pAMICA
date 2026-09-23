@@ -1061,22 +1061,27 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
 # --- 5. early mass merges behave the same in the reference (opt-in) -------------
 # The kind of recipe the sharing tests used before issue #334 made the metric
 # compare true component maps: 4096 samples, pamica's default optimizer, an
-# early scan at a loose threshold. The first scan (iteration 11) merges 25
-# components and the second model's gm falls from 0.53 to 6.0e-4 within two
+# early scan at a loose threshold. The first scan (iteration 11) merges 28
+# components and the second model's gm falls from 0.57 to 9.0e-4 within two
 # iterations; by the second scan (iteration 22, which merges nothing more) it
-# is 2e-22, and the fit goes non-finite at iteration 25. Issue #345 moved the
-# A-freeze to the reference's iterations (mod(iter, share_iter) <= 5), so
-# share_start is a multiple of share_iter here, which puts each window on its
-# scan iteration; the earlier recipe (seed 7, scans at 8 and 18) now goes
-# non-finite at iteration 18, before its second scan. _COLLAPSE_REF spells pamica's
-# defaults out for the binary, with no further scans, no A-freeze and no
-# convergence stops, so both sides run the same updates from the same state.
+# is 2.4e-4, and the fit's parameters go non-finite in iteration 23. Issue #345
+# moved the A-freeze to the reference's iterations (mod(iter, share_iter) <= 5),
+# so share_start is a multiple of share_iter here, which puts each window on its
+# scan iteration; the earlier recipe (seed 7, scans at 8 and 18) went
+# non-finite at iteration 18, before its second scan. Seed 20 served until
+# issue #341, whose normalized initial A leaves its second model at gm 1.2e-3
+# after the second scan and 1.7e-3 one iteration later, not collapsed; of seeds
+# 0-49, 23, 32, 40 and 41 collapse as described (with share_start 10, none of
+# 0-29; with 12, seeds 11 and 27), and many others go non-finite before the
+# second scan. _COLLAPSE_REF spells pamica's defaults out for the binary, with
+# no further scans, no A-freeze and no convergence stops, so both sides run the
+# same updates from the same state.
 _COLLAPSE_SAMPLES = 4096
 _COLLAPSE: Dict[str, Any] = dict(
     n_channels=NW,
     n_models=2,
     n_mix=NMIX,
-    seed=20,
+    seed=23,
     device="cpu",
     dtype=torch.float64,
     block_size=1024,
