@@ -26,13 +26,15 @@ Hungarian-matched component correlation both agree with Fortran on real EEG.
 
 ## Quick links
 
-- [Getting Started](getting-started.md) — install and run your first decomposition.
-- [Backends & Devices](guides/backends.md) — pick CUDA / CPU / MLX and float32 vs float64.
-- [Validation & Parity](guides/validation.md) — how correctness is defined and checked.
-- [API Reference](api/index.md) — the `AMICA` interface and the backend classes.
+- [Getting Started](getting-started.md): install and run your first decomposition.
+- [Backends & Devices](guides/backends.md): pick CUDA / CPU / MLX and float32 vs float64.
+- [Validation & Parity](guides/validation.md): how correctness is defined and checked.
+- [pamica vs. AMICA](guides/amica-differences.md): every deliberate difference from the reference.
+- [API Reference](api/index.md): the `AMICA` interface and the backend classes.
 
 !!! note "Precision and parity"
     The natural-gradient backend computes in float64 for Fortran parity. Apple
     MPS cannot represent float64, so parity runs use CPU or CUDA; float32 is
-    faster (and required on MPS/MLX) but is ~7-significant-digit, not
-    float64-parity. Use float64 for reference-parity runs.
+    required on MPS/MLX but is ~7-significant-digit, not float64-parity, and
+    is not a general speedup (the Apple-GPU speed comes from the MLX backend).
+    Use float64 for reference-parity runs.

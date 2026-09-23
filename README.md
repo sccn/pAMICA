@@ -31,7 +31,10 @@ AMICA (Adaptive Mixture ICA) is an advanced blind source separation algorithm th
 
 ## Installation
 
-The canonical environment is [uv](https://docs.astral.sh/uv/):
+Released versions are on PyPI: `uv add pamica` (or `uv pip install pamica`).
+The development version, with the changes listed as unreleased in the
+[changelog](https://eeglab.org/pAMICA/changelog/), installs from source; the
+canonical environment is [uv](https://docs.astral.sh/uv/):
 
 ```bash
 git clone https://github.com/sccn/pAMICA.git
@@ -41,7 +44,7 @@ uv run pytest               # optional: run the tests
 ```
 
 The optional Apple-GPU backend (MLX, Apple Silicon only) installs with the `mlx`
-extra: `uv pip install mlx`.
+extra: `uv sync --extra mlx` from source, or `uv add "pamica[mlx]"`.
 
 ## Usage
 
@@ -56,7 +59,7 @@ from pamica import AMICA
 model = AMICA(n_models=1, n_mix=3).fit(X)
 
 sources = model.transform(X)       # (n_sources, n_samples)
-A = model.get_mixing_matrix()      # sensor-space scalp maps
+maps = model.get_sensor_mixing_matrix()  # scalp maps, (n_channels, n_sources)
 order = model.variance_order()     # EEGLAB IC order (IC1 = highest variance)
 ```
 
@@ -93,7 +96,8 @@ mod = loadmodout15('amicaout');   % components in EEGLAB variance order
 
 ### Legacy NumPy CLI
 
-The NumPy reference backend keeps a JSON-driven command-line interface:
+The NumPy reference backend keeps a command-line interface, driven by a
+pamica JSON parameter file or a Fortran `input.param`:
 
 ```bash
 python -m pamica.numpy_impl.cli params.json --outdir results
