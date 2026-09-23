@@ -91,6 +91,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import numbers
 import time
 import zipfile
 from typing import List, Optional, Sequence, Tuple
@@ -569,6 +570,20 @@ class AMICAMLXNG:
     back to the input channels with :meth:`get_sensor_mixing_matrix`.
     ``fit(mir_step > 0)`` rejects an explicit reduction request up front, as
     AMICATorchNG does (see :meth:`_fit_once`).
+
+    The rescale parameters (issue #333) likewise carry AMICATorchNG's names,
+    defaults, validation and semantics:
+
+    ``doscaling`` (True)
+        Rescale each component's mixing vector (a row of its model's stored
+        ``A`` block) to unit norm, with the matching ``mu``/``beta`` rescale,
+        an exact change of scale (see :meth:`_rescale_components`).
+    ``scalestep`` (1)
+        Run the rescale on iterations ``scalestep``, ``2*scalestep``, ...
+        counted from 1; the default 1 rescales every iteration, as the
+        reference always does (it ignores ``scalestep``). Validated only when
+        ``doscaling`` is on (an integer >= 1, or the constructor raises
+        ``ValueError``); with ``doscaling`` off it is inert, never read.
     """
 
     def __init__(
@@ -764,6 +779,14 @@ class AMICAMLXNG:
         self.invsigmax = invsigmax
         self.doscaling = doscaling
         self.scalestep = scalestep
+        if doscaling and (
+            isinstance(scalestep, bool)
+            or not isinstance(scalestep, numbers.Integral)
+            or scalestep < 1
+        ):
+            # A zero cadence divides by zero mid-fit; a fractional one fires on
+            # no meaningful schedule. The reference never reads scalestep.
+            raise ValueError(f"scalestep must be an integer >= 1, got {scalestep!r}")
 
         # Component sharing (issue #263), same names/defaults/validation as
         # AMICATorchNG (torch_impl/core.py). OFF by default and inert for
@@ -1743,12 +1766,12 @@ class AMICAMLXNG:
         # a SHARED column (#263) takes Fortran's responsibility-weighted average,
         # NOT a raw sum (a raw sum would over-step by the contributor count). A
         # merged-away column needs no special case: nothing scatters into it, so
-        # its zeta is 0 and its dAk is 0/tiny = 0, i.e. it takes no step. It is
-        # NOT a zero-norm column, and the rescale below does renormalize it like
-        # any other -- but by its own retained (already ~unit) norm, so that is a
-        # near-identity that perturbs it only at ULP scale. Hence
-        # test_merged_away_columns_keep_their_last_finite_value disables
-        # doscaling, to compare a frozen column exactly.
+        # its zeta is 0 and its dAk is 0/tiny = 0, i.e. it takes no step. The
+        # rescale below does not touch it either: it normalizes the rows of each
+        # model's block, and a merged-away column is in no model's block.
+        # (test_merged_away_columns_keep_their_last_finite_value disables
+        # doscaling; the column rule this replaced, issue #333, renormalized
+        # such a column at ULP scale.)
         #
         # The direction/dAk/gradient-norm computation below runs
         # UNCONDITIONALLY, not gated on _a_frozen(): Fortran computes dAk and
@@ -1844,16 +1867,14 @@ class AMICAMLXNG:
 
             self.A = self.A - self.lrate * dAk
 
-        if self.doscaling and (self.iteration % self.scalestep == 0):
-            scale = mx.sqrt((self.A**2).sum(axis=0))  # (n_comps,)
-            # A zero-norm (collapsed) column is left untouched, not rescaled:
-            # safe_scale is 1 there, so A/beta are unchanged and mu*safe_scale
-            # keeps its prior value (matching AMICATorchNG's nonzero mask in
-            # _update_parameters -- using raw `scale` would zero mu instead).
-            safe_scale = mx.where(scale > 0, scale, mx.ones_like(scale))
-            self.A = self.A / safe_scale
-            self.mu = self.mu * safe_scale
-            self.beta = self.beta / safe_scale
+        # The reference rescales every iteration (it parses ``scalestep`` but
+        # never reads it, amica15.f90:1843/3686); pamica keeps ``scalestep`` as
+        # an extension counted from 1 like the reference's other cadences
+        # (iterations s, 2s, ...), so the default 1 is the reference. The
+        # 1-based rule moves to ``schedule.every`` when epic #324 Phase 9
+        # (issue #335) lands.
+        if self.doscaling and (self.iteration + 1) % self.scalestep == 0:
+            self._rescale_components()
 
         # rho is frozen for every non-GG family (self.dorho is False), so the
         # table it feeds (used only on the GG _log_pdf path) cannot have
@@ -1866,6 +1887,51 @@ class AMICAMLXNG:
         if self.dorho:
             self._refresh_lgamma_table()
         self._update_unmixing_matrices()
+
+    def _rescale_components(self) -> None:
+        """Rescale every component to a unit-norm mixing vector (Fortran
+        ``doscaling``, amica15.f90:1843-1851), an exact change of scale; the
+        same rule, order and zero-norm guard as
+        ``AMICATorchNG._rescale_components``.
+
+        Source ``i`` of model ``h`` is ROW ``i`` of the stored block
+        ``A[:, comp_list[:, h]]`` (issue #24 convention), so that row is divided
+        by its norm while ``mu``/``beta`` at ``comp_list[i, h]`` are multiplied/
+        divided by it, leaving the log-likelihood unchanged (the column rule
+        this replaced, issue #333, was not a change of scale). A zero-norm row
+        keeps its values: the scale is 1 there, so ``A``/``mu``/``beta`` are
+        unchanged rather than ``mu`` being zeroed. The new values are written
+        with ``mx.put_along_axis`` (an exact scatter), rebinding each attribute
+        to a new array as the rest of the M-step does, never mutating in place.
+
+        Models are rescaled in order, one vectorized pass per model. Their
+        blocks are disjoint unless ``share_comps`` merged a column; a shared
+        stored column then belongs to rows of several blocks, where this
+        per-block rule is not well defined. It is applied uniformly anyway: the
+        component-row layout of epic #324 Phase 8 (issue #334) replaces it.
+        ADR 0006 records the convention.
+        """
+        assert (
+            self.A is not None
+            and self.mu is not None
+            and self.beta is not None
+            and self.comp_list is not None
+        )
+        n = self.n_channels
+        for h in range(self.n_models):
+            idx = self.comp_list[:, h]
+            block = self.A[:, idx]  # row i = source i of model h
+            norm = mx.sqrt((block**2).sum(axis=1))  # (n_channels,)
+            scale = mx.where(norm > 0, norm, mx.ones_like(norm))
+            a_cols = mx.broadcast_to(idx[None, :], (n, n))
+            self.A = mx.put_along_axis(self.A, a_cols, block / scale[:, None], axis=1)
+            d_cols = mx.broadcast_to(idx[None, :], (self.n_mix, n))
+            self.mu = mx.put_along_axis(
+                self.mu, d_cols, self.mu[:, idx] * scale, axis=1
+            )
+            self.beta = mx.put_along_axis(
+                self.beta, d_cols, self.beta[:, idx] / scale, axis=1
+            )
 
     # ------------------------------------------------------------------
     # Adaptive PDF switch (issue #265; AMICATorchNG's #26 port)

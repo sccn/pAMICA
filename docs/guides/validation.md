@@ -22,7 +22,7 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 | Per-block sufficient statistics and one M-step | vs Fortran | bit-exact ($\sim\!10^{-15}$) |
 | Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | LL within ~0.0005 of $-3.6993$; correlation 0.998 |
 | Single-model solution (`do_newton=0`, bundled, $k\approx30$) | Amari distance vs Fortran | 0.006 |
-| Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | LL within 3.2e-5; correlation 0.9992; Amari distance 0.004, for all three |
+| Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | LL within 3.2e-5; correlation 0.9992; Amari distance 0.004, for all three (measured before issue #333's `doscaling` change; see [the per-backend rows](#parity-rows-per-backend)) |
 | Multi-model solution | distributional similarity over 20-run ensembles | indistinguishable from Fortran's own run-to-run spread ($p = 0.96$) |
 | Device and precision invariance | same independent components across CPU/CUDA/MPS/MLX, float32/float64, Linux/macOS | identical (1.000) across all eight torch/MLX combinations |
 | Cross-backend log-likelihood | converged LL across every backend | agree to ~3 significant digits (max pairwise ~0.003) |
@@ -69,6 +69,10 @@ falling back, with a warning, to the bundled macOS x86_64 `amica15mac`, which ca
 `--fortran-binary PATH` runs a specific binary.
 
 ### Parity rows per backend
+
+These rows predate epic #324 Phase 7 (issue #333),
+which changed `doscaling` from normalizing stored columns to normalizing components, as the reference does;
+they will be re-measured before the epic merges.
 
 Measured on 2026-09-22 on an Apple M4 Pro (14 cores, 64 GB, macOS 27; MLX 0.32.0, PyTorch 2.12.1, NumPy 2.5.0)
 against the v0.3.3 release native engine (`amica15-macos-arm64`, SHA-256 `c8b2ac7f...`), with the harness defaults:
@@ -357,9 +361,13 @@ files (`gm`, `W`, `S`, `mean`, `c`, `alpha`, `mu`, `sbeta`, `rho`, `comp_list`, 
 
 The round-trip is verified two ways:
 
-- **Byte-level:** for a single model the written files are an exact float64 serialization of the fitted
-  parameters. `W` and the symmetric zero-phase component analysis (ZCA) sphere are byte-identical in C order; the non-square mixture
-  parameters and `c`/`comp_list` are column-major (Fortran layout), matching the reference `amicaout` files.
+- **Byte-level:** for a single model the written files are an exact float64 serialization of the fitted parameters.
+  `W` is byte-identical in C order;
+  the sphere `S` and the non-square mixture parameters and `c`/`comp_list` are column-major (Fortran layout),
+  matching the reference `amicaout` files.
+  The default symmetric zero-phase component analysis (ZCA) sphere happens to be its own transpose to about 1e-17,
+  which is why an earlier column-major/C-order mismatch in the square-sphere write path went unnoticed,
+  until it was measured against an asymmetric (`do_approx_sphere=False`) sphere (issue #336).
 - **Reader-level:** the directory loads through `loadmodout15.m` (and its NumPy port `loadmodout`) with the
   expected shapes and the correct column-major layout. The MATLAB round-trip during development is what caught,
   and fixed, a column-major format bug in the mixture-parameter arrays.

@@ -27,6 +27,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from pamica.mlx_impl import AMICAMLXNG  # noqa: E402  (after the MLX importorskip)
+from pamica.mlx_impl.core import _KEEP_BEST_TOL  # noqa: E402
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
 DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
@@ -235,29 +236,49 @@ def test_keep_best_inactive_reason_prefers_do_reject_when_both_are_on(
     assert "keep_best is inactive under share_comps" not in text
 
 
+# The aggressive-Newton recipe that genuinely overshoots on this backend
+# (test_mlx_keepbest.py's module docstring), plus a single rejection pass.
+_OVERSHOOT_KWARGS: dict[str, Any] = dict(
+    n_models=2,
+    seed=0,
+    do_newton=True,
+    newt_start=1,
+    lrate=0.5,
+    newtrate=3.0,
+    use_min_dll=True,
+    min_dll=1e-4,
+    maxincs=2,
+    use_grad_norm=False,
+)
+_REJECT_KWARGS: dict[str, Any] = dict(
+    do_reject=True, rejsig=3.0, rejstart=5, rejint=5, maxrej=1
+)
+_OVERSHOOT_MAX_ITER = 150
+
+
 def test_keep_best_restore_never_fires_under_do_reject(real_data):
-    """Even the aggressive-Newton recipe known to overshoot under plain
-    keep_best (test_mlx_llt_stash.py) never restores when do_reject is on:
-    fit() always returns the last iterate there."""
-    m = _model(
-        n_models=2,
-        seed=0,
-        do_newton=True,
-        newt_start=2,
-        lrate=0.5,
-        use_min_dll=True,
-        min_dll=1e-4,
-        maxincs=2,
-        use_grad_norm=False,
-        do_reject=True,
-        rejsig=3.0,
-        rejstart=6,
-        rejint=5,
-        maxrej=1,
-    )
-    m.fit(real_data, max_iter=30, verbose=False)
-    if m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS:
-        pytest.skip("run ended degenerate; not the case under test")
+    """A recipe that overshoots its own peak never restores when do_reject is
+    on: fit() returns the last iterate there.
+
+    Non-vacuous on both counts, measured on an Apple M4 Pro. Without
+    do_reject the same fit restores (peak at iteration 63, stop at 64, 4.2e-4
+    below the peak). With do_reject its own trajectory also ends below an
+    earlier peak (iteration 36, stop at 37, 2.0e-3 below), so a restore would
+    fire if the safeguard were active, and it does not. The previous version
+    (``newtrate`` 0.5, 30 iterations) ran monotone once issue #333 changed
+    ``doscaling`` to rescale components, so it could not have failed.
+    """
+    plain = _model(keep_best=True, **_OVERSHOOT_KWARGS)
+    plain.fit(real_data, max_iter=_OVERSHOOT_MAX_ITER, verbose=False)
+    assert plain.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert max(plain.ll_history) - plain.ll_history[-1] > _KEEP_BEST_TOL
+    assert plain.final_ll_ == max(plain.ll_history) > plain.ll_history[-1]
+
+    m = _model(keep_best=True, **_OVERSHOOT_KWARGS, **_REJECT_KWARGS)
+    m.fit(real_data, max_iter=_OVERSHOOT_MAX_ITER, verbose=False)
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert m.numrej >= 1  # rejection fired, so keep_best is inactive
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL
     assert m.final_ll_ == m.ll_history[-1]
 
 

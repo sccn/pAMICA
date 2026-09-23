@@ -30,3 +30,4 @@ Add new entries here as you create ADRs:
 - ADR 0003 - [Return the best-log-likelihood iterate from AMICATorchNG.fit](0003-best-iterate-safeguard.md) (accepted)
 - ADR 0004 - [Rank-deficient input handling and a relative eigenvalue floor](0004-rank-deficient-input-handling.md) (accepted)
 - ADR 0005 - [Restore the PCA residual in the MNE export](0005-restore-pca-residual-in-mne-export.md) (accepted)
+- ADR 0006 - [Components are rows of each stored mixing block](0006-component-orientation.md) (accepted; amends ADR 0001)

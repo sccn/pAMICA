@@ -17,7 +17,7 @@ import torch
 
 from pamica.amica import AMICA
 from pamica.metrics import mir, pairwise_mi
-from pamica.torch_impl.core import AMICATorchNG
+from pamica.torch_impl.core import _KEEP_BEST_TOL, AMICATorchNG
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
 DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
@@ -167,18 +167,22 @@ def test_variance_order_requires_fit():
 
 def test_write_amica_output_bytes(fitted_ng, tmp_path):
     """The written files are the model's exact float64 parameters: the on-disk
-    EEGLAB directory is a lossless serialization, not a lossy export (#92). W and
-    the symmetric sphere are byte-identical in C order; the non-square mixture
-    params and c/comp_list are column-major (Fortran layout), so read order="F".
+    EEGLAB directory is a lossless serialization, not a lossy export (#92). W is
+    byte-identical in C order; S is column-major (Fortran layout, issue #336 --
+    the default zero-phase component analysis (ZCA) sphere is symmetric to
+    about 1e-17 so this was invisible before the fix); the non-square mixture
+    params and c/comp_list are column-major too, so read order="F".
     """
     outdir = tmp_path / "amicaout"
     fitted_ng.write_amica_output(str(outdir))
     ng = fitted_ng.model_
 
-    for name, attr in [("gm", ng.gm), ("W", ng.W), ("S", ng.sphere),
+    for name, attr in [("gm", ng.gm), ("W", ng.W),
                        ("mean", ng.mean)]:  # fmt: skip
         got = np.fromfile(outdir / name).reshape(attr.shape)  # C order
         np.testing.assert_array_equal(got, attr.cpu().numpy(), err_msg=name)
+    got_s = np.fromfile(outdir / "S").reshape(ng.sphere.shape, order="F")
+    np.testing.assert_array_equal(got_s, ng.sphere.cpu().numpy(), err_msg="S")
     for name, attr in [("c", ng.c), ("alpha", ng.alpha), ("mu", ng.mu),
                        ("sbeta", ng.beta), ("rho", ng.rho)]:  # fmt: skip
         got = np.fromfile(outdir / name).reshape(attr.shape, order="F")
@@ -236,21 +240,30 @@ def test_write_amica_output_ll_matches_kept_iterate(real_data, tmp_path):
     overshoot -- so a user reading mod.LL(end) in EEGLAB sees the loaded model's
     likelihood (review finding, #92)."""
     model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
+    # The overshoot recipe of test_ng_convergence.py (same data, block size
+    # and settings, so the same trajectory): it peaks at iteration 70 and stops
+    # via the loosened min_dll at 71. A fixed 60-iteration budget overshot on
+    # the development machine only; on the CI runners that run was monotone.
     model.fit(
         real_data[:, :4096],
-        max_iter=60,
+        max_iter=150,
         do_newton=True,
         newt_start=2,
         lrate=0.5,
+        newtrate=3.0,
+        use_min_dll=True,
+        min_dll=1e-4,
+        maxincs=2,
+        use_grad_norm=False,
         seed=0,
         block_size=1024,
     )
-    if not model.is_fitted_:
-        pytest.skip("aggressive run ended degenerate; not the case under test")
+    assert model.is_fitted_, "the overshoot recipe ended degenerate: retune it"
     ng = model.model_
     assert ng is not None and ng.final_ll_ is not None
-    if np.isclose(ng.ll_history[-1], ng.final_ll_):
-        pytest.skip("run was monotone; keep_best restore did not fire")
+    assert max(ng.ll_history) - ng.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
 
     outdir = tmp_path / "amicaout"
     model.write_amica_output(str(outdir))
@@ -327,8 +340,7 @@ def test_loadmodout_sources_reproduce_live_transform_multimodel(real_data, tmp_p
 
     model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
     model.fit(real_data[:, :4096], max_iter=8, block_size=1024, seed=4)
-    if not model.is_fitted_:
-        pytest.skip("aggressive short fit ended degenerate; not the case under test")
+    assert model.is_fitted_, "the short fit ended degenerate: retune it"
 
     outdir = tmp_path / "amicaout"
     model.write_amica_output(str(outdir))
@@ -372,8 +384,7 @@ def test_written_w_bytes_are_genuine_fortran_layout(real_data, tmp_path):
     """
     model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
     model.fit(real_data[:, :4096], max_iter=5, block_size=1024, seed=7)
-    if not model.is_fitted_:
-        pytest.skip("short fit ended degenerate; not the case under test")
+    assert model.is_fitted_, "the short fit ended degenerate: retune it"
 
     outdir = tmp_path / "amicaout"
     model.write_amica_output(str(outdir))
@@ -407,8 +418,7 @@ def test_load_results_returns_internal_w_multimodel(real_data, tmp_path):
 
     model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
     model.fit(real_data[:, :4096], max_iter=5, block_size=1024, seed=7)
-    if not model.is_fitted_:
-        pytest.skip("short fit ended degenerate; not the case under test")
+    assert model.is_fitted_, "the short fit ended degenerate: retune it"
 
     outdir = tmp_path / "amicaout"
     model.write_amica_output(str(outdir))
@@ -445,13 +455,13 @@ def test_loadmodout_sources_roundtrip_with_share_comps(real_data, tmp_path):
         share_iter=7,
         comp_thresh=0.85,
     )
-    if not model.is_fitted_:
-        pytest.skip("short share_comps fit ended degenerate; not the case under test")
+    assert model.is_fitted_, "the short share_comps fit ended degenerate: retune it"
     ng = model.model_
     assert ng is not None and ng.comp_list is not None and ng.gm is not None
     comp_list = ng.comp_list.detach().cpu().numpy()
-    if len(np.unique(comp_list)) == comp_list.size:
-        pytest.skip("no merge fired for this build; the sharing path is not exercised")
+    assert len(np.unique(comp_list)) < comp_list.size, (
+        "no merge fired, so the sharing path is not exercised: retune the recipe"
+    )
 
     outdir = tmp_path / "amicaout"
     model.write_amica_output(str(outdir))

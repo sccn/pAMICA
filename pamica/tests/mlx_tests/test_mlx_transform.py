@@ -278,74 +278,93 @@ def test_get_rho_raises_on_force_set_nan_rho():
 #
 # This test is the LOOSER canary that survives CI running a different Apple
 # GPU model: MLX float32 is bit-reproducible on one machine but not across
-# GPU models (observed on CI: ll_history[0] -3.332018613 vs this machine's
-# -3.332018852, a ~7e-8 relative difference -- not a fit-path regression).
-# _REL_TOL (5e-6) is calibrated between that noise floor and a real change:
-# ~50x the observed ~1e-7 cross-GPU spread, comfortably below the ~1e-6+
-# trajectory shift a genuine fit-path change produces on this same benchmark
-# (issue #216's block_size default change alone shifted the trajectory
-# ~1e-6, "inside parity tolerance" -- AGENTS.md). stop_reason and
-# len(ll_history) are asserted exactly: they are a string and an int, so
-# they carry no floating-point cross-machine risk at all.
+# GPU models, whose kernels accumulate in a different order. stop_reason and
+# len(ll_history) are asserted exactly: they are a string and an int, so they
+# carry no floating-point cross-machine risk at all.
+#
+# Re-recorded on the same machine for issue #333 (epic #324 Phase 7), which
+# deliberately changed doscaling from normalizing stored columns to
+# normalizing components (rows of each model's block), as the reference does.
+# The pre-#333 recording (reproduced exactly on this machine before the change)
+# ended at final_ll_ -3.25075626373291 with A[0,0] 0.8831924, A[5,5]
+# 0.95371497, A[10,20] -0.0037135077, A[31,31] 0.99918866, A[0,31]
+# 0.032124873; ll_history[0] is unchanged (it is computed before the first
+# rescale).
 _NOOP_PIN_LL_HISTORY = [
     -3.3320186138153076,
-    -3.2827978134155273,
-    -3.2742865085601807,
-    -3.2692978382110596,
-    -3.26499080657959,
-    -3.2611570358276367,
-    -3.2578959465026855,
-    -3.2551658153533936,
-    -3.2528350353240967,
-    -3.25075626373291,
+    -3.282797336578369,
+    -3.2743287086486816,
+    -3.269350528717041,
+    -3.2649497985839844,
+    -3.260986089706421,
+    -3.2576255798339844,
+    -3.254916191101074,
+    -3.252664566040039,
+    -3.2506353855133057,
 ]
-_NOOP_PIN_FINAL_LL = -3.25075626373291
+_NOOP_PIN_FINAL_LL = -3.2506353855133057
 _NOOP_PIN_STOP_REASON = "max_iter"
 # A handful of representative A entries (two diagonal, two off-diagonal, one
 # corner), replacing the previous SHA-256 hash of the full A/W arrays: a
 # cross-machine hash can never match (any per-entry float32 noise flips it),
-# but these entries under the same relative tolerance still catch a real
-# fit-path change while surviving cross-GPU float32 noise.
+# but these entries still catch a real fit-path change within tolerances that
+# survive cross-GPU float32 noise.
 _NOOP_PIN_A_ENTRIES = {
-    (0, 0): 0.8831924,
-    (5, 5): 0.95371497,
-    (10, 20): -0.0037135077,
-    (31, 31): 0.99918866,
-    (0, 31): 0.032124873,
+    (0, 0): 0.9853508,
+    (5, 5): 0.99289405,
+    (10, 20): -0.0037210553,
+    (31, 31): 0.99681115,
+    (0, 31): 0.0327551,
 }
-# Recorded max(|A|) from the same run (A columns are ~unit-normalized by
-# construction, so this sits near 1.0 regardless of seed/config). A[10, 20]
-# above (-0.0037) is itself near zero, so a PER-ENTRY relative bound would
-# collapse to an absolute tolerance of ~1.9e-8 there -- tighter than the
-# ~1.1e-7 cross-GPU float32 noise CI actually observed, and exactly the
-# near-zero-entry failure mode _max_rel_disagreement's docstring in
-# test_mlx_transform_cross_backend.py explains for transform's output. Scale
-# by this matrix-wide max instead, the same fix that function applies.
-_NOOP_PIN_A_MAXABS = 0.99975544
-_REL_TOL = 5e-6
+
+# Tolerances from a float32-rounding perturbation study, not hand-picked. The
+# same fit ran on 48 copies of the input, each element multiplied by
+# (1 + eps * z) with eps the float32 machine epsilon (1.19e-7) and z standard
+# normal (numpy default_rng(20260922)): the scale of the accumulation-order
+# differences between GPU models.
+# Recorded below is the largest deviation from the unperturbed fit over those
+# draws (Apple M4 Pro); each tolerance is _PIN_SAFETY times it. Both
+# cross-GPU deviations seen on CI sat inside the study's maxima: ll_history[0]
+# at ~7e-8 relative (study 7.2e-8) and A[0,0] at 9.2e-6 (study 1.9e-5). The
+# earlier flat 5e-6 relative tolerance had no margin (the study's largest
+# log-likelihood deviation is 5.0e-6) and failed on CI at A[0,0].
+#
+# The canary still catches a real fit-path change. Issue #333's doscaling
+# change moved A[0,0] by 1.0e-1 (1800x its tolerance), A[5,5] by 3.9e-2
+# (8800x), A[31,31] by 2.4e-3 (530x), A[0,31] by 6.3e-4 (11x), and
+# ll_history[2] and [3] by 1.3e-5 and 1.6e-5 relative (15x and 12x). The
+# discriminating power therefore rests on the three diagonal entries: A[10,20]
+# (moved 7.5e-6, 1.3x) and ll_history[0] and [1] (unchanged or under 1x) sit
+# inside float32 noise for that change and are kept as regression guards only.
+_PIN_SAFETY = 3.0
+_STUDY_MAX_REL_DLL = [
+    7.16e-08,
+    1.38e-06,
+    2.91e-07,
+    4.38e-07,
+    2.63e-06,
+    4.09e-06,
+    4.98e-06,
+    3.66e-06,
+    3.23e-06,
+    4.11e-06,
+]
+_STUDY_MAX_REL_DFINAL = 4.11e-06
+_STUDY_MAX_DA = {
+    (0, 0): 1.87e-05,
+    (5, 5): 1.49e-06,
+    (10, 20): 1.90e-06,
+    (31, 31): 1.49e-06,
+    (0, 31): 1.87e-05,
+}
 
 
-def _assert_relclose(actual: float, expected: float, *, label: str) -> None:
+def _assert_within(actual: float, expected: float, tol: float, *, label: str) -> None:
     diff = abs(actual - expected)
-    tol = _REL_TOL * abs(expected)
     assert diff <= tol, (
         f"{label}: {actual!r} differs from the recorded {expected!r} by "
-        f"{diff:.3e} (relative {diff / abs(expected):.3e}), over the "
-        f"{_REL_TOL:.0e} cross-GPU tolerance"
-    )
-
-
-def _assert_matrix_scale_close(actual: float, expected: float, *, label: str) -> None:
-    """Like :func:`_assert_relclose`, but scaled by the matrix-wide
-    ``_NOOP_PIN_A_MAXABS`` rather than by ``expected`` itself -- appropriate
-    for a single entry of a matrix whose entries individually pass through
-    near zero, per the module-level comment above."""
-    diff = abs(actual - expected)
-    tol = _REL_TOL * _NOOP_PIN_A_MAXABS
-    assert diff <= tol, (
-        f"{label}: {actual!r} differs from the recorded {expected!r} by "
-        f"{diff:.3e}, over the {tol:.3e} matrix-scaled tolerance "
-        f"({_REL_TOL:.0e} x max|A|={_NOOP_PIN_A_MAXABS})"
+        f"{diff:.3e}, over its {tol:.3e} tolerance ({_PIN_SAFETY:g} x the "
+        "float32-rounding study's largest deviation)"
     )
 
 
@@ -360,15 +379,11 @@ def test_fit_path_is_unchanged_by_phase1():
     Exact equality does not survive a different Apple GPU model, though
     (MLX float32 is bit-reproducible on one machine, not across models), so
     this CI-facing version checks agreement with the recorded M4 Pro values
-    instead: ``ll_history``/``final_ll_`` per-entry relative (safe -- their
-    magnitude, ~3.3, stays well clear of zero), the five ``A`` spot entries
-    scaled by the matrix-wide ``max|A|`` instead (``A[10, 20]`` is itself
-    near zero, so a per-entry relative bound there would be tighter than the
-    observed cross-GPU noise -- see the module-level comment). Both are
-    loose enough to survive cross-GPU float32 noise (~1e-7), tight enough to
-    still catch a genuine fit-path regression (~1e-6+, see the module-level
-    comment). ``stop_reason`` and the trajectory length are still exact --
-    both machine-independent.
+    instead, each entry within _PIN_SAFETY times the largest deviation a
+    float32-rounding perturbation of the input produced (the study in the
+    module-level comment): ``ll_history``/``final_ll_`` relative, the five
+    ``A`` spot entries absolute. ``stop_reason`` and the trajectory length
+    are still exact -- both machine-independent.
     """
     m = AMICAMLXNG(n_channels=NW, n_mix=NMIX, seed=SEED, block_size=BLOCK)
     m.fit(_real_data(4096), max_iter=10, verbose=False)
@@ -376,11 +391,16 @@ def test_fit_path_is_unchanged_by_phase1():
     assert m.stop_reason == _NOOP_PIN_STOP_REASON
     assert len(m.ll_history) == len(_NOOP_PIN_LL_HISTORY)
 
-    for it, (actual, expected) in enumerate(zip(m.ll_history, _NOOP_PIN_LL_HISTORY)):
-        _assert_relclose(actual, expected, label=f"ll_history[{it}]")
+    for it, (actual, expected, dev) in enumerate(
+        zip(m.ll_history, _NOOP_PIN_LL_HISTORY, _STUDY_MAX_REL_DLL)
+    ):
+        tol = _PIN_SAFETY * dev * abs(expected)
+        _assert_within(actual, expected, tol, label=f"ll_history[{it}]")
     assert m.final_ll_ is not None
-    _assert_relclose(m.final_ll_, _NOOP_PIN_FINAL_LL, label="final_ll_")
+    tol = _PIN_SAFETY * _STUDY_MAX_REL_DFINAL * abs(_NOOP_PIN_FINAL_LL)
+    _assert_within(m.final_ll_, _NOOP_PIN_FINAL_LL, tol, label="final_ll_")
 
     a = np.array(m.A, dtype=np.float32)
     for (i, j), expected in _NOOP_PIN_A_ENTRIES.items():
-        _assert_matrix_scale_close(float(a[i, j]), expected, label=f"A[{i},{j}]")
+        tol = _PIN_SAFETY * _STUDY_MAX_DA[(i, j)]
+        _assert_within(float(a[i, j]), expected, tol, label=f"A[{i},{j}]")

@@ -42,7 +42,7 @@ import torch
 from pamica import AMICA_NumPy
 from pamica.numpy_impl.data import load_data_file
 from pamica.numpy_impl.load import loadmodout
-from pamica.torch_impl.core import AMICATorchNG
+from pamica.torch_impl.core import _KEEP_BEST_TOL, AMICATorchNG
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
 _FDT = SAMPLE_DIR / "eeglab_data.fdt"
@@ -389,19 +389,32 @@ def test_keep_best_restore_rolls_the_llt_stash_back(real_data, tmp_path):
     would still hold the discarded last iterate's values, which the second
     assertion rules out.
     """
+    # The overshoot recipe of test_ng_convergence.py (same data, block size
+    # and settings, so the same trajectory): aggressive Newton that peaks and
+    # then stops via the loosened min_dll (peak at iteration 70, stop at 71).
+    # A fixed 60-iteration budget overshot on the development machine only;
+    # on the CI runners that run was monotone.
     m = _torch_fit(
         real_data,
         n_models=2,
-        max_iter=60,
+        max_iter=150,
         seed=0,
         do_newton=True,
         newt_start=2,
         lrate=0.5,
+        newtrate=3.0,
+        use_min_dll=True,
+        min_dll=1e-4,
+        maxincs=2,
+        use_grad_norm=False,
     )
-    if m.stop_reason in AMICATorchNG._DEGENERATE_STOP_REASONS:
-        pytest.skip("aggressive run ended degenerate; not the case under test")
-    if np.isclose(m.ll_history[-1], m.final_ll_):
-        pytest.skip("run was monotone; keep_best restore did not fire")
+    assert m.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS, (
+        "the overshoot recipe ended degenerate: retune it"
+    )
+    assert m.final_ll_ is not None
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
 
     assert m._llt_lt is not None and m._llt_lht is not None
     inv = _llt_invariant(m._llt_lt, m._llt_lt.size, NW)

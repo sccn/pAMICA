@@ -22,7 +22,9 @@ newt_ramp 10, newtrate 1.0, max_decs 3, ...) on CPU/float64.
 Two implementation facts made this work:
 
 - **Transpose:** the Python true unmixing is `inv(self.A).T` (= Fortran `W`), so the Fortran
-  mixing to load is `A_fortran = self.A.T`.
+  mixing to load is `A_fortran = self.A.T`. (2026-09-22: a component is therefore a ROW of
+  `self.A`'s block, not a column; see ADR 0006 and issue #333 for what that means for
+  `doscaling` and `share_comps`.)
 - **`load_sphere` is unusable** in the reference binary: its load path never allocates the
   `Stmp2` temp it later dereferences (amica17.f90:553) and segfaults. Worked around by NOT
   loading the sphere and letting Fortran compute its own -- it is the same symmetric ZCA

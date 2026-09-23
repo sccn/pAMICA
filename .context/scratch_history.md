@@ -108,6 +108,13 @@ use `order="F"` for those arrays. Diagnostic that nails the layout: read genuine
   internal-vs-true-unmixing transpose (#24) cancels against Fortran's column-major
   storage (`self.W` C-order bytes == Fortran column-major `W_true` bytes). `S` is
   symmetric (order-agnostic); `mean`/`gm`/`LL` are 1-D.
+  CORRECTION (2026-09-22, #336): "`S` is symmetric (order-agnostic)" is wrong.
+  Fortran writes `S` column-major like every other EEGLAB-read 2-D file; the
+  square branch wrote it C-order, which only looked "order-agnostic" because the
+  default zero-phase component analysis (ZCA) sphere is symmetric to ~1e-17.
+  With `do_approx_sphere=False` the sphere is genuinely asymmetric and the old
+  C-order write came back exactly transposed (measured `max|S_loaded - S| = 0.51`
+  on the bundled sample). Fixed in #336: `S` is now `order="F"` in both branches.
 - [SUPERSEDED by #159 -- this bullet's premise EXPIRED, read the update below]
   Remaining, deliberately-out-of-scope quirk: `loadmodout`/`load_results` still
   read the **W** file C-order, so the port's `mod.W` is the transpose of MATLAB's

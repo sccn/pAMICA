@@ -5,6 +5,55 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Phase 7 of epic #324: `doscaling` rescales components, as the reference does (issue #333).**
+  **Behavior change:** default fits on every backend (PyTorch, NumPy and MLX) now follow the reference's trajectory,
+  so their fitted parameters differ from those of earlier versions.
+  pamica stores each model's mixing block transposed relative to the reference (the issue #24 convention, now ADR 0006),
+  so a component is a row of the stored block,
+  but `doscaling` (on by default) normalized stored columns, which is not a change of scale of any component and perturbed every iteration.
+  It now divides each component's mixing vector by its norm and rescales that component's `mu` and `beta` to match,
+  an exact change of scale that leaves the log-likelihood unchanged.
+  - Seeded from pamica's initialization, `A`, `mu` and `sbeta` now match the native reference binary to float64 round-off
+    (after 1 iteration: `A` 5.0e-16, `mu` 7.8e-11, `sbeta` 1.1e-14, previously 7.2e-5, 6.6e-5 and 8.6e-5;
+    after 3: 2.7e-13, 8.6e-10 and 2.7e-11, previously 1.4e-3, 6.7e-3 and 2.2e-3).
+  - Fitted components now have unit norm, as in the reference;
+    previously, after 100 seeded iterations, norms ranged over [0.94, 1.07] with one model and [0.05, 1.97] with two.
+  - Scale-blind results barely move: against the bundled `amicaout` fixture after 200 iterations,
+    the log-likelihood goes from -3.401777 to -3.401673 (fixture: -3.401873),
+    the matched correlation from 0.99752 to 0.99740 and the Amari distance from 5.95e-3 to 6.14e-3.
+    Two-model fits improve most: after 100 seeded iterations, the matched correlation with the reference rises from 0.850 to 0.99998.
+  - `doscaling=False` is byte-identical to before on every backend.
+    Saved models load unchanged; refit only to compare parameters element by element with the reference.
+  - `scalestep`, which the reference parses but never reads (it rescales every iteration), stays a pamica extension
+    but now counts from 1: the rescale runs on iterations `scalestep`, `2*scalestep`, and so on, instead of 1, `1+scalestep`, and so on.
+    The default of 1 is unaffected (row 14 of the differences page).
+    With `doscaling` on, every backend's constructor now raises `ValueError` for a `scalestep` that is not an integer of at least 1;
+    `scalestep=0` used to fail mid-fit with a bare `ZeroDivisionError`.
+  - New test helper `pamica/tests/native_oracle.py` seeds the native binary from a pamica state through its `load_*` files,
+    for element-wise oracle tests (opt-in with `AMICA_RUN_FORTRAN=1`).
+- **Fix: the EEGLAB export wrote an asymmetric sphere transposed (Phase 10 of epic #324, issue #336).**
+  `write_amicaout` (`pamica/numpy_impl/load.py`), the shared writer called from `write_amica_output` on
+  `AMICATorchNG`, `AMICAMLXNG` and the `AMICA` wrapper, and from the NumPy backend's own `_write_results`,
+  wrote the square sphere matrix `S` in C order,
+  while the Fortran reference and both readers
+  (EEGLAB's `loadmodout15.m` and pamica's `loadmodout`) read it column-major.
+  The default symmetric zero-phase component analysis (ZCA) sphere is its own transpose to about 1e-17,
+  so the bug moved only that many bytes there;
+  with `do_approx_sphere=False` the sphere is genuinely asymmetric,
+  and the exported sphere came back exactly transposed
+  (measured on the bundled sample, torch, 3 iterations:
+  before the fix `max|S_loaded - S| = 0.51`, `max|S_loaded - S.T| = 0.0`;
+  after, `max|S_loaded - S| = 0.0`, `max|S_loaded - S.T| = 0.51`).
+  `S` is now written column-major in both the square and rank-reduced branches,
+  and `load_results` reads a square sphere the same way.
+  **Action needed for existing output:** a full-rank directory written with `do_approx_sphere=False`
+  by an earlier pamica holds a C-order `S`.
+  EEGLAB always read that transposed (this fix does not change EEGLAB's own reading, only pamica's),
+  and pamica's corrected `loadmodout`/`load_results` now also read it transposed, with no error raised.
+  Regenerate any such directory by re-running the fit and `write_amica_output` again;
+  there is no on-disk version marker to detect the old layout, and this repo carries no
+  compatibility shim to read it automatically.
+  Directories from the default (symmetric) sphere and from a rank-reduced (`pcakeep`) fit are unaffected.
 - **Phase 6 of epic #324: the validation harness covers every backend (issue #315).**
   `validate_implementations.py --backend {torch,numpy,mlx}` (or a comma-separated list, or `all`)
   compares each backend against one Fortran reference run with the same settings;
@@ -61,7 +110,7 @@ Release notes are also published on the
     (`histstep=0` was a bare `ZeroDivisionError` mid-fit).
     `restartiter=0` disables restart-on-NaN, as in the reference.
     NumPy's restart-on-NaN recovery itself differs from the reference's, which never resumes fitting after a restart;
-    that is now recorded as row 14 of the differences guide.
+    that is now recorded as row 15 of the differences guide.
   - Every schedule gate now lives in one shared module, `pamica/schedule.py`, which all three backends call.
     The share-merge, A-freeze, kurtosis-switch and `writestep`/`histstep` schedules already counted from 1 and are unchanged.
   - `iteration`, `ll_history` and `mir_history_` keep their 0-based indexing.
