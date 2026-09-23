@@ -544,8 +544,8 @@ backend-differences guide), taking `AMICATorchNG`'s off-by-default.
 
 Which of them actually ends a fit:
 
-- **`min_dll` normally wins**, at iteration 326-1076 depending on the BLAS build
-  — but only when `max_iter` is large enough to let it. At `AMICATorchNG`'s
+- **`min_dll` normally wins**, at iteration 326-1076 depending on the BLAS build,
+  when `max_iter` is large enough to let it. At `AMICATorchNG`'s
   default `max_iter=100` the fit always ends on `max_iter` before `min_dll` can
   fire, so the default PyTorch run is iteration-limited, not converged. Raise
   `max_iter` if you want the likelihood stop to be the one that decides.
@@ -569,7 +569,7 @@ configuration, its own gradient norm oscillates rather than shrinking:
 
 It then plateaus at 1.0-1.65e-5 out to iteration 5073 without ever crossing the
 `1e-7` threshold, which sits about two orders of magnitude below the reference's
-own floor. The Python backends plateau roughly two orders higher again — near
+own floor. The Python backends plateau roughly two orders higher again: near
 a fixed point `dAk` tends to zero, so the norm is measuring a near-total
 cancellation where floating-point and BLAS ordering differences dominate what is
 left.
