@@ -286,7 +286,9 @@ def test_torch_and_numpy_stash_the_same_llt_on_matched_state(real_data, tmp_path
 
 # --- do_reject: the one reference-faithful break in the invariant -----------
 def _reject_kwargs(rejstart):
-    """Fire exactly one rejection, on iteration ``rejstart`` (0-indexed).
+    """Fire exactly one rejection, on iteration ``rejstart`` (counted from 1, as
+    the reference counts it -- issue #335), so a fit of ``rejstart`` iterations
+    rejects on its own last one.
 
     ``rejint=3`` keeps the modulo arm of the schedule from firing earlier (both
     backends clamp ``max(1, iter - rejstart)``, so a ``rejint`` of 1 would
@@ -318,7 +320,7 @@ def test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration(
     rather than pinned to a value -- what is asserted is that it is far above
     the summation tolerance and far below anything resembling a blow-up.
     """
-    tm = _torch_fit(real_data, n_models=1, max_iter=6, **_reject_kwargs(5))
+    tm = _torch_fit(real_data, n_models=1, max_iter=6, **_reject_kwargs(6))
     assert len(tm.ll_history) == 6 and tm.numrej == 1
     assert tm.good_idx is not None and int(tm.good_idx.numel()) < real_data.shape[1]
     assert tm._llt_lt is not None
@@ -334,7 +336,7 @@ def test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration(
         n_models=1,
         max_iter=6,
         outdir=str(tmp_path / "rej"),
-        **_reject_kwargs(5),
+        **_reject_kwargs(6),
     )
     assert len(nm.ll) == 6 and nm.numrej == 1
     _, n_lt = nm._llt_arrays()
@@ -352,7 +354,7 @@ def test_llt_invariant_returns_one_iteration_after_a_rejection(real_data, tmp_pa
     the rejected samples contribute 0 to both sides, so the equality is exact
     again.
     """
-    tm = _torch_fit(real_data, n_models=1, max_iter=7, **_reject_kwargs(5))
+    tm = _torch_fit(real_data, n_models=1, max_iter=7, **_reject_kwargs(6))
     assert len(tm.ll_history) == 7 and tm.numrej == 1
     assert tm.good_idx is not None and tm._llt_lt is not None
     n_good = int(tm.good_idx.numel())
@@ -364,7 +366,7 @@ def test_llt_invariant_returns_one_iteration_after_a_rejection(real_data, tmp_pa
         n_models=1,
         max_iter=7,
         outdir=str(tmp_path / "rej2"),
-        **_reject_kwargs(5),
+        **_reject_kwargs(6),
     )
     assert len(nm.ll) == 7 and nm.numrej == 1
     _, n_lt = nm._llt_arrays()
@@ -393,7 +395,7 @@ def test_keep_best_restore_rolls_the_llt_stash_back(real_data, tmp_path):
         max_iter=60,
         seed=0,
         do_newton=True,
-        newt_start=1,
+        newt_start=2,
         lrate=0.5,
     )
     if m.stop_reason in AMICATorchNG._DEGENERATE_STOP_REASONS:

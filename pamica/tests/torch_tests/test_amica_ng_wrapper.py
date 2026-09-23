@@ -240,7 +240,7 @@ def test_write_amica_output_ll_matches_kept_iterate(real_data, tmp_path):
         real_data[:, :4096],
         max_iter=60,
         do_newton=True,
-        newt_start=1,
+        newt_start=2,
         lrate=0.5,
         seed=0,
         block_size=1024,

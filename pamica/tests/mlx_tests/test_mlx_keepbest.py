@@ -15,10 +15,12 @@ on the same config PyTorch's float64 one does):
 
 * ``_FORCED_RESTORE_KWARGS`` (real EEG, first 4096 samples, ``max_iter=60``):
   ``n_models=2, n_mix=3, seed=0, block_size=1024, do_newton=True,
-  newt_start=1, lrate=0.5, use_min_dll=True, min_dll=1e-4, maxincs=2,
+  newt_start=2, lrate=0.5, use_min_dll=True, min_dll=1e-4, maxincs=2,
   use_grad_norm=False`` -- the same aggressive-Newton config
   ``test_ng_convergence.py::test_keep_best_restores_genuine_overshoot_under_min_dll_stop``
-  uses on PyTorch, and it reproduces a genuine overshoot here too: the fit
+  uses on PyTorch (``newt_start`` counts from 1 since issue #335, so ``2``
+  here is the trajectory these recipes were measured on as ``newt_start=1``
+  before it), and it reproduces a genuine overshoot here too: the fit
   stops via ``min_dll`` at iteration 56 (57 recorded LLs), peaks at
   ``ll_history[54]``, and ends ``best_ll - ll_history[-1] ~= 1.676e-4`` below
   that peak (measured on an Apple M4 Pro; the exact float32 value is
@@ -123,7 +125,7 @@ _FORCED_RESTORE_KWARGS: dict[str, Any] = dict(
     seed=0,
     block_size=BLOCK,
     do_newton=True,
-    newt_start=1,
+    newt_start=2,
     lrate=0.5,
     use_min_dll=True,
     min_dll=1e-4,
@@ -141,7 +143,7 @@ _FORCED_RESTORE_PDFTYPE1_KWARGS: dict[str, Any] = dict(
     seed=2,
     block_size=BLOCK,
     do_newton=True,
-    newt_start=1,
+    newt_start=2,
     lrate=0.5,
     use_min_dll=True,
     min_dll=1e-4,

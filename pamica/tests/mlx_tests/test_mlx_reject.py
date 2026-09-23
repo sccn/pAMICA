@@ -98,10 +98,12 @@ def test_do_reject_false_leaves_good_idx_unset(real_data):
 
 # --- the reject schedule -------------------------------------------------
 def test_rejection_shrinks_good_sample_set_on_the_expected_schedule(real_data):
-    """rejstart=2/rejint=3/maxrej=2: rejection fires at it=2 (unconditional)
-    and it=5 (max(1,5-2)%3==0, numrej<2), then is capped -- no more passes
-    at it=8/11 despite the modulo condition recurring, matching Fortran's
-    schedule (amica15.f90:1142) and the torch/NumPy backends' own tests."""
+    """rejstart=2/rejint=3/maxrej=2: rejection fires at iteration 2
+    (unconditional) and 5 (max(1,5-2)%3==0, numrej<2), then is capped -- no
+    more passes at 8/11 despite the modulo condition recurring, matching
+    Fortran's schedule (amica15.f90:1136, iterations counted from 1 as the
+    reference counts them, issue #335) and the torch/NumPy backends' own
+    tests."""
     n_total = real_data.shape[1]
     m = _model(
         seed=42,
@@ -237,7 +239,7 @@ def test_keep_best_restore_never_fires_under_do_reject(real_data):
         n_models=2,
         seed=0,
         do_newton=True,
-        newt_start=1,
+        newt_start=2,
         lrate=0.5,
         use_min_dll=True,
         min_dll=1e-4,
@@ -245,7 +247,7 @@ def test_keep_best_restore_never_fires_under_do_reject(real_data):
         use_grad_norm=False,
         do_reject=True,
         rejsig=3.0,
-        rejstart=5,
+        rejstart=6,
         rejint=5,
         maxrej=1,
     )

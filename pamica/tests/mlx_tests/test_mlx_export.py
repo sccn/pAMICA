@@ -149,7 +149,7 @@ def test_written_ll_ends_at_the_keep_best_restored_iterate(real_data):
         seed=0,
         block_size=BLOCK,
         do_newton=True,
-        newt_start=1,
+        newt_start=2,
         lrate=0.5,
         use_min_dll=True,
         min_dll=1e-4,
