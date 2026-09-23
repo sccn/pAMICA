@@ -643,6 +643,42 @@ def test_numpy_restart_window_is_the_first_restartiter_iterations(
         assert len(m.ll) == nan_iter
 
 
+def test_numpy_restart_clears_the_small_gain_count_as_the_reference_does(X, tmp_path):
+    """The reference's checks still run on its restart iteration, and its
+    ``min_dll`` comparison with the NaN likelihood is false, so it zeroes
+    ``numincs`` (amica15.f90:1078-1089). With every gain counted as small
+    (``min_dll=10``) and ``maxincs=3``, two small gains before a restart on the
+    4th iteration (index 3) must not count after it: the fit stops on the 5th
+    small gain after the restart, at index 8, not at index 6, where the gains
+    carried across the restart (the behavior before the issue #339 review)
+    would stop it."""
+    m = _NaNOnIteration(
+        num_models=1,
+        num_mix=NMIX,
+        seed=SEED,
+        block_size=BLOCK,
+        max_iter=20,
+        use_tqdm=False,
+        do_opt_block=False,
+        writestep=10**7,
+        restartiter=10,
+        maxrestarts=3,
+        use_min_dll=True,
+        min_dll=10.0,
+        maxincs=3,
+        use_grad_norm=False,
+        outdir=str(tmp_path / "out"),
+    )
+    m.nan_iter = 3
+    m.fit(X)
+    assert m.numrestarts == 1
+    assert m.stop_reason == "Converged: small likelihood increase"
+    # Indices 4 to 8 after the restart: one to start the history, then four
+    # small gains, the fourth of which exceeds maxincs=3.
+    assert m.iter == 8
+    assert len(m.ll) == 5
+
+
 # --- validation of the settings the gates read ------------------------------
 
 

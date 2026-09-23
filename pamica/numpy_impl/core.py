@@ -2846,6 +2846,14 @@ class AMICA:
                             self.maxrestarts,
                         )
                         self._reinitialize_for_restart()
+                        # The reference's checks still run on its restart
+                        # iteration, and its min_dll comparison with the NaN
+                        # likelihood is false (amica15.f90:1078-1089), so it
+                        # zeroes numincs; its decrease comparison is false too,
+                        # so numdecs is left as it was. Match that state, so
+                        # small gains before the restart cannot count toward a
+                        # min_dll stop after it (issue #339 review).
+                        numincs = 0
                         continue
                     # Past the window, or out of restarts: stop, as the
                     # reference does (amica15.f90:1052-1055).
