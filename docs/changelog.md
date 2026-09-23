@@ -22,6 +22,8 @@ Release notes are also published on the
     lower by 3.7e-10 and 2.0e-8 and higher by 2.1e-8, which now matches the binary's to 2.7e-15.
     Their parameter updates move only by round-off, since a family's normalizer shifts every mixture alike.
   - The underflow guard of the rho update, `epsdble`, is likewise the reference's `1.0e-16` in single precision (1.0000000168623835e-16).
+  - The NumPy plotting helper `pamica.numpy_impl.pdf.compute_pdf`, which `viz.plot_pdf_fits` draws, takes its normalizers from the same module,
+    so it draws the density the fit uses; its unused companion `compute_log_pdf` is removed.
   - Row 16 of the differences page now records the one kind of single-precision literal pamica keeps at its decimal value:
     the compiled-in defaults of `input.param` keys, which the binary uses only when the key is missing
     (then its `comp_thresh` is 0.9900000095); a value given in `input.param` is read as double, and pamica's native engine gives every one.
