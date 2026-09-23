@@ -47,10 +47,24 @@ def normalize_components(block: np.ndarray) -> np.ndarray:
     """``block`` with every row (component) divided by its Euclidean norm,
     ``A(:,k) / sqrt(sum(A(:,k)*A(:,k)))`` in the reference (amica15.f90:818-819).
 
-    No zero-norm guard: the reference has none here, and a block from
+    The reference has no zero-norm guard here, and needs none: a block from
     :func:`draw_initial_block` has a unit diagonal, so every norm is at least 1.
+    A direct call on any other block could still divide by a zero or
+    non-finite norm, so that raises instead of returning NaN rows; it cannot
+    happen on the reference's path, so the arithmetic there is unchanged.
+
+    Raises
+    ------
+    ValueError
+        If a row's norm is zero or not finite.
     """
     norm = np.sqrt(np.sum(block * block, axis=1))
+    bad = np.flatnonzero(~(np.isfinite(norm) & (norm > 0)))
+    if bad.size:
+        raise ValueError(
+            f"cannot normalize component row(s) {bad.tolist()}: their norm is "
+            "zero or not finite"
+        )
     return block / norm[:, None]
 
 

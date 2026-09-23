@@ -14,7 +14,9 @@ Pinned here, cross-backend per ``.rules/backend_parity.md`` (PyTorch and NumPy
 always run; MLX checks skip individually without MLX or an Apple GPU):
 
 1. the shared draw (:func:`pamica.initialization.initial_mixing`) is the
-   reference's recipe, written out below loop for loop from amica15.f90;
+   reference's recipe, written out below loop for loop from amica15.f90, and
+   its normalization refuses a zero or non-finite component instead of
+   returning NaN;
 2. every backend starts every fit (one and two models, a single fit and each
    of best-of-two restarts) from that draw: unit-norm components, the same
    bits in PyTorch and NumPy and their float32 cast in MLX, unchanged up to
@@ -60,7 +62,11 @@ import pytest
 import torch
 
 from pamica import AMICA_NumPy
-from pamica.initialization import draw_initial_block, initial_mixing
+from pamica.initialization import (
+    draw_initial_block,
+    initial_mixing,
+    normalize_components,
+)
 from pamica.tests.pre_change import load_pre_change_package
 from pamica.torch_impl.core import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
@@ -177,6 +183,17 @@ def test_the_shared_draw_is_the_reference_recipe(n_models):
         fixed = initial_mixing(rng, NW, n_models, fix_init=True)
         np.testing.assert_array_equal(fixed, np.vstack([np.eye(NW)] * n_models))
         assert rng.rand() == untouched.rand()
+
+
+@pytest.mark.parametrize("bad", [0.0, np.nan], ids=["zero", "nan"])
+def test_normalizing_a_zero_or_nan_component_raises(bad):
+    """The reference's normalization has no zero-norm guard because its draw
+    cannot need one (the unit diagonal keeps every norm at least 1). A direct
+    call on another block must not divide by a zero or NaN norm silently."""
+    block = draw_initial_block(np.random.RandomState(SEED), NW)
+    block[5, :] = bad
+    with pytest.raises(ValueError, match=r"component row\(s\) \[5\]"):
+        normalize_components(block)
 
 
 # --- 2. every backend starts every fit from that draw -------------------------
