@@ -216,11 +216,7 @@ def run_seeded_reference(
         rec.tofile(indir / "c")
         load = {"load_c": 0, "load_comp_list": 1}
 
-    link = workdir / "data.fdt"
-    if link.is_symlink() or link.exists():
-        link.unlink()
-    link.symlink_to(Path(data_file).resolve())
-
+    _link_data(workdir, data_file)
     param = {
         # `files` must come first: amica15.f90 stops if other keys precede it.
         "files": "./data.fdt",
@@ -247,6 +243,109 @@ def run_seeded_reference(
         **load,
         **params,
     }
+    return _run_reference(
+        param,
+        workdir,
+        nw=nw,
+        num_comps=num_comps,
+        num_mix=num_mix,
+        num_models=num_models,
+        max_iter=max_iter,
+        threads=threads,
+        timeout=timeout,
+        binary=binary,
+    )
+
+
+def run_drawn_reference(
+    data_file: Path,
+    workdir: Path,
+    *,
+    nw: int,
+    n_samples: int,
+    num_models: int,
+    num_mix: int,
+    seed: int,
+    max_iter: int = 0,
+    threads: int = 2,
+    timeout: float = 600.0,
+    binary: Optional[Path] = None,
+    **params: object,
+) -> ReferenceOutput:
+    """Run the reference binary from its OWN drawn initialization.
+
+    Nothing is loaded: the binary draws ``A`` (and ``mu``, ``sbeta``) with
+    gfortran's ``random_number``, seeded deterministically from ``seed``
+    (amica15.f90:222-238). With ``max_iter=0`` its loop exits before the first
+    iteration (:955) and ``write_output`` writes the initialization itself, so
+    the returned ``A`` is the drawn initial mixing matrix (issue #341).
+    Full rank only (``nw`` channels, ``pcakeep = nw``); ``params`` override
+    the engine defaults by Fortran name. Raises like
+    :func:`run_seeded_reference`.
+    """
+    num_comps = nw * num_models
+    workdir.mkdir(parents=True, exist_ok=True)
+    # Old output from an earlier run must never be read back.
+    out = workdir / "out"
+    if out.exists():
+        shutil.rmtree(out)
+    _link_data(workdir, data_file)
+    param = {
+        # `files` must come first: amica15.f90 stops if other keys precede it.
+        "files": "./data.fdt",
+        "outdir": "./out/",
+        **_DEFAULT_PARAMS,
+        "data_dim": nw,
+        "field_dim": n_samples,
+        "pcakeep": nw,
+        "num_models": num_models,
+        "num_mix_comps": num_mix,
+        "max_iter": max_iter,
+        "max_threads": threads,
+        "write_LLt": 0,
+        "writestep": max_iter + 1,
+        "seed": seed,
+        **params,
+    }
+    return _run_reference(
+        param,
+        workdir,
+        nw=nw,
+        num_comps=num_comps,
+        num_mix=num_mix,
+        num_models=num_models,
+        max_iter=max_iter,
+        threads=threads,
+        timeout=timeout,
+        binary=binary,
+    )
+
+
+def _link_data(workdir: Path, data_file: Path) -> None:
+    """Link the raw recording into ``workdir`` as ``data.fdt``."""
+    link = workdir / "data.fdt"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(Path(data_file).resolve())
+
+
+def _run_reference(
+    param: dict,
+    workdir: Path,
+    *,
+    nw: int,
+    num_comps: int,
+    num_mix: int,
+    num_models: int,
+    max_iter: int,
+    threads: int,
+    timeout: float,
+    binary: Optional[Path],
+) -> ReferenceOutput:
+    """Write ``param`` as ``input.param`` in ``workdir``, run the binary there
+    and read its raw output back (full rank: the sphere is ``nw x nw``). Raises
+    as :func:`run_seeded_reference` describes."""
+    out = workdir / "out"
     (workdir / "input.param").write_text(_render_param(param))
 
     exe = binary if binary is not None else resolver.resolve(REFERENCE_VERSION)
@@ -279,6 +378,6 @@ def run_seeded_reference(
         c=_read_f64(out / "c", (nw, num_models)),
         comp_list=comp_list.reshape(nw, num_models, order="F") - 1,
         LL=_read_f64(out / "LL", (max_iter,)),
-        S=_read_f64(out / "S", (nx, nx)),
+        S=_read_f64(out / "S", (nw, nw)),
         stdout=proc.stdout,
     )

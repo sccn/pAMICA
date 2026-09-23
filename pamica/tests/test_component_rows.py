@@ -14,7 +14,8 @@ Pinned here, cross-backend per ``.rules/backend_parity.md`` (PyTorch and NumPy
 always run; MLX checks skip individually without MLX or an Apple GPU):
 
 1. every configuration without a merge is byte-identical to the pre-change code
-   (the package at commit ``0930c0e`` is loaded from git): one, two and three
+   (the package at commit ``0930c0e`` is loaded from git, and started from the
+   live normalized initial ``A`` of issue #341): one, two and three
    models, ``doscaling`` and Newton on and off, every ``pdftype``,
    ``do_reject``, several blocks, a ``keep_best`` restore and best-of-two
    restarts, each on every backend that supports it; the old ``A`` maps onto
@@ -53,7 +54,11 @@ from scipy.special import logsumexp
 from pamica import AMICA_NumPy
 from pamica.component_layout import rows_from_legacy_columns
 from pamica.numpy_impl.utils import identify_shared_components
-from pamica.tests.pre_change import load_pre_change_package, use_pre_344_constants
+from pamica.tests.pre_change import (
+    load_pre_change_package,
+    use_pre_344_constants,
+    with_normalized_initial_mixing,
+)
 from pamica.torch_impl.core import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
 
@@ -118,14 +123,20 @@ def _live(backend: str) -> Any:
 
 
 def _classes(backend: str, pre: Any) -> Tuple[Any, Any]:
-    """``(pre-change class, live class)`` for ``backend``."""
+    """``(pre-change class, live class)`` for ``backend``.
+
+    The pre-change class starts from the live normalized initial ``A`` (issue
+    #341, epic #324 Phase 12, which changed every trajectory through the
+    initialization alone), so the two sides differ by the layout alone.
+    """
     live = _live(backend)
     if backend == "torch":
-        return pre.torch_impl.core.AMICATorchNG, live
-    if backend == "numpy":
-        return pre.numpy_impl.core.AMICA, live
-    old = importlib.import_module(f"{pre.__name__}.mlx_impl.core").AMICAMLXNG
-    return old, live
+        old = pre.torch_impl.core.AMICATorchNG
+    elif backend == "numpy":
+        old = pre.numpy_impl.core.AMICA
+    else:
+        old = importlib.import_module(f"{pre.__name__}.mlx_impl.core").AMICAMLXNG
+    return with_normalized_initial_mixing(old), live
 
 
 def _np(value: Any) -> np.ndarray:
@@ -899,7 +910,13 @@ def merged_seed(real_data) -> Dict[str, Any]:
 
 
 def _seeded_run(
-    model: Any, backend: str, seed: Dict[str, Any], X: np.ndarray, k: int, rows: bool
+    model: Any,
+    backend: str,
+    seed: Dict[str, Any],
+    X: np.ndarray,
+    k: int,
+    rows: bool,
+    sphere: np.ndarray,
 ) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
     """Run ``k`` production iterations of ``model`` from the merged seed, in
     the reference's load order: ``get_unmixing_matrices`` runs on the DEFAULT
@@ -907,14 +924,21 @@ def _seeded_run(
     (amica15.f90:825-833), so the first E-step unmixes with the pre-merge
     blocks while indexing densities by the merged ``comp_list``. ``rows`` is
     False for a pre-change class, which gets the seed's ``A`` in its column
-    layout. Returns the per-iteration log-likelihood, each model's mixing
-    matrix (the reference's ``A(:, comp_list(:, h))``), ``mu`` and ``sbeta``."""
+    layout. The data are sphered with ``sphere``, the one input the reference
+    computes for itself (its ``load_sphere`` path is broken, see
+    ``native_oracle.py``); pass the reference's own ``S`` so both sides start
+    from the same bits. Returns the per-iteration log-likelihood, each model's
+    mixing matrix (the reference's ``A(:, comp_list(:, h))``), ``mu`` and
+    ``sbeta``."""
     A = seed["A"]
     if not rows:
         A = _column_state({"A": A, "comp_list": seed["default"]})["A"]
     lls: List[float] = []
     if backend == "torch":
-        X_t = model._preprocess(X)
+        model._preprocess(X)
+        model.sphere = torch.from_numpy(sphere.copy())
+        model._sphere_pinv = None
+        X_t = model.sphere @ (torch.from_numpy(X) - model.mean.reshape(-1, 1))
         model._initialize_parameters()
         model.A = torch.from_numpy(A.copy())
         for name in ("mu", "beta", "rho", "alpha", "gm"):
@@ -932,7 +956,7 @@ def _seeded_run(
     else:
         model.fit(X)  # sizes and preprocesses; the state is replaced below
         model.mean = seed["mean"].reshape(-1, 1).copy()
-        model.sphere = seed["sphere"].copy()
+        model.sphere = sphere.copy()
         model.data = model.sphere @ (X - model.mean)
         model._sphere_pinv = None
         model.A = A.copy()
@@ -1037,11 +1061,13 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
             writestep=10**6,
             **opt,
         )
+        # Both sides from the reference's own sphere (see _seeded_run).
+        S = ref.S
         runs = {
             "torch": _seeded_run(
-                torch_model(AMICATorchNG), "torch", seed, real_data, k, rows=True
+                torch_model(AMICATorchNG), "torch", seed, real_data, k, True, S
             ),
-            "numpy": _seeded_run(numpy_model, "numpy", seed, real_data, k, rows=True),
+            "numpy": _seeded_run(numpy_model, "numpy", seed, real_data, k, True, S),
         }
         for name, (ll, mixing, mu, sbeta) in runs.items():
             errs = {
@@ -1058,7 +1084,9 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
         # normalizer against the reference's single-precision one, the gap the
         # maxrho = 1.99 workaround hid.
         old344 = torch_model(pre344.torch_impl.core.AMICATorchNG)
-        ll, mixing, mu, sbeta = _seeded_run(old344, "torch", seed, real_data, k, True)
+        ll, mixing, mu, sbeta = _seeded_run(
+            old344, "torch", seed, real_data, k, True, S
+        )
         errs = {
             "A": _mixing_error(mixing, ref.A, seed["merged"]),
             "mu": np.abs(mu[:, used] - ref.mu[:, used]).max(),
@@ -1071,7 +1099,9 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
 
         if k == 3:
             old = torch_model(pre.torch_impl.core.AMICATorchNG)
-            ll_old, mixing, _, _ = _seeded_run(old, "torch", seed, real_data, k, False)
+            ll_old, mixing, _, _ = _seeded_run(
+                old, "torch", seed, real_data, k, False, S
+            )
             old_err = _mixing_error(mixing, ref.A, seed["merged"])
             print(
                 f"merged oracle doscaling={doscaling} column semantics k=3: "
@@ -1083,22 +1113,29 @@ def test_updates_from_a_merged_state_match_the_seeded_reference(
 # --- 5. early mass merges behave the same in the reference (opt-in) -------------
 # The kind of recipe the sharing tests used before issue #334 made the metric
 # compare true component maps: 4096 samples, pamica's default optimizer, an
-# early scan at a loose threshold. The first scan (iteration 11) merges 25
-# components and the second model's gm falls from 0.53 to 6.0e-4 within two
-# iterations; by the second scan (iteration 22, which merges nothing more) it
-# is 2e-22, and the fit goes non-finite at iteration 25. Issue #345 moved the
-# A-freeze to the reference's iterations (mod(iter, share_iter) <= 5), so
-# share_start is a multiple of share_iter here, which puts each window on its
-# scan iteration; the earlier recipe (seed 7, scans at 8 and 18) now goes
-# non-finite at iteration 18, before its second scan. _COLLAPSE_REF spells pamica's
-# defaults out for the binary, with no further scans, no A-freeze and no
-# convergence stops, so both sides run the same updates from the same state.
+# early scan at a loose threshold. The first scan (iteration 11) merges 28
+# components and the second model's gm falls in the fit (whose A is held on
+# those iterations) from 0.57 to 9.0e-4 within two iterations, and to 4.2e-3
+# in the freeze-free continuation the test runs on both sides; by the second
+# scan (iteration 22, which merges nothing more) it is 2.4e-4 in the fit, and
+# the fit's parameters go non-finite in iteration 23. Issue #345
+# moved the A-freeze to the reference's iterations (mod(iter, share_iter) <= 5),
+# so share_start is a multiple of share_iter here, which puts each window on its
+# scan iteration; the earlier recipe (seed 7, scans at 8 and 18) went
+# non-finite at iteration 18, before its second scan. Seed 20 served until
+# issue #341, whose normalized initial A leaves its second model at gm 1.2e-3
+# after the second scan and 1.7e-3 one iteration later, not collapsed; of seeds
+# 0-49, 23, 32, 40 and 41 collapse as described (with share_start 10, none of
+# 0-29; with 12, seeds 11 and 27), and many others go non-finite before the
+# second scan. _COLLAPSE_REF spells pamica's defaults out for the binary, with
+# no further scans, no A-freeze and no convergence stops, so both sides run the
+# same updates from the same state.
 _COLLAPSE_SAMPLES = 4096
 _COLLAPSE: Dict[str, Any] = dict(
     n_channels=NW,
     n_models=2,
     n_mix=NMIX,
-    seed=20,
+    seed=23,
     device="cpu",
     dtype=torch.float64,
     block_size=1024,

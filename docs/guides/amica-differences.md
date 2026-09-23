@@ -470,11 +470,13 @@ Two consequences to know:
   but its similarity with `Spinv2 = Spinv^T Spinv`, applied to the binary's own state after 8 iterations from pamica's initialization,
   merges exactly the pairs the PyTorch and NumPy scans merge: 32, 32 and 30 at `comp_thresh` 0.9, 0.95 and 0.99.
 - A model left with few components of its own then loses its responsibility, and can end in a non-finite fit.
-  In a short recipe (4096 samples, seed 20, `share_start=11`, `share_iter=11`, `comp_thresh=0.9`), 25 merges at iteration 11
-  dropped the second model's `gm` from 0.53 to 6.0e-4 within two iterations, and the fit went non-finite at iteration 25.
-  Seeded with the same merged states, the reference's update does the same:
-  the second model's `gm` falls to 6.0e-4 within two iterations, as pamica's does from the same state,
-  and from the state after the second scan (iteration 22) it reaches zero in one iteration and the binary reports NaN and reinitializes.
+  In a short recipe (4096 samples, seed 23, `share_start=11`, `share_iter=11`, `comp_thresh=0.9`), 28 merges at iteration 11
+  dropped the second model's `gm` from 0.57 to 9.0e-4 within two iterations
+  (in pamica's own fit, whose `A` is held on those iterations, amica15.f90:1803), and the fit went non-finite in iteration 23.
+  Seeded with the same merged states and run without the `A`-freeze, the reference's update behaves the same way:
+  from the state after the first scan it drops the second model's `gm` to 4.2e-3 within two iterations,
+  matching pamica's update rule run without the freeze from that state (not the 9.0e-4 above, which includes the freeze),
+  and from the state after the second scan (iteration 22) it reaches zero in one iteration, as pamica's does, and the binary reports NaN and reinitializes.
   This is the algorithm on models that have not yet separated, not a defect of the port.
   The reference's default `share_start=100` avoids it; keep `share_start` well past the first iterations.
 - Saved models: a PyTorch `state_dict` (now `format_version` 4) or MLX save (now format 2) from an earlier version
@@ -662,7 +664,7 @@ so they fit the data unscaled.
 
 **Consequences.**
 A `do_sphere=False` fit is not trajectory-comparable to the binary's:
-the natural-gradient EM is not scale-invariant through its `A = I + noise` initialization and its step sizes, so the two fit differently scaled data.
+the natural-gradient EM is not scale-invariant through its fixed near-identity initialization (unit-norm components, whatever the data's scale) and its step sizes, so the two fit differently scaled data.
 The reported log-likelihood also differs by the log-determinant term.
 That term looks inconsistent in the reference itself:
 `log|det S|` for `S = diag(1/sqrt(var_i))` is `-0.5 * sum_i log(var_i)`,

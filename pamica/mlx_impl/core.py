@@ -110,6 +110,7 @@ from .. import blocktune
 from .. import restarts
 from .. import schedule
 from ..component_layout import rows_from_legacy_columns
+from ..initialization import initial_mixing
 from ..metrics import mir as mir_metric
 from ..metrics import model_probability_from_loglik, pairwise_mi
 from ..numpy_impl.utils import identify_shared_components
@@ -1127,14 +1128,14 @@ class AMICAMLXNG:
         rng = np.random.RandomState(self.seed)
         n, m, ncomp, nmix = self.n_channels, self.n_models, self.n_comps, self.n_mix
 
-        # Per-model mixing blocks + comp_list mapping each (source, model) to its
-        # component, a row of A (issue #334; identical RNG draw order to
-        # AMICATorchNG; for m=1 the loop runs once, so single-model init stays
-        # byte-for-byte).
-        A_np = np.zeros((ncomp, n))
+        # Per-model mixing blocks, drawn and normalized to unit-norm components
+        # as the reference does (issue #341, pamica.initialization), in float64
+        # before the float32 cast; comp_list maps each (source, model) to its
+        # component, a row of A (issue #334). Identical RNG draw order to
+        # AMICATorchNG.
+        A_np = initial_mixing(rng, n, m)
         comp_list_np = np.zeros((n, m), dtype=np.int64)
         for h in range(m):
-            A_np[h * n : (h + 1) * n, :] = np.eye(n) + 0.01 * (0.5 - rng.rand(n, n))
             comp_list_np[:, h] = np.arange(h * n, (h + 1) * n)
 
         mu_np = np.zeros((nmix, ncomp))

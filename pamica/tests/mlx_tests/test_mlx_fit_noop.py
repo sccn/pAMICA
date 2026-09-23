@@ -32,6 +32,13 @@ same lossless conversion a pre-#334 save goes through
 (:func:`pamica.component_layout.rows_from_legacy_columns`) before the bit-for-bit
 comparison; every per-model block, and so every other array, is unchanged.
 
+Issue #341 (epic #324 Phase 12) normalizes the drawn initial ``A`` to unit-norm
+components, as the reference does, which changes every trajectory from its
+first E-step. The historical class therefore starts from the live normalized
+initial ``A``
+(:func:`pamica.tests.pre_change.with_normalized_initial_mixing`), and every
+other part of the fit path is still compared bit for bit.
+
 Issue #344 (epic #324 Phase 13) gave every backend the reference's
 single-precision density constants, and these fits reach ``rho == 2``, where
 the generalized Gaussian's normalizer is one of them, so the live class runs
@@ -54,6 +61,7 @@ from pamica.mlx_impl.core import AMICAMLXNG as CurrentAMICAMLXNG  # noqa: E402
 from pamica.tests.pre_change import (  # noqa: E402
     load_pre_change_package,
     use_pre_344_constants,
+    with_normalized_initial_mixing,
 )
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
@@ -87,12 +95,14 @@ def real_data() -> np.ndarray:
 @pytest.fixture(scope="module")
 def historical_amicamlxng(tmp_path_factory):
     """The pre-Phase-3 ``AMICAMLXNG`` class: the package at ``_EPIC_TIP``,
-    imported beside the live one. A clone without that commit fails under
-    ``CI`` and otherwise skips with the command that fetches it."""
+    imported beside the live one, starting from the live normalized initial
+    ``A`` (issue #341; module docstring). A clone without that commit fails
+    under ``CI`` and otherwise skips with the command that fetches it."""
     old = load_pre_change_package(
         _EPIC_TIP, "pamica_pre289", tmp_path_factory.mktemp("pre289")
     )
-    return importlib.import_module(f"{old.__name__}.mlx_impl.core").AMICAMLXNG
+    mlx_core = importlib.import_module(f"{old.__name__}.mlx_impl.core")
+    return with_normalized_initial_mixing(mlx_core.AMICAMLXNG)
 
 
 _PARAM_NAMES = (

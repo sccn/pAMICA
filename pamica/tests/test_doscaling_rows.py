@@ -26,7 +26,9 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
    the reference;
 3. ``doscaling=False`` is byte-identical to the pre-fix code: the package at
    commit ``fb13d76`` is loaded from git and each backend fitted in the same
-   process, its ``A`` mapped onto the component rows issue #334 introduced;
+   process from the live normalized initial ``A`` (issue #341), the live one
+   at its pre-#344 density constants, its ``A`` mapped onto the component rows
+   issue #334 introduced;
 4. ``scalestep``, a pamica extension the reference parses but never reads,
    counts iterations from 1, so its default of 1 is the reference's
    every-iteration rescale, and every constructor rejects a ``scalestep`` that
@@ -54,7 +56,11 @@ from scipy.special import logsumexp
 
 from pamica import AMICA_NumPy
 from pamica.component_layout import rows_from_legacy_columns
-from pamica.tests.pre_change import load_pre_change_package, use_pre_344_constants
+from pamica.tests.pre_change import (
+    load_pre_change_package,
+    use_pre_344_constants,
+    with_normalized_initial_mixing,
+)
 from pamica.torch_impl.core import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
 
@@ -393,7 +399,11 @@ def test_a_zero_or_nan_norm_row_is_left_untouched(unscaled_state, backend, bad):
 # --- 3. doscaling=False is byte-identical to the pre-fix code ---------------
 # The epic #324 head this phase branched from: the last commit with the stored-
 # column rule. A later phase that deliberately changes the doscaling=False
-# trajectory moves this pin to its own base commit.
+# trajectory moves this pin to its own base commit. Issue #341 (Phase 12)
+# changed every trajectory through the initial A alone, so the pre-fix class
+# starts from the live normalized initial A instead
+# (``with_normalized_initial_mixing``): from the same start, everything else
+# the doscaling=False path does is still the pre-fix code's, bit for bit.
 _PRE_FIX_COMMIT = "fb13d76de145419da9c89db94438d60aafbff444"
 
 
@@ -408,11 +418,15 @@ def pre_fix(tmp_path_factory) -> Any:
 
 
 def _pre_fix_class(pre_fix: Any, backend: str) -> Any:
+    """The pre-fix class, starting from the live initial ``A`` (issue #341)."""
     if backend == "torch":
-        return pre_fix.torch_impl.core.AMICATorchNG
-    if backend == "numpy":
-        return pre_fix.numpy_impl.core.AMICA
-    return importlib.import_module(f"{pre_fix.__name__}.mlx_impl.core").AMICAMLXNG
+        cls = pre_fix.torch_impl.core.AMICATorchNG
+    elif backend == "numpy":
+        cls = pre_fix.numpy_impl.core.AMICA
+    else:
+        mlx_core = importlib.import_module(f"{pre_fix.__name__}.mlx_impl.core")
+        cls = mlx_core.AMICAMLXNG
+    return with_normalized_initial_mixing(cls)
 
 
 def _fit_unscaled(
@@ -461,9 +475,9 @@ def test_doscaling_off_is_byte_identical_to_the_pre_fix_code(
 ):
     """``doscaling=False`` never enters the rescale, so this fix must leave its
     trajectory and every fitted array bit for bit where the pre-fix code put
-    them, on every backend. The live backend runs with the density constants it
-    had before issue #344, which the pre-fix code predates (the two-model fits
-    reach ``rho == 2``)."""
+    them, on every backend, from the same initial ``A`` (issue #341). The live
+    backend runs with the density constants it had before issue #344, which the
+    pre-fix code predates (the two-model fits reach ``rho == 2``)."""
     new_cls: Any
     if backend == "mlx":
         new_cls = _mlx_core().AMICAMLXNG  # skips without MLX
@@ -595,20 +609,38 @@ _REF_OPT: Dict[str, Any] = {
     "scalestep": 1,
 }
 # Tolerances per iteration count. The reference itself carries round-off that
-# the ill-conditioned exact-EM mu update amplifies (mu of a low-mass mixture
-# component), so each bound sits at the doscaling-OFF noise floor with margin.
-# Measured maxima (doscaling on / off), each taken over both backends (PyTorch
-# and NumPy) and both model counts, which is why they are wider than the
-# single-configuration figures in the changelog and PR (PyTorch, one model:
-# A 5.0e-16, mu 7.8e-11, sbeta 1.1e-14 after 1 iteration):
-#   1 iteration:  A 2.2e-15 / 2.4e-15, mu 7.8e-11 / 8.0e-11, sbeta 2.4e-14
-#   3 iterations: A 6.1e-12 / 3.1e-11, mu 3.6e-8 / 1.3e-8, sbeta 2.8e-10
+# the ill-conditioned exact-EM mu update amplifies (a sample close to a mixture
+# center weighs |y|^(rho-2) in its denominator), so each bound sits at the
+# round-off floor of the seeded state with margin. Measured maxima (doscaling
+# on / off), each taken over both backends (PyTorch and NumPy) and both model
+# counts, from ORACLE_SEED's initialization:
+#   1 iteration:  A 2.1e-15 / 2.3e-15, mu 1.3e-10 / 1.3e-10, sbeta 2.4e-14
+#   3 iterations: A 3.6e-12 / 1.1e-11, mu 1.4e-7 / 4.3e-8, sbeta 1.1e-10
 # The column rule this replaced was off by A 7.2e-5, mu 6.6e-5, sbeta 8.6e-5
-# after 1 iteration and 1.4e-3 / 6.7e-3 / 2.2e-3 after 3.
+# after 1 iteration and 1.4e-3 / 6.7e-3 / 2.2e-3 after 3 (measured from seed
+# 42's initialization before issue #341; PyTorch, one model, the new rule was
+# off by A 5.0e-16, mu 7.8e-11, sbeta 1.1e-14 after 1 iteration there).
 _ORACLE_TOL = {
     1: {"A": 1e-13, "mu": 1e-9, "sbeta": 1e-12, "LL": 1e-12},
     3: {"A": 1e-10, "mu": 1e-6, "sbeta": 1e-8, "LL": 1e-11},
 }
+# The seeded state's round-off floor, measured in the test as the largest
+# disagreement between PyTorch and NumPy (the same float64 arithmetic in two
+# operation orders), must sit this many times below each bound, as the worse
+# of the doscaling on and off deviations the bounds were set on did (3.2 to 42
+# times below): a state whose floor reaches a bound cannot test that bound.
+_FLOOR_MARGIN = 3.0
+# The seed of the oracle's initialization. Seed 42 served until issue #341: from
+# its normalized initial A, the two-model state puts one sample 2.3e-7 from a
+# mixture center, and after one iteration PyTorch and NumPy disagree with each
+# other by 7.9e-10 in mu and with the reference by 5.1e-10 and 1.3e-9, at and
+# over the bound (the spheres of all three differ by 1e-14, and the mu update
+# amplifies that). Of seeds 42 and 45-56, only 45 and 47 keep every deviation
+# within its bound (at 0.14 and 0.33 of it); the others exceed one by up to 34
+# times, their two backends as far apart as each is from the reference. With
+# the pre-#341 initialization, the one-iteration mu deviation of PyTorch stayed
+# below 2.7e-10 on seeds 42-49.
+ORACLE_SEED = 45
 
 
 @pytest.mark.skipif(
@@ -638,7 +670,7 @@ def test_doscaling_matches_the_seeded_reference(n_models, tmp_path):
             n_channels=NW,
             n_models=n_models,
             n_mix=NMIX,
-            seed=SEED,
+            seed=ORACLE_SEED,
             device="cpu",
             dtype=torch.float64,
             keep_best=False,
@@ -680,7 +712,7 @@ def test_doscaling_matches_the_seeded_reference(n_models, tmp_path):
                 num_models=n_models,
                 num_mix=NMIX,
                 max_iter=k,
-                seed=SEED,
+                seed=ORACLE_SEED,
                 use_tqdm=False,
                 outdir=td,
                 do_opt_block=False,
@@ -692,6 +724,20 @@ def test_doscaling_matches_the_seeded_reference(n_models, tmp_path):
             "torch": (t.A.numpy(), t.mu.numpy(), t.beta.numpy(), t.ll_history),
             "numpy": (n.A, n.mu, n.beta, n.ll),
         }
+        # Precondition: the state's own round-off floor leaves room under
+        # every bound (_FLOOR_MARGIN).
+        (tA, tmu, tbeta, tll), (nA, nmu, nbeta, nll) = fits.values()
+        floor = {
+            "A": np.abs(tA - nA).max(),
+            "mu": np.abs(tmu - nmu).max(),
+            "sbeta": np.abs(tbeta - nbeta).max(),
+            "LL": np.abs(np.asarray(tll) - np.asarray(nll)).max(),
+        }
+        high = {q: f for q, f in floor.items() if not f * _FLOOR_MARGIN <= tol[q]}
+        assert not high, (
+            f"setup: PyTorch and NumPy disagree by {high} after {k} iteration(s) "
+            f"from seed {ORACLE_SEED}, too close to the bounds {tol} to test them"
+        )
         for name, (A, mu, beta, ll) in fits.items():
             errs = {
                 "A": np.abs(reference_mixing(A) - ref.A).max(),

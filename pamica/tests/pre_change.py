@@ -17,6 +17,15 @@ history, ``fetch-depth: 0``) and is otherwise skipped with the command that
 fetches it; the same holds, with its own message, when git is not installed or
 the tests do not run from a git checkout.
 
+Every commit loaded here predates two changes that move every trajectory:
+the normalized initial mixing matrix of issue #341 (epic #324 Phase 12) and
+the reference's single-precision density constants of issue #344 (Phase 13).
+A byte-identity test that pins a later change against such a commit adapts
+both sides, so the comparison isolates the change it was written for:
+:func:`with_normalized_initial_mixing` starts the pre-change class from the
+live initialization, and :func:`use_pre_344_constants` gives the live backend
+its old constants.
+
 Not a test module (no ``test_`` prefix, so pytest does not collect it).
 """
 
@@ -31,8 +40,9 @@ import sys
 import tarfile
 from pathlib import Path, PurePosixPath
 from types import ModuleType
-from typing import NoReturn
+from typing import Any, NoReturn
 
+import numpy as np
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -183,3 +193,96 @@ def use_pre_344_constants(monkeypatch: pytest.MonkeyPatch, backend: str) -> None
     module = importlib.import_module(module_name)
     for name in names:
         monkeypatch.setattr(module, name, _PRE_344_CONSTANTS[name])
+
+
+def with_normalized_initial_mixing(cls: Any) -> Any:
+    """A subclass of the pre-change backend class ``cls`` that starts from the
+    normalized initial ``A`` the live backends draw (issue #341).
+
+    Every commit the byte-identity tests load predates epic #324 Phase 12,
+    whose backends normalize each drawn initial component to unit norm, as the
+    reference does (amica15.f90:818-819). That changes every trajectory from its
+    first E-step, so a test that pins a LATER behavior against such a commit
+    (the layout of issue #334, the rescale of issue #333, ...) fits the
+    pre-change class from the same initial ``A`` as the live code; everything
+    else the pre-change class does is its own, unmodified. ``cls`` is the
+    ``AMICATorchNG``, ``AMICAMLXNG`` or NumPy ``AMICA`` class of a package from
+    :func:`load_pre_change_package`.
+
+    The pre-change class draws exactly as it always did, so every later draw
+    (``mu``, ``beta``, a restart) is unchanged; only the drawn ``A`` is then
+    replaced, in the class's own storage layout (component rows, or the
+    component-column layout before issue #334) and dtype:
+
+    * PyTorch and MLX draw each fit's ``A`` first from a fresh
+      ``numpy.random.RandomState(seed)``, so the replacement is the live
+      :func:`pamica.initialization.initial_mixing` from that generator.
+    * NumPy draws from its running generator and only while ``A`` is ``None``
+      (a supplied ``A`` is kept, and the restart after a non-finite likelihood
+      redraws through the same method), so the replacement normalizes the
+      class's own draw: off-diagonal entries of ``I + 0.01 * (0.5 - u)`` are
+      exactly the live draw's ``0.01 * (0.5 - u)``, and the diagonal is set to
+      one as in :func:`pamica.initialization.draw_initial_block`.
+    """
+    from pamica.initialization import initial_mixing, normalize_components
+
+    # The backend module the class (or the pre-change class it derives from,
+    # for a test's own subclass) was defined in.
+    backend, module = "", None
+    for base in cls.__mro__:
+        parts = base.__module__.split(".")
+        if len(parts) == 3 and parts[1:] in (
+            ["torch_impl", "core"],
+            ["mlx_impl", "core"],
+            ["numpy_impl", "core"],
+        ):
+            backend, module = parts[1], sys.modules[base.__module__]
+            break
+    if module is None:
+        raise ValueError(f"{cls!r} is not a pamica backend class")
+
+    def blocks(shape: tuple, n: int, m: int) -> list:
+        """Each model's block of an ``A`` of ``shape`` as index tuples."""
+        if shape == (m * n, n):  # component rows (issue #334 on)
+            return [(slice(h * n, (h + 1) * n), slice(None)) for h in range(m)]
+        if shape == (n, m * n):  # component columns (before issue #334)
+            return [(slice(None), slice(h * n, (h + 1) * n)) for h in range(m)]
+        raise ValueError(f"unexpected A shape {shape} for {m} model(s) of {n}")
+
+    if backend == "numpy_impl":
+
+        class NumPyNormalizedInit(cls):
+            def _initialize_parameters(self):
+                drawn = self.A is None and not getattr(self, "fix_init", False)
+                super()._initialize_parameters()
+                if drawn:
+                    A = np.array(self.A, dtype=np.float64)
+                    n, m = self.data_dim, self.num_models
+                    for idx in blocks(A.shape, n, m):
+                        # A component is a row of the per-model block in both
+                        # layouts; only the axis of the full A that carves the
+                        # block out differs (columns before #334, rows after).
+                        block = A[idx].copy()
+                        block[np.diag_indices(n)] = 1.0
+                        A[idx] = normalize_components(block)
+                    self.A = A
+                    self._update_unmixing_matrices()
+
+        return NumPyNormalizedInit
+
+    class NormalizedInit(cls):
+        def _initialize_parameters(self):
+            super()._initialize_parameters()
+            n, m = self.n_channels, self.n_models
+            rows = initial_mixing(np.random.RandomState(self.seed), n, m)
+            shape = tuple(self.A.shape)
+            A = np.empty(shape)
+            for h, idx in enumerate(blocks(shape, n, m)):
+                A[idx] = rows[h * n : (h + 1) * n, :]
+            if backend == "torch_impl":
+                self.A = module.torch.from_numpy(A).to(self.A.device, self.A.dtype)
+            else:
+                self.A = module.mx.array(A.astype(np.float32))
+            self._update_unmixing_matrices()
+
+    return NormalizedInit

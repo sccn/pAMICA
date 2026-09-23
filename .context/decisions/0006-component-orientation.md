@@ -73,10 +73,15 @@ it was applied uniformly, model by model.
   ADR 0003's `keep_best` variance figures were measured under the column rule and will be re-measured in the epic's final parity re-measurement.
 - `scalestep > 1` now rescales on iterations `scalestep`, `2*scalestep`, ... instead of 1, `1+scalestep`, ...;
   the default is unaffected.
-- Remaining known difference: pamica does not normalize its drawn initial `A`
+- Former known difference, now resolved: pamica did not normalize its drawn initial `A`
   (the reference normalizes a drawn one, amica15.f90:818-819, but not a loaded one).
   The two draws come from different random generators anyway, and the first iteration's rescale normalizes every component.
-  Aligning it changes default trajectories, so it is its own change, issue #341, not part of the layout change of Phase 8.
+  Aligning it changes default trajectories, so it was its own change, issue #341, not part of the layout change of Phase 8.
+  Epic #324 Phase 12 made it: every backend draws its initial `A` through `pamica.initialization.initial_mixing`,
+  which sets each block's diagonal to one and normalizes every component as the reference does, the NumPy restart redraw included,
+  and a supplied or loaded `A` is still used as is.
+  Default fits start from a different point and end close to where they did (the first rescale used to do the normalizing);
+  with `doscaling` off the change reaches the whole fit.
 
 ## Alternatives considered
 
@@ -94,6 +99,7 @@ it was applied uniformly, model by model.
   :818-819 and :1039-1040 (normalization of a drawn initial and restart `A`),
   :793-800 (a loaded `A` is used as is),
   :3686-3688 (`scalestep` parsed, never read).
-- Issues #333 (this change), #334 (Phase 8, component-row layout), #335 (Newton start), #24 (the storage convention), epic #324.
+- Issues #333 (this change), #334 (Phase 8, component-row layout), #335 (Newton start), #341 (Phase 12, initial `A`), #24 (the storage convention), epic #324.
 - `pamica/tests/test_doscaling_rows.py` (invariance, cross-backend, byte-identity and the gated native oracle),
-  `pamica/tests/native_oracle.py` (seeded reference runs).
+  `pamica/tests/native_oracle.py` (seeded reference runs),
+  `pamica/tests/test_initial_mixing.py` (the initial `A`, with its gated oracles).

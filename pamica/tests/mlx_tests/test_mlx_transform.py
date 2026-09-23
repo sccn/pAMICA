@@ -290,19 +290,29 @@ def test_get_rho_raises_on_force_set_nan_rho():
 # 0.95371497, A[10,20] -0.0037135077, A[31,31] 0.99918866, A[0,31]
 # 0.032124873; ll_history[0] is unchanged (it is computed before the first
 # rescale).
+#
+# Re-recorded again on the same machine for issue #341 (epic #324 Phase 12),
+# which deliberately normalizes each drawn initial component to unit norm, as
+# the reference does. The pre-#341 recording (reproduced exactly on this
+# machine before the change) was ll_history -3.3320186138153076,
+# -3.282797336578369, -3.2743287086486816, -3.269350528717041,
+# -3.2649497985839844, -3.260986089706421, -3.2576255798339844,
+# -3.254916191101074, -3.252664566040039, -3.2506353855133057 (the last also
+# final_ll_) with A[0,0] 0.9853508, A[5,5] 0.99289405, A[10,20]
+# -0.0037210553, A[31,31] 0.99681115, A[0,31] 0.0327551.
 _NOOP_PIN_LL_HISTORY = [
-    -3.3320186138153076,
-    -3.282797336578369,
-    -3.2743287086486816,
-    -3.269350528717041,
-    -3.2649497985839844,
-    -3.260986089706421,
-    -3.2576255798339844,
-    -3.254916191101074,
-    -3.252664566040039,
-    -3.2506353855133057,
+    -3.332034111022949,
+    -3.282749891281128,
+    -3.2743053436279297,
+    -3.2693262100219727,
+    -3.264932155609131,
+    -3.260972738265991,
+    -3.2576169967651367,
+    -3.254908800125122,
+    -3.2526557445526123,
+    -3.2506275177001953,
 ]
-_NOOP_PIN_FINAL_LL = -3.2506353855133057
+_NOOP_PIN_FINAL_LL = -3.2506275177001953
 _NOOP_PIN_STOP_REASON = "max_iter"
 # A handful of representative A entries (two diagonal, two off-diagonal, one
 # corner), replacing the previous SHA-256 hash of the full A/W arrays: a
@@ -310,11 +320,11 @@ _NOOP_PIN_STOP_REASON = "max_iter"
 # but these entries still catch a real fit-path change within tolerances that
 # survive cross-GPU float32 noise.
 _NOOP_PIN_A_ENTRIES = {
-    (0, 0): 0.9853508,
-    (5, 5): 0.99289405,
-    (10, 20): -0.0037210553,
-    (31, 31): 0.99681115,
-    (0, 31): 0.0327551,
+    (0, 0): 0.98533404,
+    (5, 5): 0.992889,
+    (10, 20): -0.0037056825,
+    (31, 31): 0.9968118,
+    (0, 31): 0.03281356,
 }
 
 # Tolerances from a float32-rounding perturbation study, not hand-picked. The
@@ -323,40 +333,55 @@ _NOOP_PIN_A_ENTRIES = {
 # normal (numpy default_rng(20260922)): the scale of the accumulation-order
 # differences between GPU models.
 # Recorded below is the largest deviation from the unperturbed fit over those
-# draws (Apple M4 Pro); each tolerance is _PIN_SAFETY times it. Both
-# cross-GPU deviations seen on CI sat inside the study's maxima: ll_history[0]
-# at ~7e-8 relative (study 7.2e-8) and A[0,0] at 9.2e-6 (study 1.9e-5). The
-# earlier flat 5e-6 relative tolerance had no margin (the study's largest
-# log-likelihood deviation is 5.0e-6) and failed on CI at A[0,0].
+# draws (Apple M4 Pro); each tolerance is _PIN_SAFETY times it, and never less
+# than _PIN_SAFETY float32 units in the last place of the recorded value, the
+# resolution of a float32 result. That floor matters for ll_history[0] alone:
+# since issue #341 no draw moved it at all (nor any of 192 draws of the same
+# generator), while a GPU with another accumulation order can move it by one
+# unit, as CI once did (7e-8 relative). Both cross-GPU deviations seen on CI
+# before issue #341 sat inside that study's maxima: ll_history[0] at ~7e-8
+# relative (study 7.2e-8) and A[0,0] at 9.2e-6 (study 1.9e-5). The earlier
+# flat 5e-6 relative tolerance had no margin (that study's largest
+# log-likelihood deviation was 5.0e-6) and failed on CI at A[0,0]. The same
+# study with 192 draws (its first 48 are these) stays inside every tolerance
+# below: its largest deviations are at most 1.8 times these (ll_history[5]).
 #
 # The canary still catches a real fit-path change. Issue #333's doscaling
-# change moved A[0,0] by 1.0e-1 (1800x its tolerance), A[5,5] by 3.9e-2
-# (8800x), A[31,31] by 2.4e-3 (530x), A[0,31] by 6.3e-4 (11x), and
-# ll_history[2] and [3] by 1.3e-5 and 1.6e-5 relative (15x and 12x). The
-# discriminating power therefore rests on the three diagonal entries: A[10,20]
-# (moved 7.5e-6, 1.3x) and ll_history[0] and [1] (unchanged or under 1x) sit
-# inside float32 noise for that change and are kept as regression guards only.
+# change moved A[0,0] by 1.0e-1, A[5,5] by 3.9e-2, A[31,31] by 2.4e-3 and
+# A[0,31] by 6.3e-4, far outside the tolerances of the time, while A[10,20]
+# and ll_history[0] and [1] sat inside float32 noise for that change. Issue
+# #341's normalized initial A moved ll_history[0] by 1.55e-5 (22 times its
+# tolerance below), ll_history[1] to [4] by 4.1 to 8.5 times theirs and A[0,31]
+# by 5.8 times; the later log-likelihoods and the other A entries moved inside
+# their tolerances, so they are regression guards only for that change.
 _PIN_SAFETY = 3.0
 _STUDY_MAX_REL_DLL = [
-    7.16e-08,
-    1.38e-06,
-    2.91e-07,
-    4.38e-07,
-    2.63e-06,
-    4.09e-06,
-    4.98e-06,
-    3.66e-06,
-    3.23e-06,
-    4.11e-06,
+    0.0,
+    1.09e-06,
+    5.83e-07,
+    2.92e-07,
+    2.19e-07,
+    1.83e-06,
+    4.68e-06,
+    6.67e-06,
+    4.91e-06,
+    4.03e-06,
 ]
-_STUDY_MAX_REL_DFINAL = 4.11e-06
+_STUDY_MAX_REL_DFINAL = 4.03e-06
 _STUDY_MAX_DA = {
-    (0, 0): 1.87e-05,
-    (5, 5): 1.49e-06,
-    (10, 20): 1.90e-06,
-    (31, 31): 1.49e-06,
-    (0, 31): 1.87e-05,
+    (0, 0): 1.76e-05,
+    (5, 5): 1.79e-06,
+    (10, 20): 1.34e-05,
+    (31, 31): 1.25e-06,
+    (0, 31): 3.36e-06,
 }
+
+
+def _tolerance(study_dev: float, expected: float) -> float:
+    """``_PIN_SAFETY`` times the study's absolute deviation, floored at one
+    float32 unit in the last place of ``expected`` (the study's resolution)."""
+    ulp = float(np.spacing(np.float32(abs(expected))))
+    return _PIN_SAFETY * max(study_dev, ulp)
 
 
 def _assert_within(actual: float, expected: float, tol: float, *, label: str) -> None:
@@ -364,7 +389,7 @@ def _assert_within(actual: float, expected: float, tol: float, *, label: str) ->
     assert diff <= tol, (
         f"{label}: {actual!r} differs from the recorded {expected!r} by "
         f"{diff:.3e}, over its {tol:.3e} tolerance ({_PIN_SAFETY:g} x the "
-        "float32-rounding study's largest deviation)"
+        "float32-rounding study's largest deviation, or of one float32 unit)"
     )
 
 
@@ -381,7 +406,8 @@ def test_fit_path_is_unchanged_by_phase1():
     this CI-facing version checks agreement with the recorded M4 Pro values
     instead, each entry within _PIN_SAFETY times the largest deviation a
     float32-rounding perturbation of the input produced (the study in the
-    module-level comment): ``ll_history``/``final_ll_`` relative, the five
+    module-level comment), and never within less than _PIN_SAFETY float32
+    units in the last place: ``ll_history``/``final_ll_`` relative, the five
     ``A`` spot entries absolute. ``stop_reason`` and the trajectory length
     are still exact -- both machine-independent.
     """
@@ -394,13 +420,15 @@ def test_fit_path_is_unchanged_by_phase1():
     for it, (actual, expected, dev) in enumerate(
         zip(m.ll_history, _NOOP_PIN_LL_HISTORY, _STUDY_MAX_REL_DLL)
     ):
-        tol = _PIN_SAFETY * dev * abs(expected)
+        tol = _tolerance(dev * abs(expected), expected)
         _assert_within(actual, expected, tol, label=f"ll_history[{it}]")
     assert m.final_ll_ is not None
-    tol = _PIN_SAFETY * _STUDY_MAX_REL_DFINAL * abs(_NOOP_PIN_FINAL_LL)
+    tol = _tolerance(
+        _STUDY_MAX_REL_DFINAL * abs(_NOOP_PIN_FINAL_LL), _NOOP_PIN_FINAL_LL
+    )
     _assert_within(m.final_ll_, _NOOP_PIN_FINAL_LL, tol, label="final_ll_")
 
     a = np.array(m.A, dtype=np.float32)
     for (i, j), expected in _NOOP_PIN_A_ENTRIES.items():
-        tol = _PIN_SAFETY * _STUDY_MAX_DA[(i, j)]
+        tol = _tolerance(_STUDY_MAX_DA[(i, j)], expected)
         _assert_within(float(a[i, j]), expected, tol, label=f"A[{i},{j}]")
