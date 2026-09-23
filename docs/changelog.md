@@ -9,22 +9,27 @@ MLX becomes a first-class backend, reachable through every wrapper feature (epic
 and every backend's fitting follows the Fortran reference more closely.
 
 !!! warning "Default fits differ from 0.3.3"
-    A default fit on any backend (PyTorch, NumPy or MLX) now follows a different trajectory than in 0.3.3,
+    A default fit on any backend (PyTorch, NumPy or MLX) follows a different trajectory than in 0.3.3,
     so its fitted parameters differ, and results computed with an earlier version do not reproduce bit for bit.
-    The cause is a series of fixes that make pamica compute what the reference computes, each described under
-    [Fitting follows the reference](#fitting-follows-the-reference-every-backend):
-    `doscaling` rescales components instead of stored columns (issue #333),
-    the drawn initial mixing matrix has unit-norm components (issue #341),
-    each iteration runs in the reference's order, so a likelihood decrease takes effect in the same iteration and a convergence stop returns the parameters its likelihood was computed from (issue #339),
-    the reference's A-freeze holds the mixing update on iterations 100-105, 200-205, and so on, of every fit (issue #345),
+    Five changes, each aligning a step with the reference and each described under
+    [Fitting follows the reference](#fitting-follows-the-reference-every-backend), reach every default fit:
+    `doscaling` normalizes each component's mixing vector, where it used to normalize stored columns (issue #333);
+    the drawn initial mixing matrix has unit-norm components (issue #341);
+    each iteration runs in the reference's order, so a likelihood decrease takes effect in the same iteration and a convergence stop returns the parameters its likelihood was computed from (issue #339);
+    the reference's A-freeze holds the mixing update on iterations 100-105, 200-205, and so on, of every fit (issue #345);
     and the density normalizers are the reference's single-precision constants (issue #344).
-    Fits with Newton, outlier rejection, a restart window or component sharing change further (issues #335 and #334).
-    Seeded from the same initialization, `A`, `mu` and `sbeta` now match the native binary to float64 round-off over the first iterations,
-    where the old code left the reference's trajectory on the first one.
-    Scale-blind results, such as the log-likelihood, the component maps and the matched correlation with the reference, move little.
-    Refit before comparing parameters element by element with the reference or with an earlier fit.
-    Saved models still load, converted where the storage changed,
-    except `share_comps` models in which components had merged, which must be refit
+    Two more reach default fits in narrow cases.
+    With schedule gates counted from 1 (issue #335), a `maxdecs` ratchet that completes on iteration `newt_start + 1` tightens the rho-rate ceiling whether or not Newton is on,
+    and on NumPy a non-finite likelihood on iteration `restartiter + 1` ends the fit.
+    With components stored as rows (issue #334), the gradient norm `ndtmpsum` is summed per component,
+    which moves it by float round-off and can change a gradient-norm stop that falls within that round-off of `min_nd`.
+    Fits with Newton, outlier rejection or merging `share_comps` change further through the same two issues.
+    Seeded from the same initialization, `A`, `mu` and `sbeta` now match the native binary to float64 round-off over the first iterations;
+    before, they departed from its trajectory on the first iteration.
+    Scale-blind results, such as the log-likelihood, the component maps and the matched correlation with the reference, moved by small amounts in the measurements reported below.
+    To compare parameters element by element with the reference or with an earlier fit, refit.
+    Saved models load, converted where the storage changed;
+    `share_comps` models in which components had merged are refused and must be refit
     ([Persistence](#persistence-and-exports)).
 
 ### Fitting follows the reference (every backend)
@@ -94,7 +99,7 @@ and every backend's fitting follows the Fortran reference more closely.
   - **Behavior change: a fit that stops on a convergence check returns the parameters its `final_ll_` was computed from.**
     On a `min_dll`, gradient-norm or `lrate`-floor stop, the stopping iteration used to take its update anyway,
     so the returned parameters were one update past `final_ll_`, and the exported `LLt` one update behind them.
-    That iteration now also runs no share scan, kurtosis switch, `mir_history_` waypoint or rejection pass.
+    That iteration now also runs no kurtosis switch, share scan, `mir_history_` waypoint or rejection pass.
     A fit that runs to `max_iter` still updates on its last iteration, as the reference does.
   - **Behavior change: the reference's A-freeze applies to every fit.**
     Once `iter >= share_start`, the reference holds the `A` update, its `lrate` ramp and its rho-rate reset
@@ -320,7 +325,7 @@ and every backend's fitting follows the Fortran reference more closely.
   and the reader translates what any backend supports;
   the PyTorch and MLX backends have no such mechanism yet (issue #312), so `AMICA.fit` names them as not applied.
   The [parameter-files section](guides/validation.md#parameter-files) has the tables.
-  - **Behavior change:** `AMICA.from_params_file` now applies `sample_params.json`'s own
+  - **Behavior change:** a fit from `AMICA.from_params_file` now applies `sample_params.json`'s own
     `max_decs`/`min_grad_norm`/`share_int` settings (as `maxdecs`/`min_nd`/`share_iter`).
     Under their raw JSON spelling they matched neither a named `fit()` parameter nor an `AMICATorchNG` keyword,
     so they were only named in the "not applied" warning.
