@@ -123,6 +123,19 @@ from ..rank import (
     validate_pca_reduction,
 )
 
+# The density normalizers and the rho-update guard, at the values the binary
+# uses: its single-precision literals widened to double (issue #344), cast to
+# float32 where they meet the float32 arrays.
+from ..reference_constants import (
+    EPSDBLE,
+    LOG2,
+    LOG4,
+    LOG_NORM_COSH_SUB,
+    LOG_NORM_COSH_SUP,
+    LOG_SQRT_2PI,
+    LOG_SQRT_PI,
+)
+
 logger = logging.getLogger(__name__)
 
 # Human-readable names for the ``pdftype``/``pdtype`` source-density family
@@ -138,20 +151,6 @@ PDFTYPE_NAMES = {
     4: "sub_gaussian_cosh",
 }
 
-_LOG2 = math.log(2.0)
-_LOG4 = math.log(4.0)  # logistic-family normalizer (amica15.f90:1346)
-# Log-normalizers for the non-GG density families, ported verbatim from the
-# same-named ``pamica.torch_impl.core`` constants (policy 1): the double-precision
-# values of the reference's decimal literals (amica15.f90:1333/1359/1371), which
-# the binary reads in single precision, so its log-normalizers differ from these
-# by 3.7e-10, 2.0e-8 and -2.1e-8 (docs/guides/amica-differences.md row 16;
-# whether to adopt the single-precision values is issue #344).
-_LOG_SQRT_2PI = math.log(2.506628274)
-_LOG_NORM_COSH_SUB = math.log(4.132731354)
-_LOG_NORM_COSH_SUP = math.log(1.858073988)
-# Fortran epsdble: zero the rho*ln|y| term when |y|^rho underflows below this
-# (amica17.f90:1570), matching AMICATorchNG.
-_EPSDBLE = 1e-16
 # MLX linalg runs on the CPU stream only (float32-accurate); the GPU stream
 # raises "not yet supported on the GPU" for inv/slogdet/eigh/solve.
 _CPU = mx.cpu
@@ -225,7 +224,7 @@ def _logcosh(x: mx.array) -> mx.array:
     precision (~1e-4 absolute; measured 2.9e-5 at ``x=1000``) out to at least
     1e3 (policy 3; no ``mlx.nn`` import)."""
     ax = mx.abs(x)
-    return ax - _LOG2 + mx.log1p(mx.exp(-2.0 * ax))
+    return ax - LOG2 + mx.log1p(mx.exp(-2.0 * ax))
 
 
 def _score(y: mx.array, rho: mx.array, pdtype: Optional[mx.array] = None) -> mx.array:
@@ -276,8 +275,10 @@ def _log_pdf(
     ``pdtype is None`` (the ``pdftype=0`` fast path): byte-for-byte the
     pre-#265 ``_log_pdf_gg`` body -- ``lgamma_table = lgamma(1+1/rho)``
     (precomputed host-side; MLX has no ``lgamma``) makes the uniform GG form
-    reduce to the exact Laplace (rho=1) and Gaussian (rho=2) log-densities, and
-    ``az_rho`` is returned for the rho-update accumulator (policy 2).
+    reduce to the Laplace (rho=1) log-density, and to the reference's Gaussian
+    (rho=2) one, whose single-precision normalizer
+    :meth:`AMICAMLXNG._refresh_lgamma_table` puts in the table; ``az_rho`` is
+    returned for the rho-update accumulator (policy 2).
 
     Otherwise selects per source among the fixed families (Fortran ``z0``
     select, amica15.f90:1333/1346/1359/1371), in AMICATorchNG's nesting order
@@ -290,15 +291,15 @@ def _log_pdf(
     """
     abs_y = mx.abs(y)
     az_rho = mx.power(abs_y, rho)  # reused by the rho-update accumulator (GG only)
-    log_pdf_gg = -az_rho - _LOG2 - lgamma_table
+    log_pdf_gg = -az_rho - LOG2 - lgamma_table
     if pdtype is None:
         return log_pdf_gg, az_rho
 
-    log_pdf_2 = -0.5 * y * y - _LOG_SQRT_2PI  # Gaussian
-    log_pdf_3 = -2.0 * _logcosh(0.5 * y) - _LOG4  # logistic (sech^2)
+    log_pdf_2 = -0.5 * y * y - LOG_SQRT_2PI  # Gaussian
+    log_pdf_3 = -2.0 * _logcosh(0.5 * y) - LOG4  # logistic (sech^2)
     lc = _logcosh(y)
-    log_pdf_4 = -0.5 * y * y + lc - _LOG_NORM_COSH_SUB  # sub-Gaussian cosh+
-    log_pdf_1 = -0.5 * y * y - lc - _LOG_NORM_COSH_SUP  # super-Gaussian cosh-
+    log_pdf_4 = -0.5 * y * y + lc - LOG_NORM_COSH_SUB  # sub-Gaussian cosh+
+    log_pdf_1 = -0.5 * y * y - lc - LOG_NORM_COSH_SUP  # super-Gaussian cosh-
     log_pdf = mx.where(
         pdtype == 2,
         log_pdf_2,
@@ -1182,9 +1183,19 @@ class AMICAMLXNG:
 
     def _refresh_lgamma_table(self):
         """Recompute ``lgamma(1+1/rho)`` host-side (MLX has no lgamma). Called at
-        init and after every rho update. Cheap: rho is ``(n_mix, n_comps)``."""
+        init and after every rho update. Cheap: rho is ``(n_mix, n_comps)``.
+
+        ``_log_pdf`` subtracts ``LOG2 + table``. At ``rho == 2`` the reference
+        takes its exact-Gaussian branch, whose normalizer is its own
+        single-precision literal (amica15.f90:1313, issue #344), so the entry
+        there is ``LOG_SQRT_PI - LOG2`` rather than ``lgamma(1.5)``: the same
+        normalizer the PyTorch and NumPy backends subtract, cast to float32. At
+        ``rho == 1`` the Laplace branch's ``log(2)`` is exact and
+        ``lgamma(2) == 0``, so the general form already matches it."""
         rho_np = np.array(self.rho, dtype=np.float64)
-        self._lgamma_table = mx.array(gammaln(1.0 + 1.0 / rho_np).astype(np.float32))
+        table = gammaln(1.0 + 1.0 / rho_np)
+        table = np.where(rho_np == 2.0, LOG_SQRT_PI - LOG2, table)
+        self._lgamma_table = mx.array(table.astype(np.float32))
 
     def _update_unmixing_matrices(self):
         """Per-model ``W_h = inv(A[comp_list[:, h], :])`` and the LL Jacobian
@@ -1473,7 +1484,7 @@ class AMICAMLXNG:
 
             if self.dorho:
                 logab = rho_h * mx.log(mx.maximum(mx.abs(y), tiny))
-                logab = mx.where(az_rho < _EPSDBLE, mx.zeros_like(logab), logab)
+                logab = mx.where(az_rho < EPSDBLE, mx.zeros_like(logab), logab)
                 drho_n = drho_n.at[:, idx].add((u * (az_rho * logab)).sum(0).T)
 
             g = (beta_h * ufp).sum(-1)  # (batch, n_channels)

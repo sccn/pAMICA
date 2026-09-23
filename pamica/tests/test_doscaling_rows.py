@@ -26,8 +26,9 @@ always run; MLX checks skip individually without MLX or an Apple GPU):
    the reference;
 3. ``doscaling=False`` is byte-identical to the pre-fix code: the package at
    commit ``fb13d76`` is loaded from git and each backend fitted in the same
-   process from the live normalized initial ``A`` (issue #341), its ``A``
-   mapped onto the component rows issue #334 introduced;
+   process from the live normalized initial ``A`` (issue #341), the live one
+   at its pre-#344 density constants, its ``A`` mapped onto the component rows
+   issue #334 introduced;
 4. ``scalestep``, a pamica extension the reference parses but never reads,
    counts iterations from 1, so its default of 1 is the reference's
    every-iteration rescale, and every constructor rejects a ``scalestep`` that
@@ -57,6 +58,7 @@ from pamica import AMICA_NumPy
 from pamica.component_layout import rows_from_legacy_columns
 from pamica.tests.pre_change import (
     load_pre_change_package,
+    use_pre_344_constants,
     with_normalized_initial_mixing,
 )
 from pamica.torch_impl.core import AMICATorchNG
@@ -469,17 +471,20 @@ def _fit_unscaled(
 @pytest.mark.parametrize("n_models", [1, 2])
 @pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
 def test_doscaling_off_is_byte_identical_to_the_pre_fix_code(
-    pre_fix, real_slice, backend, n_models, tmp_path
+    pre_fix, real_slice, backend, n_models, tmp_path, monkeypatch
 ):
     """``doscaling=False`` never enters the rescale, so this fix must leave its
     trajectory and every fitted array bit for bit where the pre-fix code put
-    them, on every backend, from the same initial ``A``."""
+    them, on every backend, from the same initial ``A`` (issue #341). The live
+    backend runs with the density constants it had before issue #344, which the
+    pre-fix code predates (the two-model fits reach ``rho == 2``)."""
     new_cls: Any
     if backend == "mlx":
-        new_cls = _mlx_core().AMICAMLXNG
+        new_cls = _mlx_core().AMICAMLXNG  # skips without MLX
     else:
         new_cls = AMICATorchNG if backend == "torch" else AMICA_NumPy
     old_cls = _pre_fix_class(pre_fix, backend)
+    use_pre_344_constants(monkeypatch, backend)
 
     old = _fit_unscaled(old_cls, backend, n_models, real_slice, tmp_path / "old")
     new = _fit_unscaled(new_cls, backend, n_models, real_slice, tmp_path / "new")

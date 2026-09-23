@@ -107,6 +107,10 @@ from ..rank import (
     numerical_rank,
     validate_pca_reduction,
 )
+
+# The density normalizers and the rho-update guard, at the values the binary
+# uses: its single-precision literals widened to double (issue #344).
+from ..reference_constants import EPSDBLE, LOG2, LOG_SQRT_PI
 from .utils import (
     gammaln,
     identify_shared_components,
@@ -1879,17 +1883,18 @@ class AMICA:
         """
         if rho == 1.0:
             # Laplace distribution
-            log_pdf = -np.abs(y) - np.log(2.0)
+            log_pdf = -np.abs(y) - LOG2
             pdf = np.exp(log_pdf)
             dpdf = -np.sign(y) * pdf
         elif rho == 2.0:
-            # Gaussian distribution
-            log_pdf = -y * y - 0.5 * np.log(np.pi)
+            # Gaussian distribution, with the reference's single-precision
+            # normalizer log(dble(1.772453851)) (amica15.f90:1313, issue #344)
+            log_pdf = -y * y - LOG_SQRT_PI
             pdf = np.exp(log_pdf)
             dpdf = -2 * y * pdf
         else:
             # Generalized Gaussian distribution
-            log_pdf = -np.power(np.abs(y), rho) - np.log(2.0) - gammaln(1.0 + 1.0 / rho)
+            log_pdf = -np.power(np.abs(y), rho) - LOG2 - gammaln(1.0 + 1.0 / rho)
             pdf = np.exp(log_pdf)
             dpdf = -rho * np.power(np.abs(y), rho - 1) * np.sign(y) * pdf
 
@@ -2258,10 +2263,10 @@ class AMICA:
                     ay = np.abs(y)
                     ayrho = np.power(ay, self.rho[j, k])
                     logab = self.rho[j, k] * np.log(np.maximum(ay, tiny))
-                    # Fortran zeros the term when |y|^rho < epsdble=1e-16
-                    # (amica17.f90:1570 / amica17_header.f90:73), not at denormal
-                    # underflow; use 1e-16 to match, not np.finfo.tiny.
-                    logab = np.where(ayrho < 1e-16, 0.0, logab)
+                    # Fortran zeros the term when |y|^rho < epsdble
+                    # (amica15.f90:1558 / amica15_header.f90:73), not at denormal
+                    # underflow; use its value to match, not np.finfo.tiny.
+                    logab = np.where(ayrho < EPSDBLE, 0.0, logab)
                     updates["drho_n"][j, k] += np.sum(u * ayrho * logab)
 
                     if self.do_newton:

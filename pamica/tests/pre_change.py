@@ -17,10 +17,14 @@ history, ``fetch-depth: 0``) and is otherwise skipped with the command that
 fetches it; the same holds, with its own message, when git is not installed or
 the tests do not run from a git checkout.
 
-Every commit loaded here predates the normalized initial mixing matrix of
-issue #341 (epic #324 Phase 12), so :func:`with_normalized_initial_mixing`
-adapts a pre-change backend class to start from the live initialization, for
-tests that pin a later change against such a commit.
+Every commit loaded here predates two changes that move every trajectory:
+the normalized initial mixing matrix of issue #341 (epic #324 Phase 12) and
+the reference's single-precision density constants of issue #344 (Phase 13).
+A byte-identity test that pins a later change against such a commit adapts
+both sides, so the comparison isolates the change it was written for:
+:func:`with_normalized_initial_mixing` starts the pre-change class from the
+live initialization, and :func:`use_pre_344_constants` gives the live backend
+its old constants.
 
 Not a test module (no ``test_`` prefix, so pytest does not collect it).
 """
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 import importlib
 import io
+import math
 import os
 import subprocess
 import sys
@@ -149,6 +154,45 @@ def load_pre_change_package(
         sys.path.remove(str(dest))
     setattr(package, _COMMIT_ATTR, commit)
     return package
+
+
+# The density constants every backend used before issue #344 (epic #324 Phase
+# 13): the double values of the reference's decimal literals, where the binary
+# uses their single-precision roundings (pamica.reference_constants). For
+# ``LOG_SQRT_PI`` this is the exact 0.5 * log(pi) the PyTorch and NumPy
+# backends used at rho == 2; the MLX backend's table then holds
+# float32(0.5 * log(pi) - log(2)), which equals the float32 lgamma(1.5) it held.
+_PRE_344_CONSTANTS = {
+    "LOG_SQRT_PI": 0.5 * math.log(math.pi),
+    "LOG_SQRT_2PI": math.log(2.506628274),
+    "LOG_NORM_COSH_SUB": math.log(4.132731354),
+    "LOG_NORM_COSH_SUP": math.log(1.858073988),
+    "EPSDBLE": 1e-16,
+}
+# The live module of each backend and the constants it reads.
+_PRE_344_USERS = {
+    "torch": ("pamica.torch_impl.core", tuple(_PRE_344_CONSTANTS)),
+    "numpy": ("pamica.numpy_impl.core", ("LOG_SQRT_PI", "EPSDBLE")),
+    "mlx": ("pamica.mlx_impl.core", tuple(_PRE_344_CONSTANTS)),
+}
+
+
+def use_pre_344_constants(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    """Give the live ``backend`` the density constants it used before issue #344.
+
+    Issue #344 replaced them with the reference's single-precision values,
+    which moves every fit in which a generalized-Gaussian mixture reaches
+    ``rho == 2`` and every fit of the Gaussian and cosh families. A test that
+    compares a live backend bit for bit with code from before that change, to
+    show that some other change left results alone, calls this first, so the
+    comparison isolates that other change. Every live code path still runs;
+    only these constants take their old values, for the rest of the test.
+    ``test_reference_constants.py`` pins the new values against the reference.
+    """
+    module_name, names = _PRE_344_USERS[backend]
+    module = importlib.import_module(module_name)
+    for name in names:
+        monkeypatch.setattr(module, name, _PRE_344_CONSTANTS[name])
 
 
 def with_normalized_initial_mixing(cls: Any) -> Any:
