@@ -26,7 +26,7 @@ name: CI
 # the push re-triggers workflows -- see their own headers). Per-SHA grouping
 # means that bump push can never land in the same concurrency group as the
 # merge commit's run, so it cannot cancel it -- the failure mode this section
-# used to describe (a rapid follow-up push cancelling the real commit's run
+# used to describe (a rapid follow-up push canceling the real commit's run
 # and leaving the trivial bump commit as the one that gets tested) cannot
 # happen at all now. `lint`/`typecheck` below still skip when the push's head
 # commit is a bot bump (same author-email + message-prefix guard
@@ -62,9 +62,9 @@ on:
 
 concurrency:
   # push: per-SHA group (each push to main/dev gets its own run, never
-  # cancelled by a later push -- see the header comment above).
+  # canceled by a later push -- see the header comment above).
   # pull_request: per-ref group, unchanged (a PR's older, superseded runs are
-  # still cancelled by a newer push to the same branch).
+  # still canceled by a newer push to the same branch).
   group: ci-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 

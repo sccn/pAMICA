@@ -210,7 +210,7 @@ def test_max_iter_zero_raises(real_data):
 
 
 def test_mir_step_zero_matches_omitted_argument(real_data):
-    """mir_step=0 (explicit) must leave fit() behaviour byte-for-byte
+    """mir_step=0 (explicit) must leave fit() behavior byte-for-byte
     identical to not passing mir_step at all."""
     default_m = _fit(real_data, max_iter=3, keep_best=False)
     explicit_m = AMICAMLXNG(

@@ -851,7 +851,7 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
     mid-fit is a transient the natural gradient can pass through (the training
     path only warns about it). Before this guard, that ValueError propagated
     straight out of `fit()` and threw away the whole fit -- turning on a
-    waypoint could lose hours of training over a condition the optimiser was
+    waypoint could lose hours of training over a condition the optimizer was
     about to recover from.
 
     Forcing the raise via monkeypatch is deliberate and is not mocked data: the
@@ -909,7 +909,7 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
 
 
 def test_mir_step_zero_matches_omitted_argument(real_data):
-    """mir_step=0 (explicit) must leave fit() behaviour byte-for-byte identical
+    """mir_step=0 (explicit) must leave fit() behavior byte-for-byte identical
     to not passing mir_step at all."""
     X = real_data[:, :4096]
     default_model = AMICA(n_models=1, n_mix=3, device="cpu", verbose=False)

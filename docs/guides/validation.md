@@ -534,7 +534,7 @@ exists to prevent.
 
 Two general checks remain useful and are much quicker, but note that neither reproduces a specific
 table row: `validate_implementations.py` defaults to a single seed at 100 iterations with `do_newton`
-read from `sample_params.json`, and `pytest` runs the parity and behaviour suite.
+read from `sample_params.json`, and `pytest` runs the parity and behavior suite.
 
 ```bash
 uv run python validate_implementations.py     # single- and multi-model parity report

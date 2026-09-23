@@ -2,7 +2,7 @@
 
 Before this, ``AMICAMLXNG`` implemented neither Fortran stop: an MLX fit always
 spent the whole iteration budget while every other backend stopped on likelihood
-stagnation. These tests pin the ported behaviour to the PyTorch backend, which is
+stagnation. These tests pin the ported behavior to the PyTorch backend, which is
 the porting reference:
 
 1. ``use_min_dll``/``min_dll``/``maxincs`` (amica15.f90:1078-1090)
