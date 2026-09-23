@@ -499,6 +499,9 @@ def run_multimodel_ensemble(
         model.fit(
             data,
             max_iter=max_iter,
+            # The #27 protocol's rate (input.param), pinned so the ensemble does
+            # not follow a change of the wrapper's default.
+            lrate=0.05,
             do_newton=True,
             seed=MULTIMODEL_SEED_START + i,
             block_size=512,
