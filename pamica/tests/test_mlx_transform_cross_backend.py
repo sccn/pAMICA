@@ -220,9 +220,12 @@ def test_variance_order_matches_float64_twin():
     order mismatch here is a real regression rather than a coin flip on a
     near-tied pair. A short (5-iteration) fit was tried first and rejected
     for this reason -- its minimum gap was ~2e-4, inside the float32 noise
-    band -- so this test runs the fit longer (30 iterations) specifically to
-    reach a spectrum with real separation (measured minimum gap ~0.47%,
-    comfortably above the bound below); a shorter/noisier config is exactly
+    band -- so this test runs the fit longer (50 iterations) specifically to
+    reach a spectrum with real separation (measured minimum gap ~0.24%,
+    comfortably above the bound below; 30 iterations served, at ~0.47%, until
+    issue #333's component rescale moved the trajectory and brought that
+    fit's minimum gap down to 5.0e-4, which this assertion then correctly
+    rejected); a shorter/noisier config is exactly
     the kind of near-tie this assertion exists to catch and reject rather
     than let the order check pass by luck. If a future data/config change
     shrinks the gap back down, this assertion is designed to fail loudly (not
@@ -230,7 +233,7 @@ def test_variance_order_matches_float64_twin():
     check getting silently loosened. Multi-model, so ``model_idx`` routing is
     exercised.
     """
-    model = _fit_model(n_models=2, max_iter=30)
+    model = _fit_model(n_models=2, max_iter=50)
     ng = _torch_twin(model)
 
     for h in range(2):
