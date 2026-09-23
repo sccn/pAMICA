@@ -60,13 +60,12 @@ Precision follows the backend:
 - A PyTorch fit (float64 by default) exports at float64 parity.
 - An MLX fit computes in float32, so its unmixing matrix, mean and centers carry float32 rounding
   and the export is float32-consistent rather than float64-parity.
-  `get_sources` agrees with `ica.amica_.transform` (which runs in float32) to float32 tolerance
-  (measured 2e-7 relative on the bundled sample),
+  `get_sources` agrees with `ica.amica_.transform` (which runs in float32) within float32 tolerance,
   and excluding a component changes the data by that component's back-projection to the same tolerance.
 - Reconstruction does not depend on the backend's precision.
   MNE's mixing is the float64 pseudo-inverse of the exported unmixing and the PCA basis is orthonormal,
-  so `apply` with nothing excluded returns the input to float64 round-off on either backend
-  (measured 1.4e-15 for an MLX fit with `pcakeep=20`), residual included.
+  so `apply` with nothing excluded returns the input to float64 round-off on either backend, residual included.
+  [Precision on the MLX backend](../guides/backends.md#precision-on-the-mlx-backend) gives the measured figures.
 
 ## Interoperating with `mne.preprocessing.ICA`
 

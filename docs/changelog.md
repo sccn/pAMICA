@@ -32,8 +32,8 @@ Release notes are also published on the
     with the same names and shapes on both backends and float64 arrays from both.
     `AMICA` also gains `get_sensor_mixing_matrix()`, which both backends already had.
   - `AMICAICA` reads the fitted mean, sphere and centers through those accessors, with no backend-specific array calls.
-    An MLX export is float32-consistent (sources agree with the MLX `transform` to 2e-7 relative on the bundled sample),
-    while `apply` with nothing excluded still returns the input to float64 round-off (1.4e-15 with `pcakeep=20`).
+    An MLX export is float32-consistent (sources agree with the MLX `transform` within float32 tolerance),
+    while `apply` with nothing excluded still returns the input to float64 round-off.
     A degenerate `AMICAICA` fit now leaves `pca_components_`/`pca_explained_variance_` as `None`; it was never exportable.
 - **`AMICAICA.apply` restores the PCA residual of rank-reduced fits** (issue #322, epic #324).
   **Behavior change for `pcakeep`/`pcadb` and rank-deficient fits:**

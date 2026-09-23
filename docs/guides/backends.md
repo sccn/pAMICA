@@ -62,10 +62,10 @@ its sphere is the float64 matrix it was built from, which its float32 GPU comput
 After `AMICA.load`, an MLX model's sphere is the saved float32 sphere, upcast.
 
 In the MNE path, `AMICAICA(backend="mlx")` exports through the same float64 accessors.
-`get_sources` agrees with the MLX `transform` to float32 tolerance (measured 2e-7 relative),
+`get_sources` agrees with the MLX `transform` to float32 tolerance (measured 2-3e-7 relative, reduced to full rank),
 and excluding a component removes its back-projection to the same tolerance.
 Reconstruction does not inherit the float32 rounding:
-`apply` with nothing excluded returns the input to float64 round-off (measured 1.4e-15), the principal component analysis (PCA) residual of a `pcakeep` fit included,
+`apply` with nothing excluded returns the input to float64 round-off (measured 1.4e-15 with `pcakeep=20`), the principal component analysis (PCA) residual included,
 because MNE's mixing is the float64 pseudo-inverse of the exported unmixing and the PCA basis is orthonormal.
 
 ### End to end on the Apple GPU
