@@ -828,8 +828,8 @@ _ORACLE_WARM_ITERS = 100
 #                 [A 1.1e-15, mu 2.3e-11, sbeta 1.3e-14, LL 1.8e-15]
 #   3 iterations: A 1.5e-12, mu 3.7e-9,  sbeta 1.8e-11, LL 4.7e-14
 #                 [A 1.9e-12, mu 1.4e-8,  sbeta 1.9e-10, LL 8.0e-15]
-# The column semantics from the same merged state is off by A 0.20-0.21 and LL
-# 3.5e-4 to 4.3e-4 after 3 iterations.
+# The column semantics from the same merged state is off by A 0.204 and 0.21 and
+# LL 3.5e-4 and 4.3e-4 (doscaling on and off) after 3 iterations.
 _MERGED_ORACLE_TOL = {
     1: {"A": 1e-13, "mu": 1e-9, "sbeta": 1e-12, "LL": 1e-13},
     3: {"A": 1e-10, "mu": 1e-6, "sbeta": 1e-8, "LL": 1e-11},

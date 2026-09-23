@@ -59,8 +59,8 @@ and refuses an `A` that does not invert the `W` beside it (a multi-model directo
   it now sums squares per component row, as the reference sums per component.
 - Fits with `share_comps=True` where a merge fires change, toward the reference.
   From a merged `load_comp_list` state the PyTorch and NumPy updates match the native binary to float64 round-off
-  (after 3 iterations: `A` 1.5e-12, `mu` 3.7e-9, `sbeta` 1.8e-11, log-likelihood 4.7e-14, at the no-merge noise floor),
-  where the column semantics was off by 0.20 in `A` and 4e-4 in log-likelihood.
+  (after 3 iterations, worst of `doscaling` on and off: `A` 1.5e-12, `mu` 3.7e-9, `sbeta` 1.8e-11, log-likelihood 4.7e-14, at the no-merge noise floor),
+  where the column semantics was off by 0.21 in `A` and 4.3e-4 in log-likelihood (worst of the same two).
   End to end (2 models, 300 iterations, `comp_thresh=0.95`), the scan now merges three true pairs (map |cos| 0.956-0.971)
   where the column metric merged pairs whose maps had |cos| 0.06, 0.35 and 0.55.
 - Merging is earlier and more complete when the models are still similar:

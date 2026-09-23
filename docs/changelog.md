@@ -24,8 +24,8 @@ Release notes are also published on the
     Refit them.
     Seeded with a merged `comp_list` through the reference's `load_comp_list`,
     the PyTorch and NumPy updates match the native binary to float64 round-off
-    (after 3 iterations: `A` 1.5e-12, `mu` 3.7e-9, log-likelihood 4.7e-14),
-    where the previous code was off by 0.20 in `A` and 4e-4 in log-likelihood.
+    (after 3 iterations, worst of `doscaling` on and off: `A` 1.5e-12, `mu` 3.7e-9, log-likelihood 4.7e-14),
+    where the previous code was off by 0.21 in `A` and 4.3e-4 in log-likelihood.
     On the bundled sample (2 models, 300 iterations, `share_start=100`, `comp_thresh=0.95`)
     the scan now merges three pairs whose maps agree (|cos| 0.956 to 0.971), ending at log-likelihood -3.3416,
     where it merged pairs whose maps did not (|cos| 0.06, 0.35 and 0.55) and ended at -3.3484 (-3.3387 with sharing off).
