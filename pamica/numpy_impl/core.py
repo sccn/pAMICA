@@ -69,7 +69,7 @@ The algorithm automatically:
 
 See Also
 --------
-pdf : PDF implementations
+pdf : Generalized Gaussian density for plotting
 utils : Utility functions
 viz : Visualization tools
 cli : Command-line interface
