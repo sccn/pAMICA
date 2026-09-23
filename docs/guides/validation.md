@@ -493,8 +493,9 @@ guarded to a no-op so the parity results above stay byte-for-byte unchanged.
 | Component sharing (`share_comps`, #60) | off by default | Fortran `identify_shared_comps` ported; no bit-exact oracle (`Spinv2` is unrunnable), behavior-validated; byte-identical when unshared |
 | Outlier rejection (`do_reject`, #123) | off by default | `good_idx` mechanism on all three backends (NumPy, PyTorch, MLX -- the last landed epic #278 Phase 3, #289); MLX/NumPy ports validated vs the PyTorch backend |
 | Degenerate-fit contract (#50) | always | the `AMICA` wrapper refuses a NaN or singular fit (`converged_` / `stop_reason_`); `transform`/`get_*`/`save` raise through the wrapper instead of returning NaN sources. This is a wrapper-level contract, not a raw-backend one -- calling a raw `AMICATorchNG`/`AMICAMLXNG`/`AMICA_NumPy` instance's `transform`/`get_*`/`save` directly, bypassing the wrapper, is not gated (tracked as issue #306). `write_amica_output` is the one exception: both the PyTorch and MLX backends gained the same degenerate/non-finite refusal directly on the raw class in this epic, since it has no wrapper equivalent to gate it. |
+| End-to-end workflow (#315) | always, PyTorch and MLX | average-referenced sample EEG with `pcakeep = n_channels - 1` through `AMICAICA`: 31 components, `get_sources` equal to `transform`, an exclusion that removes exactly one back-projection and keeps the residual, the EEGLAB export reloaded by `loadmodout`, `save`/`load`, an `input.param`-driven fit, and the two backends' sources Hungarian-matched with a minimum correlation of at least 0.999 (measured 0.999999999) |
 
-Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests/test_ng_sharing.py`, `torch_tests/test_amica_ng_wrapper.py`, and `test_numpy_reject.py`.
+Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests/test_ng_sharing.py`, `torch_tests/test_amica_ng_wrapper.py`, `test_numpy_reject.py`, and `mne_tests/test_end_to_end_workflow.py`.
 
 ## Which convergence criterion actually stops a fit
 
