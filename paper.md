@@ -31,13 +31,13 @@ bibliography: paper.bib
 
 Independent Component Analysis (ICA) separates electroencephalographic and magnetoencephalographic (EEG/MEG) recordings into maximally independent sources that isolate brain, muscle, and artifact activities for downstream analysis [@makeig1995independent; @vigario1997independent; @iversen2019megeeg].
 Adaptive Mixture ICA (AMICA) [@palmer2006super; @palmer2007modeling; @palmer2012amica] models each source with a flexible, self-adjusting probability density and lets several ICA models coexist, one per segment of a recording.
-Among the algorithms benchmarked by @delorme2012independent it recovers the least dependent and most dipolar decompositions,
-and therefore the most physiologically interpretable ones.
-Its reference implementation, by Jason Palmer, is a Fortran program distributed as a compiled binary callable from MATLAB/EEGLAB:
-awkward to install, restricted to the central processing unit (CPU), and unusable from Python.
+Among the algorithms benchmarked by @delorme2012independent it returned the least dependent and most dipolar decompositions,
+properties that study links to physiological interpretability.
+Its reference implementation, by Jason Palmer, is a Fortran program distributed as a compiled binary and usually run from MATLAB/EEGLAB;
+it runs only on the central processing unit (CPU) and has no Python interface.
 
 `pamica` reproduces the reference Fortran results within numerical tolerance while running on the CPU, NVIDIA graphics processing units (GPUs, via CUDA), and Apple GPUs (through Apple's MLX array framework [@mlx2023]).
-It is a complete reimplementation on PyTorch [@paszke2019pytorch], NumPy [@harris2020array], and SciPy [@virtanen2020scipy] rather than a wrapper around the binary,
+It reimplements the algorithm on PyTorch [@paszke2019pytorch], NumPy [@harris2020array], and SciPy [@virtanen2020scipy],
 and exposes a scikit-learn-style estimator under a BSD-3-Clause license.
 It writes the format EEGLAB's AMICA loader reads, so established MATLAB tooling consumes its results unchanged.
 The software is at <https://github.com/sccn/pAMICA> (archived at doi:10.5281/zenodo.21312148).
@@ -45,7 +45,7 @@ The software is at <https://github.com/sccn/pAMICA> (archived at doi:10.5281/zen
 # Statement of need
 
 AMICA decompositions are well suited to equivalent-dipole source localization and automated component classification [@piontonachini2019iclabel].
-Yet the reference implementation is MATLAB-only Fortran, an increasing obstacle as neuroimaging analysis moves toward Python, for example MNE-Python [@gramfort2013meg]:
+Yet the reference implementation is used mainly through MATLAB, a growing obstacle as neuroimaging analysis moves toward Python, for example MNE-Python [@gramfort2013meg]:
 modern pipelines need an AMICA that runs natively in Python and on a GPU, and that is validated to reproduce the Fortran reference numerically.
 
 General-purpose Python ICA implementations do not fill this gap.
@@ -54,35 +54,37 @@ while Picard [@ablin2018faster] offers faster-converging maximum-likelihood ICA;
 none implement AMICA's mixture of models, adaptive generalized-Gaussian densities, or Newton updates, so none can reproduce its decompositions.
 `pamica` is for analysts who want AMICA-quality decompositions in Python, for anyone with a GPU who wants faster runs than the CPU-only binary,
 and for methodologists who need a transparent reference to build on.
-Validation to date is on EEG; the algorithm is modality-agnostic but MEG is untested.
+The parity measurements reported here use EEG.
+The algorithm itself is modality-agnostic, and an external user has fit rank-reduced, Maxwell-filtered MEG with it end to end,
+but parity with the reference has not yet been measured on MEG.
 
 # State of the field
 
-`pamica` complements rather than replaces the reference Fortran AMICA used with EEGLAB [@delorme2004eeglab]:
+`pamica` is designed to work alongside the reference Fortran AMICA used with EEGLAB [@delorme2004eeglab]:
 it keeps the same output format, adds a Python API with GPU support,
 and can run the reference Fortran itself through a bundled dependency-free native build.
 Three other Python AMICA reimplementations have appeared as of August 2026 [@huberty2025amicapython; @esmaeili2025amica; @herforth2026pyamica], oriented toward MNE-Python;
 `pamica` adds a scikit-learn-style array API, output in EEGLAB's exact on-disk layout, an MLX backend, and an optional MNE-Python wrapper.
-Its Fortran-parity validation goes further than theirs: score functions exact to floating-point resolution against the literal Fortran expressions,
-and a distributional framework for the non-identifiable multi-model case.
+Its validation includes score functions checked against the literal Fortran expressions to floating-point resolution,
+and a distributional comparison for the non-identifiable multi-model case.
 
 # Software design
 
-The governing decision was to treat numerical parity with Palmer's Fortran, rather than convergence to some independent solution, as the definition of correctness.
-The rest follows from it.
-Wrapping the binary would have secured parity for free but inherited its CPU-only, MATLAB-facing design; reimplementing put parity at risk.
-`pamica` does both, porting the algorithm natively and also shipping the reference binary as a runnable engine,
-so users can reproduce the parity claims on their own data and hardware.
-For the same reason the port follows the reference's natural-gradient [@amari1998natural] expectation-maximization (EM) formulation rather than an automatic-differentiation optimizer:
-an Adam/autograd backend was written early and then deleted, because it converged to different optima and made the name "AMICA" ambiguous.
+The central design decision was to define correctness as numerical parity with Palmer's Fortran,
+and most of the other choices follow from it.
+Wrapping the binary would have secured parity but inherited its CPU-only, MATLAB-facing design, while a reimplementation must demonstrate parity.
+`pamica` ports the algorithm natively and also ships the reference binary as a runnable engine,
+so users can check the parity claims on their own data and hardware.
+For the same reason the port follows the reference's natural-gradient [@amari1998natural] expectation-maximization (EM) formulation.
+An early Adam/autograd backend was removed because it converged to different optima, which made results labeled "AMICA" hard to compare with the reference.
 The port covers exact-EM mixture updates, a positive-definite Newton step [@palmer2008newton], symmetric sphering,
 the five source-density families, a mixture of ICA models, component sharing, and the mutual-information metrics used to score separation quality [@frank2023optimal].
 
 Three array backends (PyTorch, MLX, NumPy) implement the same algorithm behind a common estimator API, with the reference Fortran a fourth.
-The duplication is deliberate: NumPy stays readable as an executable specification,
-and MLX exists because it is the more efficient path on Apple GPUs: PyTorch's Metal backend trails MLX across the entire block-size sweep,
-and at `pamica`'s shipped defaults trails even the CPU it runs beside (see the [documentation](https://eeglab.org/pAMICA/guides/validation/)).
-Double precision is the default because parity demands it; single precision is available for Apple GPUs, which have no float64.
+NumPy is kept as a readable executable specification.
+MLX is included because it is the more efficient path on Apple GPUs: in the block-size sweep, PyTorch's Metal backend was slower than MLX at every size,
+and at `pamica`'s shipped defaults slower than the CPU it runs beside (see the [documentation](https://eeglab.org/pAMICA/guides/validation/)).
+Double precision is the default because the parity comparisons need it; single precision is available for Apple GPUs, which have no float64.
 
 # Validation
 
@@ -131,17 +133,17 @@ The harness and sample data ship with the package, and every row of Table 1 but 
 
 # Research impact statement
 
-AMICA is not a new method: its source model and estimation were published in 2006-2008 [@palmer2006super; @palmer2007modeling; @palmer2008newton],
+AMICA's source model and estimation were published in 2006-2008 [@palmer2006super; @palmer2007modeling; @palmer2008newton],
 and it ranked first of the twenty-two algorithms benchmarked by @delorme2012independent.
 MNE-Python is publicly weighing which of the Python ports to adopt (`mne-tools/mne-python` issue 13819),
 where an MNE core developer and the author of a competing port lean toward `pamica`,
 since this Center develops AMICA and maintains the reference Fortran and EEGLAB.
 
-`sccn/pAMICA` has been public since 2021, with public issues, pull requests, seven releases (four on PyPI), and a Zenodo archive.
+`sccn/pAMICA` has been public since 2021, with public issues, pull requests, nine releases (six on PyPI), and a Zenodo archive.
 Three researchers outside the author group have filed issues, two mid-analysis on their own data:
 a 236-channel, 8.3-million-sample EEG decomposition (issue 207) and Maxwell-filtered 306-channel MEG (issue 221);
 the third is adopting AMICA for a multiverse analysis in MNE-Python (issue 206).
-Integration is underway, not complete, into this Center's Python preprocessing and into NEMAR [@delorme2022nemar], the public archive we operate: 800 datasets, ~40,000 participants, 55 TB.
+Integration into this Center's Python preprocessing and into NEMAR [@delorme2022nemar], the public archive we operate (800 datasets, ~40,000 participants, 55 TB), is in progress.
 
 # AI usage disclosure
 
@@ -154,9 +156,9 @@ The instructions given to them are public in the repository (`AGENTS.md`, `CLAUD
 
 **Human oversight.** The authors made the design decisions and take responsibility for the result.
 Parity as the correctness criterion, the natural-gradient EM formulation, the backend architecture,
-the distributional treatment of the multi-model case, and the acceptance thresholds were chosen by the authors, not by a model.
+the distributional treatment of the multi-model case, and the acceptance thresholds were chosen by the authors.
 Every AI-assisted change was reviewed by a human before merge and run through the parity harness,
-which scores output against the reference binary on real recordings rather than generated fixtures.
+which scores output against the reference binary on real recordings.
 The reported numbers came from running the software and were checked against their run records, as was every bibliographic entry.
 
 # Acknowledgments
