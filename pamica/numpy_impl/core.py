@@ -2181,12 +2181,7 @@ class AMICA:
 
         # Rescale parameters if requested
         if self.doscaling and self.iter % self.scalestep == 0:
-            for k in range(self.num_comps):
-                scale = np.sqrt(np.sum(self.A[:, k] ** 2))
-                if scale > 0:
-                    self.A[:, k] /= scale
-                    self.mu[:, k] *= scale
-                    self.beta[:, k] /= scale
+            self._rescale_components()
 
         # Update unmixing matrices
         self._update_unmixing_matrices()
@@ -2199,6 +2194,41 @@ class AMICA:
         # the decrease-stop condition regardless of use_grad_norm; the flag only
         # gates the separate final gradient-norm stop.
         self.nd.append(nd_value)
+
+    def _rescale_components(self) -> None:
+        """Rescale every component to a unit-norm mixing vector (Fortran
+        ``doscaling``, amica15.f90:1843-1851), an exact change of scale.
+
+        Each model's stored block ``A[:, comp_list[:, h]]`` is the transpose of
+        the reference's per-model mixing matrix (issue #24 convention), so
+        source ``i`` of model ``h`` is ROW ``i`` of that block, the reference's
+        column ``A(:,k)``. Dividing that row by its norm scales source ``i`` up
+        by the norm; ``mu[:, comp_list[i, h]] *= norm`` and
+        ``beta[:, comp_list[i, h]] /= norm`` rescale its density to match, so
+        the log-likelihood is unchanged. Normalizing stored COLUMNS instead
+        (the rule before issue #333) is not a change of scale of any component
+        and perturbed the fit every iteration. A zero-norm row is left
+        untouched, as in the reference (``Anrmk > 0``). Same rule, order and
+        guard as ``AMICATorchNG._rescale_components``.
+
+        Models are rescaled in order. Their blocks are disjoint unless
+        ``share_comps`` merged a column; a shared stored column then belongs to
+        rows of several blocks, where this per-block rule is not well defined.
+        It is applied uniformly anyway: the component-row layout of epic #324
+        Phase 8 (issue #334) replaces it. ADR 0006 records the convention.
+        """
+        assert self.A is not None and self.mu is not None and self.beta is not None
+        assert self.comp_list is not None
+        for h in range(self.num_models):
+            # comp_list[:, h] holds distinct indices within a model, so the
+            # fancy-index assignments below write every element exactly once.
+            idx = self.comp_list[:, h]
+            block = self.A[:, idx]  # row i = source i of model h
+            norm = np.sqrt(np.sum(block**2, axis=1))  # (data_dim,)
+            scale = np.where(norm > 0, norm, 1.0)
+            self.A[:, idx] = block / scale[:, None]
+            self.mu[:, idx] = self.mu[:, idx] * scale
+            self.beta[:, idx] = self.beta[:, idx] / scale
 
     def _a_frozen(self) -> bool:
         """Whether the A-update (and its lrate ramp) is held this iteration.

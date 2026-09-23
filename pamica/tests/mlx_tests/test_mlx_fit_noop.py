@@ -19,6 +19,13 @@ literals (``test_mlx_transform.py``'s ``_NOOP_PIN_*`` module comment): MLX
 float32 is bit-reproducible run-to-run on ONE machine, so this needs no
 recorded constant at all, just the two classes agreeing with each other,
 here, now.
+
+Both fits run with ``doscaling=False``. Issue #333 (epic #324 Phase 7)
+deliberately changed the rescale from stored columns to component rows, so a
+``doscaling=True`` fit of the historical class no longer matches by design;
+with the rescale off, every other part of the fit path is still compared bit
+for bit against the pre-Phase-3 tip. The rescale itself is pinned by
+``pamica/tests/test_doscaling_rows.py``.
 """
 
 import subprocess
@@ -138,11 +145,16 @@ _PARAM_NAMES = (
 
 
 @pytest.mark.parametrize("n_models", [1, 2])
-def test_default_fit_is_bit_identical_to_the_pre_phase3_epic_tip(
+def test_unscaled_fit_is_bit_identical_to_the_pre_phase3_epic_tip(
     real_data, historical_amicamlxng, n_models
 ):
     kwargs: dict[str, Any] = dict(
-        n_channels=NW, n_models=n_models, n_mix=NMIX, seed=42, block_size=BLOCK
+        n_channels=NW,
+        n_models=n_models,
+        n_mix=NMIX,
+        seed=42,
+        block_size=BLOCK,
+        doscaling=False,  # the rescale changed deliberately (#333; docstring)
     )
 
     old = historical_amicamlxng(**kwargs)
@@ -162,13 +174,18 @@ def test_default_fit_is_bit_identical_to_the_pre_phase3_epic_tip(
         assert np.array_equal(a, b), f"{name}: diverged from the pre-phase-3 fit"
 
 
-def test_default_fit_with_keep_best_off_is_also_bit_identical(
+def test_unscaled_fit_with_keep_best_off_is_also_bit_identical(
     real_data, historical_amicamlxng
 ):
     """Same check with keep_best explicitly off, so the comparison does not
     depend on whichever safeguard branch a given seed happens to take."""
     kwargs: dict[str, Any] = dict(
-        n_channels=NW, n_mix=NMIX, seed=7, block_size=BLOCK, keep_best=False
+        n_channels=NW,
+        n_mix=NMIX,
+        seed=7,
+        block_size=BLOCK,
+        keep_best=False,
+        doscaling=False,  # the rescale changed deliberately (#333; docstring)
     )
     old = historical_amicamlxng(**kwargs)
     old.fit(real_data, max_iter=8, verbose=False)

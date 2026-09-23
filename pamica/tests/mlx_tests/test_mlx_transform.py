@@ -287,19 +287,28 @@ def test_get_rho_raises_on_force_set_nan_rho():
 # ~1e-6, "inside parity tolerance" -- AGENTS.md). stop_reason and
 # len(ll_history) are asserted exactly: they are a string and an int, so
 # they carry no floating-point cross-machine risk at all.
+#
+# Re-recorded on the same machine for issue #333 (epic #324 Phase 7), which
+# deliberately changed doscaling from normalizing stored columns to
+# normalizing components (rows of each model's block), as the reference does.
+# The pre-#333 recording (reproduced exactly on this machine before the change)
+# ended at final_ll_ -3.25075626373291 with A[0,0] 0.8831924, A[5,5]
+# 0.95371497, A[10,20] -0.0037135077, A[31,31] 0.99918866, A[0,31]
+# 0.032124873 and max|A| 0.99975544; ll_history[0] is unchanged (it is
+# computed before the first rescale).
 _NOOP_PIN_LL_HISTORY = [
     -3.3320186138153076,
-    -3.2827978134155273,
-    -3.2742865085601807,
-    -3.2692978382110596,
-    -3.26499080657959,
-    -3.2611570358276367,
-    -3.2578959465026855,
-    -3.2551658153533936,
-    -3.2528350353240967,
-    -3.25075626373291,
+    -3.282797336578369,
+    -3.2743287086486816,
+    -3.269350528717041,
+    -3.2649497985839844,
+    -3.260986089706421,
+    -3.2576255798339844,
+    -3.254916191101074,
+    -3.252664566040039,
+    -3.2506353855133057,
 ]
-_NOOP_PIN_FINAL_LL = -3.25075626373291
+_NOOP_PIN_FINAL_LL = -3.2506353855133057
 _NOOP_PIN_STOP_REASON = "max_iter"
 # A handful of representative A entries (two diagonal, two off-diagonal, one
 # corner), replacing the previous SHA-256 hash of the full A/W arrays: a
@@ -307,21 +316,22 @@ _NOOP_PIN_STOP_REASON = "max_iter"
 # but these entries under the same relative tolerance still catch a real
 # fit-path change while surviving cross-GPU float32 noise.
 _NOOP_PIN_A_ENTRIES = {
-    (0, 0): 0.8831924,
-    (5, 5): 0.95371497,
-    (10, 20): -0.0037135077,
-    (31, 31): 0.99918866,
-    (0, 31): 0.032124873,
+    (0, 0): 0.9853508,
+    (5, 5): 0.99289405,
+    (10, 20): -0.0037210553,
+    (31, 31): 0.99681115,
+    (0, 31): 0.0327551,
 }
-# Recorded max(|A|) from the same run (A columns are ~unit-normalized by
-# construction, so this sits near 1.0 regardless of seed/config). A[10, 20]
+# Recorded max(|A|) from the same run (A's rows, the components, are
+# unit-normalized by construction, so this sits near 1.0 regardless of
+# seed/config). A[10, 20]
 # above (-0.0037) is itself near zero, so a PER-ENTRY relative bound would
 # collapse to an absolute tolerance of ~1.9e-8 there -- tighter than the
 # ~1.1e-7 cross-GPU float32 noise CI actually observed, and exactly the
 # near-zero-entry failure mode _max_rel_disagreement's docstring in
 # test_mlx_transform_cross_backend.py explains for transform's output. Scale
 # by this matrix-wide max instead, the same fix that function applies.
-_NOOP_PIN_A_MAXABS = 0.99975544
+_NOOP_PIN_A_MAXABS = 0.9985746
 _REL_TOL = 5e-6
 
 

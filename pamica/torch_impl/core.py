@@ -489,8 +489,10 @@ class AMICATorchNG:
     invsigmin, invsigmax : float
         Clamp bounds for the mixture scale parameter ``beta``.
     doscaling, scalestep : bool, int
-        Whether/how often to rescale ``A`` columns to unit norm each
-        iteration (with matching ``mu``/``beta`` rescale).
+        Whether/how often to rescale each component's mixing vector (a row of
+        its model's stored ``A`` block) to unit norm, with the matching
+        ``mu``/``beta`` rescale, an exact change of scale
+        (see :meth:`_rescale_components`).
     share_comps : bool, default=False
         Enable multi-model component sharing (Fortran ``share_comps`` /
         ``identify_shared_comps``, amica15.f90:1916): components that are
@@ -1822,14 +1824,45 @@ class AMICATorchNG:
             self.A = self.A - self.lrate * dAk
 
         if self.doscaling and (self.iteration % self.scalestep == 0):
-            assert self.A is not None and self.mu is not None and self.beta is not None
-            scale = torch.sqrt((self.A**2).sum(dim=0))  # (n_comps,)
-            nonzero = scale > 0
-            self.A[:, nonzero] = self.A[:, nonzero] / scale[nonzero]
-            self.mu[:, nonzero] = self.mu[:, nonzero] * scale[nonzero]
-            self.beta[:, nonzero] = self.beta[:, nonzero] / scale[nonzero]
+            self._rescale_components()
 
         self._update_unmixing_matrices()
+
+    def _rescale_components(self) -> None:
+        """Rescale every component to a unit-norm mixing vector (Fortran
+        ``doscaling``, amica15.f90:1843-1851), an exact change of scale.
+
+        Each model's stored block ``A[:, comp_list[:, h]]`` is the transpose of
+        the reference's per-model mixing matrix (issue #24 convention), so
+        source ``i`` of model ``h`` is ROW ``i`` of that block, the reference's
+        column ``A(:,k)``. Dividing that row by its norm scales source ``i`` up
+        by the norm; ``mu[:, comp_list[i, h]] *= norm`` and
+        ``beta[:, comp_list[i, h]] /= norm`` rescale its density to match, so
+        the log-likelihood is unchanged. Normalizing stored COLUMNS instead
+        (the rule before issue #333) is not a change of scale of any component
+        and perturbed the fit every iteration. A zero-norm row is left
+        untouched, as in the reference (``Anrmk > 0``).
+
+        Models are rescaled in order. Their blocks are disjoint unless
+        ``share_comps`` merged a column; a shared stored column then belongs to
+        rows of several blocks, where this per-block rule is not well defined.
+        It is applied uniformly anyway: the component-row layout of epic #324
+        Phase 8 (issue #334) replaces it. ADR 0006 records the convention.
+        """
+        assert (
+            self.A is not None
+            and self.mu is not None
+            and self.beta is not None
+            and self.comp_list is not None
+        )
+        for h in range(self.n_models):
+            idx = self.comp_list[:, h]
+            block = self.A[:, idx]  # row i = source i of model h
+            norm = torch.sqrt((block**2).sum(dim=1))  # (n_channels,)
+            scale = torch.where(norm > 0, norm, torch.ones_like(norm))
+            self.A[:, idx] = block / scale.unsqueeze(1)
+            self.mu[:, idx] = self.mu[:, idx] * scale
+            self.beta[:, idx] = self.beta[:, idx] / scale
 
     def _a_frozen(self) -> bool:
         """Whether the A-update (and its lrate ramp) is held this iteration.

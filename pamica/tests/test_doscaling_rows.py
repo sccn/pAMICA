@@ -1,0 +1,528 @@
+"""``doscaling`` rescales components, not stored columns (issue #333, epic #324
+Phase 7).
+
+pamica stores each model's mixing block transposed relative to the reference
+(issue #24 convention, ADR 0006), so source ``i`` of model ``h`` is ROW ``i`` of
+``A[:, comp_list[:, h]]``, with its density at ``mu[:, comp_list[i, h]]``. The
+reference's ``doscaling`` (amica15.f90:1843-1851) divides each component's
+mixing vector by its norm and multiplies/divides that component's ``mu``/``sbeta``
+by it: an exact change of scale that leaves the log-likelihood unchanged. Before
+this fix every backend normalized stored COLUMNS instead, which is not a change
+of scale of any component and moved every default fit off the reference's
+trajectory from the first iteration.
+
+Pinned here, cross-backend per ``.rules/backend_parity.md`` (PyTorch and NumPy
+always run; MLX checks skip individually without MLX or an Apple GPU):
+
+1. one doscaling pass, through each backend's own ``_rescale_components``, is an
+   exact change of scale: the log-likelihood moves by float round-off only and
+   every component row ends at unit norm, while the old column rule on the same
+   state moves the log-likelihood by far more (so these tests catch the bug);
+2. the three backends rescale one shared state identically, including a merged
+   ``comp_list``, where the per-block rule is applied uniformly until the
+   component-row layout of Phase 8 (issue #334) replaces it;
+3. ``doscaling=False`` is byte-identical to the pre-fix code: each backend class
+   at commit ``fb13d76`` is loaded from git and fitted in the same process;
+4. (opt-in, ``AMICA_RUN_FORTRAN=1``) the native reference binary, seeded from
+   pamica's initialization, matches pamica's ``A``/``mu``/``sbeta`` after one
+   and three iterations to float64 round-off.
+
+Real bundled sample EEG only, no synthetic data or mocks (``.rules/testing.md``).
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import os
+import subprocess
+import sys
+import tempfile
+import types
+from pathlib import Path
+from typing import Any, Dict, Tuple
+
+import numpy as np
+import pytest
+import torch
+from scipy.special import logsumexp
+
+from pamica import AMICA_NumPy
+from pamica.torch_impl.core import AMICATorchNG
+from pamica.torch_impl.utils import load_eeglab_data
+
+SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
+DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
+NW = 32
+FIELD = 30504
+NMIX = 3
+SEED = 42
+# The fitting slice for the always-on tests: long enough for real dynamics,
+# short enough that a few iterations on every backend stay fast.
+N_SLICE = 8192
+
+# A float64 log-likelihood (per sample and channel, about -3.4) changed by a
+# pure rescale moves by round-off only: measured 0 to 4.4e-16 (1 ULP) on the
+# sample. The float32 MLX likelihood moves by float32 round-off: measured 3e-8
+# to 6e-8 (a float32 ULP at 3.4 is 2.4e-7).
+LL_TOL_F64 = 1e-13
+LL_TOL_F32 = 1e-6
+# The old stored-column rule on the same 3-iteration states moved the
+# log-likelihood by 1.0e-4 to 1.1e-4 (a compensated rescale of the wrong
+# vectors), ten times this bound and a hundred times the float32 tolerance.
+COLUMN_RULE_MIN_DLL = 1e-5
+
+pytestmark = pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
+
+
+@pytest.fixture(scope="module")
+def real_slice() -> np.ndarray:
+    X = load_eeglab_data(str(DATA_FILE), data_dim=NW, field_dim=FIELD)
+    return X.astype(np.float64)[:, :N_SLICE]
+
+
+def _mlx_core():
+    """The MLX backend module, or skip this test (never the whole module)."""
+    mlx_core = pytest.importorskip(
+        "pamica.mlx_impl.core", reason="MLX not installed (Apple Silicon only)"
+    )
+    mx = mlx_core.mx
+    if mx.default_device().type != mx.DeviceType.gpu:
+        pytest.skip("no Apple GPU")
+    return mlx_core
+
+
+def _row_norm_dev(A: np.ndarray, comp_list: np.ndarray) -> float:
+    """Largest ``| ||row i of block h|| - 1 |`` over every component."""
+    norms = [
+        np.linalg.norm(A[:, comp_list[:, h]], axis=1) for h in range(comp_list.shape[1])
+    ]
+    return float(np.abs(np.concatenate(norms) - 1.0).max())
+
+
+def _mean_ll(lht: np.ndarray, n_channels: int) -> float:
+    """Per-sample-per-channel log-likelihood from ``Lht`` (models x samples)."""
+    lht = np.asarray(lht, dtype=np.float64)
+    return float(logsumexp(lht, axis=0).sum() / (lht.shape[1] * n_channels))
+
+
+# --- 1. one pass is an exact change of scale, per backend -------------------
+@pytest.mark.parametrize("n_models", [1, 2])
+def test_torch_rescale_is_an_exact_change_of_scale(real_slice, n_models):
+    m = AMICATorchNG(
+        n_channels=NW,
+        n_models=n_models,
+        n_mix=NMIX,
+        seed=SEED,
+        device="cpu",
+        dtype=torch.float64,
+        doscaling=False,
+        keep_best=False,
+    )
+    m.fit(real_slice, max_iter=3, verbose=False)
+    assert m.A is not None and m.mu is not None and m.beta is not None
+    assert m.comp_list is not None
+    comp_list = m.comp_list.numpy()
+    saved = {k: getattr(m, k).clone() for k in ("A", "mu", "beta")}
+    ll0 = _mean_ll(m.model_loglik(real_slice), NW)
+    # Unscaled rows drift well away from unit norm: the pass has work to do.
+    assert _row_norm_dev(m.A.numpy(), comp_list) > 1e-2
+
+    m._rescale_components()
+    m._update_unmixing_matrices()
+    assert abs(_mean_ll(m.model_loglik(real_slice), NW) - ll0) <= LL_TOL_F64
+    assert _row_norm_dev(m.A.numpy(), comp_list) <= 1e-14
+
+    # The pre-#333 rule (normalize stored columns) on the same state.
+    for k, v in saved.items():
+        setattr(m, k, v.clone())
+    scale = torch.sqrt((m.A**2).sum(dim=0))
+    m.A, m.mu, m.beta = m.A / scale, m.mu * scale, m.beta / scale
+    m._update_unmixing_matrices()
+    assert abs(_mean_ll(m.model_loglik(real_slice), NW) - ll0) > COLUMN_RULE_MIN_DLL
+
+
+@pytest.mark.parametrize("n_models", [1, 2])
+def test_numpy_rescale_is_an_exact_change_of_scale(real_slice, n_models, tmp_path):
+    m = AMICA_NumPy(
+        num_models=n_models,
+        num_mix=NMIX,
+        max_iter=3,
+        seed=SEED,
+        use_tqdm=False,
+        outdir=str(tmp_path),
+        do_opt_block=False,
+        block_size=8192,
+        doscaling=False,
+        writestep=10000,
+    )
+    m.fit(real_slice)
+    assert m.A is not None and m.mu is not None and m.beta is not None
+    assert m.comp_list is not None
+    comp_list = m.comp_list
+    A0, mu0, beta0 = m.A.copy(), m.mu.copy(), m.beta.copy()
+    ll0 = m._get_updates_and_likelihood()["ll"]
+    assert _row_norm_dev(A0, comp_list) > 1e-2
+
+    m._rescale_components()
+    m._update_unmixing_matrices()
+    assert abs(m._get_updates_and_likelihood()["ll"] - ll0) <= LL_TOL_F64
+    assert m.A is not None
+    assert _row_norm_dev(m.A, comp_list) <= 1e-14
+
+    scale = np.sqrt(np.sum(A0**2, axis=0))
+    m.A, m.mu, m.beta = A0 / scale, mu0 * scale, beta0 / scale
+    m._update_unmixing_matrices()
+    assert abs(m._get_updates_and_likelihood()["ll"] - ll0) > COLUMN_RULE_MIN_DLL
+
+
+@pytest.mark.parametrize("n_models", [1, 2])
+def test_mlx_rescale_is_an_exact_change_of_scale(real_slice, n_models):
+    mlx_core = _mlx_core()
+    mx = mlx_core.mx
+    m = mlx_core.AMICAMLXNG(
+        n_channels=NW,
+        n_models=n_models,
+        n_mix=NMIX,
+        seed=SEED,
+        doscaling=False,
+        keep_best=False,
+    )
+    m.fit(real_slice, max_iter=3, verbose=False)
+    comp_list = np.array(m.comp_list)
+    saved = {k: getattr(m, k) for k in ("A", "mu", "beta")}
+    ll0 = _mean_ll(m.model_loglik(real_slice), NW)
+    assert _row_norm_dev(np.array(m.A, dtype=np.float64), comp_list) > 1e-2
+
+    m._rescale_components()
+    m._update_unmixing_matrices()
+    assert abs(_mean_ll(m.model_loglik(real_slice), NW) - ll0) <= LL_TOL_F32
+    assert _row_norm_dev(np.array(m.A, dtype=np.float64), comp_list) <= 1e-6
+
+    # MLX rebinds (never mutates) these arrays, so the saved ones are intact.
+    for k, v in saved.items():
+        setattr(m, k, v)
+    scale = mx.sqrt((m.A**2).sum(axis=0))
+    m.A, m.mu, m.beta = m.A / scale, m.mu * scale, m.beta / scale
+    m._update_unmixing_matrices()
+    assert abs(_mean_ll(m.model_loglik(real_slice), NW) - ll0) > COLUMN_RULE_MIN_DLL
+
+
+# --- 2. one state, three backends, identical rescale ------------------------
+# A real two-model state: A, mu, beta and comp_list of a short unscaled fit.
+State = Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+
+
+@pytest.fixture(scope="module", params=[False, True], ids=["disjoint", "merged"])
+def two_model_state(request, real_slice) -> State:
+    """``merged`` plants a share merge (model 1's source 3 folded onto model
+    0's source 5 column, the way ``identify_shared_comps`` folds a pair): the
+    shared column then sits in rows of both blocks, the one configuration where
+    the per-block rule is not a change of scale. Every backend must still apply
+    it the same way (models in order) until Phase 8 (issue #334) replaces it.
+    """
+    t = AMICATorchNG(
+        n_channels=NW,
+        n_models=2,
+        n_mix=NMIX,
+        seed=SEED,
+        device="cpu",
+        dtype=torch.float64,
+        doscaling=False,
+        keep_best=False,
+    )
+    t.fit(real_slice, max_iter=3, verbose=False)
+    assert t.A is not None and t.mu is not None and t.beta is not None
+    assert t.comp_list is not None
+    comp_list = t.comp_list.numpy().copy()
+    if request.param:
+        comp_list[3, 1] = comp_list[5, 0]
+    return t.A.numpy().copy(), t.mu.numpy().copy(), t.beta.numpy().copy(), comp_list
+
+
+def _torch_rescaled(state: State) -> State:
+    """``AMICATorchNG._rescale_components`` applied to a float64 copy of ``state``."""
+    A, mu, beta, comp_list = state
+    t = AMICATorchNG(
+        n_channels=NW, n_models=2, n_mix=NMIX, device="cpu", dtype=torch.float64
+    )
+    t.A, t.mu, t.beta = (
+        torch.from_numpy(np.array(x, np.float64)) for x in (A, mu, beta)
+    )
+    t.comp_list = torch.from_numpy(comp_list.copy())
+    t._rescale_components()
+    assert t.A is not None and t.mu is not None and t.beta is not None
+    return t.A.numpy(), t.mu.numpy(), t.beta.numpy(), comp_list
+
+
+def test_numpy_rescales_like_torch(two_model_state, tmp_path):
+    A, mu, beta, comp_list = two_model_state
+    n = AMICA_NumPy(num_models=2, num_mix=NMIX, outdir=str(tmp_path), use_tqdm=False)
+    n.A, n.mu, n.beta, n.comp_list = A.copy(), mu.copy(), beta.copy(), comp_list.copy()
+    n._rescale_components()
+    # Same float64 arithmetic; only the sum-of-squares association may differ.
+    for got, want in zip((n.A, n.mu, n.beta), _torch_rescaled(two_model_state)):
+        np.testing.assert_allclose(got, want, rtol=1e-14, atol=0)
+
+
+def test_mlx_rescales_like_torch(two_model_state):
+    mlx_core = _mlx_core()
+    mx = mlx_core.mx
+    A, mu, beta, comp_list = two_model_state
+    f32 = [a.astype(np.float32) for a in (A, mu, beta)]
+    x = mlx_core.AMICAMLXNG(n_channels=NW, n_models=2, n_mix=NMIX)
+    x.A, x.mu, x.beta = (mx.array(a) for a in f32)
+    x.comp_list = mx.array(comp_list)
+    x._rescale_components()
+    # The float64 pass on the same float32-cast state is MLX's reference.
+    want = _torch_rescaled((*f32, comp_list))
+    for got, ref in zip((x.A, x.mu, x.beta), want):
+        np.testing.assert_allclose(np.array(got), ref, rtol=1e-6, atol=0)
+
+
+# --- 3. doscaling=False is byte-identical to the pre-fix code ---------------
+# The epic #324 head this phase branched from: the last commit with the stored-
+# column rule. A later phase that deliberately changes the doscaling=False
+# trajectory moves this pin to its own base commit.
+_PRE_FIX_COMMIT = "fb13d76de145419da9c89db94438d60aafbff444"
+_BACKEND_MODULES = {
+    "torch": ("pamica/torch_impl/core.py", "pamica.torch_impl", "AMICATorchNG"),
+    "numpy": ("pamica/numpy_impl/core.py", "pamica.numpy_impl", "AMICA"),
+    "mlx": ("pamica/mlx_impl/core.py", "pamica.mlx_impl", "AMICAMLXNG"),
+}
+
+
+def _pre_fix_class(backend: str) -> Any:
+    """The backend class as it was at ``_PRE_FIX_COMMIT``, read with ``git
+    show`` and executed as a sibling module of the live package, so its
+    relative imports resolve against the live helper modules (this phase
+    changes none of them). The same construction as
+    ``mlx_tests/test_mlx_fit_noop.py``: both classes then run in one process on
+    one machine, so the comparison is exact without recorded constants."""
+    path, package, cls_name = _BACKEND_MODULES[backend]
+    repo_root = Path(__file__).resolve().parents[2]
+    # A shallow CI checkout may lack the commit: fetch just that object first
+    # (best effort, e.g. no network), and let `git show` be the real check.
+    subprocess.run(
+        ["git", "fetch", "origin", _PRE_FIX_COMMIT, "--depth", "1"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run(
+        ["git", "show", f"{_PRE_FIX_COMMIT}:{path}"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(
+            f"git object {_PRE_FIX_COMMIT[:7]} is not reachable in this checkout; "
+            f"git show stderr: {result.stderr.strip()!r}"
+        )
+    name = f"{package}._pre_issue_333_core"
+    module = types.ModuleType(name)
+    module.__package__ = package
+    # The live path, so a data file read next to the module (NumPy's
+    # params.json, unchanged by this phase) resolves; the code object names
+    # the commit it came from.
+    module.__file__ = str(repo_root / path)
+    sys.modules[name] = module  # dataclasses look the module up while building
+    try:
+        code = compile(result.stdout, f"<git {_PRE_FIX_COMMIT[:7]} {path}>", "exec")
+        exec(code, module.__dict__)
+    finally:
+        del sys.modules[name]
+    return getattr(module, cls_name)
+
+
+def _fit_unscaled(
+    cls: Any, backend: str, n_models: int, X: np.ndarray, outdir: Path
+) -> Dict[str, np.ndarray]:
+    """A short ``doscaling=False`` fit of ``cls``; its trajectory and every
+    fitted array, as float64/int numpy arrays."""
+    if backend == "numpy":
+        model = cls(
+            num_models=n_models,
+            num_mix=NMIX,
+            max_iter=6,
+            seed=SEED,
+            use_tqdm=False,
+            outdir=str(outdir),
+            do_opt_block=False,
+            block_size=8192,
+            doscaling=False,
+            writestep=10000,
+        )
+        model.fit(X)
+        ll = model.ll
+    else:
+        kwargs: Dict[str, Any] = dict(
+            n_channels=NW, n_models=n_models, n_mix=NMIX, seed=SEED, doscaling=False
+        )
+        if backend == "torch":
+            kwargs.update(device="cpu", dtype=torch.float64)
+        model = cls(**kwargs)
+        model.fit(X, max_iter=6, verbose=False)
+        ll = model.ll_history
+    out = {"ll": np.asarray(ll, dtype=np.float64)}
+    for k in ("A", "W", "mu", "beta", "alpha", "rho", "gm", "c", "comp_list"):
+        v = getattr(model, k)
+        out[k] = v.cpu().numpy() if isinstance(v, torch.Tensor) else np.array(v)
+    return out
+
+
+@pytest.mark.parametrize("n_models", [1, 2])
+@pytest.mark.parametrize("backend", ["torch", "numpy", "mlx"])
+def test_doscaling_off_is_byte_identical_to_the_pre_fix_code(
+    real_slice, backend, n_models, tmp_path
+):
+    """``doscaling=False`` never enters the rescale, so this fix must leave its
+    trajectory and every fitted array bit for bit where the pre-fix code put
+    them, on every backend."""
+    new_cls: Any
+    if backend == "mlx":
+        new_cls = _mlx_core().AMICAMLXNG
+    else:
+        new_cls = AMICATorchNG if backend == "torch" else AMICA_NumPy
+    old_cls = _pre_fix_class(backend)
+
+    old = _fit_unscaled(old_cls, backend, n_models, real_slice, tmp_path / "old")
+    new = _fit_unscaled(new_cls, backend, n_models, real_slice, tmp_path / "new")
+    changed = sorted(k for k in old if not np.array_equal(old[k], new[k]))
+    assert not changed, f"doscaling=False results changed: {changed}"
+
+
+# --- 4. seeded native reference oracle (opt-in) -----------------------------
+# The reference's input.param optimizer (natural gradient only here: the Newton
+# start is epic #324 Phase 9, issue #335) with the block size pinned on both
+# sides. pamica keyword -> reference keyword where the names differ.
+_OPT: Dict[str, Any] = dict(
+    block_size=512,
+    lrate=0.05,
+    lratefact=0.5,
+    rholrate=0.05,
+    rholratefact=0.5,
+    rho0=1.5,
+    minrho=1.0,
+    maxrho=2.0,
+    invsigmin=0.0,
+    invsigmax=100.0,
+    do_newton=False,
+    newt_start=50,
+    newtrate=1.0,
+    newt_ramp=10,
+)
+_REF_OPT: Dict[str, Any] = {
+    **{k: v for k, v in _OPT.items() if k != "do_newton"},
+    "do_newton": 0,
+    "do_opt_block": 0,
+    "do_reject": 0,
+    "share_comps": 0,
+    "doscaling": 1,
+    "scalestep": 1,
+}
+# Tolerances per iteration count. The reference itself carries round-off that
+# the ill-conditioned exact-EM mu update amplifies (mu of a low-mass mixture
+# component), so each bound sits at the doscaling-OFF noise floor with margin;
+# measured maxima over both backends and both model counts (on / off):
+#   1 iteration:  A 2.2e-15 / 2.4e-15, mu 7.8e-11 / 8.0e-11, sbeta 2.4e-14
+#   3 iterations: A 6.1e-12 / 3.1e-11, mu 3.6e-8 / 1.3e-8, sbeta 2.8e-10
+# The column rule this replaced was off by A 7.2e-5, mu 6.6e-5, sbeta 8.6e-5
+# after 1 iteration and 1.4e-3 / 6.7e-3 / 2.2e-3 after 3.
+_ORACLE_TOL = {
+    1: {"A": 1e-13, "mu": 1e-9, "sbeta": 1e-12, "LL": 1e-12},
+    3: {"A": 1e-10, "mu": 1e-6, "sbeta": 1e-8, "LL": 1e-11},
+}
+
+
+@pytest.mark.skipif(
+    os.environ.get("AMICA_RUN_FORTRAN") != "1",
+    reason="opt-in Fortran-binary integration test (set AMICA_RUN_FORTRAN=1)",
+)
+@pytest.mark.parametrize("n_models", [1, 2])
+def test_doscaling_matches_the_seeded_reference(n_models, tmp_path):
+    """Seed the reference from pamica's initialization, run 1 and 3 iterations
+    with ``doscaling`` on, and compare ``A``/``mu``/``sbeta`` element by element.
+
+    The two-model case seeds ``comp_list`` through ``load_comp_list`` (the
+    default one; ``c`` then starts at the reference's own zero, as pamica's
+    does), so the helper's comp_list path is exercised for Phase 8.
+    """
+    from pamica.tests.native_oracle import (
+        reference_mixing,
+        run_seeded_reference,
+        seed_from_torch,
+    )
+
+    X = load_eeglab_data(str(DATA_FILE), data_dim=NW, field_dim=FIELD)
+    X = X.astype(np.float64)
+
+    def torch_model() -> AMICATorchNG:
+        return AMICATorchNG(
+            n_channels=NW,
+            n_models=n_models,
+            n_mix=NMIX,
+            seed=SEED,
+            device="cpu",
+            dtype=torch.float64,
+            keep_best=False,
+            **_OPT,
+        )
+
+    init = torch_model()
+    init._preprocess(X)
+    init._initialize_parameters()
+    state = seed_from_torch(init)
+    assert init.comp_list is not None and init.sphere is not None
+    comp_list = init.comp_list.numpy()
+    if n_models > 1:
+        state = dataclasses.replace(state, comp_list=comp_list)
+
+    for k, tol in _ORACLE_TOL.items():
+        ref = run_seeded_reference(
+            state,
+            DATA_FILE,
+            tmp_path / f"k{k}",
+            n_samples=FIELD,
+            max_iter=k,
+            num_models=n_models,
+            **_REF_OPT,
+        )
+        if n_models > 1:
+            assert "reading comp_list" in ref.stdout
+            np.testing.assert_array_equal(ref.comp_list, comp_list)
+        # Same data, same symmetric ZCA sphere (the reference computes its own).
+        assert np.abs(ref.S - init.sphere.numpy()).max() < 1e-12
+        # The reference's components are unit norm, as pamica's rows now are.
+        assert np.abs(np.linalg.norm(ref.A, axis=0) - 1.0).max() < 1e-14
+
+        t = torch_model()
+        t.fit(X, max_iter=k, verbose=False)
+        assert t.A is not None and t.mu is not None and t.beta is not None
+        with tempfile.TemporaryDirectory() as td:
+            n = AMICA_NumPy(
+                num_models=n_models,
+                num_mix=NMIX,
+                max_iter=k,
+                seed=SEED,
+                use_tqdm=False,
+                outdir=td,
+                do_opt_block=False,
+                writestep=10000,
+                **_OPT,
+            )
+            n.fit(X)
+        fits: Dict[str, tuple] = {
+            "torch": (t.A.numpy(), t.mu.numpy(), t.beta.numpy(), t.ll_history),
+            "numpy": (n.A, n.mu, n.beta, n.ll),
+        }
+        for name, (A, mu, beta, ll) in fits.items():
+            errs = {
+                "A": np.abs(reference_mixing(A, comp_list) - ref.A).max(),
+                "mu": np.abs(mu - ref.mu).max(),
+                "sbeta": np.abs(beta - ref.sbeta).max(),
+                "LL": np.abs(np.asarray(ll) - ref.LL).max(),
+            }
+            over = {q: e for q, e in errs.items() if not e <= tol[q]}
+            assert not over, f"{name}, {k} iteration(s): {over} (bounds {tol})"
+            assert _row_norm_dev(A, comp_list) <= 1e-14

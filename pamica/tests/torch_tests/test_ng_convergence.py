@@ -330,13 +330,13 @@ def test_a_frozen_window_still_computes_fresh_grad_norm(real_data):
     (amica15.f90:1803). ``_update_parameters`` was refactored so the
     direction/dAk/ndtmpsum computation runs unconditionally too, with only
     the step itself gated on ``not self._a_frozen()``. This test proves both
-    halves of that refactor: the mixing matrix's per-column DIRECTION does not
-    move during a frozen iteration (only ``doscaling``'s unconditional
-    unit-norm rescale touches its magnitude -- that rescale is a separate,
-    non-frozen Fortran block, amica15.f90:1843-1854, so it is expected to
-    still apply), AND ndtmpsum is NOT a stale repeat of the pre-freeze value
-    across those same iterations (which would happen if the computation were
-    still skipped).
+    halves of that refactor: during a frozen iteration the mixing matrix takes
+    no gradient step -- it ends exactly where ``doscaling``'s unconditional
+    component rescale alone takes it (that rescale is a separate, non-frozen
+    Fortran block, amica15.f90:1843-1854, so it is expected to still apply),
+    while an unfrozen iteration does not -- AND ndtmpsum is NOT a stale repeat
+    of the pre-freeze value across those same iterations (which would happen if
+    the computation were still skipped).
     """
     ng = _fresh_ng(
         n_models=2,
@@ -352,23 +352,22 @@ def test_a_frozen_window_still_computes_fresh_grad_norm(real_data):
     )
     trace = []
     original = ng._update_parameters
+    # Applies the backend's own rescale to a copy of the pre-update A, i.e. A as
+    # it would be if this iteration took no gradient step at all.
+    probe = _fresh_ng(n_models=2)
 
     def spy(acc, n):
-        assert ng.A is not None
+        assert ng.A is not None and ng.mu is not None and ng.beta is not None
+        assert ng.comp_list is not None
         frozen = ng._a_frozen()
-        a_before = ng.A.clone()
+        probe.A, probe.mu, probe.beta = ng.A.clone(), ng.mu.clone(), ng.beta.clone()
+        probe.comp_list = ng.comp_list.clone()
+        probe._rescale_components()
         result = original(acc, n)
-        # Direction check robust to doscaling's per-column rescale: normalize
-        # both snapshots to unit columns before comparing, so only an actual
-        # gradient step (not a magnitude rescale) can fail this.
-        before_dir = a_before / a_before.norm(dim=0, keepdim=True)
-        after_dir = ng.A / ng.A.norm(dim=0, keepdim=True)
         trace.append(
             {
                 "frozen": frozen,
-                "direction_changed": not torch.allclose(
-                    before_dir, after_dir, atol=1e-12
-                ),
+                "stepped": not torch.equal(ng.A, probe.A),
                 "ndtmpsum": ng._ndtmpsum,
             }
         )
@@ -380,8 +379,10 @@ def test_a_frozen_window_still_computes_fresh_grad_norm(real_data):
     frozen_iters = [t for t in trace if t["frozen"]]
     assert frozen_iters, "test setup: no frozen iteration occurred in this run"
     for t in frozen_iters:
-        assert not t["direction_changed"]
+        assert not t["stepped"]
         assert t["ndtmpsum"] is not None and math.isfinite(t["ndtmpsum"])
+    # The check can fail: every unfrozen iteration does take a step.
+    assert all(t["stepped"] for t in trace if not t["frozen"])
     # Fresh per-iteration values, not the same stale number repeated.
     assert len({round(v, 15) for v in (t["ndtmpsum"] for t in frozen_iters)}) > 1
     # comp_used is exercised: the merge dropped at least one component.

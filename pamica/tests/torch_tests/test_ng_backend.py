@@ -489,7 +489,8 @@ def test_newton_posdef_mstep_composition():
     (issue #21), so the posdef branch never fires in a plain fit. Here the
     finalized stats are forced positive definite to exercise that branch, and
     the resulting ``A`` is checked against an independent recomputation of the
-    exact composition (slice -> H -> ``A + lrate*(A@H)`` -> column rescale).
+    exact composition (slice -> H -> ``A + lrate*(A@H)`` -> component rescale:
+    each component is a ROW of the stored block, issue #333).
     """
     data = _load_real_data()
     blk = 256
@@ -519,9 +520,8 @@ def test_newton_posdef_mstep_composition():
     idx = ng.comp_list[:, 0]
     A_expected = A_before.clone()
     A_expected[:, idx] = A_before[:, idx] - lrate_after * (H.T @ A_before[:, idx])
-    scale = torch.sqrt((A_expected**2).sum(dim=0))
-    nz = scale > 0
-    A_expected[:, nz] = A_expected[:, nz] / scale[nz]
+    block = A_expected[:, idx]
+    A_expected[:, idx] = block / torch.sqrt((block**2).sum(dim=1, keepdim=True))
 
     with mock.patch.object(ng, "_finalize_newton_stats", side_effect=forced):
         ng._update_parameters(acc, blk)
