@@ -428,8 +428,10 @@ class AMICATorchNG:
         update, so the step it takes already uses the halved rate, as in the
         reference (amica15.f90:1056-1122, issue #339).
     maxdecs : int, default=5
-        Number of consecutive log-likelihood decreases after which the
-        learning-rate *ceiling* is ratcheted down (Fortran ``maxdecs``).
+        Number of log-likelihood decreases after which the learning-rate
+        *ceiling* is ratcheted down (Fortran ``maxdecs``). The decreases need
+        not be consecutive: the count resets only at each ratchet and when
+        Newton switches on, as in the reference (amica15.f90:1062-1076).
     use_min_dll : bool, default=True
         Enable the small-likelihood-increase stop (Fortran ``use_min_dll``,
         amica15_header.f90:24/74; amica15.f90:1078-1090): once the per-
