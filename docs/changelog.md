@@ -27,6 +27,11 @@ Release notes are also published on the
     (about 10% away from the PyTorch backend's maps after five iterations on the bundled sample, and not an inverse of `get_weights() @ sphere`).
     It now matches the PyTorch backend to round-off (4.6e-12 relative), pinned by a cross-backend test.
     The NumPy backend's fit, `transform`, `get_weights` and EEGLAB export were not affected.
+  - **Fix:** the legacy plotting helpers in `pamica.numpy_impl.viz` had the same orientation slip.
+    `plot_components` drew rows of the mixing matrix as mixing vectors, and it and `plot_pdf_fits` formed activations from the raw data with no mean removal, no sphere and no transpose;
+    `plot_model_comparison` skipped the sphere.
+    They now plot the model's own sensor maps and sources (what `get_sensor_mixing_matrix` and `transform` return), checked against those accessors on a real fit.
+    `load_results` also reads a rank-reduced fit's zero-padded sphere, which it used to reject.
 - **Phase 4 of epic #324: backend selection in `AMICA` and `AMICAICA` (issue #313).**
   `AMICA` and `AMICAICA` gain a `backend` parameter:
   `"torch"` (the default, `AMICATorchNG`, float64 Fortran parity) or `"mlx"` (`AMICAMLXNG`, Apple GPU, float32 only).
