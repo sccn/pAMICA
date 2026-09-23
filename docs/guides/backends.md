@@ -47,7 +47,8 @@ Everything the wrappers offer works on both backends:
   and `AMICANative` (which takes Fortran `input.param` keys as keywords); see [the backend table](amica-differences.md#backend-differences).
 - `AMICA.from_params_file` is the wrapper's parameter-file entry point;
   `AMICAICA` takes its settings as `fit` keywords instead.
-- `AMICA.from_params_file(path, backend="mlx")` applies the file's settings through `AMICAMLXNG`'s own constructor,
+- `AMICA.from_params_file(path, backend="mlx")` stores the file's settings on the instance;
+  `fit` then passes them to `AMICAMLXNG`'s own constructor as defaults (an explicit `fit` keyword wins)
   and names any setting that backend cannot take in its "not applied" warning.
 - `save` records the backend (`format_version` 2), so `AMICA.load` restores the model on the backend that fit it.
   Files written before backend selection (version 1) still load, as PyTorch models.
