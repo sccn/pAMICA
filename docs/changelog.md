@@ -5,6 +5,14 @@ Release notes are also published on the
 
 ## Unreleased
 
+- **Fix: tests no longer make a full clone shallow (issue #343).**
+  Tests that load historical code ran `git fetch origin <sha> --depth 1` to reach the pinned commit;
+  in a full clone that records a shallow boundary, after which `git gc` can prune history.
+  Every such test now goes through `pamica/tests/pre_change.py`, which only reads the repository:
+  when the pinned commit is missing it fails under `CI` and otherwise skips,
+  naming the command that fetches it (`git fetch origin <sha>`, or `git fetch --unshallow origin` in a shallow clone).
+  `pamica/tests/test_pre_change_loader.py` runs the loader behind a logging `git` wrapper and asserts that nothing is fetched.
+
 - **Phase 8 of epic #324: `share_comps` compares and merges components (issue #334).**
   Every backend (PyTorch, NumPy and MLX) now stores the mixing matrix with one component per row,
   `A` of shape `(n_comps, n_channels)`, the reference's `A` transposed ([ADR 0007](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0007-component-row-layout.md)).
