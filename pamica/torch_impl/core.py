@@ -1548,8 +1548,8 @@ class AMICATorchNG:
     def _newton_direction(self, dA_h, sigma2_h, lambda_h, kappa_h):
         """Per-model Newton direction ``H`` from the natural gradient ``dA_h``.
 
-        Vectorized port of the per-source-pair 2x2 solve (amica17.f90:1817-1832,
-        pamica.py:802-813):
+        Vectorized port of the per-source-pair 2x2 solve (amica17.f90:1817-1832;
+        the NumPy backend's loop in ``AMICA_NumPy._update_parameters``):
 
             H[i,i] = dA_h[i,i] / lambda[i]
             sk1 = sigma2[i]*kappa[k];  sk2 = sigma2[k]*kappa[i]   (i != k)

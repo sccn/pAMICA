@@ -1495,7 +1495,7 @@ class _NaNAfterIteration(AMICATorchNG):
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
 def test_keep_best_does_not_rescue_a_diverged_fit_that_peaked_earlier():
     """The end-of-fit restore guard's ``stop_reason not in
-    _DEGENERATE_STOP_REASONS`` exclusion (core.py:2725) had zero coverage:
+    _DEGENERATE_STOP_REASONS`` exclusion (``AMICATorchNG._fit_once``) had zero coverage:
     every existing keep_best test either never diverges or diverges on
     iteration 0 (no ``best_snapshot`` yet to wrongly rescue). This forces a
     fit to run ``_DEGENERATE_NAN_AFTER`` real iterations -- so a genuine,
