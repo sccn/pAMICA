@@ -10,7 +10,7 @@ MNE is an optional dependency, so `import pamica` never requires it. Install the
 extra and import the wrapper explicitly:
 
 ```bash
-pip install pamica[mne]
+uv add "pamica[mne]"        # or, from a source checkout: uv sync --extra mne
 ```
 
 ```python

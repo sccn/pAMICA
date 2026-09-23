@@ -21,9 +21,10 @@ Without one (the default) a fit writes nothing, like the PyTorch and MLX backend
 
 This backend implements only the generalized-Gaussian source density
 (`pdftype=0`); `AMICA_NumPy(pdftype=...)` with any other value raises
-`NotImplementedError` at construction instead of silently doing nothing -- see
-the backend-differences table in
-[amica-differences.md](../guides/amica-differences.md).
+`NotImplementedError` at construction instead of silently doing nothing.
+It also has no best-iterate safeguard (`keep_best`), Mutual Information Reduction (MIR) diagnostic,
+`variance_order` or per-sample scoring accessors, and a second `fit` on the same instance continues from the first;
+see the [backend-differences table](../guides/amica-differences.md#backend-differences).
 
 `AMICA_NumPy(**kwargs)` rejects a keyword argument it does not recognize
 (issue #346), before any other construction runs.
@@ -34,9 +35,8 @@ An option implemented on the PyTorch backend (`AMICATorchNG`) but not this one
 also raises `TypeError`, naming the option and pointing to `AMICA(backend='torch')`.
 `n_models`/`n_mix` (`AMICATorchNG`'s own spelling of this backend's
 `num_models`/`num_mix`) get a message naming the correct spelling instead;
-`n_channels` gets its own message, since it is inferred from the data passed
-to `fit()` on every backend, torch included, not a constructor keyword on
-any of them.
+`n_channels` gets its own message: this backend, like the `AMICA` wrapper,
+infers it from the data passed to `fit()`.
 Every offending keyword is named in one error, however many different kinds
 are mixed in the same call.
 The three settings this backend spells differently from `AMICATorchNG`

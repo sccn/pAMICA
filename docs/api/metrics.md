@@ -4,14 +4,14 @@ Quality metrics for a decomposition, as free functions over plain arrays. They
 are backend-agnostic and independent of any fitted model object, so they work on
 sources from any source.
 
-- **`mir`** — Mutual Information Reduction, in nats: how much mutual information
+- **`mir`**: Mutual Information Reduction, in nats: how much mutual information
   a linear unmixing removes from the data. Higher is a better separation. It
   needs the **full raw-data-to-sources transform** (the unmixing composed with
   the sphering matrix), which must be square and invertible, since the estimate
   includes a log-Jacobian term.
-- **`pairwise_mi`** — the symmetric mutual-information matrix between sources.
+- **`pairwise_mi`**: the symmetric mutual-information matrix between sources.
   Its diagonal is each source's own entropy, not a mutual information.
-- **`block_diagonal_order`** — a permutation that clusters mutually dependent
+- **`block_diagonal_order`**: a permutation that clusters mutually dependent
   components near the diagonal, for reading structure out of a `pairwise_mi`
   matrix.
 
