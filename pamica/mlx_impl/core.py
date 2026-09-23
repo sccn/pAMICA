@@ -385,10 +385,10 @@ class AMICAMLXNG:
         comment (issue #269).
     ``share_start`` (100) / ``share_iter`` (100)
         Sharing schedule: first iteration to attempt merges (counted from 1)
-        and the interval between attempts. The A-update is held for the first 6 iterations of
-        every cycle (whether or not a merge fired) so the densities can settle;
-        ``share_iter`` must be ``> 6`` so that window never consumes the whole
-        cycle, and ``share_start`` must be ``>= 1``.
+        and the interval between attempts. The A-update is held for the first
+        6 iterations of every cycle (whether or not a merge fired) so the
+        densities can settle; ``share_iter`` must be ``> 6`` so that window
+        never consumes the whole cycle, and ``share_start`` must be ``>= 1``.
     ``comp_thresh`` (0.99)
         Cosine-similarity cutoff, in the de-sphered (sensor-space) metric, above
         which two mixing columns are identified and merged. Must be in
@@ -457,12 +457,12 @@ class AMICAMLXNG:
     ``kurt_start`` (3) / ``num_kurt`` (5) / ``kurt_int`` (1)
         Adaptive-switch schedule (only used when ``pdftype=1``): first
         iteration to re-estimate kurtosis (counted from 1), number of switch
-        passes, and the
-        iteration interval between them. ``num_kurt=0`` disables switching (the
-        family stays at its super-Gaussian init). No bit-exact oracle -- the
-        reference's own switch is dead code (``do_choose_pdfs`` is set but
-        ``m2sum``/``m4sum`` are never accumulated, amica15.f90:608-615) -- so
-        this is behavior-validated on real data (ADR 0002).
+        passes, and the iteration interval between them. ``num_kurt=0``
+        disables switching (the family stays at its super-Gaussian init). No
+        bit-exact oracle -- the reference's own switch is dead code
+        (``do_choose_pdfs`` is set but ``m2sum``/``m4sum`` are never
+        accumulated, amica15.f90:608-615) -- so this is behavior-validated on
+        real data (ADR 0002).
 
     The block-size search parameters (issue #232) likewise carry
     AMICATorchNG's names, defaults and semantics:
