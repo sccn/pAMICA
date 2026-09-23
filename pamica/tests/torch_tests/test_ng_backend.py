@@ -1401,15 +1401,18 @@ def test_keep_best_snapshot_restore_roundtrip():
 
 
 def _multimodel_keep_best(keep_best: bool) -> AMICATorchNG:
-    """The aggressive-Newton recipe of ``test_ng_convergence.py``'s
-    overshoot tests on 4096 real samples, without their loosened early stop:
-    it peaks at iteration 57 and ends lower at 59."""
+    """The aggressive-Newton overshoot recipe of ``test_ng_convergence.py`` on
+    the same 4096 real samples, so the same trajectory: it peaks at iteration
+    70 and stops via the loosened ``min_dll`` at 71. A fixed 60-iteration
+    budget without that stop overshot on the development machine only; on the
+    CI runners that run was monotone."""
     m = AMICATorchNG(
         n_channels=NW, n_models=2, n_mix=NMIX, seed=0, device="cpu",
         dtype=torch.float64, block_size=1024, do_newton=True, newt_start=1,
-        lrate=0.5, newtrate=3.0, keep_best=keep_best,
+        lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-4, maxincs=2,
+        use_grad_norm=False, keep_best=keep_best,
     )  # fmt: skip
-    m.fit(_load_real_data()[:, :4096], max_iter=60, verbose=False)
+    m.fit(_load_real_data()[:, :4096], max_iter=150, verbose=False)
     return m
 
 

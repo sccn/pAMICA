@@ -387,17 +387,24 @@ def test_keep_best_restore_rolls_the_llt_stash_back(real_data, tmp_path):
     would still hold the discarded last iterate's values, which the second
     assertion rules out.
     """
+    # The overshoot recipe of test_ng_convergence.py (same data, block size
+    # and settings, so the same trajectory): aggressive Newton that peaks and
+    # then stops via the loosened min_dll (peak at iteration 70, stop at 71).
+    # A fixed 60-iteration budget overshot on the development machine only;
+    # on the CI runners that run was monotone.
     m = _torch_fit(
         real_data,
         n_models=2,
-        max_iter=60,
+        max_iter=150,
         seed=0,
         do_newton=True,
         newt_start=1,
         lrate=0.5,
-        # Without it the run is monotone since issue #333 and the restore
-        # never fires; with it the run peaks at iteration 57 of 60.
         newtrate=3.0,
+        use_min_dll=True,
+        min_dll=1e-4,
+        maxincs=2,
+        use_grad_norm=False,
     )
     assert m.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS, (
         "the overshoot recipe ended degenerate: retune it"

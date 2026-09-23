@@ -240,15 +240,21 @@ def test_write_amica_output_ll_matches_kept_iterate(real_data, tmp_path):
     overshoot -- so a user reading mod.LL(end) in EEGLAB sees the loaded model's
     likelihood (review finding, #92)."""
     model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
+    # The overshoot recipe of test_ng_convergence.py (same data, block size
+    # and settings, so the same trajectory): it peaks at iteration 70 and stops
+    # via the loosened min_dll at 71. A fixed 60-iteration budget overshot on
+    # the development machine only; on the CI runners that run was monotone.
     model.fit(
         real_data[:, :4096],
-        max_iter=60,
+        max_iter=150,
         do_newton=True,
         newt_start=1,
         lrate=0.5,
-        # Without it the run is monotone since issue #333 and the restore
-        # never fires; with it the run peaks at iteration 57 of 60.
         newtrate=3.0,
+        use_min_dll=True,
+        min_dll=1e-4,
+        maxincs=2,
+        use_grad_norm=False,
         seed=0,
         block_size=1024,
     )
