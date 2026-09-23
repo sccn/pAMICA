@@ -135,6 +135,13 @@ def test_mlx_without_mlx_raises_import_error(monkeypatch):
         AMICAICA(backend="mlx")
 
 
+def test_unknown_fit_keyword_propagates_from_amica(raw):
+    ica = AMICAICA(random_state=SEED, device="cpu", verbose=False)
+    with pytest.raises(TypeError, match=r"\['blocksize'\].*AMICATorchNG"):
+        ica.fit(raw, stop=2048, max_iter=1, blocksize=512)
+    assert ica.amica_ is None
+
+
 def test_mlx_rejects_a_dtype(raw):
     _require_mlx()
     ica = AMICAICA(random_state=SEED, verbose=False, backend="mlx")
