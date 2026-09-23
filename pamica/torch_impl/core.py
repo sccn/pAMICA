@@ -59,6 +59,7 @@ from tqdm import tqdm
 
 from .. import blocktune
 from .. import restarts
+from ..component_layout import rows_from_legacy_columns
 from ..metrics import mir as mir_metric
 from ..metrics import model_probability_from_loglik, pairwise_mi
 from ..rank import (
@@ -122,6 +123,33 @@ _EPSDBLE = 1e-16
 # single-model run (issue #24 parity) a bit-exact no-op: its final iterate
 # already IS the best, the gap is 0 < tol, and no restore fires.
 _KEEP_BEST_TOL = 1e-9
+
+# The last state_dict format_version that stored A with components as COLUMNS,
+# shape (n_channels, n_comps) (issue #334). from_state_dict converts it.
+_COLUMN_LAYOUT_FORMAT_VERSION = 3
+
+
+def _component_rows_state(state: dict) -> dict:
+    """A format_version 3 state with its ``A`` converted to component rows.
+
+    Version 3 stored ``A`` as ``(n_channels, n_comps)`` with ``comp_list``
+    indexing stored columns; every model's block carries over element for
+    element (:func:`pamica.component_layout.rows_from_legacy_columns`), so the
+    loaded model is exactly the saved one. A state whose ``comp_list`` shares
+    a component across models (a ``share_comps`` merge made under the column
+    semantics, issue #334) is refused with a message to refit. The input is not
+    modified.
+    """
+    params = state["params"]
+    missing = [name for name in ("A", "comp_list") if name not in params]
+    if missing:
+        raise ValueError(f"malformed AMICATorchNG state: missing params {missing}")
+    A_rows = rows_from_legacy_columns(
+        torch.as_tensor(params["A"]).detach().cpu().numpy(),
+        torch.as_tensor(params["comp_list"]).detach().cpu().numpy(),
+        owner="AMICATorchNG",
+    )
+    return {**state, "params": {**params, "A": torch.from_numpy(A_rows)}}
 
 
 def _logcosh(x: torch.Tensor) -> torch.Tensor:
@@ -3800,6 +3828,10 @@ class AMICATorchNG:
     )  # fmt: skip
     # Integer tensors in _PARAM_TENSORS: keep their dtype on load, only move device.
     _INT_PARAM_TENSORS = ("comp_list", "pdtype")
+    # The state_dict format. 4 (issue #334) stores A with one component per
+    # row, shape (n_comps, n_channels); see from_state_dict for what older
+    # versions load as.
+    _STATE_FORMAT_VERSION = 4
 
     # Stop reasons that mark a fit as degenerate (non-finite log-likelihood, or
     # -- only reachable under best-of-N restarts, issue #198 -- a fit that raised
@@ -3962,7 +3994,7 @@ class AMICATorchNG:
             "restart_stop_reasons_": list(self.restart_stop_reasons_),
         }
         return {
-            "format_version": 3,
+            "format_version": self._STATE_FORMAT_VERSION,
             "config": config,
             "params": params,
             "extra": extra,
@@ -3977,23 +4009,34 @@ class AMICATorchNG:
         ``device`` overrides where the restored tensors live (the constructor
         picks a default when ``None``); ``dtype`` always comes from the saved
         ``config``.
+
+        A ``format_version`` 3 state (components as columns of ``A``, before
+        issue #334) loads unchanged in every other respect: its ``A`` is
+        converted to component rows without loss, unless ``share_comps`` had
+        merged components, which raises ``ValueError`` asking for a refit
+        (:func:`pamica.component_layout.rows_from_legacy_columns`).
         """
-        # format_version stays 3 here -- deliberately NOT bumped for issue
-        # #207, unlike PR #52's 1->2 (adaptive PDF) and PR #53's 2->3
-        # (keep_best). The check below is strict equality, so bumping would
-        # break loading genuinely older (pre-#53) files for no reason: the
-        # five new config keys (use_min_dll/min_dll/maxincs/use_grad_norm/
-        # min_nd) are additive-only, and a payload saved before #207 simply
-        # lacks them in its ``config`` dict, so ``cls(device=device,
-        # **config)`` below falls back to the constructor's own
-        # Fortran-faithful defaults for whichever keys are missing -- see
+        # format_version 4 (issue #334) stores A with one component per row,
+        # shape (n_comps, n_channels). A version 3 payload stored it as
+        # (n_channels, n_comps) with comp_list indexing columns; it is converted
+        # without loss when unmerged and refused when share_comps had merged
+        # components (pamica.component_layout, ADR 0007). Earlier bumps were
+        # PR #52's 1->2 (adaptive PDF) and PR #53's 2->3 (keep_best); versions 1
+        # and 2 stay unreadable. Additive keys do not bump the version: issue
+        # #207's five convergence config keys (use_min_dll/min_dll/maxincs/
+        # use_grad_norm/min_nd) are simply absent from an older payload's
+        # ``config`` dict, so ``cls(device=device, **config)`` below falls back
+        # to the constructor's own Fortran-faithful defaults for whichever keys
+        # are missing -- see
         # test_missing_convergence_keys_fall_back_to_fortran_defaults in
         # test_ng_convergence.py.
         version = state.get("format_version")
-        if version != 3:
+        if version not in (cls._STATE_FORMAT_VERSION, _COLUMN_LAYOUT_FORMAT_VERSION):
             raise ValueError(
                 f"unsupported AMICATorchNG state format_version: {version!r} "
-                "(expected 3)"
+                f"(expected {cls._STATE_FORMAT_VERSION}, or "
+                f"{_COLUMN_LAYOUT_FORMAT_VERSION} from before the component-row "
+                "layout)"
             )
         for section in ("config", "params", "extra"):
             if section not in state:
@@ -4017,6 +4060,8 @@ class AMICATorchNG:
                 f"AMICATorchNG constructor ({exc}); the payload may be "
                 "truncated or from an incompatible version."
             ) from exc
+        if version == _COLUMN_LAYOUT_FORMAT_VERSION:
+            state = _component_rows_state(state)
         obj._load_params(state)
         return obj
 

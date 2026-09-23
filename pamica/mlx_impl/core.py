@@ -109,6 +109,7 @@ from scipy.special import digamma, gamma, gammaln
 
 from .. import blocktune
 from .. import restarts
+from ..component_layout import rows_from_legacy_columns
 from ..metrics import mir as mir_metric
 from ..metrics import model_probability_from_loglik, pairwise_mi
 from ..numpy_impl.utils import identify_shared_components
@@ -3931,10 +3932,15 @@ class AMICAMLXNG:
     )  # fmt: skip
 
     # This backend owns its own format_version, independent of AMICATorchNG's
-    # (currently 3): the two payloads are never interchangeable (different
+    # (currently 4): the two payloads are never interchangeable (different
     # param layouts, no dtype/device fields here), so there is no reason for
-    # the version numbers to track each other.
-    _SAVE_FORMAT_VERSION = 1
+    # the version numbers to track each other. Version 2 (issue #334) stores A
+    # with one component per row, shape (n_comps, n_channels); a version 1
+    # payload stored it as (n_channels, n_comps) and is converted on load when
+    # unmerged, refused when share_comps had merged components
+    # (pamica.component_layout, ADR 0007).
+    _SAVE_FORMAT_VERSION = 2
+    _COLUMN_LAYOUT_FORMAT_VERSION = 1
 
     def state_dict(self) -> dict:
         """Serialize the fitted model to a plain, framework-agnostic dict.
@@ -4109,12 +4115,20 @@ class AMICAMLXNG:
 
         Unlike ``AMICATorchNG.from_state_dict`` there is no ``device``
         argument: this backend always runs on ``mx.default_device()``.
+
+        A ``format_version`` 1 state (components as columns of ``A``, before
+        issue #334) loads unchanged in every other respect: its ``A`` is
+        converted to component rows without loss, unless ``share_comps`` had
+        merged components, which raises ``ValueError`` asking for a refit
+        (:func:`pamica.component_layout.rows_from_legacy_columns`).
         """
         version = state.get("format_version")
-        if version != cls._SAVE_FORMAT_VERSION:
+        if version not in (cls._SAVE_FORMAT_VERSION, cls._COLUMN_LAYOUT_FORMAT_VERSION):
             raise ValueError(
                 f"unsupported AMICAMLXNG state format_version: {version!r} "
-                f"(expected {cls._SAVE_FORMAT_VERSION})"
+                f"(expected {cls._SAVE_FORMAT_VERSION}, or "
+                f"{cls._COLUMN_LAYOUT_FORMAT_VERSION} from before the "
+                "component-row layout)"
             )
         for section in ("config", "params", "extra"):
             if section not in state:
@@ -4138,6 +4152,19 @@ class AMICAMLXNG:
                 f"AMICAMLXNG constructor ({exc}); the payload may be "
                 "truncated or from an incompatible version."
             ) from exc
+        if version == cls._COLUMN_LAYOUT_FORMAT_VERSION:
+            params = state["params"]
+            missing = [name for name in ("A", "comp_list") if name not in params]
+            if missing:
+                raise ValueError(
+                    f"malformed AMICAMLXNG state: missing params {missing}"
+                )
+            A_rows = rows_from_legacy_columns(
+                np.asarray(params["A"]),
+                np.asarray(params["comp_list"]),
+                owner="AMICAMLXNG",
+            )
+            state = {**state, "params": {**params, "A": A_rows}}
         obj._load_params(state)
         return obj
 
@@ -4348,7 +4375,8 @@ class AMICAMLXNG:
         whose central directory or a member's compressed bytes were cut off)
         each raise a named ``ValueError`` naming what is wrong, rather than
         raising an opaque ``zipfile``/``numpy`` error or loading a silently
-        partial model.
+        partial model. A ``format_version`` 1 file (before issue #334) is
+        converted or refused exactly as :meth:`from_state_dict` describes.
         """
         # Eagerly materialize every array the archive actually contains
         # INSIDE this try, so any corruption -- an unreadable zip (raised by
@@ -4374,10 +4402,12 @@ class AMICAMLXNG:
                     f"{section!r} (the file may be truncated or corrupted)."
                 )
         version = int(raw["format_version"])
-        if version != cls._SAVE_FORMAT_VERSION:
+        if version not in (cls._SAVE_FORMAT_VERSION, cls._COLUMN_LAYOUT_FORMAT_VERSION):
             raise ValueError(
                 f"unsupported AMICAMLXNG save format_version: {version!r} "
-                f"(expected {cls._SAVE_FORMAT_VERSION})"
+                f"(expected {cls._SAVE_FORMAT_VERSION}, or "
+                f"{cls._COLUMN_LAYOUT_FORMAT_VERSION} from before the "
+                "component-row layout)"
             )
         config = json.loads(raw["config"].item())
         extra = json.loads(raw["extra"].item())

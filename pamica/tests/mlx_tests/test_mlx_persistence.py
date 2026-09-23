@@ -177,7 +177,9 @@ def test_save_load_npz_layout(tmp_path):
         assert files == {"format_version", "config", "extra"} | set(
             AMICAMLXNG._PARAM_ARRAYS
         )
-        assert int(data["format_version"]) == 1
+        # 2 since issue #334 stored A with one component per row.
+        assert int(data["format_version"]) == 2
+        assert data["A"].shape == (m.n_comps, m.n_channels)
         config = json.loads(data["config"].item())
         assert config["n_channels"] == m.n_channels
         extra = json.loads(data["extra"].item())
