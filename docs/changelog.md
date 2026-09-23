@@ -16,7 +16,14 @@ Release notes are also published on the
   and the NumPy restart after a non-finite likelihood redraws through it too.
   The generator is called exactly as before, so `mu` and `beta` start from the same values.
   A supplied or loaded `A` is used as is, as the reference uses a loaded one (:793-802):
-  an `A` set on a NumPy model before `fit`, a NumPy refit, a PyTorch `state_dict` and an MLX save.
+  an `A` set on a NumPy model before `fit`, a NumPy refit, a PyTorch `state_dict`, a saved `AMICA` model and an MLX save.
+  - **Behavior change (NumPy backend): a supplied initial `A` is checked at fit start.**
+    An `A` set before `fit`, or left by a previous fit on the same instance, now raises `ValueError` naming the problem
+    when its shape is not `(num_comps, n_channels)` (one row per component), when it holds a non-finite entry,
+    or when a model's block is numerically singular.
+    Before, a wrong shape or a singular block raised `LinAlgError` from deep in the fit,
+    and a NaN entry ended the fit with no stop reason.
+    The PyTorch and MLX backends take an `A` only through their saves, which are already validated.
   - **Behavior change: every fit from a drawn `A` starts from a different point.**
     Normalizing is not a compensated rescale, so it changes the first E-step and the trajectory after it.
     With `doscaling` on (the default), the first rescale used to normalize the components after the first iteration anyway,
@@ -34,7 +41,7 @@ Release notes are also published on the
     and the binary, loaded with pamica's draw before normalization and with its `A` update off,
     normalizes it to pamica's initial `A` within 4.4e-16.
   - Tests: `pamica/tests/test_initial_mixing.py` checks the recipe, the start of every fit on every backend
-    (with a control that fails on the code before this change), the supplied and loaded paths, the NumPy restart redraw, and the two gated oracles.
+    (with a control that fails on the code before this change), the supplied and loaded paths and the refused ones, NumPy's `fix_init`, the NumPy restart redraw, and the two gated oracles.
     The byte-identity tests that pin earlier changes against older commits now start the older code from the new initial `A`
     (`pamica.tests.pre_change.with_normalized_initial_mixing`), and still pass bit for bit.
     Data-driven tests whose trajectories moved were re-searched or re-recorded:
