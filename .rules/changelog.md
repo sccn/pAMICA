@@ -30,10 +30,12 @@
 - **Style:**
   - American English. No em-dashes. Semantic line breaks. Define an abbreviation on first use.
   - Honest, nuanced wording: state what was measured and what it implies, without negation-contrast pairs ("X, not Y") or candor announcements ("plainly").
-- **Links:** relative links to docs pages are fine. `scripts/changelog_section.py` rewrites them to site URLs for the release notes.
+- **Links:** relative links to docs pages are fine, inline or reference-style.
+  `scripts/changelog_section.py` rewrites them to site URLs for the release notes and leaves code spans and fenced code untouched.
 
 ## Format
 - Release headings are `## X.Y.Z - YYYY-MM-DD`, newest first, with at most one `## Unreleased` section above them.
+  The date is the release's publication date in UTC, the date GitHub and PyPI show.
 - `pamica/tests/test_changelog.py` enforces the format and runs the release-notes extractor on the real file.
 
 ## At release time

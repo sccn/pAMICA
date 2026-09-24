@@ -679,7 +679,7 @@ and every backend's fitting follows the Fortran reference more closely.
 
 - **A root `CHANGELOG.md` points to this changelog,**
   and the package metadata links it and the documentation site, so PyPI shows both.
-- **Release headings carry their dates** (`## X.Y.Z - YYYY-MM-DD`), taken from the release tags;
+- **Release headings carry their dates** (`## X.Y.Z - YYYY-MM-DD`): each release's publication date in UTC, or its tag date where no GitHub release exists;
   `pamica/tests/test_changelog.py` checks the format.
 - **`.rules/changelog.md` records the practice:** what an entry says, when the `skip-changelog` label applies, and the release-prep steps.
 
@@ -1061,7 +1061,7 @@ external tester (#221).
   bundled sample reproduces its previous `comp_list` and log-likelihood bit for
   bit.
 
-## 0.3.2 - 2026-08-15
+## 0.3.2 - 2026-08-16
 
 Rank-deficient input support across every backend, a much faster default block
 size, and a reproducible Fortran reference for parity runs.
@@ -1236,7 +1236,7 @@ native-engine documentation.
   backend on any platform, not only through the bundled macOS `amica15mac`
   fixture (#147 phase 5, #179).
 
-## 0.2.0 - 2026-07-17
+## 0.2.0 - 2026-07-18
 
 Package rename to align with the reserved PyPI name.
 
@@ -1247,7 +1247,7 @@ Package rename to align with the reserved PyPI name.
   domain (`eeglab.org/pyAMICA`), and the release-asset repository are unchanged
   (#176).
 
-## 0.1.3 - 2026-07-17
+## 0.1.3 - 2026-07-18
 
 Native Fortran run engine, separation-quality metrics, LLt output parity, and
 the `loadmodout` byte-order fix.
