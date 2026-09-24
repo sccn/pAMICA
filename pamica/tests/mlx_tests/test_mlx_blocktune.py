@@ -308,14 +308,14 @@ def test_allocation_failure_falls_back_to_the_last_working_size(
     model = _model(do_opt_block=True, blk_min=4096, blk_max=16384, blk_step=4096)
     real_accumulate = model._accumulate_blocks
 
-    def failing_accumulate(X):
+    def failing_accumulate(X, stash_llt=False):
         if model.block_size > 8192:
             raise RuntimeError(
                 "[metal::malloc] Attempting to allocate 160000000000 bytes "
                 "which is greater than the maximum allowed buffer size of "
                 "41747087360 bytes."
             )
-        return real_accumulate(X)
+        return real_accumulate(X, stash_llt=stash_llt)
 
     monkeypatch.setattr(model, "_accumulate_blocks", failing_accumulate)
     with caplog.at_level(logging.DEBUG, logger="pamica.mlx_impl.core"):
@@ -333,7 +333,7 @@ def test_a_real_error_in_the_probe_is_not_swallowed(real_data, monkeypatch):
     RuntimeError."""
     model = _model(do_opt_block=True, blk_min=4096, blk_max=8192, blk_step=4096)
 
-    def broken_accumulate(X):
+    def broken_accumulate(X, stash_llt=False):
         raise RuntimeError("[linalg::lu] Input matrix is singular")
 
     monkeypatch.setattr(model, "_accumulate_blocks", broken_accumulate)

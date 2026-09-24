@@ -127,6 +127,7 @@ def _torch_twin(model, x_t, block_size: int = BLOCK):
     ng.lrate_cap = model.lrate_cap
     ng.newtrate = model.newtrate
     ng.rholrate = model.rholrate
+    ng.rholrate_cap = model.rholrate_cap
     ng.iteration = model.iteration
     # sldet cancels in the cross-model softmax, but carry it anyway so the two
     # states are identical in every field either backend reads.
@@ -275,7 +276,7 @@ def _force_merged_column(model):
     cl = np.array(model.comp_list)
     kept, dead = int(cl[0, 0]), int(cl[0, 1])
     a_np = np.array(model.A)
-    a_np[:, dead] = a_np[:, kept]
+    a_np[dead, :] = a_np[kept, :]  # the retired component row (issue #334)
     model.A = mx.array(a_np)
     cl[cl == dead] = kept
     model.comp_list = mx.array(cl)
@@ -288,15 +289,15 @@ def _force_merged_column(model):
 
 @pytest.mark.parametrize("merged", [False, True])
 def test_multimodel_newton_mstep_matches_float64_twin(merged):
-    """Two models, with and without a shared mixing column, still match the
+    """Two models, with and without a shared component, still match the
     float64 twin through a full Newton M-step.
 
     Multi-model is where the curvature reduction's broadcast axis becomes
     observable (the NumPy backend's issue #267 crash), and ``merged=True`` adds
-    the ``share_comps`` interaction: one column carries both models' Newton
-    directions through the ``gm``-weighted ``dAk`` average, and one column is
+    the ``share_comps`` interaction: one component row carries both models'
+    Newton steps through the ``gm``-weighted ``dAk`` average, and one row is
     frozen. The curvature itself is indexed by (model, SOURCE) rather than by
-    mixing column, so a merge must NOT create a 0/0 there -- this is what pins
+    component, so a merge must NOT create a 0/0 there -- this is what pins
     that.
     """
     model, x_t = _warm_model(5, n_models=2)

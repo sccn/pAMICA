@@ -1,0 +1,33 @@
+
+======================================================================
+VALIDATION REPORT: Fortran vs NumPy AMICA
+======================================================================
+
+1. LOG-LIKELIHOOD COMPARISON:
+----------------------------------------
+  Fortran Final LL: -3.4112742644
+  NumPy Final LL: -3.411246
+  LL Ratio (NumPy/Fortran): 1.0000
+  LL Absolute Difference: 0.000029
+
+2. CONVERGENCE COMPARISON:
+----------------------------------------
+  Fortran Iterations: 100
+  NumPy Iterations: 100
+
+3. COMPONENT CORRELATION:
+----------------------------------------
+  Mean Correlation: 0.9992
+  Min Correlation: 0.9934
+  Max Correlation: 1.0000
+  Std Correlation: 0.0014
+  ✓ Components are highly correlated (>0.9)
+
+  Mixing Matrix Relative Error: 0.0476
+  ✓ Mixing matrices are very similar (<10% error)
+
+4. OVERALL ASSESSMENT:
+----------------------------------------
+  ✓ Implementations produce comparable results
+
+======================================================================

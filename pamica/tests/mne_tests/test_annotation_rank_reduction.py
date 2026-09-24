@@ -131,11 +131,15 @@ def test_pcakeep_mir_still_refuses_pca_reduction(fitted_pcakeep, raw_annot):
 
 
 def test_pcakeep_export_is_rank_sized_and_orthonormal(fitted_pcakeep):
-    """The exported MNE ICA reflects the reduced rank, not the channel count."""
+    """The exported MNE ICA's component count is the reduced rank, not the
+    channel count; its PCA basis spans every channel, the rows beyond the rank
+    being the residual that apply restores (issue #322)."""
     ica = fitted_pcakeep.to_mne_ica()
-    assert ica.pca_components_.shape == (RANK, len(fitted_pcakeep.ch_names_))
+    n_ch = len(fitted_pcakeep.ch_names_)
+    assert ica.n_components_ == RANK
+    assert ica.pca_components_.shape == (n_ch, n_ch)
     np.testing.assert_allclose(
-        ica.pca_components_ @ ica.pca_components_.T, np.eye(RANK), atol=1e-10
+        ica.pca_components_ @ ica.pca_components_.T, np.eye(n_ch), atol=1e-10
     )
 
 

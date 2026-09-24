@@ -1,0 +1,9 @@
+platform: {'machine': 'x86_64', 'system': 'Linux', 'nproc': 32, 'torch': '2.12.1+cu130', 'cuda_device': 'NVIDIA GeForce RTX 4090', 'loadavg': [33.0, 36.2, 32.2]}
+data (70, 60000) | config m1 | channels [32, 48, 70] | samples 30000 | iters 25 x 3 | ['torch-cuda-f64', 'torch-cuda-f32']
+  [m1]  32ch torch-cuda-f64             125.50 ms/it   LL=-3.28489
+  [m1]  32ch torch-cuda-f32             145.12 ms/it   LL=-3.28488
+  [m1]  48ch torch-cuda-f64              90.71 ms/it   LL=-3.20838
+  [m1]  48ch torch-cuda-f32             105.01 ms/it   LL=-3.20839
+  [m1]  70ch torch-cuda-f64             123.88 ms/it   LL=-3.21723
+  [m1]  70ch torch-cuda-f32             137.21 ms/it   LL=-3.21689
+wrote /home/yahya/epic324-runs/p15/dimsweep_cuda.json

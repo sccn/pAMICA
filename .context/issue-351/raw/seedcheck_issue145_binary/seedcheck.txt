@@ -1,0 +1,6 @@
+43b9f0e3dfd7b1e05754fdd5c86e5abe0b47b784ac8019adb995d20ae2c53b59  /home/yahya/pyAMICA-issue144/pyAMICA/sample_data/amica15_linux
+run1
+ iter     1 lrate =  0.0500000000 LL =  -3.5114441940 nd =  0.0556873701, D =   0.42075E-02  0.42075E-02  (  0.10 s,   0.0 h)
+run2
+ iter     1 lrate =  0.0500000000 LL =  -3.5132320906 nd =  0.0576198453, D =   0.39757E-02  0.39757E-02  (  0.09 s,   0.0 h)
+max|A1-A2| after 1 iteration: 0.009557581902372853

@@ -37,7 +37,10 @@ def test_amica_initialization():
     # Test default initialization
     model = AMICA()
     assert model.num_models == 1
-    assert model.max_iter == 2000
+    # The other backends' defaults since issue #354 (params.json had 2000 and
+    # Newton on); test_default_settings.py checks every shared setting.
+    assert model.max_iter == 100
+    assert model.do_newton is False
 
     # Test custom parameters
     model = AMICA(num_models=2, max_iter=500, do_newton=True)
@@ -74,9 +77,11 @@ def test_pdf_computation():
     npt.assert_allclose(pdf, np.exp(-np.abs(y)) / 2.0)
     npt.assert_allclose(dpdf, -np.sign(y) * pdf)
 
-    # Test Gaussian distribution
+    # Test Gaussian distribution, normalized by the reference's
+    # single-precision sqrt(pi), 1.772453851 rounded to float32
+    # (amica15.f90:1313, issue #344)
     pdf, dpdf = compute_pdf(y, rho=2.0)
-    npt.assert_allclose(pdf, np.exp(-y * y) / np.sqrt(np.pi))
+    npt.assert_allclose(pdf, np.exp(-y * y) / float(np.float32(1.772453851)))
     npt.assert_allclose(dpdf, -2 * y * pdf)
 
 
@@ -145,6 +150,16 @@ def test_error_handling():
 
     with pytest.raises(ValueError):
         model.fit(np.ones((10,)))  # 1D array
+
+    # __init__ already rejects a non-positive max_iter (see
+    # test_amica_initialization above), but max_iter is a plain public
+    # attribute a caller can reassign after construction; fit() must
+    # re-check it too rather than silently running the EM loop zero times
+    # (PR #318 review item 5).
+    bad_max_iter = AMICA(num_models=1, num_mix=3)
+    bad_max_iter.max_iter = 0
+    with pytest.raises(ValueError, match="max_iter"):
+        bad_max_iter.fit(np.ones((4, 20)))
 
     # Test transform before fit
     with pytest.raises(RuntimeError):

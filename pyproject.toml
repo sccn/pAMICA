@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pamica"
-version = "0.3.3"
+version = "0.4.0.dev1"
 description = "pAMICA: Python implementation of the Adaptive Mixture ICA algorithm"
 readme = "README.md"
 authors = [
@@ -57,6 +57,8 @@ mne = ["mne>=1.6"]
 [project.urls]
 Homepage = "https://github.com/sccn/pAMICA"
 Repository = "https://github.com/sccn/pAMICA"
+Documentation = "https://eeglab.org/pAMICA/"
+Changelog = "https://eeglab.org/pAMICA/changelog/"
 
 [tool.setuptools]
 # List subpackages explicitly so the wheel is deterministic across platforms
@@ -64,7 +66,7 @@ Repository = "https://github.com/sccn/pAMICA"
 packages = ["pamica", "pamica.numpy_impl", "pamica.torch_impl", "pamica.mlx_impl", "pamica.metrics", "pamica.native", "pamica.mne_compat"]
 # numpy_impl/params.json is the NumPy backend's default parameter file, loaded at
 # runtime via importlib/__file__, so it must ship in the wheel.
-package-data = {"pamica" = ["data/*"], "pamica.numpy_impl" = ["params.json"]}
+package-data = {"pamica.numpy_impl" = ["params.json"]}
 
 [dependency-groups]
 dev = [

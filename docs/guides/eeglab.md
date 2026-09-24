@@ -27,12 +27,36 @@ This writes the raw binary files EEGLAB's AMICA loader reads:
 | `mean` | data mean |
 | `c` | per-model centers |
 | `alpha`, `mu`, `sbeta`, `rho` | source mixture-density parameters |
+| `A` | mixing matrix in sphered space, one column per component (the reference's layout, for any number of models) |
 | `comp_list` | component ids (for component sharing) |
 | `LL` | log-likelihood per iteration |
 | `LLt` | per-timepoint, per-model log-likelihood, plus the per-timepoint total |
 
 For a single model the bytes are identical to the reference Fortran binary's
 `amicaout` files, so the directory is interchangeable with a native AMICA run.
+A directory written with `do_approx_sphere=False` (a full-rank, genuinely
+asymmetric `S`) by a pamica older than issue #336's fix has `S` transposed;
+re-run `write_amica_output` to regenerate it (the default symmetric sphere and
+a rank-reduced fit were unaffected).
+`loadmodout15.m` does not read `A`; pamica's own `load_results` does,
+and refuses an `A` that does not invert the `W` beside it.
+A multi-model directory written by a pamica older than issue #334 stored `A` in another layout
+and must be written again to load there (a single-model `A` was already in the reference layout).
+
+The MLX backend writes the same directory: an Apple-Silicon fit exports to
+EEGLAB directly, with no torch round trip (epic #278). The export is
+validated against a torch twin in the test suite to float32 precision
+(max abs diff < 1e-5; `comp_list` is the only field compared exactly --
+MLX computes in float32, so its files are not bit-identical to a float64
+export the way a torch fit's are to Fortran's):
+
+```python
+from pamica import AMICA
+
+model = AMICA(n_mix=3, backend="mlx")   # requires the mlx extra (issue #313)
+model.fit(X)                            # X is (n_channels, n_samples)
+model.write_amica_output("amicaout")
+```
 
 `LLt` is what `loadmodout15.m` turns into `Lht`/`Lt` and the model-probability
 odds `v`; it is written after a fresh `fit()`, and omitted (with a warning) for
@@ -72,16 +96,21 @@ which ranks sources by the same back-projected variance (IC1 = highest):
 
 ```python
 order = model.variance_order()           # source indices, highest variance first
-A = model.get_mixing_matrix()[:, order]  # scalp maps in EEGLAB order
+A = model.get_sensor_mixing_matrix()[:, order]  # scalp maps in EEGLAB order
 W = model.get_unmixing_matrix()[order]   # unmixing rows in EEGLAB order
 ```
 
 Pass `return_svar=True` to also get the per-component variances.
 
+`get_sensor_mixing_matrix()` gives the maps in input-channel space;
+`get_mixing_matrix()` is the sphered-space matrix, which is not a scalp map.
+
 ## Multi-model note
 
-Single-model output files are byte-identical in layout to a native AMICA run. For
-`n_models > 1` the per-model axis layout is self-consistent (it round-trips
-through `loadmodout15` and pamica's own reader) but is not byte-identical to a
-native multi-model AMICA run; see the multi-model equivalence discussion in
-[Validation & Parity](validation.md).
+Every file is written in the reference's layout for any number of models:
+`W` with the model axis slowest (issue #159) and `A` with one column per component (issue #334),
+so `loadmodout15` reads a multi-model directory the same way it reads a native one.
+The values themselves are another matter:
+multi-model AMICA is not partition-identifiable,
+so two runs, native or pamica, do not produce the same models;
+see the multi-model discussion in [Validation & Parity](validation.md#multi-model-distributional-similarity).

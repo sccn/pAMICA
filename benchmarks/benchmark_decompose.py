@@ -123,7 +123,7 @@ def _fit_mlx(data, iters):
     W_np = np.array(m.W)
     idx = np.array(m.comp_list)[:, 0].astype(int)
     W = W_np[0].T  # (comps x channels), matching torch get_unmixing convention
-    A = A_np[:, idx].T
+    A = A_np[idx, :].T  # component rows of model 0 (issue #334 layout)
     assert m.final_ll_ is not None
     return {"time": elapsed, "final_ll": float(m.final_ll_), "W": W, "A": A}
 

@@ -1,0 +1,560 @@
+{
+  "ll": {
+    "fortran_seed1": -3.399644280997763,
+    "fortran_seed2": -3.399446053777136,
+    "fortran_seed3": -3.3996402544421502,
+    "fortran_seed4": -3.3996119263160636,
+    "fortran_seed5": -3.399563131051804,
+    "fortran_seed6": -3.3995541089444816,
+    "fortran_seed7": -3.399617603804792,
+    "fortran_seed8": -3.3995827076502567,
+    "fortran_seed9": -3.3998076574695872,
+    "fortran_seed10": -3.3998408175881214,
+    "pamica_seed301": -3.3997216530763565,
+    "pamica_seed302": -3.399558597670594,
+    "pamica_seed303": -3.3996768215064535,
+    "pamica_seed304": -3.399518642876667,
+    "pamica_seed305": -3.399432015696039
+  },
+  "pairs": {
+    "fortran_seed1 vs fortran_seed2": {
+      "mean_corr": 0.9973838178304947,
+      "min_corr": 0.9833377930758486,
+      "amari": 0.0074416676119647635
+    },
+    "fortran_seed1 vs fortran_seed3": {
+      "mean_corr": 0.9989427216190532,
+      "min_corr": 0.9916487468589162,
+      "amari": 0.004623320291597859
+    },
+    "fortran_seed1 vs fortran_seed4": {
+      "mean_corr": 0.999372784429559,
+      "min_corr": 0.9957432465186093,
+      "amari": 0.0036354243637478677
+    },
+    "fortran_seed1 vs fortran_seed5": {
+      "mean_corr": 0.999033626255555,
+      "min_corr": 0.993034701641012,
+      "amari": 0.004970984085623771
+    },
+    "fortran_seed1 vs fortran_seed6": {
+      "mean_corr": 0.9996709661698624,
+      "min_corr": 0.9968596716414584,
+      "amari": 0.002607841801349828
+    },
+    "fortran_seed1 vs fortran_seed7": {
+      "mean_corr": 0.9988894018489317,
+      "min_corr": 0.9921465133433931,
+      "amari": 0.0050044187434843115
+    },
+    "fortran_seed1 vs fortran_seed8": {
+      "mean_corr": 0.9992426681703461,
+      "min_corr": 0.9941112768865812,
+      "amari": 0.004326540803187227
+    },
+    "fortran_seed1 vs fortran_seed9": {
+      "mean_corr": 0.9987262157772459,
+      "min_corr": 0.9879189709291721,
+      "amari": 0.005368950672020232
+    },
+    "fortran_seed1 vs fortran_seed10": {
+      "mean_corr": 0.9987029946463601,
+      "min_corr": 0.9836560358967542,
+      "amari": 0.004577045376639574
+    },
+    "fortran_seed1 vs pamica_seed301": {
+      "mean_corr": 0.9988197782134436,
+      "min_corr": 0.9925473290369876,
+      "amari": 0.004493081767497086
+    },
+    "fortran_seed1 vs pamica_seed302": {
+      "mean_corr": 0.9996232269976436,
+      "min_corr": 0.9970666514513028,
+      "amari": 0.0026077025843725234
+    },
+    "fortran_seed1 vs pamica_seed303": {
+      "mean_corr": 0.9998760370088206,
+      "min_corr": 0.9993005371750217,
+      "amari": 0.001651445174441888
+    },
+    "fortran_seed1 vs pamica_seed304": {
+      "mean_corr": 0.9984774064870074,
+      "min_corr": 0.9894225634478668,
+      "amari": 0.005147511117384538
+    },
+    "fortran_seed1 vs pamica_seed305": {
+      "mean_corr": 0.9989797499059779,
+      "min_corr": 0.994136773775746,
+      "amari": 0.004700049082804198
+    },
+    "fortran_seed2 vs fortran_seed3": {
+      "mean_corr": 0.9990637987741886,
+      "min_corr": 0.9927341373252119,
+      "amari": 0.004704936426180726
+    },
+    "fortran_seed2 vs fortran_seed4": {
+      "mean_corr": 0.9981576718699423,
+      "min_corr": 0.987098725237102,
+      "amari": 0.006352106280226102
+    },
+    "fortran_seed2 vs fortran_seed5": {
+      "mean_corr": 0.9988945163070959,
+      "min_corr": 0.9900752075964804,
+      "amari": 0.0045919722544712875
+    },
+    "fortran_seed2 vs fortran_seed6": {
+      "mean_corr": 0.9984511926614246,
+      "min_corr": 0.990159284635876,
+      "amari": 0.005775851282398327
+    },
+    "fortran_seed2 vs fortran_seed7": {
+      "mean_corr": 0.9989580398485283,
+      "min_corr": 0.9935704632586921,
+      "amari": 0.0047472126870288
+    },
+    "fortran_seed2 vs fortran_seed8": {
+      "mean_corr": 0.9967476787217107,
+      "min_corr": 0.9749520396175718,
+      "amari": 0.008379231447818235
+    },
+    "fortran_seed2 vs fortran_seed9": {
+      "mean_corr": 0.9967465716554912,
+      "min_corr": 0.9692128653877078,
+      "amari": 0.007910240403602466
+    },
+    "fortran_seed2 vs fortran_seed10": {
+      "mean_corr": 0.9943219341832437,
+      "min_corr": 0.9378651203429902,
+      "amari": 0.010081459366705963
+    },
+    "fortran_seed2 vs pamica_seed301": {
+      "mean_corr": 0.9988355109676916,
+      "min_corr": 0.9918783082330488,
+      "amari": 0.0048316508763874624
+    },
+    "fortran_seed2 vs pamica_seed302": {
+      "mean_corr": 0.9981044794948167,
+      "min_corr": 0.9885362597692511,
+      "amari": 0.005841226562580723
+    },
+    "fortran_seed2 vs pamica_seed303": {
+      "mean_corr": 0.9977177294812547,
+      "min_corr": 0.9828253940390324,
+      "amari": 0.006062072042578845
+    },
+    "fortran_seed2 vs pamica_seed304": {
+      "mean_corr": 0.9990591880211106,
+      "min_corr": 0.9930293495753705,
+      "amari": 0.003981188020323598
+    },
+    "fortran_seed2 vs pamica_seed305": {
+      "mean_corr": 0.9988763951838573,
+      "min_corr": 0.9940098117862647,
+      "amari": 0.005304718261202596
+    },
+    "fortran_seed3 vs fortran_seed4": {
+      "mean_corr": 0.999396828999206,
+      "min_corr": 0.9939018563863432,
+      "amari": 0.003729894131341692
+    },
+    "fortran_seed3 vs fortran_seed5": {
+      "mean_corr": 0.9995027948739312,
+      "min_corr": 0.9965289679019256,
+      "amari": 0.003915647203107725
+    },
+    "fortran_seed3 vs fortran_seed6": {
+      "mean_corr": 0.9995373733080833,
+      "min_corr": 0.997313115630426,
+      "amari": 0.0034475029006144115
+    },
+    "fortran_seed3 vs fortran_seed7": {
+      "mean_corr": 0.999737951212694,
+      "min_corr": 0.9988851323264738,
+      "amari": 0.002894253487469939
+    },
+    "fortran_seed3 vs fortran_seed8": {
+      "mean_corr": 0.9984126558389312,
+      "min_corr": 0.9850535534433025,
+      "amari": 0.006228034795063001
+    },
+    "fortran_seed3 vs fortran_seed9": {
+      "mean_corr": 0.9980125990212064,
+      "min_corr": 0.9797064543658351,
+      "amari": 0.006562078495015843
+    },
+    "fortran_seed3 vs fortran_seed10": {
+      "mean_corr": 0.9961808307110858,
+      "min_corr": 0.9540472986110117,
+      "amari": 0.007816293587526967
+    },
+    "fortran_seed3 vs pamica_seed301": {
+      "mean_corr": 0.9998087338508995,
+      "min_corr": 0.9986467519039831,
+      "amari": 0.0020338897938263706
+    },
+    "fortran_seed3 vs pamica_seed302": {
+      "mean_corr": 0.9992934120660634,
+      "min_corr": 0.9950641208037472,
+      "amari": 0.0038377943779466252
+    },
+    "fortran_seed3 vs pamica_seed303": {
+      "mean_corr": 0.9989548528144083,
+      "min_corr": 0.9912030864194291,
+      "amari": 0.004001457338479523
+    },
+    "fortran_seed3 vs pamica_seed304": {
+      "mean_corr": 0.9995758585079988,
+      "min_corr": 0.9975891319405777,
+      "amari": 0.0031725247657017723
+    },
+    "fortran_seed3 vs pamica_seed305": {
+      "mean_corr": 0.999321832795217,
+      "min_corr": 0.9965494031999469,
+      "amari": 0.004237758146630131
+    },
+    "fortran_seed4 vs fortran_seed5": {
+      "mean_corr": 0.9991202381494935,
+      "min_corr": 0.9943376613161212,
+      "amari": 0.004807896584858074
+    },
+    "fortran_seed4 vs fortran_seed6": {
+      "mean_corr": 0.9996532699778209,
+      "min_corr": 0.9969838420201728,
+      "amari": 0.0028179627570559616
+    },
+    "fortran_seed4 vs fortran_seed7": {
+      "mean_corr": 0.999592631816905,
+      "min_corr": 0.9968492901763694,
+      "amari": 0.003229051969471713
+    },
+    "fortran_seed4 vs fortran_seed8": {
+      "mean_corr": 0.9994733805072307,
+      "min_corr": 0.9969951845046999,
+      "amari": 0.00382415179094113
+    },
+    "fortran_seed4 vs fortran_seed9": {
+      "mean_corr": 0.9991819595533001,
+      "min_corr": 0.9948901078793091,
+      "amari": 0.0046200497354493275
+    },
+    "fortran_seed4 vs fortran_seed10": {
+      "mean_corr": 0.9978787919021165,
+      "min_corr": 0.9789276715722082,
+      "amari": 0.006155067102876148
+    },
+    "fortran_seed4 vs pamica_seed301": {
+      "mean_corr": 0.9995596280306486,
+      "min_corr": 0.9965788934035755,
+      "amari": 0.0029616145944367013
+    },
+    "fortran_seed4 vs pamica_seed302": {
+      "mean_corr": 0.9997192789317055,
+      "min_corr": 0.9980140310776281,
+      "amari": 0.0024300833561121888
+    },
+    "fortran_seed4 vs pamica_seed303": {
+      "mean_corr": 0.9994433846754331,
+      "min_corr": 0.9945940089354077,
+      "amari": 0.0028600874996276768
+    },
+    "fortran_seed4 vs pamica_seed304": {
+      "mean_corr": 0.9990326222134043,
+      "min_corr": 0.9924562885109357,
+      "amari": 0.0042666370792989235
+    },
+    "fortran_seed4 vs pamica_seed305": {
+      "mean_corr": 0.9989924331252956,
+      "min_corr": 0.9937442592620741,
+      "amari": 0.0048758452512213096
+    },
+    "fortran_seed5 vs fortran_seed6": {
+      "mean_corr": 0.9995812314178413,
+      "min_corr": 0.9978058116755557,
+      "amari": 0.0038239318706220038
+    },
+    "fortran_seed5 vs fortran_seed7": {
+      "mean_corr": 0.999514078092274,
+      "min_corr": 0.9961493736965917,
+      "amari": 0.0035298370569453114
+    },
+    "fortran_seed5 vs fortran_seed8": {
+      "mean_corr": 0.9979474199591788,
+      "min_corr": 0.9861032521379883,
+      "amari": 0.007113548565940528
+    },
+    "fortran_seed5 vs fortran_seed9": {
+      "mean_corr": 0.9977092745441969,
+      "min_corr": 0.9812674458487556,
+      "amari": 0.0069307479557897305
+    },
+    "fortran_seed5 vs fortran_seed10": {
+      "mean_corr": 0.9963040748261923,
+      "min_corr": 0.9572839861586194,
+      "amari": 0.008444862394737896
+    },
+    "fortran_seed5 vs pamica_seed301": {
+      "mean_corr": 0.9990798748391737,
+      "min_corr": 0.991812490346674,
+      "amari": 0.004365215155725142
+    },
+    "fortran_seed5 vs pamica_seed302": {
+      "mean_corr": 0.999052425177928,
+      "min_corr": 0.9938682616228671,
+      "amari": 0.004544902710188987
+    },
+    "fortran_seed5 vs pamica_seed303": {
+      "mean_corr": 0.9991326202143925,
+      "min_corr": 0.9925599414827744,
+      "amari": 0.004078852790282991
+    },
+    "fortran_seed5 vs pamica_seed304": {
+      "mean_corr": 0.9996321800932771,
+      "min_corr": 0.9975972592892737,
+      "amari": 0.0026105539199796604
+    },
+    "fortran_seed5 vs pamica_seed305": {
+      "mean_corr": 0.9990525101394004,
+      "min_corr": 0.9950573779105458,
+      "amari": 0.0052706226767407416
+    },
+    "fortran_seed6 vs fortran_seed7": {
+      "mean_corr": 0.9994787394752752,
+      "min_corr": 0.9963826816875206,
+      "amari": 0.003853602008941948
+    },
+    "fortran_seed6 vs fortran_seed8": {
+      "mean_corr": 0.9991179565875554,
+      "min_corr": 0.9937033424068504,
+      "amari": 0.004220774931521121
+    },
+    "fortran_seed6 vs fortran_seed9": {
+      "mean_corr": 0.9984704041532737,
+      "min_corr": 0.9891222741067596,
+      "amari": 0.006042614553299116
+    },
+    "fortran_seed6 vs fortran_seed10": {
+      "mean_corr": 0.9976792573949571,
+      "min_corr": 0.9715053015020583,
+      "amari": 0.006057537480594763
+    },
+    "fortran_seed6 vs pamica_seed301": {
+      "mean_corr": 0.9993817084503793,
+      "min_corr": 0.9943323743499128,
+      "amari": 0.003463736140921489
+    },
+    "fortran_seed6 vs pamica_seed302": {
+      "mean_corr": 0.9997483557019242,
+      "min_corr": 0.9978549303692951,
+      "amari": 0.0020593122926749535
+    },
+    "fortran_seed6 vs pamica_seed303": {
+      "mean_corr": 0.9996293319744426,
+      "min_corr": 0.9960185370855396,
+      "amari": 0.0023946050179204526
+    },
+    "fortran_seed6 vs pamica_seed304": {
+      "mean_corr": 0.9992764975353268,
+      "min_corr": 0.9954589447119667,
+      "amari": 0.003994141572805168
+    },
+    "fortran_seed6 vs pamica_seed305": {
+      "mean_corr": 0.9995429848429997,
+      "min_corr": 0.9972313656240595,
+      "amari": 0.0033531200996181135
+    },
+    "fortran_seed7 vs fortran_seed8": {
+      "mean_corr": 0.998433337743135,
+      "min_corr": 0.9895361968690808,
+      "amari": 0.00643518217927485
+    },
+    "fortran_seed7 vs fortran_seed9": {
+      "mean_corr": 0.9986835321774921,
+      "min_corr": 0.9858556378309332,
+      "amari": 0.004858183652285637
+    },
+    "fortran_seed7 vs fortran_seed10": {
+      "mean_corr": 0.9964049035371767,
+      "min_corr": 0.9617609445475178,
+      "amari": 0.008067803373905285
+    },
+    "fortran_seed7 vs pamica_seed301": {
+      "mean_corr": 0.9997786684436386,
+      "min_corr": 0.9985262254188575,
+      "amari": 0.0022860058517429073
+    },
+    "fortran_seed7 vs pamica_seed302": {
+      "mean_corr": 0.999259598279419,
+      "min_corr": 0.9947097558602807,
+      "amari": 0.004074054728796885
+    },
+    "fortran_seed7 vs pamica_seed303": {
+      "mean_corr": 0.999112423908114,
+      "min_corr": 0.9938442748708238,
+      "amari": 0.0038845591225042837
+    },
+    "fortran_seed7 vs pamica_seed304": {
+      "mean_corr": 0.999566253303679,
+      "min_corr": 0.9967154659035612,
+      "amari": 0.0029108383790811586
+    },
+    "fortran_seed7 vs pamica_seed305": {
+      "mean_corr": 0.9988982189664617,
+      "min_corr": 0.9933732362767999,
+      "amari": 0.005252643833358741
+    },
+    "fortran_seed8 vs fortran_seed9": {
+      "mean_corr": 0.9989541892283986,
+      "min_corr": 0.994169254451218,
+      "amari": 0.005974994529053787
+    },
+    "fortran_seed8 vs fortran_seed10": {
+      "mean_corr": 0.9986423997841374,
+      "min_corr": 0.9895995779298575,
+      "amari": 0.005617472432972744
+    },
+    "fortran_seed8 vs pamica_seed301": {
+      "mean_corr": 0.9986557250966162,
+      "min_corr": 0.9891814682631886,
+      "amari": 0.005360023028224558
+    },
+    "fortran_seed8 vs pamica_seed302": {
+      "mean_corr": 0.9996343047588356,
+      "min_corr": 0.9971255038386381,
+      "amari": 0.002738872715799867
+    },
+    "fortran_seed8 vs pamica_seed303": {
+      "mean_corr": 0.9990941929024237,
+      "min_corr": 0.9947858081838797,
+      "amari": 0.00442126148088693
+    },
+    "fortran_seed8 vs pamica_seed304": {
+      "mean_corr": 0.9975578815618564,
+      "min_corr": 0.9828843222612923,
+      "amari": 0.006881352991437963
+    },
+    "fortran_seed8 vs pamica_seed305": {
+      "mean_corr": 0.9985258946057936,
+      "min_corr": 0.9884589663297982,
+      "amari": 0.0051706321119112855
+    },
+    "fortran_seed9 vs fortran_seed10": {
+      "mean_corr": 0.9984767540249583,
+      "min_corr": 0.9918408069705098,
+      "amari": 0.006276540536856508
+    },
+    "fortran_seed9 vs pamica_seed301": {
+      "mean_corr": 0.9986041275933438,
+      "min_corr": 0.9848170213311357,
+      "amari": 0.004646159725441516
+    },
+    "fortran_seed9 vs pamica_seed302": {
+      "mean_corr": 0.9989926477063218,
+      "min_corr": 0.9939290507647376,
+      "amari": 0.004879920174524821
+    },
+    "fortran_seed9 vs pamica_seed303": {
+      "mean_corr": 0.9990787139815815,
+      "min_corr": 0.990651633823239,
+      "amari": 0.004116590256502387
+    },
+    "fortran_seed9 vs pamica_seed304": {
+      "mean_corr": 0.9972738179906191,
+      "min_corr": 0.9774399285182953,
+      "amari": 0.006847851485397489
+    },
+    "fortran_seed9 vs pamica_seed305": {
+      "mean_corr": 0.9973536019809848,
+      "min_corr": 0.9826030980586804,
+      "amari": 0.007641576909828345
+    },
+    "fortran_seed10 vs pamica_seed301": {
+      "mean_corr": 0.9963857293380367,
+      "min_corr": 0.960681248582251,
+      "amari": 0.007001875424024999
+    },
+    "fortran_seed10 vs pamica_seed302": {
+      "mean_corr": 0.9981676337703574,
+      "min_corr": 0.9782688764002065,
+      "amari": 0.005010091281096943
+    },
+    "fortran_seed10 vs pamica_seed303": {
+      "mean_corr": 0.9987120734130099,
+      "min_corr": 0.9847804527627908,
+      "amari": 0.004349191154381497
+    },
+    "fortran_seed10 vs pamica_seed304": {
+      "mean_corr": 0.9953235058707853,
+      "min_corr": 0.9509878778759614,
+      "amari": 0.008321524192129484
+    },
+    "fortran_seed10 vs pamica_seed305": {
+      "mean_corr": 0.9965803501903417,
+      "min_corr": 0.961306274186901,
+      "amari": 0.007279637650825507
+    },
+    "pamica_seed301 vs pamica_seed302": {
+      "mean_corr": 0.9993632507318939,
+      "min_corr": 0.9963030562962545,
+      "amari": 0.00336599590754251
+    },
+    "pamica_seed301 vs pamica_seed303": {
+      "mean_corr": 0.9989130161076951,
+      "min_corr": 0.992290719846548,
+      "amari": 0.003655795362540219
+    },
+    "pamica_seed301 vs pamica_seed304": {
+      "mean_corr": 0.9992686078972955,
+      "min_corr": 0.9936924638973679,
+      "amari": 0.0035167304795695625
+    },
+    "pamica_seed301 vs pamica_seed305": {
+      "mean_corr": 0.9990620599367581,
+      "min_corr": 0.9926554749691798,
+      "amari": 0.004254937488855155
+    },
+    "pamica_seed302 vs pamica_seed303": {
+      "mean_corr": 0.999584203402772,
+      "min_corr": 0.9972710767947442,
+      "amari": 0.0025009291903615597
+    },
+    "pamica_seed302 vs pamica_seed304": {
+      "mean_corr": 0.9986041716955749,
+      "min_corr": 0.9917773094805747,
+      "amari": 0.0047337704633078695
+    },
+    "pamica_seed302 vs pamica_seed305": {
+      "mean_corr": 0.999244106003941,
+      "min_corr": 0.9953375977547575,
+      "amari": 0.0037017057962124723
+    },
+    "pamica_seed303 vs pamica_seed304": {
+      "mean_corr": 0.9985917475017295,
+      "min_corr": 0.98881749714067,
+      "amari": 0.004088939800788652
+    },
+    "pamica_seed303 vs pamica_seed305": {
+      "mean_corr": 0.9988930115217927,
+      "min_corr": 0.9930351766442601,
+      "amari": 0.004499529337141232
+    },
+    "pamica_seed304 vs pamica_seed305": {
+      "mean_corr": 0.9991082793499348,
+      "min_corr": 0.9952202525241588,
+      "amari": 0.004619937201301882
+    }
+  },
+  "iters": {
+    "pamica_seed301": 2000,
+    "pamica_seed302": 2000,
+    "pamica_seed303": 2000,
+    "pamica_seed304": 2000,
+    "pamica_seed305": 2000
+  },
+  "stop": {
+    "pamica_seed301": "max_iter",
+    "pamica_seed302": "max_iter",
+    "pamica_seed303": "max_iter",
+    "pamica_seed304": "max_iter",
+    "pamica_seed305": "max_iter"
+  }
+}

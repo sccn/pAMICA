@@ -1,10 +1,15 @@
 name: CI
 
-# Python jobs (lint/test/build) skip when a change touches only prose or
-# metadata -- Markdown, the docs site, the JOSS paper (paper.md/paper.bib), and
-# citation/archive metadata (CITATION.cff, .zenodo.json, LICENSE) -- none of
-# which affect the package. Spell-checking (typos.yml) and the paper PDF build
-# (draft-pdf.yml) have their own triggers, so prose is still checked.
+# Python jobs (lint/test/build) skip when a change touches no code: only
+# Markdown, the docs site, the JOSS paper (paper.md/paper.bib and the rebuilt
+# paper.pdf), citation/archive metadata (CITATION.cff, .zenodo.json, LICENSE),
+# or the non-Python records under .context/ (notes, raw run outputs, figures).
+# Python files under .context/ still run CI: ruff lints them, and the test
+# suite loads .context/issue-27/amari_distance.py with its ensemble.npz, which
+# is re-included for that reason. The filter is `paths` with negations, where a
+# later positive pattern re-includes what an earlier negation dropped.
+# Spell-checking (typos.yml) and the paper PDF build (draft-pdf.yml) have their
+# own triggers, so prose is still checked.
 #
 # push runs on both `main` (release branch) and `dev` (integration branch, the
 # default branch): post-merge pushes to dev are what catch drift that only
@@ -26,7 +31,7 @@ name: CI
 # the push re-triggers workflows -- see their own headers). Per-SHA grouping
 # means that bump push can never land in the same concurrency group as the
 # merge commit's run, so it cannot cancel it -- the failure mode this section
-# used to describe (a rapid follow-up push cancelling the real commit's run
+# used to describe (a rapid follow-up push canceling the real commit's run
 # and leaving the trivial bump commit as the one that gets tested) cannot
 # happen at all now. `lint`/`typecheck` below still skip when the push's head
 # commit is a bot bump (same author-email + message-prefix guard
@@ -42,29 +47,39 @@ name: CI
 on:
   push:
     branches: [main, dev]
-    paths-ignore:
-      - "**.md"
-      - "**.bib"
-      - "docs/**"
-      - "mkdocs.yml"
-      - "CITATION.cff"
-      - ".zenodo.json"
-      - "LICENSE"
+    paths:
+      - "**"
+      - "!**.md"
+      - "!**.bib"
+      - "!docs/**"
+      - "!mkdocs.yml"
+      - "!CITATION.cff"
+      - "!.zenodo.json"
+      - "!LICENSE"
+      - "!paper.pdf"
+      - "!.context/**"
+      - ".context/**.py"
+      - ".context/issue-27/ensemble.npz"
   pull_request:
-    paths-ignore:
-      - "**.md"
-      - "**.bib"
-      - "docs/**"
-      - "mkdocs.yml"
-      - "CITATION.cff"
-      - ".zenodo.json"
-      - "LICENSE"
+    paths:
+      - "**"
+      - "!**.md"
+      - "!**.bib"
+      - "!docs/**"
+      - "!mkdocs.yml"
+      - "!CITATION.cff"
+      - "!.zenodo.json"
+      - "!LICENSE"
+      - "!paper.pdf"
+      - "!.context/**"
+      - ".context/**.py"
+      - ".context/issue-27/ensemble.npz"
 
 concurrency:
   # push: per-SHA group (each push to main/dev gets its own run, never
-  # cancelled by a later push -- see the header comment above).
+  # canceled by a later push -- see the header comment above).
   # pull_request: per-ref group, unchanged (a PR's older, superseded runs are
-  # still cancelled by a newer push to the same branch).
+  # still canceled by a newer push to the same branch).
   group: ci-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
@@ -121,6 +136,11 @@ jobs:
       PYTORCH_ENABLE_MPS_FALLBACK: "1"
     steps:
       - uses: actions/checkout@v4
+        # Full history: the byte-identity pins (test_doscaling_rows.py,
+        # mlx_tests/test_mlx_fit_noop.py) read older backend classes with
+        # `git show` and fail under CI when the commit is unreachable.
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
@@ -190,6 +210,11 @@ jobs:
       PYTORCH_ENABLE_MPS_FALLBACK: "1"
     steps:
       - uses: actions/checkout@v4
+        # Full history: the byte-identity pins (test_doscaling_rows.py,
+        # mlx_tests/test_mlx_fit_noop.py) read older backend classes with
+        # `git show` and fail under CI when the commit is unreachable.
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"

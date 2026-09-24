@@ -250,11 +250,18 @@ def load_results(indir: Union[str, Path], compressed: bool = False) -> dict:
     W_fortran = W.reshape(nw, nw, num_models, order="F")
     results = {"gm": gm, "W": np.transpose(W_fortran, (1, 0, 2))}
 
+    # On disk A is the reference's A(nw, num_comps), column-major (issue #334,
+    # write_amicaout); the backends hold its transpose, one component per row,
+    # which is exactly a C-order read of the same bytes: (num_comps, nw).
     A = _read("A")
     if A is not None:
-        results["A"] = A.reshape(
-            len(A) // num_comps, num_comps
-        )  # (data_dim, num_comps)
+        if A.size != num_comps * nw:
+            raise ValueError(
+                f"The mixing matrix A in {indir} holds {A.size} values, expected "
+                f"{num_comps * nw} ({num_comps} components x {nw} channels, from "
+                "gm and W); the file may be truncated or from another run."
+            )
+        results["A"] = A.reshape(num_comps, nw)
 
     # Mixture params are stored (num_mix, num_comps) column-major (Fortran names
     # 'sbeta'); reshape order="F" matches the write_amicaout writer and Fortran
@@ -282,9 +289,18 @@ def load_results(indir: Union[str, Path], compressed: bool = False) -> dict:
     if mean is not None:
         results["mean"] = mean
 
+    # The sphere is (nw, nx): square unless rank reduction kept nw < nx
+    # dimensions, in which case write_amicaout pads it with zero rows to the
+    # reference's (nx, nx) record. Both the square and padded cases are written
+    # column-major (Fortran layout, matching the reference and loadmodout()),
+    # so read both back order="F" (issue #336).
     S = _read("S")
     if S is not None:
-        results["sphere"] = S.reshape(nw, nw)
+        nx = int(round(np.sqrt(len(S))))
+        if nx == nw:
+            results["sphere"] = S.reshape(nw, nw, order="F")
+        else:
+            results["sphere"] = S.reshape(nx, nx, order="F")[:nw]
 
     ll = _read("LL")
     if ll is not None:
@@ -299,5 +315,36 @@ def load_results(indir: Union[str, Path], compressed: bool = False) -> dict:
             f"Incomplete AMICA output in {indir}: missing {sorted(missing)}. "
             "The directory may be from an interrupted or partial run."
         )
+    _check_mixing_inverts_unmixing(results, indir)
 
     return results
+
+
+# Largest |A_h @ W_h - I| accepted from a written directory. W is written as
+# the inverse of each model's block of A, so the residual is inversion
+# round-off: measured on 60-iteration fits of the sample EEG with 1-3 models, at
+# most 3.8e-7 for float32 MLX exports (sharing on or off) and 1.1e-15 for
+# float64, while a multi-model A written in the pre-#334 component-column
+# layout, read as component rows, gives 1.5.
+_A_W_RESIDUAL_TOL = 1e-3
+
+
+def _check_mixing_inverts_unmixing(results: dict, indir: Path) -> None:
+    """Refuse an ``A`` that is not the inverse of the ``W`` written beside it.
+
+    pamica before issue #334 wrote a multi-model ``A`` in its component-column
+    layout (C order), which reads back scrambled as component rows; a
+    single-model file is the same bytes in both layouts. Rather than hand the
+    viz helpers wrong sensor maps, fail with the remedy.
+    """
+    A, W, comp_list = results["A"], results["W"], results["comp_list"]
+    for h in range(comp_list.shape[1]):
+        residual = np.abs(A[comp_list[:, h], :] @ W[:, :, h] - np.eye(W.shape[0])).max()
+        if not residual <= _A_W_RESIDUAL_TOL:
+            raise ValueError(
+                f"The mixing matrix A in {indir} does not invert the unmixing W "
+                f"of model {h} (max |A_h W_h - I| = {residual:.3g}). A "
+                "multi-model directory written by pamica before issue #334 "
+                "stored A with components as columns; write it again from the "
+                "fitted (or saved and reloaded) model with this version."
+            )

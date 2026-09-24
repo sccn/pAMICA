@@ -1,0 +1,15 @@
+platform: {'machine': 'arm64', 'system': 'Darwin', 'nproc': 14, 'torch': '2.12.1', 'loadavg': [10.3, 15.3, 12.1]}
+data (70, 60000) | config m1 | channels [32, 48, 70] | samples 30000 | iters 25 x 1 | ['mlx-f32', 'torch-cpu-f64', 'torch-mps-f32', 'numpy-cpu-f64']
+  [m1]  32ch mlx-f32                     35.30 ms/it   LL=-3.28488
+  [m1]  32ch torch-cpu-f64              141.09 ms/it   LL=-3.28489
+  [m1]  32ch torch-mps-f32              302.25 ms/it   LL=-3.28488
+  [m1]  32ch numpy-cpu-f64              337.44 ms/it   LL=-3.28478
+  [m1]  48ch mlx-f32                     35.70 ms/it   LL=-3.20839
+  [m1]  48ch torch-cpu-f64              148.66 ms/it   LL=-3.20838
+  [m1]  48ch torch-mps-f32              375.34 ms/it   LL=-3.20839
+  [m1]  48ch numpy-cpu-f64              499.61 ms/it   LL=-3.20893
+  [m1]  70ch mlx-f32                     38.29 ms/it   LL=-3.21643
+  [m1]  70ch torch-cpu-f64              195.01 ms/it   LL=-3.21746
+  [m1]  70ch torch-mps-f32              404.71 ms/it   LL=-3.21638
+  [m1]  70ch numpy-cpu-f64              743.35 ms/it   LL=-3.22054
+wrote .context/issue-351/raw/dimsweep/dimsweep_mac_ll.json

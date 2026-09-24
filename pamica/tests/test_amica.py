@@ -65,9 +65,11 @@ class TestAMICA(unittest.TestCase):
         np.testing.assert_allclose(pdf, np.exp(-np.abs(y)) / 2.0)
         np.testing.assert_allclose(dpdf, -np.sign(y) * pdf)
 
-        # Test Gaussian distribution
+        # Test Gaussian distribution, normalized by the reference's
+        # single-precision sqrt(pi), 1.772453851 rounded to float32
+        # (amica15.f90:1313, issue #344)
         pdf, dpdf = compute_pdf(y, rho=2.0)
-        np.testing.assert_allclose(pdf, np.exp(-y * y) / np.sqrt(np.pi))
+        np.testing.assert_allclose(pdf, np.exp(-y * y) / float(np.float32(1.772453851)))
         np.testing.assert_allclose(dpdf, -2 * y * pdf)
 
     # NOTE: the former synthetic-data source-recovery test (test_full_amica) was

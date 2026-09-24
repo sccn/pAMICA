@@ -1,0 +1,65 @@
+name: Changelog
+
+# docs/changelog.md is the project's changelog (.rules/changelog.md).
+#
+# - A pull request into dev that changes package code (pamica/ outside its
+#   tests, validate_implementations.py, pyproject.toml) must also change
+#   docs/changelog.md, adding its entry under "## Unreleased". A change with no
+#   user-visible effect carries the `skip-changelog` label instead.
+# - A pull request into main is a release: the merged tree must carry the
+#   release's "## X.Y.Z - YYYY-MM-DD" section, which auto-tag.yml publishes as
+#   the GitHub release notes, and no leftover "## Unreleased" section.
+#
+# The version bots (auto-bump-dev.yml, sync-dev.yml) push to dev directly and
+# open no pull requests, so this check never gates them.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    name: Changelog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Entry for a change into dev
+        if: github.base_ref != 'main'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+        run: |
+          set -euo pipefail
+          changed=$(git diff --name-only "$BASE...$HEAD")
+          code=$(grep -E '^(pamica/|validate_implementations\.py$|pyproject\.toml$)' <<<"$changed" | grep -v '^pamica/tests/' || true)
+          if [ -z "$code" ]; then
+            echo "No package code changed; no entry required."
+          elif grep -qx 'docs/changelog.md' <<<"$changed"; then
+            echo "docs/changelog.md is updated."
+          elif [ "$SKIP" = "true" ]; then
+            echo "The skip-changelog label is set."
+          else
+            echo "::error::This pull request changes package code but not docs/changelog.md. Add an entry under '## Unreleased' (.rules/changelog.md), or add the skip-changelog label when the change has no user-visible effect."
+            printf 'Changed code:\n%s\n' "$code"
+            exit 1
+          fi
+
+      - name: Release section for a release into main
+        if: github.base_ref == 'main'
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          release="${version%.dev*}"
+          python3 scripts/changelog_section.py "$release" --check
+          if grep -q '^## Unreleased' docs/changelog.md; then
+            echo "::error::docs/changelog.md still has an '## Unreleased' section. Release prep renames it to '## $release - YYYY-MM-DD'; changes merged to dev afterward belong in that section or in the next release."
+            exit 1
+          fi
+          echo "docs/changelog.md carries the $release section."

@@ -7,15 +7,16 @@ Top-level, backend-agnostic plots for a fitted model's output
 accept an optional `ax`/`axes` to draw on, instead of returning `None` and
 mutating pyplot's global state.
 
-- **`plot_pmi_heatmap`** — a components-by-components pairwise mutual-information
+- **`plot_pmi_heatmap`**: a components-by-components pairwise mutual-information
   heatmap (see `pamica.metrics.pairwise_mi`), reordered to cluster related
   components near the diagonal.
-- **`plot_model_probability`** — for a multi-model fit, two stacked panels: each
+- **`plot_model_probability`**: for a multi-model fit, two stacked panels: each
   model's posterior probability over time, and the log-likelihood of the most
   probable model at each timepoint.
-A per-component scalp-topography plot is not included yet: deriving source
-activations from a loaded `AmicaOutput` depends on an unsettled `W` convention
-question, tracked in [#159](https://github.com/sccn/pAMICA/issues/159).
+A per-component scalp-topography plot is not included: the one upstream
+reference it could be checked against (EEGLAB's `pop_topohistplot`) is broken
+on current EEGLAB, so it is left out until it can be verified. For scalp maps,
+use the MNE wrapper's [`plot_components`](mne-compat.md).
 
 ```python
 from pamica import plot_pmi_heatmap, plot_model_probability

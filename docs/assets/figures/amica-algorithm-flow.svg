@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="160mm" height="214mm" viewBox="0 0 160 214">
+<svg xmlns="http://www.w3.org/2000/svg" width="180mm" height="214mm" viewBox="0 0 180 214">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
             markerWidth="3.2" markerHeight="3.2" orient="auto-start-reverse">
@@ -9,26 +9,49 @@
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#009E73"/>
     </marker>
   </defs>
-  <rect x="0" y="0" width="160" height="214" fill="white"/>
-  <line x1="90.00" y1="30.00" x2="90.00" y2="45.00" stroke="#333333" stroke-width="0.9" marker-end="url(#arrow)"/>
-  <line x1="90.00" y1="67.00" x2="90.00" y2="82.00" stroke="#333333" stroke-width="0.9" marker-end="url(#arrow)"/>
-  <line x1="90.00" y1="114.00" x2="90.00" y2="129.00" stroke="#333333" stroke-width="0.9" marker-end="url(#arrow)"/>
-  <line x1="90.00" y1="169.00" x2="90.00" y2="184.00" stroke="#009E73" stroke-width="0.9" marker-end="url(#arrow-accent)"/>
-  <path d="M 40.00 149.00 L 16.00 149.00 L 16.00 56.00 L 40.00 56.00" fill="none" stroke="#333333" stroke-width="0.9" marker-end="url(#arrow)"/>
-  <rect x="40.00" y="8.00" width="100.00" height="22.00" rx="2.5" fill="#FAFAFA" stroke="#333333" stroke-width="0.8"/>
-  <text x="90.00" y="16.40" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">Center + Whiten</text>
-  <text x="90.00" y="21.60" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">(ZCA sphere)</text>
-  <rect x="40.00" y="45.00" width="100.00" height="22.00" rx="2.5" fill="#FAFAFA" stroke="#333333" stroke-width="0.8"/>
-  <text x="90.00" y="53.40" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">E-step:</text>
-  <text x="90.00" y="58.60" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">responsibilities</text>
-  <rect x="40.00" y="82.00" width="100.00" height="32.00" rx="2.5" fill="#FAFAFA" stroke="#333333" stroke-width="0.8"/>
-  <text x="90.00" y="92.80" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">M-step: source-density params (exact EM)</text>
-  <text x="90.00" y="98.00" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">+ unmixing W</text>
-  <text x="90.00" y="103.20" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">(natural gradient -&gt; Newton)</text>
-  <polygon points="90.00,129.00 140.00,149.00 90.00,169.00 40.00,149.00" fill="#FAFAFA" stroke="#333333" stroke-width="0.8"/>
-  <text x="90.00" y="149.00" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">converged?</text>
-  <rect x="40.00" y="184.00" width="100.00" height="22.00" rx="2.5" fill="#E9F7F1" stroke="#333333" stroke-width="0.8"/>
-  <text x="90.00" y="195.00" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">Best-iterate solution</text>
-  <text x="28.00" y="146.50" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="3.9" fill="#1A1A1A">no</text>
-  <text x="96.00" y="176.50" text-anchor="start" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="3.9" fill="#009E73" font-weight="600">yes</text>
+  <rect x="0" y="0" width="180" height="214" fill="white"/>
+  <!-- main column arrows -->
+  <line x1="125.00" y1="30.00" x2="125.00" y2="44.00" stroke="#333333" stroke-width="0.9" marker-end="url(#arrow)"/>
+  <line x1="125.00" y1="72.00" x2="125.00" y2="86.00" stroke="#333333" stroke-width="0.9" marker-end="url(#arrow)"/>
+  <line x1="125.00" y1="114.00" x2="125.00" y2="128.00" stroke="#333333" stroke-width="0.9" marker-end="url(#arrow)"/>
+  <line x1="125.00" y1="168.00" x2="125.00" y2="182.00" stroke="#009E73" stroke-width="0.9" marker-end="url(#arrow-accent)"/>
+  <!-- no branch: diamond to the update, then back to the E-step -->
+  <line x1="95.00" y1="148.00" x2="70.00" y2="148.00" stroke="#333333" stroke-width="0.9" marker-end="url(#arrow)"/>
+  <path d="M 38.00 123.00 L 38.00 58.00 L 80.00 58.00" fill="none" stroke="#333333" stroke-width="0.9" marker-end="url(#arrow)"/>
+  <!-- preprocessing -->
+  <rect x="80.00" y="8.00" width="90.00" height="22.00" rx="2.5" fill="#FAFAFA" stroke="#333333" stroke-width="0.8"/>
+  <text x="125.00" y="16.40" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">Center + whiten</text>
+  <text x="125.00" y="21.60" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">(ZCA sphere)</text>
+  <!-- E-step -->
+  <rect x="80.00" y="44.00" width="90.00" height="28.00" rx="2.5" fill="#FAFAFA" stroke="#333333" stroke-width="0.8"/>
+  <text x="125.00" y="52.80" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">1. E-step: responsibilities,</text>
+  <text x="125.00" y="58.00" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">log-likelihood,</text>
+  <text x="125.00" y="63.20" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">update direction</text>
+  <!-- checks -->
+  <rect x="80.00" y="86.00" width="90.00" height="28.00" rx="2.5" fill="#FAFAFA" stroke="#333333" stroke-width="0.8"/>
+  <text x="125.00" y="94.80" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">2. Checks: likelihood</text>
+  <text x="125.00" y="100.00" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">decreased? reduce the</text>
+  <text x="125.00" y="105.20" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">learning rate; stop?</text>
+  <!-- decision -->
+  <polygon points="125.00,128.00 155.00,148.00 125.00,168.00 95.00,148.00" fill="#FAFAFA" stroke="#333333" stroke-width="0.8"/>
+  <text x="125.00" y="145.40" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.0" fill="#1A1A1A">stopping</text>
+  <text x="125.00" y="150.60" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.0" fill="#1A1A1A">check fired?</text>
+  <!-- update -->
+  <rect x="6.00" y="123.00" width="64.00" height="50.00" rx="2.5" fill="#FAFAFA" stroke="#333333" stroke-width="0.8"/>
+  <text x="38.00" y="131.40" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">3. Update (M-step):</text>
+  <text x="38.00" y="137.60" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">densities, weights:</text>
+  <text x="38.00" y="142.80" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">exact EM</text>
+  <text x="38.00" y="149.00" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">W: natural gradient</text>
+  <text x="38.00" y="154.20" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">or Newton, held in</text>
+  <text x="38.00" y="159.40" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">A-freeze windows</text>
+  <text x="38.00" y="165.60" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">rescale components</text>
+  <!-- exit -->
+  <rect x="80.00" y="182.00" width="90.00" height="22.00" rx="2.5" fill="#E9F7F1" stroke="#333333" stroke-width="0.8"/>
+  <text x="125.00" y="190.40" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">Exit before any update:</text>
+  <text x="125.00" y="195.60" text-anchor="middle" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="4.2" fill="#1A1A1A">best-iterate solution</text>
+  <!-- branch labels -->
+  <text x="82.50" y="145.00" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="3.9" fill="#1A1A1A">no</text>
+  <text x="131.00" y="176.50" text-anchor="start" dominant-baseline="middle" font-family="Helvetica, Arial, sans-serif" font-size="3.9" fill="#009E73" font-weight="600">yes</text>
+  <text x="41.00" y="87.50" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="3.9" fill="#1A1A1A">next iteration</text>
+  <text x="41.00" y="92.50" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="3.9" fill="#1A1A1A">(up to max_iter)</text>
 </svg>

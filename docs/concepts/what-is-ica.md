@@ -79,8 +79,8 @@ In practice the data are first **centered** (mean removed) and **whitened**
 (also called *sphering*): linearly transformed so the channels are uncorrelated
 and have unit variance. Whitening removes all second-order structure, reducing
 the remaining ICA problem to finding an orthogonal rotation, which is both
-faster and better conditioned. pamica uses a symmetric (ZCA) whitening that
-matches the Fortran reference.
+faster and better conditioned. pamica uses a symmetric zero-phase component
+analysis (ZCA) whitening that matches the Fortran reference.
 
 ## What ICA cannot pin down
 
@@ -92,9 +92,10 @@ irreducible:
   scalar can move between a column of $\mathbf{A}$ and the corresponding source.
 
 These do not affect the usefulness of the components; they only mean component
-*indices* and *scaling* are conventions, not ground truth. pamica follows the
-EEGLAB conventions for ordering and sign where it matters (see
-[Validation & Parity](../guides/validation.md)).
+*indices* and *scaling* are conventions, not ground truth. AMICA keeps each
+component's mixing vector at unit norm (see [What is AMICA?](what-is-amica.md)),
+and pamica's EEGLAB export and `variance_order` give EEGLAB's component order
+(see [EEGLAB interoperability](../guides/eeglab.md)).
 
 Next: [What is AMICA?](what-is-amica.md), which relaxes the fixed-source-density
 assumption and adds multiple models.

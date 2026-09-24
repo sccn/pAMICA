@@ -3,7 +3,9 @@
 These cover the wiring the wrapper adds on top of ``AMICATorchNG``: the
 save/load round-trip (issue #36) and the device-selection fallback that keeps
 the float64 parity default from crashing on Apple Silicon (MPS cannot
-represent float64). Real sample EEG data only (no synthetic/mock).
+represent float64). Since issue #354 that fallback lives in the backend's
+constructor, so its tests here cover the raw ``AMICATorchNG`` as well as the
+wrapper that relies on it. Real sample EEG data only (no synthetic/mock).
 """
 
 import logging
@@ -17,7 +19,7 @@ import torch
 
 from pamica.amica import AMICA
 from pamica.metrics import mir, pairwise_mi
-from pamica.torch_impl.core import AMICATorchNG
+from pamica.torch_impl.core import _KEEP_BEST_TOL, AMICATorchNG
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
 DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
@@ -104,20 +106,95 @@ def test_ng_load_rejects_unknown_version(fitted_ng, tmp_path):
         AMICA.load(path)
 
 
+_HAS_MPS = torch.backends.mps.is_available()
+_BACKEND_LOGGER = "pamica.torch_impl.core"
+
+
+def _fallback_warnings(caplog) -> list:
+    return [
+        r
+        for r in caplog.records
+        if r.name == _BACKEND_LOGGER and "auto-selected MPS" in r.getMessage()
+    ]
+
+
 def test_ng_default_device_avoids_mps_float64(real_data, caplog):
     """The default float64 NG config must not crash when the auto-selected
-    device is MPS; the wrapper falls back to CPU (regression for #29)."""
+    device is MPS; the backend falls back to CPU, and the wrapper relies on it
+    (regression for #29, moved into the backend by issue #354)."""
     model = AMICA(n_models=1, n_mix=3, verbose=False)  # device=None
-    with caplog.at_level(logging.WARNING, logger="pamica.amica"):
+    with caplog.at_level(logging.WARNING, logger=_BACKEND_LOGGER):
         model.fit(real_data[:, :2048], max_iter=2, block_size=1024, seed=42)
 
     # float64 parity runs must never land on MPS.
-    assert model.model_ is not None
+    assert isinstance(model.model_, AMICATorchNG)
     assert model.model_.device.type in ("cpu", "cuda")
-    if torch.backends.mps.is_available():
+    if _HAS_MPS:
         assert model.model_.device.type == "cpu"
-        # The downgrade must be announced even with verbose=False (not silent).
-        assert any("float64" in r.message for r in caplog.records)
+        # The downgrade must be announced even with verbose=False (not silent),
+        # once per fit.
+        assert len(_fallback_warnings(caplog)) == 1
+
+
+# --- the raw backend's automatic device choice (issue #354) --------------------------
+@pytest.mark.skipif(not _HAS_MPS, reason="the fallback needs an MPS device")
+def test_raw_backend_default_construction_uses_cpu_on_mps(caplog):
+    """``AMICATorchNG(n_channels)`` with default arguments raised ValueError on
+    every Apple Silicon Mac: auto-selection picks MPS, which cannot hold the
+    float64 default. It now resolves to the CPU and says so."""
+    with caplog.at_level(logging.WARNING, logger=_BACKEND_LOGGER):
+        model = AMICATorchNG(n_channels=NW)
+    assert model.device.type == "cpu"
+    assert model.dtype == torch.float64
+    (record,) = _fallback_warnings(caplog)
+    assert record.levelno == logging.WARNING
+    assert "dtype=torch.float32" in record.getMessage()
+
+
+@pytest.mark.skipif(not _HAS_MPS, reason="the fallback needs an MPS device")
+def test_raw_backend_default_fit_runs_on_cpu_on_mps(real_data):
+    """The fallback holds through a fit, which places every tensor on the
+    resolved device."""
+    model = AMICATorchNG(n_channels=NW, block_size=1024, seed=42)
+    model.fit(real_data[:, :2048], max_iter=2, verbose=False)
+    assert model.stop_reason == "max_iter"
+    assert model.W is not None
+    assert model.W.device.type == "cpu" and model.W.dtype == torch.float64
+
+
+@pytest.mark.skipif(not _HAS_MPS, reason="needs an MPS device to auto-select")
+def test_raw_backend_float32_auto_selection_keeps_mps(caplog):
+    with caplog.at_level(logging.WARNING, logger=_BACKEND_LOGGER):
+        model = AMICATorchNG(n_channels=NW, dtype=torch.float32)
+    assert model.device.type == "mps"
+    assert _fallback_warnings(caplog) == []
+
+
+def test_raw_backend_explicit_mps_float64_raises():
+    """A caller who names MPS gets the error instead of a move to the CPU.
+    Raised at construction, before any tensor is placed, so no MPS hardware
+    is needed."""
+    with pytest.raises(ValueError, match="MPS does not support float64"):
+        AMICATorchNG(n_channels=NW, device="mps")
+
+
+def test_load_without_a_device_uses_the_backend_choice(fitted_ng, tmp_path, caplog):
+    """``AMICA.load(path)`` with ``device=None`` rebuilds the model through the
+    backend constructor, so a float64 model lands where a fresh one would: the
+    CPU on a host whose automatic choice is MPS."""
+    path = str(tmp_path / "model.pt")
+    fitted_ng.save(path)
+    with caplog.at_level(logging.WARNING, logger=_BACKEND_LOGGER):
+        loaded = AMICA.load(path)
+    assert isinstance(loaded.model_, AMICATorchNG)
+    assert loaded.model_.dtype == torch.float64
+    assert loaded.model_.device.type in ("cpu", "cuda")
+    if _HAS_MPS:
+        assert loaded.model_.device.type == "cpu"
+        assert len(_fallback_warnings(caplog)) == 1
+    np.testing.assert_array_equal(
+        loaded.get_unmixing_matrix(), fitted_ng.get_unmixing_matrix()
+    )
 
 
 def test_ng_explicit_mps_float64_raises(real_data):
@@ -140,7 +217,7 @@ def test_ng_mps_float32_escape_hatch(real_data):
     model.fit(
         real_data[:, :2048], max_iter=2, block_size=1024, seed=42, dtype=torch.float32
     )
-    assert model.model_ is not None
+    assert isinstance(model.model_, AMICATorchNG)
     assert model.model_.device.type == "mps"
     assert model.model_.dtype == torch.float32
 
@@ -167,18 +244,22 @@ def test_variance_order_requires_fit():
 
 def test_write_amica_output_bytes(fitted_ng, tmp_path):
     """The written files are the model's exact float64 parameters: the on-disk
-    EEGLAB directory is a lossless serialization, not a lossy export (#92). W and
-    the symmetric sphere are byte-identical in C order; the non-square mixture
-    params and c/comp_list are column-major (Fortran layout), so read order="F".
+    EEGLAB directory is a lossless serialization, not a lossy export (#92). W is
+    byte-identical in C order; S is column-major (Fortran layout, issue #336 --
+    the default zero-phase component analysis (ZCA) sphere is symmetric to
+    about 1e-17 so this was invisible before the fix); the non-square mixture
+    params and c/comp_list are column-major too, so read order="F".
     """
     outdir = tmp_path / "amicaout"
     fitted_ng.write_amica_output(str(outdir))
     ng = fitted_ng.model_
 
-    for name, attr in [("gm", ng.gm), ("W", ng.W), ("S", ng.sphere),
+    for name, attr in [("gm", ng.gm), ("W", ng.W),
                        ("mean", ng.mean)]:  # fmt: skip
         got = np.fromfile(outdir / name).reshape(attr.shape)  # C order
         np.testing.assert_array_equal(got, attr.cpu().numpy(), err_msg=name)
+    got_s = np.fromfile(outdir / "S").reshape(ng.sphere.shape, order="F")
+    np.testing.assert_array_equal(got_s, ng.sphere.cpu().numpy(), err_msg="S")
     for name, attr in [("c", ng.c), ("alpha", ng.alpha), ("mu", ng.mu),
                        ("sbeta", ng.beta), ("rho", ng.rho)]:  # fmt: skip
         got = np.fromfile(outdir / name).reshape(attr.shape, order="F")
@@ -236,21 +317,32 @@ def test_write_amica_output_ll_matches_kept_iterate(real_data, tmp_path):
     overshoot -- so a user reading mod.LL(end) in EEGLAB sees the loaded model's
     likelihood (review finding, #92)."""
     model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
+    # The overshoot recipe of test_ng_convergence.py (same data, block size
+    # and settings, so the same trajectory): maxincs=0/min_dll=1e-8 stop it on
+    # its first likelihood decrease (peak at iteration 13, stop at 14). Endings
+    # left to the trajectory (a fixed 60-iteration budget, then
+    # min_dll=1e-4/maxincs=2) overshot on one machine and ended at the peak on
+    # another.
     model.fit(
         real_data[:, :4096],
-        max_iter=60,
+        max_iter=150,
         do_newton=True,
-        newt_start=1,
+        newt_start=2,
         lrate=0.5,
+        newtrate=3.0,
+        use_min_dll=True,
+        min_dll=1e-8,
+        maxincs=0,
+        use_grad_norm=False,
         seed=0,
         block_size=1024,
     )
-    if not model.is_fitted_:
-        pytest.skip("aggressive run ended degenerate; not the case under test")
+    assert model.is_fitted_, "the overshoot recipe ended degenerate: retune it"
     ng = model.model_
     assert ng is not None and ng.final_ll_ is not None
-    if np.isclose(ng.ll_history[-1], ng.final_ll_):
-        pytest.skip("run was monotone; keep_best restore did not fire")
+    assert max(ng.ll_history) - ng.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
 
     outdir = tmp_path / "amicaout"
     model.write_amica_output(str(outdir))
@@ -327,8 +419,7 @@ def test_loadmodout_sources_reproduce_live_transform_multimodel(real_data, tmp_p
 
     model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
     model.fit(real_data[:, :4096], max_iter=8, block_size=1024, seed=4)
-    if not model.is_fitted_:
-        pytest.skip("aggressive short fit ended degenerate; not the case under test")
+    assert model.is_fitted_, "the short fit ended degenerate: retune it"
 
     outdir = tmp_path / "amicaout"
     model.write_amica_output(str(outdir))
@@ -372,8 +463,7 @@ def test_written_w_bytes_are_genuine_fortran_layout(real_data, tmp_path):
     """
     model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
     model.fit(real_data[:, :4096], max_iter=5, block_size=1024, seed=7)
-    if not model.is_fitted_:
-        pytest.skip("short fit ended degenerate; not the case under test")
+    assert model.is_fitted_, "the short fit ended degenerate: retune it"
 
     outdir = tmp_path / "amicaout"
     model.write_amica_output(str(outdir))
@@ -407,8 +497,7 @@ def test_load_results_returns_internal_w_multimodel(real_data, tmp_path):
 
     model = AMICA(n_models=2, n_mix=3, device="cpu", verbose=False)
     model.fit(real_data[:, :4096], max_iter=5, block_size=1024, seed=7)
-    if not model.is_fitted_:
-        pytest.skip("short fit ended degenerate; not the case under test")
+    assert model.is_fitted_, "the short fit ended degenerate: retune it"
 
     outdir = tmp_path / "amicaout"
     model.write_amica_output(str(outdir))
@@ -445,13 +534,13 @@ def test_loadmodout_sources_roundtrip_with_share_comps(real_data, tmp_path):
         share_iter=7,
         comp_thresh=0.85,
     )
-    if not model.is_fitted_:
-        pytest.skip("short share_comps fit ended degenerate; not the case under test")
+    assert model.is_fitted_, "the short share_comps fit ended degenerate: retune it"
     ng = model.model_
     assert ng is not None and ng.comp_list is not None and ng.gm is not None
     comp_list = ng.comp_list.detach().cpu().numpy()
-    if len(np.unique(comp_list)) == comp_list.size:
-        pytest.skip("no merge fired for this build; the sharing path is not exercised")
+    assert len(np.unique(comp_list)) < comp_list.size, (
+        "no merge fired, so the sharing path is not exercised: retune the recipe"
+    )
 
     outdir = tmp_path / "amicaout"
     model.write_amica_output(str(outdir))
@@ -830,6 +919,20 @@ def test_mir_step_negative_raises(real_data):
         )
 
 
+def test_max_iter_zero_raises(real_data):
+    """PR #318 review: max_iter=0 used to run the EM loop zero times and
+    "complete" with stop_reason="max_iter" (not a degenerate marker) and
+    final_ll_=NaN -- an untrained model that state_dict()/
+    write_amica_output() would then accept, since neither checks "did an
+    E-step ever actually run". Rejected up front instead, alongside the
+    same-style X.ndim/mir_step checks."""
+    model = AMICA(n_models=1, n_mix=3, device="cpu", verbose=False)
+    with pytest.raises(ValueError, match="max_iter"):
+        model.fit(real_data[:, :4096], max_iter=0, block_size=1024, seed=42)
+    assert model.model_ is None or model.model_.A is None
+    assert not model.is_fitted_
+
+
 def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, caplog):
     """A diagnostic must never destroy a decomposition.
 
@@ -837,7 +940,7 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
     mid-fit is a transient the natural gradient can pass through (the training
     path only warns about it). Before this guard, that ValueError propagated
     straight out of `fit()` and threw away the whole fit -- turning on a
-    waypoint could lose hours of training over a condition the optimiser was
+    waypoint could lose hours of training over a condition the optimizer was
     about to recover from.
 
     Forcing the raise via monkeypatch is deliberate and is not mocked data: the
@@ -845,6 +948,12 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
     input, and what is under test is the fit's response to a raising waypoint,
     not any numerical claim. The fit's own inputs and arithmetic stay real
     throughout.
+
+    Since PR #318's flood fix, a ValueError (unlike a LinAlgError) also
+    disables all LATER scheduled waypoints for this fit -- it is treated as
+    a geometry fact that will not spontaneously resolve, not a one-off
+    transient -- so `flaky_mir` must never be called a third time here, and
+    `mir_history_` stops at the failed entry instead of continuing.
     """
     real_mir = AMICATorchNG.mir
     calls = {"n": 0}
@@ -867,22 +976,29 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
     assert model.final_ll_ is not None
     assert math.isfinite(model.final_ll_)
 
-    # The failed waypoint is recorded as a visible NaN gap, not silently dropped.
+    # The failed waypoint is recorded as a visible NaN, then waypoints stop
+    # being scheduled entirely -- no entries for iterations 2/3, and mir()
+    # is never called again after the failure.
+    assert calls["n"] == 2, "mir() must not be called again after the ValueError"
     iters = [row[0] for row in model.mir_history_]
-    assert iters == [0, 1, 2, 3], iters
+    assert iters == [0, 1], iters
     values = [row[1] for row in model.mir_history_]
+    assert math.isfinite(values[0])
     assert math.isnan(values[1]), "failed waypoint must be a visible NaN"
-    assert all(math.isfinite(v) for i, v in enumerate(values) if i != 1)
 
-    # And it warned rather than failing silently.
-    assert any(
-        "MIR waypoint failed" in r.getMessage() and "iter 1" in r.getMessage()
-        for r in caplog.records
+    # And it warned once, naming that waypoints are now disabled.
+    assert (
+        sum(
+            "MIR waypoint failed" in r.getMessage() and "iter 1" in r.getMessage()
+            for r in caplog.records
+        )
+        == 1
     )
+    assert any("disabled" in r.getMessage() for r in caplog.records)
 
 
 def test_mir_step_zero_matches_omitted_argument(real_data):
-    """mir_step=0 (explicit) must leave fit() behaviour byte-for-byte identical
+    """mir_step=0 (explicit) must leave fit() behavior byte-for-byte identical
     to not passing mir_step at all."""
     X = real_data[:, :4096]
     default_model = AMICA(n_models=1, n_mix=3, device="cpu", verbose=False)
@@ -928,6 +1044,27 @@ def test_mir_step_raises_under_pca_reduction_up_front(real_data):
             pcakeep=20,
             mir_step=1,
         )
+
+
+def test_bundled_input_param_passes_the_mir_step_gate(real_data):
+    """Issue #323 regression: the bundled ``input.param`` sets ``pcakeep 32``
+    (and ``pcadb 30``, ignored because ``pcakeep`` takes precedence) for the
+    32-channel sample, which reduces nothing. The upfront ``mir_step`` gate
+    used to treat any explicit ``pcakeep`` as a reduction request and refuse
+    the reference's own configuration. A gate test, not a convergence test.
+    """
+    param_file = SAMPLE_DIR / "input.param"
+    if not param_file.exists():
+        pytest.skip("bundled input.param missing")
+    model = AMICA.from_params_file(str(param_file), device="cpu", verbose=False)
+    model.fit(real_data, max_iter=2, mir_step=1)
+
+    ng = model.model_
+    assert ng is not None
+    assert ng.pcakeep == NW and ng.pcadb == 30.0
+    assert ng.n_channels == ng.n_channels_in == NW
+    assert [row[0] for row in model.mir_history_] == [0, 1]
+    assert all(math.isfinite(row[1]) for row in model.mir_history_)
 
 
 def test_mir_raises_under_auto_detected_rank_reduction(real_data):

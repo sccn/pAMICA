@@ -191,8 +191,8 @@ class _NaNForSeeds(AMICAMLXNG):
 
     nan_seeds: tuple = ()
 
-    def _accumulate_blocks(self, X):
-        acc = super()._accumulate_blocks(X)
+    def _accumulate_blocks(self, X, stash_llt=False):
+        acc = super()._accumulate_blocks(X, stash_llt=stash_llt)
         if self.seed in self.nan_seeds:
             acc["ll"] = acc["ll"] * float("nan")
         return acc

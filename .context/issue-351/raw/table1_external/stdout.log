@@ -1,0 +1,42 @@
+reproduce_table1: tier=external, threads=16, out_dir=/home/yahya/epic324-runs/external
+device: CUDA (NVIDIA GeForce RTX 4090)
+Fortran reference binary: /home/yahya/.cache/pamica/bin/v0.3.3/amica15-linux-x64 (native/v0.3.3)
+
+### external tier ###
+data: benchmarks/data/ds002718_sub-002_eeg70_full.npy (70ch x 747750fr, k=152.6)
+[external] seed 201: Fortran (16 threads, do_newton=0)...
+[external] seed 201: Fortran done in 2246s, LL=-3.6993
+[external] seed 201: pamica (device=cuda, do_newton=0)...
+[external] seed 201: pamica done in 1941s, LL=-3.6993, mean_corr=0.9999, min_corr=0.9996, amari=0.0008
+[external] seed 202: Fortran (16 threads, do_newton=0)...
+[external] seed 202: Fortran done in 2559s, LL=-3.6994
+[external] seed 202: pamica (device=cuda, do_newton=0)...
+[external] seed 202: pamica done in 5013s, LL=-3.6993, mean_corr=0.9987, min_corr=0.9602, amari=0.0024
+[external] seed 203: Fortran (16 threads, do_newton=0)...
+[external] seed 203: Fortran done in 2363s, LL=-3.6993
+[external] seed 203: pamica (device=cuda, do_newton=0)...
+[external] seed 203: pamica done in 4320s, LL=-3.6993, mean_corr=0.9999, min_corr=0.9985, amari=0.0012
+[external] seed 204: Fortran (16 threads, do_newton=0)...
+[external] seed 204: Fortran done in 1972s, LL=-3.6993
+[external] seed 204: pamica (device=cuda, do_newton=0)...
+[external] seed 204: pamica done in 1893s, LL=-3.6993, mean_corr=1.0000, min_corr=0.9998, amari=0.0007
+[external] seed 205: Fortran (16 threads, do_newton=0)...
+[external] seed 205: Fortran done in 1992s, LL=-3.6995
+[external] seed 205: pamica (device=cuda, do_newton=0)...
+[external] seed 205: pamica done in 1886s, LL=-3.6994, mean_corr=0.9998, min_corr=0.9955, amari=0.0012
+==============================================================================
+EXTERNAL tier: 70ch x 747750fr, k=152.6
+==============================================================================
+------------------------------------------------------------------------------
+Row: Single | Log-likelihood gap (on002718)
+  paper:    within ~0.0005 of -3.6993
+  measured: Fortran mean=-3.6993 (sd 0.0001); pamica mean=-3.6993 (sd 0.0000); gap=0.0000 (n=5/5 seeds ok)
+------------------------------------------------------------------------------
+Row: Single | Component correlation (on002718)
+  paper:    0.998
+  measured: pamica vs Fortran: mean=0.9996 (min=0.9602, sd 0.0005)
+  measured: Fortran vs Fortran self-consistency: mean=0.9983 (min=0.9167)
+------------------------------------------------------------------------------
+external tier wall-clock: 26185s
+
+wrote /home/yahya/epic324-runs/external/report.json

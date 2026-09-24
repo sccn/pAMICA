@@ -84,7 +84,7 @@ def _force_merged_column(model):
     cl = np.array(model.comp_list)
     kept, dead = int(cl[0, 0]), int(cl[0, 1])
     a_np = np.array(model.A)
-    a_np[:, dead] = a_np[:, kept]
+    a_np[dead, :] = a_np[kept, :]  # the retired component row (issue #334)
     model.A = mx.array(a_np)
     cl[cl == dead] = kept
     model.comp_list = mx.array(cl)
@@ -210,16 +210,21 @@ def _assert_share_result_consistent(model):
     cl = np.array(model.comp_list)
     assert cl.shape == (model.n_channels, model.n_models)
     assert cl.min() >= 0 and cl.max() < model.n_comps
-    assert np.array(model.A).shape == (model.n_channels, model.n_comps)
+    assert np.array(model.A).shape == (model.n_comps, model.n_channels)
     used = int(np.array(model.comp_used).sum())
     assert used == np.unique(cl).size
 
     for group in model.shared_components():
-        cols = {int(cl[i, h]) for h, i in group}
-        assert len(cols) == 1, "a shared group must reference exactly one column"
+        ids = {int(cl[i, h]) for h, i in group}
+        assert len(ids) == 1, "a shared group must reference exactly one component"
         assert len({h for h, _ in group}) >= 2, "sharing is across models"
         for h, i in group:
             assert 0 <= h < model.n_models and 0 <= i < model.n_channels
+        # One component, so one mixing vector (issue #334): every grouped
+        # source has the same column in its model's mixing matrix.
+        vecs = [model.get_mixing_matrix(h)[:, i] for h, i in group]
+        for vec in vecs[1:]:
+            np.testing.assert_array_equal(vec, vecs[0])
 
 
 def test_merge_on_the_final_iteration_completes():
@@ -283,9 +288,10 @@ def test_convergence_stop_can_fire_while_A_is_frozen():
     assert model.stop_reason == "grad_norm"
     # It stops on the first iteration that can stop at all (two LL values are
     # required, Fortran's `if (iter > 1)`), which is itf=2 -- inside the first
-    # freeze window [share_start, share_start + 5] = [1, 6].
+    # freeze window, iterations 1-5 (from share_start, remainders 1-5 mod 8,
+    # amica15.f90:1803).
     itf = model.iteration + 1
-    assert itf == 2 and model.share_start <= itf <= model.share_start + 5
+    assert itf == 2 and itf >= model.share_start and itf % model.share_iter <= 5
     assert model._a_frozen() is True, "the stop did not land inside the window"
     assert model._ndtmpsum is not None and model._ndtmpsum <= model.min_nd
     assert model.final_ll_ is not None and np.isfinite(model.final_ll_)
@@ -395,20 +401,29 @@ def test_second_identify_call_does_not_resurrect_merged_columns():
 # --- (d) merged-away columns are frozen --------------------------------------
 
 
+def _component_values(model, name, ids):
+    """The values of components ``ids``: rows of ``A`` (issue #334), columns
+    of the density parameters."""
+    value = np.array(getattr(model, name))
+    return value[ids, :] if name == "A" else value[:, ids]
+
+
 def test_merged_away_columns_keep_their_last_finite_value():
-    """A column no model references receives no sufficient statistics, so its
-    mixture update would be 0/0 and its ``dAk`` is exactly zero. It must freeze
-    at its last finite value rather than go NaN (which ``fit``'s ``nan_params``
-    guard would then -- correctly -- abort on). ``doscaling`` is off so the
-    comparison is exact: the rescale pass renormalizes every column, dead ones
-    included, by a norm that is 1.0 only to within a ULP.
+    """A component no model references receives no sufficient statistics, so
+    its mixture update would be 0/0 and its ``dAk`` row is exactly zero. It
+    must freeze at its last finite value rather than go NaN (which ``fit``'s
+    ``nan_params`` guard would then -- correctly -- abort on). The rescale runs
+    (``doscaling`` on, the default): it gives a merged-away row, which is in no
+    model's block, a scale of exactly 1, so the comparison is exact. (Before
+    issue #334 this test turned ``doscaling`` off, because the rescale then
+    renormalized such a stored column at ULP scale.)
     """
-    model, x_t = _warm_model(warmup=3, doscaling=False)
+    model, x_t = _warm_model(warmup=3)
     _force_merged_column(model)
     dead = ~np.array(model.comp_used)
-    assert dead.any(), "setup failed: no column was merged away"
+    assert dead.any(), "setup failed: no component was merged away"
     before = {
-        name: np.array(getattr(model, name))[:, dead]
+        name: _component_values(model, name, dead)
         for name in ("A", "mu", "alpha", "beta", "rho")
     }
     live_mu_before = np.array(model.mu)[:, ~dead]
@@ -419,8 +434,10 @@ def test_merged_away_columns_keep_their_last_finite_value():
     mx.eval(model.A, model.mu, model.alpha, model.beta, model.rho)
 
     for name, expected in before.items():
-        actual = np.array(getattr(model, name))[:, dead]
-        assert np.all(np.isfinite(actual)), f"{name} went non-finite on a dead column"
+        actual = _component_values(model, name, dead)
+        assert np.all(np.isfinite(actual)), (
+            f"{name} went non-finite on a dead component"
+        )
         np.testing.assert_array_equal(actual, expected, err_msg=name)
     # The live columns did keep moving, so "unchanged" above means frozen, not
     # "nothing happened in these three iterations".
@@ -430,14 +447,17 @@ def test_merged_away_columns_keep_their_last_finite_value():
 # --- (e) the post-merge A-freeze window ---------------------------------------
 
 
-def test_a_frozen_window_matches_the_torch_schedule():
-    """Identical window to AMICATorchNG: the merge iteration and the 5 after."""
+@pytest.mark.parametrize("share_comps, n_models", [(True, 2), (False, 2), (False, 1)])
+def test_a_frozen_window_matches_the_torch_schedule(share_comps, n_models):
+    """Identical window to AMICATorchNG, the reference's ``iter >=
+    share_start`` and ``mod(iter, share_iter) <= 5`` (amica15.f90:1803,
+    1-indexed), with sharing on or off and for any model count (issue #345)."""
     from pamica.mlx_impl import AMICAMLXNG
 
     model = AMICAMLXNG(
         n_channels=8,
-        n_models=2,
-        share_comps=True,
+        n_models=n_models,
+        share_comps=share_comps,
         share_start=10,
         share_iter=20,
     )
@@ -446,21 +466,20 @@ def test_a_frozen_window_matches_the_torch_schedule():
         model.iteration = itf - 1  # itf is the Fortran-style 1-indexed iteration
         return model._a_frozen()
 
-    assert not any(frozen(i) for i in range(1, 10))  # before share_start
-    assert all(frozen(i) for i in range(10, 16))  # merge + 5 (residue 0..5)
-    assert not any(frozen(i) for i in range(16, 30))  # thawed rest of cycle
-    assert all(frozen(i) for i in range(30, 36))  # next cycle boundary
+    assert not any(frozen(i) for i in range(1, 20))  # remainder above 5 or early
+    assert all(frozen(i) for i in range(20, 26))  # remainder 0..5
+    assert not any(frozen(i) for i in range(26, 40))  # thawed rest of cycle
+    assert all(frozen(i) for i in range(40, 46))  # next cycle
 
 
-def test_a_frozen_is_off_for_a_single_model():
-    """A model cannot share with itself, so sharing never freezes A there."""
+def test_a_frozen_applies_to_a_single_model_without_sharing():
+    """The reference never checks share_comps in the A-update guard, so a
+    one-model fit with sharing off is held too (issue #345)."""
     from pamica.mlx_impl import AMICAMLXNG
 
-    model = AMICAMLXNG(
-        n_channels=8, n_models=1, share_comps=True, share_start=2, share_iter=8
-    )
+    model = AMICAMLXNG(n_channels=8, n_models=1, share_start=2, share_iter=8)
     model.iteration = 3
-    assert model._a_frozen() is False
+    assert model._a_frozen() is True
 
 
 def test_freeze_holds_A_while_the_mixture_keeps_moving():
@@ -468,10 +487,16 @@ def test_freeze_holds_A_while_the_mixture_keeps_moving():
     parameters and the gradient norm keep updating -- Fortran computes ``dAk``/
     ``ndtmpsum`` in the accumulation pass, which runs whether or not the A step
     is taken (issue #207). A moves again at the sixth iteration after the merge.
+
+    ``share_start`` is a multiple of ``share_iter``, as with the reference's
+    defaults, so the window (remainders 0-5, amica15.f90:1803) starts on the
+    merge iteration: iterations 7-12, thawed on 13. (It was 4 of 20 under the
+    anchored window issue #345 replaced, which the reference holds on 4 and 5
+    only.)
     """
-    share_start, share_iter = 4, 20
+    share_start, share_iter = 7, 7
     model, x_t = _warm_model(
-        warmup=share_start - 1,  # iterations 0..2, so the next itf is share_start
+        warmup=share_start - 1,  # iterations 0..5, so the next itf is share_start
         share_comps=True,
         share_start=share_start,
         share_iter=share_iter,
@@ -485,7 +510,7 @@ def test_freeze_holds_A_while_the_mixture_keeps_moving():
     mu_start = np.array(model.mu)
     lrate_start = model.lrate
 
-    frozen_iters = range(share_start - 1, share_start + 5)  # itf = 4..9
+    frozen_iters = range(share_start - 1, share_start + 5)  # itf = 7..12
     for it in frozen_iters:
         model.iteration = it
         assert model._a_frozen() is True
@@ -522,9 +547,10 @@ def test_freeze_holds_A_while_the_mixture_keeps_moving():
 )
 def test_share_constructor_validation(kwargs, match):
     """Rejected up front, for the same reasons and with the same messages as
-    ``AMICATorchNG``. ``share_iter <= 6`` is the one that bites: the post-merge
-    A-freeze is 6 iterations long, so a shorter cycle would hold A frozen on
-    every iteration of every cycle and the mixing matrix would stop moving."""
+    ``AMICATorchNG``. ``share_iter <= 6`` is the one that bites: the reference
+    holds A on every iteration whose remainder mod ``share_iter`` is 0 to 5, so
+    a shorter cycle would hold A frozen on every iteration of every cycle and
+    the mixing matrix would stop moving."""
     from pamica.mlx_impl import AMICAMLXNG
 
     with pytest.raises(ValueError, match=match):
@@ -532,12 +558,19 @@ def test_share_constructor_validation(kwargs, match):
 
 
 def test_share_settings_are_not_validated_when_sharing_is_off():
-    """The validation is gated on ``share_comps``, as in AMICATorchNG, so a
-    default-constructed model carries the (unused) defaults untouched."""
+    """The merge threshold is validated only with ``share_comps`` on, as in
+    AMICATorchNG, so it is carried untouched otherwise. The schedule is the
+    exception: the reference's A-freeze reads ``share_start`` and
+    ``share_iter`` whether or not sharing is on (issue #345), so both are
+    validated always."""
     from pamica.mlx_impl import AMICAMLXNG
 
-    model = AMICAMLXNG(n_channels=8, n_models=2, share_start=0, share_iter=1)
-    assert model.share_comps is False and model.share_iter == 1
+    model = AMICAMLXNG(n_channels=8, n_models=2, comp_thresh=0.0)
+    assert model.share_comps is False and model.comp_thresh == 0.0
+    with pytest.raises(ValueError, match="share_iter must be an integer >= 7"):
+        AMICAMLXNG(n_channels=8, n_models=2, share_iter=1)
+    with pytest.raises(ValueError, match="share_start must be an integer >= 1"):
+        AMICAMLXNG(n_channels=8, n_models=2, share_start=0)
 
 
 def test_single_model_sharing_is_accepted_and_inert():

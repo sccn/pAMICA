@@ -10,7 +10,7 @@ MNE is an optional dependency, so `import pamica` never requires it. Install the
 extra and import the wrapper explicitly:
 
 ```bash
-pip install pamica[mne]
+uv add "pamica[mne]"        # or, from a source checkout: uv sync --extra mne
 ```
 
 ```python
@@ -31,10 +31,42 @@ clean = ica.apply(raw.copy(), exclude=[0, 3])
 
 `fit` accepts a `Raw` or `Epochs` (epochs are concatenated along time, as MNE's
 own ICA does), any MNE `picks` selector, and forwards remaining keywords
-(`max_iter`, `lrate`, `do_newton`, ...) to [`AMICA.fit`](amica.md). It rejects
-non-finite input and PCA reduction (`pcakeep`/`pcadb`, which leaves the sphere
-rank-deficient so the full-rank export would be invalid), and a degenerate
-(diverged) fit is refused by the consumer methods rather than emitting NaNs.
+(`max_iter`, `lrate`, `do_newton`, ...) to [`AMICA.fit`](amica.md),
+so a setting left out takes the backend's default, as with `AMICA` (for example `lrate=0.1`). It rejects
+non-finite input, supports principal component analysis (PCA) reduction
+(`pcakeep`/`pcadb`) and rank-deficient data
+(see [Rank-reduced fits and the PCA residual](#rank-reduced-fits-and-the-pca-residual)),
+and a degenerate (diverged) fit is refused by the consumer methods rather than
+emitting NaNs.
+
+## Choosing the backend
+
+`AMICAICA` fits through [`AMICA`](amica.md), so it takes the same `backend` parameter:
+the PyTorch backend by default, or the Apple-GPU MLX backend with `backend="mlx"` (issue #313).
+Everything on this page works on both.
+
+```python
+# raw: 32 average-referenced EEG channels, so rank 31
+ica = AMICAICA(backend="mlx", random_state=42).fit(raw, picks="eeg", pcakeep=31)
+clean = ica.apply(raw.copy(), exclude=[0])
+```
+
+As with `AMICA`, `device` (and a `dtype` fit keyword) apply to the PyTorch backend only and raise `ValueError` with `backend="mlx"`,
+and `backend="mlx"` without MLX installed raises `ImportError`.
+
+The export reads the fitted mean, sphere and per-model centers through the backend-agnostic float64 accessors
+`AMICA.get_mean()`, `get_sphere()` and `get_model_center()`, so both backends take the same code path.
+Precision follows the backend:
+
+- A PyTorch fit (float64 by default) exports at float64 parity.
+- An MLX fit computes in float32, so its unmixing matrix, mean and centers carry float32 rounding
+  and the export is float32-consistent rather than float64-parity.
+  `get_sources` agrees with `ica.amica_.transform` (which runs in float32) within float32 tolerance,
+  and excluding a component changes the data by that component's back-projection to the same tolerance.
+- Reconstruction does not depend on the backend's precision.
+  MNE's mixing is the float64 pseudo-inverse of the exported unmixing and the PCA basis is orthonormal,
+  so `apply` with nothing excluded returns the input to float64 round-off on either backend, residual included.
+  [Precision on the MLX backend](../guides/backends.md#precision-on-the-mlx-backend) gives the measured figures.
 
 ## Interoperating with `mne.preprocessing.ICA`
 
@@ -52,12 +84,40 @@ mne_ica.plot_scores(scores)
 The wrapper's `get_sources`, `apply`, `get_components`, `plot_components` and
 `plot_sources` delegate to this object, so they reproduce `AMICA.transform`
 exactly: MNE
-computes sources as `unmixing_matrix_ @ pca_components_ @ (X - pca_mean_)`, and
+computes sources as
+`unmixing_matrix_ @ pca_components_[:n_components_] @ (X / pre_whitener_ - pca_mean_)`, and
 the export maps pamica's mean, symmetric-ZCA sphere and unmixing into those
 matrices (writing the sphere as `V diag(1/√e) Vᵀ` with `V` orthonormal so MNE's
 scalp maps come out in channel space). The equivalence
 `to_mne_ica().get_sources(raw) == AMICA.transform(X)` is pinned by the test
 suite on real sample EEG.
+
+## Rank-reduced fits and the PCA residual
+
+A fit can be rank-reduced by `pcakeep`/`pcadb`,
+or by automatic rank detection on Maxwell-filtered, average-referenced or interpolated data.
+AMICA then models only the retained PCA subspace, and `n_components_` is that rank.
+The export still carries the full PCA basis, so `apply` restores the residual the reduction discarded,
+as MNE's own ICA does (issue #322).
+With nothing excluded, `apply` returns the input;
+excluding a component removes that component and nothing else.
+
+This goes beyond the Fortran reference, whose back-projection reconstructs only the retained subspace.
+MNE's own `n_pca_components` gives that behavior back:
+
+```python
+ica = AMICAICA(random_state=42).fit(raw, pcakeep=20, max_iter=100)
+
+# Default: the residual is restored.
+clean = ica.apply(raw.copy(), exclude=[0])
+
+# Reference behavior: rank-reduced reconstruction.
+reduced = ica.apply(raw.copy(), exclude=[0], n_pca_components=ica.n_components_)
+```
+
+Sources, component maps and the log-likelihood are the same either way; only reconstruction differs.
+The fitted basis is `ica.pca_components_` (retained rows first, then the residual) with `ica.pca_explained_variance_`,
+and [pamica vs. AMICA](../guides/amica-differences.md#amicaicaapply-restores-the-pca-residual-issue-322) has the full rationale.
 
 ## Multi-model fits
 

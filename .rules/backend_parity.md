@@ -20,10 +20,11 @@ A backend may lack a behavior only when it *cannot* support it, and then:
 2. The call raises `NotImplementedError` with that reason, never a silent difference
 3. The divergence is listed in `docs/guides/amica-differences.md`
 
-Existing legitimate examples: MLX's non-fitting surface (`transform`, save/load,
-`do_reject`, `keep_best`, LLt/MIR) is absent -- `transform` raises
-`NotImplementedError` -- and is tracked as epic #278; MLX is float32-only because
-Apple GPUs have no float64.
+Existing legitimate example: MLX is float32-only because Apple GPUs have no
+float64 (epic #278's other MLX gaps -- `transform`/accessors/save-load
+(Phase 1, #287), `keep_best` (Phase 2, #288), `do_reject`/LLt/MIR
+(Phase 3, #289), and `variance_order` (the post-Phase-3 polish round,
+ahead of merge to `dev`) -- are all closed, which completes the epic).
 
 "I only had time for one" is not an exception.
 
