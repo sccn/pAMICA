@@ -11,6 +11,8 @@ Python backends are validated against.
 
 from __future__ import annotations
 
+import functools
+import inspect
 import subprocess
 import tempfile
 from pathlib import Path
@@ -18,62 +20,26 @@ from typing import Optional, Union
 
 import numpy as np
 
+from ..fortran_params import FORTRAN_TO_PAMICA_KEY
 from ..numpy_impl.load import AmicaOutput, loadmodout
 from . import resolver
 
-# Full default parameter set (mirrors sample_data/input.param) so the engine does
-# not depend on the sample data being installed. ``files``/``outdir``/``data_dim``/
-# ``field_dim`` are set per fit; everything else is a tunable default. Keys are the
-# Fortran param names; friendly aliases are mapped in ``fit``.
-_DEFAULT_PARAMS: dict[str, object] = {
-    "block_size": 512,
-    "do_opt_block": 0,
-    "blk_min": 256,
-    "blk_step": 256,
-    "blk_max": 1024,
-    "num_models": 1,
+# Settings the binary reads that no pamica backend has: its thread count, the
+# raw-data format, its output files and checkpoint cadence, the checkpoint
+# loading switches and the per-family update switches. They keep the values of
+# the bundled sample_data/input.param, as before issue #354. doPCA,
+# field_blocksize and load_W are keys that file carries and this amica15.f90
+# does not parse (pamica.fortran_params warns about them the same way).
+_NATIVE_ONLY_PARAMS: dict[str, object] = {
     "max_threads": 10,
-    "use_min_dll": 1,
-    "min_dll": 1e-09,
-    "use_grad_norm": 1,
-    "min_grad_norm": 1e-07,
-    "num_mix_comps": 3,
-    "pdftype": 0,
-    "max_iter": 2000,
     "num_samples": 1,
     "field_blocksize": 1,
     "do_history": 0,
     "histstep": 10,
-    "share_comps": 0,
-    "share_start": 100,
-    "comp_thresh": 0.99,
-    "share_iter": 100,
-    "lrate": 0.05,
-    "minlrate": 1e-08,
-    "mineig": 1e-12,
-    "lratefact": 0.5,
-    "rholrate": 0.05,
-    "rho0": 1.5,
-    "minrho": 1.0,
-    "maxrho": 2.0,
-    "rholratefact": 0.5,
-    "kurt_start": 3,
-    "num_kurt": 5,
-    "kurt_int": 1,
-    "do_newton": 1,
-    "newt_start": 50,
-    "newt_ramp": 10,
-    "newtrate": 1.0,
-    "do_reject": 0,
-    "numrej": 3,
-    "rejsig": 3.0,
-    "rejstart": 2,
-    "rejint": 3,
     "writestep": 20,
     "write_nd": 0,
     "write_LLt": 1,
     "decwindow": 1,
-    "max_decs": 3,
     "fix_init": 0,
     "update_A": 1,
     "update_c": 1,
@@ -81,8 +47,6 @@ _DEFAULT_PARAMS: dict[str, object] = {
     "update_alpha": 1,
     "update_mu": 1,
     "update_beta": 1,
-    "invsigmax": 100.0,
-    "invsigmin": 0.0,
     "do_rho": 1,
     "load_rej": 0,
     "load_W": 0,
@@ -93,15 +57,52 @@ _DEFAULT_PARAMS: dict[str, object] = {
     "load_beta": 0,
     "load_rho": 0,
     "load_comp_list": 0,
-    "do_mean": 1,
-    "do_sphere": 1,
     "doPCA": 1,
-    "pcakeep": 0,
-    "pcadb": 30.0,
     "byte_size": 4,
-    "doscaling": 1,
-    "scalestep": 1,
 }
+
+# The two canonical pamica keys (pamica.fortran_params) that AMICATorchNG
+# spells differently in its constructor.
+_TORCH_SPELLING = {"num_models": "n_models", "num_mix": "n_mix"}
+
+
+@functools.cache
+def _shared_default_params() -> dict[str, object]:
+    """pamica's shared defaults under the binary's keywords (issue #354).
+
+    Every keyword of ``pamica.fortran_params.FORTRAN_TO_PAMICA_KEY`` whose
+    pamica setting ``AMICATorchNG`` has takes ``AMICATorchNG``'s default
+    (``max_iter`` from its ``fit``), the same value the other backends hold
+    (``pamica/tests/test_default_settings.py``). A setting whose default is
+    ``None`` (``pcakeep``, ``pcadb``, ``seed``) is not written, and pamica
+    settings with no binary keyword (``keep_best``, ``mineig_rel``,
+    ``n_restarts``, ...) have nothing to write. Then the native-only knobs.
+    Imported lazily: the torch backend's signature is the shared source.
+    """
+    from ..torch_impl.core import AMICATorchNG
+
+    shared = {
+        name: param.default
+        for name, param in inspect.signature(AMICATorchNG).parameters.items()
+    }
+    shared["max_iter"] = (
+        inspect.signature(AMICATorchNG.fit).parameters["max_iter"].default
+    )
+    params: dict[str, object] = {}
+    for fortran_key, pamica_key in FORTRAN_TO_PAMICA_KEY.items():
+        if fortran_key == "num_mix":  # the binary's second spelling of num_mix_comps
+            continue
+        value = shared.get(_TORCH_SPELLING.get(pamica_key, pamica_key))
+        if value is not None:
+            params[fortran_key] = value
+    params.update(_NATIVE_ONLY_PARAMS)
+    return params
+
+
+def _default_params() -> dict[str, object]:
+    """A fresh copy of :func:`_shared_default_params`, for a caller to modify."""
+    return dict(_shared_default_params())
+
 
 # Friendly kwarg -> Fortran param-name aliases (match the Python backends' names).
 _ALIASES = {"n_models": "num_models", "n_mix": "num_mix_comps"}
@@ -138,6 +139,25 @@ class AMICANative:
         Any Fortran ``input.param`` field (or a friendly alias: ``n_models``,
         ``n_mix``), overriding the defaults; e.g. ``max_iter``, ``lrate``,
         ``pdftype``, ``do_newton``.
+
+    Notes
+    -----
+    The defaults are pamica's shared ones since issue #354, the values the
+    PyTorch, MLX and NumPy backends default to, under the binary's keywords
+    (``lrate`` 0.1, Newton off, ``max_iter`` 100, ``do_opt_block`` off,
+    ``pdftype`` 0, ...). pamica settings the binary has no keyword for, such
+    as ``keep_best`` and ``mineig_rel``, are not written, so the binary
+    returns its last iterate and uses the absolute ``mineig`` floor.
+
+    The binary's ``block_size`` counts one thread's share of a block, and it
+    processes no block at all when ``max_threads * block_size`` exceeds the
+    samples (an all-NaN fit, issue #292). Unless ``block_size`` is given, the
+    engine therefore writes pamica's 8192-sample block, capped at the data's
+    length, divided by ``max_threads`` (10 unless given): 819 for a long
+    recording. A given ``block_size`` is written as is. Before issue #354 the defaults were the bundled
+    ``sample_data/input.param``'s (``lrate`` 0.05, Newton on from iteration
+    50, ``max_iter`` 2000, ``block_size`` 512); pass that file's settings as
+    keywords to run it (see ``docs/api/native-backend.md``).
     """
 
     def __init__(
@@ -165,6 +185,37 @@ class AMICANative:
             return self.binary
         return resolver.resolve(self.version)
 
+    def _input_params(
+        self, n_channels: int, n_samples: int, params: dict[str, object]
+    ) -> dict[str, object]:
+        """The ``input.param`` settings :meth:`fit` writes for data of this
+        shape: pamica's shared defaults, then the constructor's and ``fit``'s
+        keywords (friendly aliases mapped), then the data's dimensions."""
+        merged = _default_params()
+        given = set()
+        for src in (self.params, params):
+            for key, value in src.items():
+                merged[_ALIASES.get(key, key)] = value
+                given.add(_ALIASES.get(key, key))
+        if "block_size" not in given:
+            # pamica's block_size counts the samples of one block; the
+            # binary's counts one thread's share of it, and it runs
+            # n_samples // (max_threads * block_size) blocks, so a block larger
+            # than the data would leave it none and an all-NaN fit (issue
+            # #292). The default is therefore pamica's block, at most the
+            # data, split over the threads.
+            # int(str(...)): a value passed as a file's text ("10") reads the same.
+            threads = int(str(merged["max_threads"]))
+            block = min(int(str(merged["block_size"])), n_samples)
+            merged["block_size"] = max(1, block // threads)
+        merged["data_dim"] = n_channels
+        merged["field_dim"] = n_samples
+        if not merged.get("pcakeep"):
+            merged["pcakeep"] = n_channels  # default: keep all components
+        # `files` must come first: amica15.f90 hard-stops if it parses other
+        # keys before the data file. Dict insertion order preserves that.
+        return {"files": "./data.fdt", "outdir": "./amicaout/", **merged}
+
     def fit(self, X: np.ndarray, **params: object) -> "AMICANative":
         """Run AMICA on ``X`` (shape ``(n_channels, n_samples)``) and store the
         result as ``self.output_`` (an ``AmicaOutput``)."""
@@ -172,15 +223,7 @@ class AMICANative:
         if X.ndim != 2:
             raise ValueError(f"X must be 2-D (n_channels, n_samples); got {X.shape}")
         n_channels, n_samples = X.shape
-
-        merged = dict(_DEFAULT_PARAMS)
-        for src in (self.params, params):
-            for key, value in src.items():
-                merged[_ALIASES.get(key, key)] = value
-        merged["data_dim"] = n_channels
-        merged["field_dim"] = n_samples
-        if not merged.get("pcakeep"):
-            merged["pcakeep"] = n_channels  # default: keep all components
+        param = self._input_params(n_channels, n_samples, params)
 
         binary = self._resolve_binary()
 
@@ -188,7 +231,7 @@ class AMICANative:
             work = Path(td)
             # AMICA reads the data as raw byte_size floats in column-major order
             # (numpy_impl/data.py: reshape order="F"); write it that way.
-            byte_size = merged["byte_size"]
+            byte_size = param["byte_size"]
             dtype = (
                 np.float32
                 if isinstance(byte_size, int) and byte_size == 4
@@ -198,9 +241,6 @@ class AMICANative:
 
             outdir = work / "amicaout"
             outdir.mkdir()
-            # `files` must come first: amica15.f90 hard-stops if it parses other
-            # keys before the data file. Dict insertion order preserves that.
-            param = {"files": "./data.fdt", "outdir": "./amicaout/", **merged}
             (work / "input.param").write_text(_render_param(param))
 
             env = None

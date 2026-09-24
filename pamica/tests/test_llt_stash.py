@@ -179,7 +179,8 @@ def test_native_binary_llt_is_the_last_estep(tmp_path):
     Opt-in (``AMICA_RUN_FORTRAN=1``) like the other binary-driven tests, so the
     default suite does not depend on a runnable ``amica15mac``. Uses the whole
     record, as the native-engine tests do: the binary NaNs on a short slice at
-    its default 512 block size (issue #292), which would test nothing here.
+    block size 512 (issue #292, the bundled input.param's size and the
+    engine's default until issue #354), which would test nothing here.
     """
     from pamica import AMICANative
 
