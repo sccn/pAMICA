@@ -1,0 +1,59 @@
+{
+  "bundled": {
+    "tier": "bundled",
+    "n_channels": 32,
+    "n_frames": 30504,
+    "k": 29.7890625,
+    "wall_clock_s": 2841.51899779198,
+    "single_model": {
+      "n_channels": 32,
+      "n_seeds_requested": 5,
+      "n_seeds_ok": 5,
+      "n_fortran_ok": 5,
+      "ng_vs_fortran_corr_mean": 0.9846753346966732,
+      "ng_vs_fortran_corr_min": 0.4527546638001393,
+      "ng_vs_fortran_corr_sd": 0.02898483475987737,
+      "ng_vs_fortran_amari_mean": 0.010926306892881809,
+      "ng_vs_fortran_amari_sd": 0.013612848173479644,
+      "fortran_vs_fortran_corr_mean": 0.9713469844921041,
+      "fortran_vs_fortran_corr_min": 0.4501997832248426,
+      "fortran_vs_fortran_amari_mean": 0.018516414708393963,
+      "fortran_ll_mean": -3.3997634405462462,
+      "fortran_ll_sd": 0.00041775059461938454,
+      "ng_ll_mean": -3.399581546165222,
+      "ng_ll_sd": 0.00010540413229583146,
+      "ll_gap_of_means": 0.00018189438102433897
+    },
+    "multimodel": {
+      "n_runs_requested": 20,
+      "n_fortran_ok": 20,
+      "n_ng_ok": 20,
+      "corr_within_fortran_mean": 0.6255295314440862,
+      "corr_within_fortran_sd": 0.036300560820058544,
+      "corr_within_ng_mean": 0.6376031888481765,
+      "corr_within_ng_sd": 0.0424716014598481,
+      "corr_between_mean": 0.6318832725487383,
+      "corr_between_sd": 0.04158240732116439,
+      "corr_diff_between_minus_within_fortran": 0.006353741104652144,
+      "corr_perm_p_not_worse": 0.8836558172091395,
+      "amari_within_fortran_mean": 0.16630054685403053,
+      "amari_within_fortran_sd": 0.017003169113571776,
+      "amari_within_ng_mean": 0.17623288658259578,
+      "amari_within_ng_sd": 0.025328776779805127,
+      "amari_between_mean": 0.17155089714011276,
+      "amari_between_sd": 0.02186823769645278,
+      "amari_diff_between_minus_within_fortran": 0.005250350286082228,
+      "amari_perm_p_not_worse": 0.05089745512724364,
+      "fortran_ll_mean": -3.354345258775286,
+      "fortran_ll_sd": 0.002081060017571174,
+      "ng_ll_mean": -3.354145177582788,
+      "ng_ll_sd": 0.002921024726455666,
+      "ll_ks_p": 0.8319696107963263
+    },
+    "score_functions": {
+      "max_log_pdf_diff": 8.881784197001252e-16,
+      "max_score_diff": 1.7763568394002505e-15,
+      "max_sufficient_stats_diff": 4.547473508864641e-13
+    }
+  }
+}

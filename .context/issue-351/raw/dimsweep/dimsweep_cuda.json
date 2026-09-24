@@ -1,0 +1,80 @@
+{
+  "platform": {
+    "machine": "x86_64",
+    "system": "Linux",
+    "nproc": 32,
+    "torch": "2.12.1+cu130",
+    "cuda_device": "NVIDIA GeForce RTX 4090",
+    "loadavg": [
+      33.0,
+      36.2,
+      32.2
+    ]
+  },
+  "config": {
+    "data": "/home/yahya/epic324-runs/p15/ds002718_sub-002_eeg70.npy",
+    "channels": "32,48,70",
+    "montage": null,
+    "samples": 30000,
+    "iters": 25,
+    "repeats": 3,
+    "backends": "torch-cuda-f64,torch-cuda-f32",
+    "out": "/home/yahya/epic324-runs/p15/dimsweep_cuda.json",
+    "report": null,
+    "n_models": 1,
+    "share": false,
+    "fortran_bin": "/home/yahya/pamica-p15/benchmarks/fortran/amica15",
+    "fortran_threads": null,
+    "threads": null
+  },
+  "rows": [
+    {
+      "config": "m1",
+      "channels": 32,
+      "backend": "torch-cuda-f64",
+      "threads": null,
+      "ms_per_iter": 125.49756260123104,
+      "final_ll": -3.2848901731348024
+    },
+    {
+      "config": "m1",
+      "channels": 32,
+      "backend": "torch-cuda-f32",
+      "threads": null,
+      "ms_per_iter": 145.12465924024582,
+      "final_ll": -3.2848782539367676
+    },
+    {
+      "config": "m1",
+      "channels": 48,
+      "backend": "torch-cuda-f64",
+      "threads": null,
+      "ms_per_iter": 90.71042256429791,
+      "final_ll": -3.2083838687794355
+    },
+    {
+      "config": "m1",
+      "channels": 48,
+      "backend": "torch-cuda-f32",
+      "threads": null,
+      "ms_per_iter": 105.01488755922765,
+      "final_ll": -3.208394765853882
+    },
+    {
+      "config": "m1",
+      "channels": 70,
+      "backend": "torch-cuda-f64",
+      "threads": null,
+      "ms_per_iter": 123.88060091994703,
+      "final_ll": -3.217233763497051
+    },
+    {
+      "config": "m1",
+      "channels": 70,
+      "backend": "torch-cuda-f32",
+      "threads": null,
+      "ms_per_iter": 137.2088565211743,
+      "final_ll": -3.2168900966644287
+    }
+  ]
+}

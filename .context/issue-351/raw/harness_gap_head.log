@@ -1,0 +1,131 @@
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+Running PyTorch AMICA (natural-gradient EM backend)...
+WARNING: params.json settings with no AMICATorchNG equivalent are ignored (NG uses its own behavior): ['do_history', 'histstep', 'writestep']. The Fortran run may honor them, so a parity comparison can differ.
+Fitting AMICA with 32 channels, 30504 samples
+Models: 1, Mixture components: 3
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+Running Fortran AMICA...
+Running Fortran AMICA...
+Running Fortran AMICA...
+Running PyTorch AMICA (natural-gradient EM backend)...
+WARNING: params.json settings with no AMICATorchNG equivalent are ignored (NG uses its own behavior): ['do_history', 'histstep', 'writestep']. The Fortran run may honor them, so a parity comparison can differ.
+Fitting AMICA with 32 channels, 30504 samples
+Models: 1, Mixture components: 3
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+Running Fortran AMICA...
+Running PyTorch AMICA (natural-gradient EM backend)...
+WARNING: params.json settings with no AMICATorchNG equivalent are ignored (NG uses its own behavior): ['do_history', 'histstep', 'writestep']. The Fortran run may honor them, so a parity comparison can differ.
+Fitting AMICA with 32 channels, 30504 samples
+Models: 1, Mixture components: 3
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+Running Fortran AMICA...
+Running PyTorch AMICA (natural-gradient EM backend)...
+WARNING: params.json settings with no AMICATorchNG equivalent are ignored (NG uses its own behavior): ['do_history', 'histstep', 'writestep']. The Fortran run may honor them, so a parity comparison can differ.
+Fitting AMICA with 32 channels, 30504 samples
+Models: 1, Mixture components: 3
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+Running Fortran AMICA...
+Running PyTorch AMICA (natural-gradient EM backend)...
+WARNING: params.json settings with no AMICATorchNG equivalent are ignored (NG uses its own behavior): ['do_history', 'histstep', 'writestep']. The Fortran run may honor them, so a parity comparison can differ.
+Fitting AMICA with 32 channels, 30504 samples
+Models: 1, Mixture components: 3
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+Running Fortran AMICA...
+Running PyTorch AMICA (natural-gradient EM backend)...
+WARNING: params.json settings with no AMICATorchNG equivalent are ignored (NG uses its own behavior): ['do_history', 'histstep', 'writestep']. The Fortran run may honor them, so a parity comparison can differ.
+Fitting AMICA with 32 channels, 30504 samples
+Models: 1, Mixture components: 3
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+Running Fortran AMICA...
+Running PyTorch AMICA (natural-gradient EM backend)...
+WARNING: params.json settings with no AMICATorchNG equivalent are ignored (NG uses its own behavior): ['do_history', 'histstep', 'writestep']. The Fortran run may honor them, so a parity comparison can differ.
+Fitting AMICA with 32 channels, 30504 samples
+Models: 1, Mixture components: 3
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+Running Fortran AMICA...
+Running PyTorch AMICA (natural-gradient EM backend)...
+WARNING: params.json settings with no AMICATorchNG equivalent are ignored (NG uses its own behavior): ['do_history', 'histstep', 'writestep']. The Fortran run may honor them, so a parity comparison can differ.
+Fitting AMICA with 32 channels, 30504 samples
+Models: 1, Mixture components: 3
+AMICA uses float64 for Fortran parity; MPS lacks float64 support, so falling back to CPU. Pass dtype=torch.float32 with device='mps' to run on MPS.
+
+{
+  "root": "/Users/yahya/Documents/git/mlx-fc-phase15-final-parity",
+  "binary": "/Users/yahya/.cache/pamica/bin/v0.3.3/amica15-macos-arm64",
+  "seed": 42,
+  "independent_start": {
+    "reference_final_ll": -3.4112742644,
+    "pamica_final_ll": -3.4110031143196786,
+    "abs_ll_difference": 0.0002711500803211919,
+    "mean_matched_corr": 0.9991066998432325,
+    "amari": 0.0038402262528516836
+  },
+  "same_start": {
+    "pamica_final_ll": -3.4110031143196786,
+    "reference_from_pamica_init_final_ll": -3.411001549158044,
+    "abs_ll_difference": 1.5651616345202513e-06,
+    "mean_matched_corr": 0.9999999298370493,
+    "min_matched_corr": 0.9999994935065543,
+    "amari": 3.919041819197437e-05,
+    "pamica_runtime_s": 18.209407091140747
+  },
+  "spread": {
+    "seeds": [
+      42,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "reference_final_ll": [
+      -3.4112742644,
+      -3.4109011933,
+      -3.4113405673,
+      -3.4111396355,
+      -3.4110592339,
+      -3.4114007131,
+      -3.4106012053,
+      -3.411368154
+    ],
+    "pamica_final_ll": [
+      -3.4110031143196786,
+      -3.410626483863021,
+      -3.411424789950665,
+      -3.4107315624727748,
+      -3.410645033104124,
+      -3.4112454654530766,
+      -3.410883961942931,
+      -3.4109585758636474
+    ],
+    "reference_ll_sd": 0.00025787060418183374,
+    "pamica_ll_sd": 0.0002656461686797844,
+    "reference_ll_range": 0.0007995078000000433,
+    "pamica_ll_range": 0.0007983060876441961,
+    "mean_ll_difference_of_means": 0.00019574747876038856,
+    "all_pairs_abs_gap_median": 0.0003508213583620634,
+    "all_pairs_abs_gap_min_max": [
+      1.723135706876988e-05,
+      0.0008235846506652322
+    ],
+    "corr_pamica_vs_reference_mean": 0.9972741592912583,
+    "corr_reference_vs_reference_mean": 0.9976571097787578
+  }
+}
+uv run python .context/issue-351/harness_gap.py .  --spread 1,2,3,4,5,6,7  277.67s user 219.56s system 202% cpu 4:05.71 total

@@ -1,0 +1,21 @@
+{
+  "root": "/private/tmp/claude-501/-Users-yahya-Documents-git-pamica/3b0e67f1-eae1-4864-8013-454e2363dda4/scratchpad/p15_pre",
+  "binary": "/Users/yahya/.cache/pamica/bin/v0.3.3/amica15-macos-arm64",
+  "seed": 42,
+  "independent_start": {
+    "reference_final_ll": -3.4112742644,
+    "pamica_final_ll": -3.411245246404745,
+    "abs_ll_difference": 2.901799525467652e-05,
+    "mean_matched_corr": 0.9992076035220132,
+    "amari": 0.003728162900584144
+  },
+  "same_start": {
+    "pamica_final_ll": -3.411245246404745,
+    "reference_from_pamica_init_final_ll": -3.41100986299553,
+    "abs_ll_difference": 0.00023538340921502865,
+    "mean_matched_corr": 0.9999857141680409,
+    "min_matched_corr": 0.9998973352640502,
+    "amari": 0.000575904415394627,
+    "pamica_runtime_s": 17.72438097000122
+  }
+}

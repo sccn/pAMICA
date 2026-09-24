@@ -1,0 +1,55 @@
+{
+  "platform": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "nproc": 14,
+    "torch": "2.12.1",
+    "loadavg": [
+      3.2,
+      3.9,
+      4.8
+    ]
+  },
+  "config": {
+    "data": "/Users/yahya/Documents/git/mlx-fc-phase15-final-parity/benchmarks/data/ds002718_sub-002_eeg70.npy",
+    "channels": "70",
+    "montage": null,
+    "samples": 30000,
+    "iters": 25,
+    "repeats": 3,
+    "backends": "mlx-f32,torch-cpu-f64,torch-mps-f32",
+    "out": "/private/tmp/claude-501/-Users-yahya-Documents-git-pamica/3b0e67f1-eae1-4864-8013-454e2363dda4/scratchpad/p15gates/dim_mlx-fc-phase15-final-parity.json",
+    "report": null,
+    "n_models": 1,
+    "share": false,
+    "fortran_bin": "/Users/yahya/Documents/git/mlx-fc-phase15-final-parity/benchmarks/fortran/amica15",
+    "fortran_threads": null,
+    "threads": null
+  },
+  "rows": [
+    {
+      "config": "m1",
+      "channels": 70,
+      "backend": "mlx-f32",
+      "threads": null,
+      "ms_per_iter": 33.12467999989167,
+      "final_ll": -3.216428518295288
+    },
+    {
+      "config": "m1",
+      "channels": 70,
+      "backend": "torch-cpu-f64",
+      "threads": null,
+      "ms_per_iter": 189.41867836052552,
+      "final_ll": -3.217461695658916
+    },
+    {
+      "config": "m1",
+      "channels": 70,
+      "backend": "torch-mps-f32",
+      "threads": null,
+      "ms_per_iter": 166.6829549986869,
+      "final_ll": -3.2163822650909424
+    }
+  ]
+}

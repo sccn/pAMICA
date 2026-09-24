@@ -1,0 +1,18 @@
+[
+  {
+    "seed": 0,
+    "fortran_ll100_separate_minus_prefix": 0.0,
+    "ng_history_prefix_max_abs_diff": 0.0,
+    "ng_keep_best_off_final_minus_prefix_last": 0.0,
+    "ng_keep_best_on_final_minus_prefix_best": 0.0,
+    "restored_at_100": false
+  },
+  {
+    "seed": 1,
+    "fortran_ll100_separate_minus_prefix": 0.0,
+    "ng_history_prefix_max_abs_diff": 0.0,
+    "ng_keep_best_off_final_minus_prefix_last": 0.0,
+    "ng_keep_best_on_final_minus_prefix_best": 0.0,
+    "restored_at_100": false
+  }
+]

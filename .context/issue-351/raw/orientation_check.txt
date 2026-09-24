@@ -1,0 +1,10 @@
+root /Users/yahya/Documents/git/mlx-fc-phase15-final-parity
+max |A - A.T| of the initial A: 9.821e-03
+pamica iteration-1 LL: -3.513155323725571
+binary iteration-1 LL, seed_from_torch: -3.513155323725570 (diff +8.882e-16)
+binary iteration-1 LL, stored A untransposed: -3.513168802764010 (diff -1.348e-05)
+root /private/tmp/claude-501/-Users-yahya-Documents-git-pamica/3b0e67f1-eae1-4864-8013-454e2363dda4/scratchpad/p15_pre
+max |A - A.T| of the initial A: 9.822e-03
+pamica iteration-1 LL: -3.513128081184544
+binary iteration-1 LL, seed_from_torch: -3.513128081184544 (diff +8.882e-16)
+binary iteration-1 LL, stored A untransposed: -3.513141342844886 (diff -1.326e-05)

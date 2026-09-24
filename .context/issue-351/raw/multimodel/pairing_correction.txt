@@ -1,0 +1,1 @@
+new ensemble (bundled tier, 780 run pairs): mean naive 0.1899 best 0.1714; reduction mean 0.0185, median 0.0000, max 0.1552; pairs swapped 333 of 780

@@ -1,0 +1,127 @@
+{
+  "platform": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "nproc": 14,
+    "torch": "2.12.1",
+    "loadavg": [
+      10.3,
+      15.3,
+      12.1
+    ]
+  },
+  "config": {
+    "data": "benchmarks/data/ds002718_sub-002_eeg70.npy",
+    "channels": "32,48,70",
+    "montage": null,
+    "samples": 30000,
+    "iters": 25,
+    "repeats": 1,
+    "backends": "mlx-f32,torch-cpu-f64,torch-mps-f32,numpy-cpu-f64",
+    "out": ".context/issue-351/raw/dimsweep/dimsweep_mac_ll.json",
+    "report": null,
+    "n_models": 1,
+    "share": false,
+    "fortran_bin": "/Users/yahya/Documents/git/mlx-fc-phase15-final-parity/benchmarks/fortran/amica15",
+    "fortran_threads": null,
+    "threads": null
+  },
+  "rows": [
+    {
+      "config": "m1",
+      "channels": 32,
+      "backend": "mlx-f32",
+      "threads": null,
+      "ms_per_iter": 35.301941679790616,
+      "final_ll": -3.2848825454711914
+    },
+    {
+      "config": "m1",
+      "channels": 32,
+      "backend": "torch-cpu-f64",
+      "threads": null,
+      "ms_per_iter": 141.085026639048,
+      "final_ll": -3.2848893716905923
+    },
+    {
+      "config": "m1",
+      "channels": 32,
+      "backend": "torch-mps-f32",
+      "threads": null,
+      "ms_per_iter": 302.2509750002064,
+      "final_ll": -3.2848832607269287
+    },
+    {
+      "config": "m1",
+      "channels": 32,
+      "backend": "numpy-cpu-f64",
+      "threads": null,
+      "ms_per_iter": 337.4410200002603,
+      "final_ll": -3.2847793027686554
+    },
+    {
+      "config": "m1",
+      "channels": 48,
+      "backend": "mlx-f32",
+      "threads": null,
+      "ms_per_iter": 35.69712499855086,
+      "final_ll": -3.208386182785034
+    },
+    {
+      "config": "m1",
+      "channels": 48,
+      "backend": "torch-cpu-f64",
+      "threads": null,
+      "ms_per_iter": 148.65664332173765,
+      "final_ll": -3.2083835269014345
+    },
+    {
+      "config": "m1",
+      "channels": 48,
+      "backend": "torch-mps-f32",
+      "threads": null,
+      "ms_per_iter": 375.34432664047927,
+      "final_ll": -3.208386182785034
+    },
+    {
+      "config": "m1",
+      "channels": 48,
+      "backend": "numpy-cpu-f64",
+      "threads": null,
+      "ms_per_iter": 499.61313331965357,
+      "final_ll": -3.2089337357203798
+    },
+    {
+      "config": "m1",
+      "channels": 70,
+      "backend": "mlx-f32",
+      "threads": null,
+      "ms_per_iter": 38.29424163792282,
+      "final_ll": -3.216428518295288
+    },
+    {
+      "config": "m1",
+      "channels": 70,
+      "backend": "torch-cpu-f64",
+      "threads": null,
+      "ms_per_iter": 195.01211500028148,
+      "final_ll": -3.217461695658916
+    },
+    {
+      "config": "m1",
+      "channels": 70,
+      "backend": "torch-mps-f32",
+      "threads": null,
+      "ms_per_iter": 404.7074583196081,
+      "final_ll": -3.2163822650909424
+    },
+    {
+      "config": "m1",
+      "channels": 70,
+      "backend": "numpy-cpu-f64",
+      "threads": null,
+      "ms_per_iter": 743.3544716797769,
+      "final_ll": -3.220537041706068
+    }
+  ]
+}

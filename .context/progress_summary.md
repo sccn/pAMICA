@@ -16,7 +16,8 @@ what remains, as of epic #324 (after v0.3.3). User-facing detail is in `docs/cha
 - Newton is ported from the NumPy reference and stays positive-definite (0 fallbacks on the
   sample data).
 - **Metrics:** single-model LL ~ -3.40 (Fortran -3.4018); Hungarian-matched component correlation
-  ~0.997, clearing the >0.95 gate.
+  ~0.997, clearing the >0.95 gate. Re-measured under epic #324 (#351) against the bundled
+  200-iteration fixture: LL within 1.4e-4, correlation 0.998, Amari 4.8e-3, on all three backends.
 
 ### Adaptive PDF selection (issue #26)
 - All five `amica15.f90` `pdftype` density families ported to `AMICATorchNG`: 0 generalized
@@ -28,18 +29,20 @@ what remains, as of epic #324 (after v0.3.3). User-facing detail is in `docs/cha
 
 ### Multi-model AMICA (issue #27)
 - Validated by **distributional equivalence**: multi-model AMICA is not partition-identifiable, so
-  the NG-vs-Fortran partition cross-correlation distribution is statistically indistinguishable
-  from Fortran's own run-to-run spread (Mann-Whitney p=0.97, TOST within +/-0.05). Per-block
-  sufficient stats are bit-exact vs Fortran.
+  the NG-vs-Fortran partition cross-correlation distribution is compared with Fortran's own
+  run-to-run spread. Re-measured under epic #324 (#351): between minus within-Fortran +0.006
+  (run-level permutation p=0.88; Amari +0.005, p=0.051), final LL -3.3541 vs -3.3543 (Kolmogorov-Smirnov (KS) p=0.83).
+  Per-block sufficient stats agree with Fortran to round-off.
 - Per-model bias `c` update (`update_c`) ported to both backends, guarded to a no-op for
   `n_models=1` so single-model parity stays bit-exact. See `.context/issue-27/`.
 
 ### Best-iterate safeguard (issue #51)
 - `AMICATorchNG.fit` returns the highest-LL iterate (`keep_best`, default on; `final_ll_` reports
   the returned iterate's LL, `ll_history` keeps the true trajectory), not the last iterate under
-  the non-monotone lrate schedule. Cuts multi-model LL sd from 12.7x to 2.0x Fortran's at a
-  matched 100-iter budget. Single-model #24 parity stays bit-exact (monotone => no restore). See
-  ADR 0003.
+  the non-monotone lrate schedule. It cut multi-model LL sd from 12.7x to 2.0x Fortran's at a
+  matched 100-iter budget; re-measured under epic #324 (#351) the sd ratio is 1.0x with or without
+  it, and a restore fired in one of 20 seeded fits (300-iteration budget only). Single-model #24 parity stays bit-exact
+  (monotone => no restore). See ADR 0003.
 
 ### Degenerate-fit contract (issues #50, #306, #339)
 - The `AMICA` wrapper no longer treats a degenerate fit (`stop_reason` nan_ll / singular_ll /
@@ -88,8 +91,10 @@ what remains, as of epic #324 (after v0.3.3). User-facing detail is in `docs/cha
 - Validation harness (`validate_implementations.py --backend {torch,numpy,mlx}`, a comma-separated
   list, or `all`; default `torch`, whose report is unchanged) runs each backend against one Fortran
   reference run with the same settings and matches components via the Hungarian algorithm, on real
-  sample EEG (#315). All three meet the Fortran bar on the bundled sample (LL within 3.2e-5,
-  correlation 0.9992, Amari 0.004; rows and bars in `docs/guides/validation.md`), pinned by the
+  sample EEG (#315). All three meet the Fortran bar on the bundled sample (re-measured under epic
+  #324 in #351: LL within 2.8e-4, correlation 0.9991, Amari 0.004 from independent starts, inside the
+  reference's own seed-to-seed LL sd of 2.6e-4; from a shared start LL within 1.6e-6; rows and bars
+  in `docs/guides/validation.md`, run records in `.context/issue-351/`), pinned by the
   `AMICA_RUN_FORTRAN`-gated test in `test_fortran_param_forwarding.py`.
 
 ## Remaining

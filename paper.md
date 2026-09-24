@@ -30,13 +30,15 @@ bibliography: paper.bib
 # Summary
 
 Independent Component Analysis (ICA) separates electroencephalographic and magnetoencephalographic (EEG/MEG) recordings into maximally independent sources that isolate brain, muscle, and artifact activities for downstream analysis [@makeig1995independent; @vigario1997independent; @iversen2019megeeg].
-Adaptive Mixture ICA (AMICA) [@palmer2006super; @palmer2007modeling; @palmer2012amica] models each source with a flexible, self-adjusting probability density and lets several ICA models coexist, one per segment of a recording.
+Adaptive Mixture ICA (AMICA) [@palmer2006super; @palmer2007modeling; @palmer2012amica] models each source with a flexible, self-adjusting probability density and lets several ICA models coexist,
+one per segment of a recording.
 Among the algorithms benchmarked by @delorme2012independent it returned the least dependent and most dipolar decompositions,
-properties that study links to physiological interpretability.
+properties that the study links to physiological interpretability.
 Its reference implementation, by Jason Palmer, is a Fortran program distributed as a compiled binary and usually run from MATLAB/EEGLAB;
 it runs only on the central processing unit (CPU) and has no Python interface.
 
-`pamica` reproduces the reference Fortran results within numerical tolerance while running on the CPU, NVIDIA graphics processing units (GPUs, via CUDA), and Apple GPUs (through Apple's MLX array framework [@mlx2023]).
+`pamica` reproduces the reference Fortran's single-model results within numerical tolerance, and its multi-model solutions spread like the reference's own,
+while running on the CPU, NVIDIA graphics processing units (GPUs, via CUDA), and Apple GPUs (through Apple's MLX array framework [@mlx2023]).
 It reimplements the algorithm on PyTorch [@paszke2019pytorch], NumPy [@harris2020array], and SciPy [@virtanen2020scipy],
 and exposes a scikit-learn-style estimator under a BSD-3-Clause license.
 It writes the format EEGLAB's AMICA loader reads, so established MATLAB tooling consumes its results unchanged.
@@ -52,10 +54,10 @@ General-purpose Python ICA implementations do not fill this gap.
 `scikit-learn` and `MNE-Python` provide FastICA [@hyvarinen2000independent] and Infomax [@bell1995information; @lee1999independent],
 while Picard [@ablin2018faster] offers faster-converging maximum-likelihood ICA;
 none implement AMICA's mixture of models, adaptive generalized-Gaussian densities, or Newton updates, so none can reproduce its decompositions.
-`pamica` is for analysts who want AMICA-quality decompositions in Python, for anyone with a GPU who wants faster runs than the CPU-only binary,
-and for methodologists who need a transparent reference to build on.
+`pamica` serves analysts who want AMICA-quality decompositions in Python and anyone with a GPU who wants faster runs than the CPU-only binary;
+it is also a transparent reference for methodologists to build on.
 The parity measurements reported here use EEG.
-The algorithm itself is modality-agnostic, and an external user has fit rank-reduced, Maxwell-filtered MEG with it end to end,
+The algorithm itself is modality-agnostic, and an external user has fit rank-reduced, Maxwell-filtered MEG with it end to end (see the research impact statement),
 but parity with the reference has not yet been measured on MEG.
 
 # State of the field
@@ -90,46 +92,54 @@ Double precision is the default because the parity comparisons need it; single p
 
 Parity is measured two ways: by Hungarian-matched component correlation,
 and by the Amari distance [@amari1996new], a relabeling- and scale-invariant metric that needs no assignment step.
-Both implementations ran AMICA's default 2000 iterations with Newton disabled (`pamica`'s own default), to isolate the algorithm from initialization.
-With Newton enabled and independent seeds, some of the weakest components settle into a different basin of equal or higher likelihood:
-on one seed of three this affected ten of seventy components, while the other two matched the reference at ~0.99.
-A matched initialization restores ~0.997, so this is a property of the initialization, not a parity defect.
-The single-model comparison uses a well-determined external recording ([NEMAR on002718](https://doi.org/10.82901/nemar.on002718), $k\approx153$, where $k$ = frames over squared channel count [@frank2025sufficient]) alongside the bundled 32-channel sample ($k\approx30$).
-A mixture of ICA models is not partition-identifiable, so exact partition parity is the wrong bar there;
-it is judged instead by whether the implementations sample a similar distribution of solutions, over ensembles of 20 runs each (\autoref{fig:ensemble}).
-A permutation test finds no evidence that cross-implementation agreement is worse than Fortran's own run-to-run agreement.
+Both implementations ran EEGLAB's default of 2000 iterations with Newton disabled (`pamica`'s own default), to isolate the algorithm from initialization.
+With Newton enabled, some of the weakest components settle into different basins of equal or higher likelihood from different starts, in the reference's runs as in `pamica`'s:
+against one reference run, one `pamica` seed of three differed on eight of seventy components and the other two matched at 0.995 and 0.996,
+and two reference runs from different seeds differed on two.
+From a shared start the two implementations end with the same components (correlation 0.9999998).
+The single-model comparison uses a well-determined external recording (OpenNeuro ds002718, mirrored in the NEMAR archive [@delorme2022nemar] as [on002718](https://doi.org/10.82901/nemar.on002718),
+$k\approx153$, where $k$ = frames over squared channel count [@frank2025sufficient]) alongside the bundled 32-channel sample ($k\approx30$).
+On the bundled sample one of the five reference runs ended in a lower-likelihood basin and sets the five-pair Amari mean;
+over 50 run pairs the distance between the implementations (0.004) is close to the reference's own run-to-run distance (0.005).
+A mixture of ICA models is not partition-identifiable,
+so the implementations are compared by the distributions of solutions they sample, over ensembles of 20 runs each (\autoref{fig:ensemble}).
+One-sided run-level permutation tests of whether cross-implementation agreement is worse than the reference's own run-to-run agreement
+give $p=0.88$ by correlation and $p=0.051$ by Amari distance, on which `pamica`'s ensemble spreads slightly more than the reference's.
 
 | Regime | Metric (dataset) | Result (mean) |
 |---|---|---|
-| Single | Log-likelihood gap (on002718) | within ~0.0005 of $-3.6993$ |
-| Single | Component correlation (on002718) | 0.998 |
-| Single | Amari distance (bundled) | 0.006 |
-| Single | Score functions, sufficient statistics | exact, $\sim\!10^{-15}$ |
-| Multi | Correlation, one run: cross; within-Fortran | 0.65; 0.64 (sd 0.05) |
-| Multi | Amari, one run: cross; within-Fortran | 0.163; 0.174 (sd 0.02) |
-| Multi | Ensemble agreement, cross $-$ within-Fortran | correlation $+0.011$ ($p=0.96$); Amari $-0.011$ ($p>0.999$) |
-| Multi | Ensemble log-likelihood: Fortran; `pamica` | $-3.3539$; $-3.3629$ (Kolmogorov-Smirnov $p=6\times10^{-5}$) |
+| Single | Log-likelihood gap (on002718) | $6\times10^{-6}$, both at $-3.6993$ |
+| Single | Component correlation (on002718) | 0.9996 (Fortran vs Fortran 0.998) |
+| Single | Amari distance (bundled) | 0.011 (5 run pairs); 0.004 (50 pairs) |
+| Single | Score functions; sufficient statistics | $\le 2\times10^{-15}$ absolute; $3\times10^{-16}$ relative |
+| Multi | Correlation, one run: cross; within-Fortran | 0.632; 0.626 (sd 0.04) |
+| Multi | Amari, one run: cross; within-Fortran | 0.172; 0.166 (sd 0.02) |
+| Multi | Ensemble agreement, cross $-$ within-Fortran | correlation $+0.006$ ($p=0.88$); Amari $+0.005$ ($p=0.051$) |
+| Multi | Ensemble log-likelihood: Fortran; `pamica` | $-3.3543$; $-3.3541$ (Kolmogorov-Smirnov $p=0.83$) |
 
-: Parity of `pamica` with the Fortran reference. Multi-model rows are over 20-run ensembles (190 within-, 400 cross-implementation pairs); sd is the standard deviation, given where computed.
-The final row is the one metric on which the ensembles differ significantly, and it is convergence speed rather than optimum quality: `pamica` reaches Fortran's mean by 200 iterations and passes it by 300.
+: Parity of `pamica` with the Fortran reference. Multi-model rows are over 20-run ensembles (190 within-Fortran and 190 within-`pamica`, plus 400 cross-implementation pairs); sd is the standard deviation, given where computed;
+$p$ values are one-sided run-level permutation tests.
 
-![Multi-model ensemble partition-correlation (A) and log-likelihood (B) distributions, 20 `pamica` and 20 Fortran fits of the sample EEG; dashed lines mark each mean.
-A's three distributions overlap, so the single-run correlation reflects intrinsic run-to-run spread, not a gap to the reference.
-B's separation is Table 1's 0.009 gap on a ~0.035 axis.\label{fig:ensemble}](docs/assets/figures/multimodel-ensemble.png){ width=100% }
+![Multi-model ensemble partition-correlation (A) and log-likelihood (B) distributions, 20 `pamica` and 20 Fortran fits of the sample EEG; vertical lines mark each mean.
+A's three distributions overlap: the single-run correlation of ~0.63 matches the reference's agreement with itself.
+B's two means lie 0.0002 apart on a ~0.02 axis.\label{fig:ensemble}](docs/assets/figures/multimodel-ensemble.png){ width=100% }
 
-All backends converge to the same single-model log-likelihood on real EEG (maximum pairwise difference ~0.003),
-and single precision matches double to four or five significant digits on that log-likelihood.
-Component-level float32 agreement is not yet characterized at a matched iteration budget, so float64 remains the default for parity work,
-and double-precision CUDA is the reproducible NVIDIA path.
+From a shared start with the harness settings, the single-precision MLX backend and the double-precision PyTorch backend differ by $5\times10^{-6}$ in log-likelihood after 100 iterations,
+with mean matched component correlation 0.9999999 and Amari distance $5\times10^{-5}$.
+In the throughput benchmark's runs on a 30,000-frame excerpt of the external recording, the backends that share a start agree after 25 iterations to $10^{-5}$ in log-likelihood on 32 and 48 channels;
+with 70 channels ($k\approx6$) they differ by up to $10^{-3}$, about the effect of perturbing one sample by $10^{-9}$ µV.
+Double precision remains the default for parity work, and double-precision CUDA is the reproducible NVIDIA path.
 
 On real 70-channel EEG at `block_size=512`, per-iteration cost is 25 ms for MLX on an Apple GPU, 39 ms for double-precision CUDA on an RTX 4090,
 and 30 ms for native Fortran on a 24-core i9-13900K, against 193 ms for PyTorch on an Apple-Silicon CPU and 255 ms for PyTorch-Metal.
-That comparison is block-size-confounded: PyTorch-Metal is far more block-size-sensitive than the CPU it runs beside, falling from 431 to 30.5 ms/iteration on the bundled 32-channel sample
-between `block_size=512` and `pamica`'s current 8192 default, still behind the CPU's 21.7 ms/iteration there, and to 13.5 ms/iteration, below the CPU's 15.8 ms,
-at a further-tuned single-block setting that is memory-limited rather than a free win, since peak block memory scales with `block_size`, which is why 8192 stays the shipped default.
+That comparison is block-size-confounded: PyTorch-Metal is far more block-size-sensitive than the CPU it runs beside,
+falling from 431 to 30.5 ms/iteration on the bundled 32-channel sample between `block_size=512` and `pamica`'s current 8192 default,
+still behind the CPU's 21.7 ms/iteration there,
+and to 13.5 ms/iteration, below the CPU's 15.8 ms, at a further-tuned single-block setting.
+Peak block memory grows with `block_size`, which is why 8192 stays the shipped default.
 MLX stays the fastest Apple backend throughout the sweep.
 Full tables, the data-size sweep, and reproduction commands are in the [documentation](https://eeglab.org/pAMICA/guides/validation/); the correctness harness never uses synthetic data.
-The harness and sample data ship with the package, and every row of Table 1 but the two on002718 entries re-runs from the bundled sample alone.
+The harness and sample data are in the source repository, and every row of Table 1 but the two on002718 entries re-runs from the bundled sample alone.
 
 # Research impact statement
 
@@ -140,10 +150,10 @@ where an MNE core developer and the author of a competing port lean toward `pami
 since this Center develops AMICA and maintains the reference Fortran and EEGLAB.
 
 `sccn/pAMICA` has been public since 2021, with public issues, pull requests, nine releases (six on PyPI), and a Zenodo archive.
-Three researchers outside the author group have filed issues, two mid-analysis on their own data:
+Three researchers outside the author group have filed issues, two of them mid-analysis on their own data:
 a 236-channel, 8.3-million-sample EEG decomposition (issue 207) and Maxwell-filtered 306-channel MEG (issue 221);
 the third is adopting AMICA for a multiverse analysis in MNE-Python (issue 206).
-Integration into this Center's Python preprocessing and into NEMAR [@delorme2022nemar], the public archive we operate (800 datasets, ~40,000 participants, 55 TB), is in progress.
+Integration into this Center's Python preprocessing and into NEMAR, the public archive we operate (800 datasets, ~40,000 participants, 55 TB), is in progress.
 
 # AI usage disclosure
 

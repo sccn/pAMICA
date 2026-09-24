@@ -1,0 +1,28 @@
+{
+  "external": {
+    "tier": "external",
+    "n_channels": 70,
+    "n_frames": 747750,
+    "k": 152.60204081632654,
+    "wall_clock_s": 26185.370152069023,
+    "single_model": {
+      "n_channels": 70,
+      "n_seeds_requested": 5,
+      "n_seeds_ok": 5,
+      "n_fortran_ok": 5,
+      "ng_vs_fortran_corr_mean": 0.9996495858496243,
+      "ng_vs_fortran_corr_min": 0.9602403962666957,
+      "ng_vs_fortran_corr_sd": 0.000479692302794331,
+      "ng_vs_fortran_amari_mean": 0.001258754660040508,
+      "ng_vs_fortran_amari_sd": 0.0006199672303702011,
+      "fortran_vs_fortran_corr_mean": 0.998267073292794,
+      "fortran_vs_fortran_corr_min": 0.9167018463145121,
+      "fortran_vs_fortran_amari_mean": 0.002489315961253494,
+      "fortran_ll_mean": -3.699346392049425,
+      "fortran_ll_sd": 6.525058589552108e-05,
+      "ng_ll_mean": -3.6993407627685135,
+      "ng_ll_sd": 4.121894736588951e-05,
+      "ll_gap_of_means": 5.629280911634282e-06
+    }
+  }
+}

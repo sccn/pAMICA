@@ -1,0 +1,4 @@
+lrate floor (1e-12) reached at iter 951; stopping.
+pamica seed7_mlx: final_ll=-3.698091 iters=952 stop_reason=lrate_floor n_newton_fallbacks=0 end_newtrate=9.094947017729282e-13 time=1050s
+lrate floor (1e-12) reached at iter 927; stopping.
+pamica seed42_mlx: final_ll=-3.698110 iters=928 stop_reason=lrate_floor n_newton_fallbacks=0 end_newtrate=9.094947017729282e-13 time=1073s

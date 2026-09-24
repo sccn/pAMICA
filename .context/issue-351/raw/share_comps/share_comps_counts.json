@@ -1,0 +1,117 @@
+{
+  "a": {
+    "share_off_final_ll": -3.3393496568371823,
+    "share_off_stop": "max_iter",
+    "share_off_newton_fallbacks": 0,
+    "share_on_final_ll": -3.3409951996200453,
+    "share_on_stop": "max_iter",
+    "share_on_newton_fallbacks": 0,
+    "merges": [
+      {
+        "iter": 100,
+        "model": 0,
+        "source": 11,
+        "into_model": 1,
+        "into_source": 3,
+        "map_abs_cos": 0.9699489398459946
+      }
+    ],
+    "unique_components": 63,
+    "groups": [
+      {
+        "group": [
+          [
+            1,
+            3
+          ],
+          [
+            0,
+            11
+          ]
+        ],
+        "identical": true
+      }
+    ]
+  },
+  "b": {
+    "scan_at_8_thr_0.9": {
+      "merged": 31,
+      "final_ll": -3.453995960732006,
+      "stop": "max_iter"
+    },
+    "scan_at_8_thr_0.95": {
+      "merged": 30,
+      "final_ll": -3.4531792987461793,
+      "stop": "max_iter"
+    },
+    "scan_at_8_thr_0.99": {
+      "merged": 17,
+      "final_ll": -3.4340012191597338,
+      "stop": "max_iter"
+    },
+    "scan_at_20_thr_0.9": {
+      "merged": 30,
+      "final_ll": -3.4702865291798437,
+      "stop": "max_iter"
+    },
+    "scan_at_20_thr_0.95": {
+      "merged": 22,
+      "final_ll": -3.4485215414735295,
+      "stop": "max_iter"
+    },
+    "scan_at_20_thr_0.99": {
+      "merged": 5,
+      "final_ll": -3.4105196773183413,
+      "stop": "max_iter"
+    }
+  },
+  "c": {
+    "state_A_diff_torch_vs_ref": 5.2365930183172205e-06,
+    "state_LL_diff_torch_vs_ref": 1.550818593543113e-07,
+    "thr_0.9": {
+      "reference_state": 32,
+      "torch_state": 32,
+      "numpy_state": 32,
+      "torch_fit_scan": 32,
+      "same_comp_list_ref_torch_numpy_fit": [
+        true,
+        true,
+        true
+      ]
+    },
+    "thr_0.95": {
+      "reference_state": 32,
+      "torch_state": 32,
+      "numpy_state": 32,
+      "torch_fit_scan": 32,
+      "same_comp_list_ref_torch_numpy_fit": [
+        true,
+        true,
+        true
+      ]
+    },
+    "thr_0.99": {
+      "reference_state": 29,
+      "torch_state": 29,
+      "numpy_state": 29,
+      "torch_fit_scan": 29,
+      "same_comp_list_ref_torch_numpy_fit": [
+        true,
+        true,
+        true
+      ]
+    }
+  },
+  "d": {
+    "first_scan_merges": 28,
+    "gm2_after_first_scan": 0.5720240822678972,
+    "gm2_1_after_scan": 0.0021825430273267536,
+    "gm2_2_after_scan": 0.0009015369020092886,
+    "second_scan_stop": "max_iter",
+    "merges_after_second_scan": 28,
+    "gm2_after_second_scan": 0.000244140625,
+    "long_fit_stop": "nan_params",
+    "long_fit_iterations_recorded": 23,
+    "long_fit_last_iteration_index": 22
+  }
+}
