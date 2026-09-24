@@ -57,7 +57,18 @@ jobs:
             # this way). Not needed anyway -- this pushes with the default
             # GITHUB_TOKEN, whose pushes do not trigger workflows.
             git commit -m "Rebuild paper.pdf"
-            git push
+            # Another workflow can push to the same branch while the PDF builds
+            # (auto-bump-dev.yml bumps the version right after a merge to dev),
+            # which rejects a plain push. Rebase onto the branch head and retry;
+            # the bump never touches paper.pdf, so the rebase cannot conflict.
+            for attempt in 1 2 3; do
+              if git pull --rebase origin "$GITHUB_REF_NAME" && git push; then
+                exit 0
+              fi
+              sleep $((attempt * 5))
+            done
+            echo "::error::could not push the rebuilt paper.pdf after 3 attempts"
+            exit 1
           else
             echo "paper.pdf unchanged, nothing to commit"
           fi
