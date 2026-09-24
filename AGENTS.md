@@ -203,7 +203,7 @@ update from a merged state seeded through `load_comp_list` matches it to float64
   against the pinned binary): the late overshoots are gone (largest LL dip 1.2e-5 in 20 trajectories,
   no Newton fallbacks), the sd ratio is 1.0x at 100 iterations with or without `keep_best`, a restore
   fired in one of 20 seeded fits, at the 300-iteration budget only (gain 4.2e-6), and the mean gap is
-  +8e-4 at 100 iterations and within 2e-4 at 200 and 300. The pre-epic code on the same seeds
+  +8.1e-4 at 100 iterations, +2.1e-4 at 200 and +1.0e-4 at 300. The pre-epic code on the same seeds
   reproduces the old gap; 7 of its 20 fits stopped early on a `min_dll` check that counted LL dips as
   small gains (fixed in #339), and its full-length fits trail by 0.006. `keep_best` stays on. Single-model #24 parity stays byte-for-byte (monotone => no
   restore). Inactive under `do_reject`. See ADR 0003 and `.context/issue-351/`.

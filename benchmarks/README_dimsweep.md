@@ -148,6 +148,12 @@ Single-fit wall-clock at this exact configuration (70ch, 747,750 frames, 2000 it
 | native-fortran-f64 | 1303 s (~22 min) |
 | pamica, CUDA float64 | 1856 s (~31 min) |
 
+The full external tier was re-run on 2026-09-23 with the code of epic #324 (issue #351) on the same
+kind of host (32 cores, RTX 4090), shared with other users' jobs, with the v0.3.3 reference at
+`--threads 16`: the Fortran fits took 1972-2559 s each, the pamica CUDA float64 fits 1886-5013 s
+(the slowest while the GPU was shared), and the whole tier, run sequentially, 26185 s (~7.3 hours).
+On an unshared host expect the pipelined estimates below.
+
 Scaling those to the paper's 5-seed protocol (Fortran phases can run back to back while each
 seed's GPU phase overlaps the next seed's Fortran phase, the way the original workstation script
 pipelined them):

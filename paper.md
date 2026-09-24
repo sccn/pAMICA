@@ -108,10 +108,10 @@ give $p=0.88$ by correlation and $p=0.051$ by Amari distance, by which `pamica`'
 
 | Regime | Metric (dataset) | Result (mean) |
 |---|---|---|
-| Single | Log-likelihood gap (on002718) | within ~0.0005 of $-3.6993$ |
-| Single | Component correlation (on002718) | 0.998 |
+| Single | Log-likelihood gap (on002718) | $6\times10^{-6}$, both at $-3.6993$ |
+| Single | Component correlation (on002718) | 0.9996 (Fortran vs Fortran 0.998) |
 | Single | Amari distance (bundled) | 0.011 (5 run pairs); 0.004 (50 pairs) |
-| Single | Score functions, sufficient statistics | round-off, $\le 2\times10^{-15}$ (relative) |
+| Single | Score functions; sufficient statistics | $\le 2\times10^{-15}$ absolute; $3\times10^{-16}$ relative |
 | Multi | Correlation, one run: cross; within-Fortran | 0.632; 0.626 (sd 0.04) |
 | Multi | Amari, one run: cross; within-Fortran | 0.172; 0.166 (sd 0.02) |
 | Multi | Ensemble agreement, cross $-$ within-Fortran | correlation $+0.006$ ($p=0.88$); Amari $+0.005$ ($p=0.051$) |

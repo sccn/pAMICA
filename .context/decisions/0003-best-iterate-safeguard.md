@@ -95,7 +95,7 @@ on and off, on two seeds on both sides).
 |---:|---:|---:|---:|---:|---:|---:|---:|
 | 100 | -3.3550 (0.0029) | -3.3542 (0.0029) | -3.3542 (0.0029) | 1.0x | +0.0008 | 0.83 | 0 of 20 |
 | 200 | -3.3418 (0.0030) | -3.3416 (0.0022) | -3.3416 (0.0022) | 0.75x | +0.0002 | 0.57 | 0 of 20 |
-| 300 | -3.3393 (0.0027) | -3.3392 (0.0020) | -3.3392 (0.0020) | 0.75x | +0.0001 | 0.98 | 1 of 20 |
+| 300 | -3.3392 (0.0027) | -3.3391 (0.0020) | -3.3391 (0.0020) | 0.75x | +0.0001 | 0.98 | 1 of 20 |
 
 - The late overshoots that motivated this decision do not occur in these
   fits: the largest likelihood decrease in any of the 20 pamica trajectories
@@ -106,8 +106,8 @@ on and off, on two seeds on both sides).
   the column-rule `doscaling` (#333).
 - A restore fired in one of the 20 fits, and only at the 300-iteration budget: seed 3,
   whose best iterate (iteration 299) beat its last by 4.2e-6.
-- The mean gap is gone at every budget: pamica's mean is within 8e-4 of the
-  reference's at 100 iterations and within 2e-4 at 200 and 300, where #51
+- The mean gap is gone at every budget: pamica's mean lies 8.1e-4 above the
+  reference's at 100 iterations, 2.1e-4 at 200 and 1.0e-4 at 300, where #51
   measured -0.009 at 100 and attributed it to convergence speed. The
   bundled tier's clock-seeded ensemble (`benchmarks/reproduce_table1.py`,
   `AMICA` seeds 1-20) agrees: -3.3541 against -3.3543, KS p 0.83. Refitting

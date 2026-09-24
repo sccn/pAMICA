@@ -20,7 +20,7 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 |---|---|---|
 | Source-density score and log-density (non-GG families) | vs the literal `amica15.f90` expressions | bit-exact ($<10^{-12}$) |
 | Per-block sufficient statistics and one M-step | vs Fortran | bit-exact ($\sim\!10^{-15}$) |
-| Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | LL gap ~0.0003 from $-3.6993$; correlation 0.998 (measured before epic #324; re-measurement tracked in issue #357) |
+| Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | both at LL $-3.6993$ (gap of the means $6\times10^{-6}$); correlation 0.9996 (Fortran vs Fortran 0.998) |
 | Single-model solution (`do_newton=0`, bundled, $k\approx30$) | Amari distance vs Fortran | 0.011 over the protocol's 5 run pairs, one of whose reference runs ended in another basin; 0.004 over 50 pairs (Fortran vs Fortran 0.005) |
 | Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | from independent starts: LL within 2.8e-4 (the reference's own seed-to-seed standard deviation is 2.6e-4), correlation 0.9991, Amari distance 0.004, for all three; from a shared start: LL within 1.6e-6, correlation 0.99999993 ([per-backend rows](#parity-rows-per-backend)) |
 | Multi-model solution | distributional similarity over 20-run ensembles | between-implementation correlation within 0.006 of Fortran's own run-to-run agreement (one-sided permutation $p = 0.88$; Amari distance $p = 0.051$); final log-likelihood $-3.3541$ against $-3.3543$ (KS $p = 0.83$) |
@@ -139,12 +139,25 @@ it is not sensitive to whether a particular small dataset happens to be well-con
 32-channel sample ($k\approx30$, at the project's own data-adequacy boundary) gives a consistent Amari
 distance:
 
-- Log-likelihood ~ -3.6993 ($k\approx153$; Fortran ~ -3.6993, gap ~0.0003).
-- Hungarian-matched component correlation ~0.998 ($k\approx153$; Fortran-vs-Fortran self-consistency
-  over the same 5 seeds: ~0.999), clearing the >0.95 gate.
-- The two $k\approx153$ figures above were measured before epic #324's changes to the fit;
-  their re-measurement with the epic's code is tracked in issue #357.
+- Log-likelihood $-3.6993$ on both sides ($k\approx153$): Fortran $-3.699346$ (sd $6.5\times10^{-5}$), pamica $-3.699341$ (sd $4.1\times10^{-5}$),
+  a gap of the means of $5.6\times10^{-6}$.
+- Hungarian-matched component correlation 0.9996 ($k\approx153$; sd 0.0005, lowest single component 0.960),
+  against the reference's own agreement over the same five runs of 0.998 (lowest component 0.917), clearing the >0.95 gate;
+  Amari distance 0.0013 (Fortran against Fortran 0.0025).
 - Amari distance on the bundled sample: 0.011 over the protocol's five run pairs, 0.004 over 50 pairs (next subsection).
+
+Per seed on the external recording (re-measured on 2026-09-23 with the code of epic #324; `benchmarks/reproduce_table1.py --tier external` on the RTX 4090 host,
+pamica on CUDA in float64, the pinned v0.3.3 reference at 16 threads, clock-seeded; `.context/issue-351/raw/table1_external/`):
+
+| seed | mean matched correlation | min matched correlation | Amari distance |
+|---:|---:|---:|---:|
+| 201 | 0.9999 | 0.9996 | 0.0008 |
+| 202 | 0.9987 | 0.9602 | 0.0024 |
+| 203 | 0.9999 | 0.9985 | 0.0012 |
+| 204 | 1.0000 | 0.9998 | 0.0007 |
+| 205 | 0.9998 | 0.9955 | 0.0012 |
+
+Before epic #324's changes to the fit, the same protocol gave a log-likelihood gap of ~0.0003, a correlation of ~0.998 and a Fortran-vs-Fortran agreement of ~0.999.
 
 ### The bundled sample
 
@@ -206,7 +219,7 @@ The seeded pair above (0.985) is a second measurement of the reference's own see
 See issue #145 and the optional init-robustness follow-up #198.
 
 A single-seed supplementary run gives the float32 side at this data size:
-the MLX backend (float32), with the same keywords and the same start as the CUDA seed-7 fit, stops on its learning-rate floor at iteration 951,
+the MLX backend (float32), with the same keywords and the same start as the CUDA seed-7 fit, stops on its learning-rate floor after 952 iterations,
 after about 120 likelihood decreases below float32 resolution, at log-likelihood -3.69809 (the float64 fit was at -3.69791 at that iteration).
 Its components match the float64 seed-7 fit at a mean correlation of 0.985 (minimum 0.907) and the reference's seed 1 at 0.983 (minimum 0.905);
 with seed 42, float32 and float64 differ on 10 of the 70 components (mean 0.955).
@@ -283,7 +296,7 @@ Refitting the pamica half with that code (e38aa11) against the same 20 reference
 (`.context/issue-351/multimodel_pamica_fits.py`).
 Seven of those 20 fits stop early on `min_dll`, whose check counted likelihood dips as small gains until issue #339 (mean $-3.3679$),
 and the 13 that run the full 100 iterations average $-3.3600$, so the old gap came partly from the early stops and partly from the update rule of that code.
-A seeded ensemble with the same settings (the reference seeded 0-19 and single-threaded) agrees within $8\times10^{-4}$ at 100 iterations and within $2\times10^{-4}$ at 200 and 300
+A seeded ensemble with the same settings (the reference seeded 0-19 and single-threaded) puts pamica's mean $8.1\times10^{-4}$ above the reference's at 100 iterations, $2.1\times10^{-4}$ at 200 and $1.0\times10^{-4}$ at 300
 ([ADR 0003](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0003-best-iterate-safeguard.md)).
 
 ### Amari distance: a second, assignment-free metric
@@ -294,7 +307,7 @@ so it is an independent check on the same 20-run ensembles, computed from the sa
 (`.context/issue-351/multimodel_ensemble.py`, which reuses `.context/issue-27/amari_distance.py`).
 Each stacked 2-model matrix is split into its per-model 32x32 blocks;
 since which Fortran model corresponds to which pamica model is not identified, both label pairings are tried and the lower-distance pairing is kept, per run pair.
-This pairing correction lowers the mean distance by 0.019 on this ensemble (333 of the 780 run pairs take the swapped pairing),
+This pairing correction lowers the mean distance by 0.0185 on this ensemble (333 of the 780 run pairs take the swapped pairing),
 the same order as the gaps between the groups below, so part of those gaps may reflect how often each group needs the swap.
 
 | Distribution (Amari distance, lower is better) | Mean | SD |
