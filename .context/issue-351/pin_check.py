@@ -13,7 +13,10 @@ parameter file and stop.
 With ``--dump PATH`` it also saves the pinned calls' parameter files, and with
 ``--against PATH`` it compares them with a saved dump instead, so a change of
 ``AMICANative``'s defaults (epic #324 Phase 17) can be checked to leave every
-pinned call's ``input.param`` unchanged.
+pinned call's settings unchanged. Phase 17 reorders the keys and adds
+``do_approx_sphere 1``, the binary's compiled value, so this mode reports the
+settings added, removed and changed as well as byte identity;
+``pin_run_check.py`` runs the binary on both forms.
 """
 
 from __future__ import annotations
@@ -96,6 +99,29 @@ def seeded_param(state_models: int = 1, **kw) -> str:
     finally:
         oracle._run_reference = real
     return captured["param"]
+
+
+def _settings(text: str) -> dict[str, str]:
+    """An ``input.param`` text as {key: value}; a repeated key is an error."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        if line.strip():
+            key, _, value = line.partition(" ")
+            if key in out:
+                raise ValueError(f"repeated key {key!r}")
+            out[key] = value.strip()
+    return out
+
+
+def settings_diff(saved: str, now: str) -> dict:
+    """How two ``input.param`` texts differ as settings, ignoring key order."""
+    a, b = _settings(saved), _settings(now)
+    return {
+        "same_key_order": list(a) == list(b),
+        "added": {k: b[k] for k in b.keys() - a.keys()},
+        "removed": {k: a[k] for k in a.keys() - b.keys()},
+        "changed": {k: [a[k], b[k]] for k in a.keys() & b.keys() if a[k] != b[k]},
+    }
 
 
 def main() -> None:
@@ -181,11 +207,19 @@ def main() -> None:
         out = {
             name: {
                 "pinned_identical_to_saved": pinned[name] == saved[name],
+                **settings_diff(saved[name], pinned[name]),
                 "unpinned_identical_to_pinned": out[name]["identical"],
             }
             for name in pinned
         }
-        ok = all(v["pinned_identical_to_saved"] for v in out.values())
+        # Byte identity, or the same settings in another order plus keys at
+        # the binary's compiled value (pin_run_check.py runs both forms).
+        ok = all(
+            v["pinned_identical_to_saved"]
+            or (not v["changed"] and not v["removed"]
+                and v["added"] == {"do_approx_sphere": "1"})
+            for v in out.values()
+        )  # fmt: skip
     else:
         ok = all(v["identical"] for v in out.values())
     Path(args[0]).write_text(json.dumps(out, indent=2))

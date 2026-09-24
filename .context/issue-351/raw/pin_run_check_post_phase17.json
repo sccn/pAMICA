@@ -1,0 +1,128 @@
+{
+  "reproduce_table1 single-model sweep": {
+    "new_has_approx": true,
+    "files": [
+      "A",
+      "LL",
+      "LLt",
+      "S",
+      "W",
+      "alpha",
+      "c",
+      "comp_list",
+      "gm",
+      "mean",
+      "mu",
+      "out.txt",
+      "rho",
+      "sbeta"
+    ],
+    "identical": [
+      "A",
+      "LL",
+      "LLt",
+      "S",
+      "W",
+      "alpha",
+      "c",
+      "comp_list",
+      "gm",
+      "mean",
+      "mu",
+      "rho",
+      "sbeta",
+      "out.txt (times removed)"
+    ],
+    "different": [],
+    "missing": [],
+    "returncodes": [
+      0,
+      0
+    ],
+    "all_identical": true
+  },
+  "reproduce_table1 multi-model ensemble": {
+    "new_has_approx": true,
+    "files": [
+      "A",
+      "LL",
+      "LLt",
+      "S",
+      "W",
+      "alpha",
+      "c",
+      "comp_list",
+      "gm",
+      "mean",
+      "mu",
+      "out.txt",
+      "rho",
+      "sbeta"
+    ],
+    "identical": [
+      "A",
+      "LL",
+      "LLt",
+      "S",
+      "W",
+      "alpha",
+      "c",
+      "comp_list",
+      "gm",
+      "mean",
+      "mu",
+      "rho",
+      "sbeta",
+      "out.txt (times removed)"
+    ],
+    "different": [],
+    "missing": [],
+    "returncodes": [
+      0,
+      0
+    ],
+    "all_identical": true
+  },
+  "newton_seeds reference": {
+    "new_has_approx": true,
+    "files": [
+      "A",
+      "LL",
+      "LLt",
+      "S",
+      "W",
+      "alpha",
+      "c",
+      "comp_list",
+      "gm",
+      "mean",
+      "mu",
+      "out.txt",
+      "rho",
+      "sbeta"
+    ],
+    "identical": [
+      "A",
+      "LL",
+      "LLt",
+      "S",
+      "W",
+      "alpha",
+      "c",
+      "comp_list",
+      "gm",
+      "mean",
+      "mu",
+      "rho",
+      "sbeta",
+      "out.txt (times removed)"
+    ],
+    "different": [],
+    "missing": [],
+    "returncodes": [
+      0,
+      0
+    ],
+    "all_identical": true
+  }
+}

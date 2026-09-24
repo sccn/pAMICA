@@ -1,0 +1,76 @@
+{
+  "reproduce_table1 single-model sweep": {
+    "pinned_identical_to_saved": false,
+    "same_key_order": false,
+    "added": {
+      "do_approx_sphere": "1"
+    },
+    "removed": {},
+    "changed": {},
+    "unpinned_identical_to_pinned": false
+  },
+  "reproduce_table1 multi-model ensemble": {
+    "pinned_identical_to_saved": false,
+    "same_key_order": false,
+    "added": {
+      "do_approx_sphere": "1"
+    },
+    "removed": {},
+    "changed": {},
+    "unpinned_identical_to_pinned": false
+  },
+  "keep_best_ensemble reference": {
+    "pinned_identical_to_saved": false,
+    "same_key_order": false,
+    "added": {
+      "do_approx_sphere": "1"
+    },
+    "removed": {},
+    "changed": {},
+    "unpinned_identical_to_pinned": false
+  },
+  "bundled_single_basins reference": {
+    "pinned_identical_to_saved": false,
+    "same_key_order": false,
+    "added": {
+      "do_approx_sphere": "1"
+    },
+    "removed": {},
+    "changed": {},
+    "unpinned_identical_to_pinned": false
+  },
+  "newton_seeds reference": {
+    "pinned_identical_to_saved": false,
+    "same_key_order": false,
+    "added": {
+      "do_approx_sphere": "1"
+    },
+    "removed": {},
+    "changed": {},
+    "unpinned_identical_to_pinned": false
+  },
+  "newton_seeds same-start reference": {
+    "pinned_identical_to_saved": true,
+    "same_key_order": true,
+    "added": {},
+    "removed": {},
+    "changed": {},
+    "unpinned_identical_to_pinned": true
+  },
+  "orientation_check": {
+    "pinned_identical_to_saved": true,
+    "same_key_order": true,
+    "added": {},
+    "removed": {},
+    "changed": {},
+    "unpinned_identical_to_pinned": true
+  },
+  "share_comps_counts part c": {
+    "pinned_identical_to_saved": true,
+    "same_key_order": true,
+    "added": {},
+    "removed": {},
+    "changed": {},
+    "unpinned_identical_to_pinned": true
+  }
+}
