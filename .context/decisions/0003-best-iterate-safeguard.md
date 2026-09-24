@@ -91,7 +91,7 @@ fit runs 300 iterations once, with the 100- and 200-iteration values read from
 its trajectory (checked equal to separate 100-iteration fits, with `keep_best`
 on and off, on two seeds on both sides).
 
-| budget | Fortran mean (sd) | pamica return-last mean (sd) | pamica `keep_best` mean (sd) | sd ratio | pamica minus Fortran | KS p | restores |
+| budget | Fortran mean (sd) | pamica return-last mean (sd) | pamica `keep_best` mean (sd) | sd ratio | pamica minus Fortran | Kolmogorov-Smirnov (KS) p | restores |
 |---:|---:|---:|---:|---:|---:|---:|---:|
 | 100 | -3.3550 (0.0029) | -3.3542 (0.0029) | -3.3542 (0.0029) | 1.0x | +0.0008 | 0.83 | 0 of 20 |
 | 200 | -3.3418 (0.0030) | -3.3416 (0.0022) | -3.3416 (0.0022) | 0.75x | +0.0002 | 0.57 | 0 of 20 |

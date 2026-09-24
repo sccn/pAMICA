@@ -114,7 +114,7 @@ remaining MLX gap vs the PyTorch backend is float32-only precision (Apple GPUs h
 ## Current Status
 - PyTorch backend with GPU/MPS/CPU support; the `AMICATorchNG` natural-gradient EM backend now
   matches the Fortran reference with Newton enabled and positive-definite (issue #24): against the
-  bundled 200-iteration `amicaout` fixture, LL -3.4017 vs -3.4019 and component correlation 0.998 on
+  bundled 200-iteration `amicaout` fixture, LL within 1.4e-4 and component correlation 0.998 on
   all three backends (re-measured under epic #324 in #351; ~0.997 when #24 closed).
 - `AMICA(backend="mlx")` and `AMICAICA(backend="mlx")` (epic #324 Phase 4, #313) run the MLX backend end to
   end: fit, `from_params_file`, `pcakeep`, the #50 degenerate-fit contract, `.pt` save/load (wrapper
@@ -186,7 +186,7 @@ update from a merged state seeded through `load_comp_list` matches it to float64
   pairwise cross-corr within-Fortran 0.626, within-pamica 0.638, between 0.632; between minus
   within-Fortran +0.006 (inside the ±0.05 margin; run-level permutation p=0.88; by Amari distance
   +0.005, p=0.051, pamica's ensemble spreading slightly more than Fortran's); final LL -3.3541 vs
-  -3.3543 (KS p=0.83). The single-run ~0.63 cross-corr matches Fortran's agreement with itself.
+  -3.3543 (Kolmogorov-Smirnov (KS) p=0.83). The single-run ~0.63 cross-corr matches Fortran's agreement with itself.
   See `docs/guides/validation.md`, `.context/issue-351/` and, for the pre-epic record,
   `.context/issue-27/multimodel_distributional_equivalence.md`.
   Supporting: per-block sufficient stats are bit-exact vs Fortran; the per-model bias `c` update

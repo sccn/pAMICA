@@ -159,7 +159,7 @@ Newton off, 2000 iterations (re-measured on 2026-09-23 with the code of epic #32
 
 The five pairs average a correlation of 0.985 and an Amari distance of 0.011;
 the ten pairs among the five reference runs average 0.971 and 0.019.
-The reference run of seed 303 ended in a lower-likelihood basin (-3.4006, against -3.3995 to -3.3996 for the other four), and its pair sets the five-pair means.
+The reference run of seed 303 ended in a lower-likelihood basin (-3.4006, against -3.3995 to -3.3996 for the other four), and that pair dominates the five-pair means.
 The tier does not seed its reference runs (`AMICANative` draws a clock-based seed per run), so a rerun draws new starts, and an event like this one may or may not recur.
 With the unmixing matrices kept (`.context/issue-351/bundled_single_basins.py`),
 ten seeded reference runs (seeds 1-10, final LL -3.39984 to -3.39945) against the same five pamica fits give, over all 50 pairs,

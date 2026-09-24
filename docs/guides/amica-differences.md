@@ -451,7 +451,7 @@ the PyTorch and NumPy updates match the native binary to float64 round-off after
 with `doscaling` on and off (`pamica/tests/test_component_rows.py`, opt-in with `AMICA_RUN_FORTRAN=1`).
 On the bundled sample (2 models, seed 42, Newton on, 300 iterations, `share_start=100`, `share_iter=100`, `comp_thresh=0.95`)
 the scan at iteration 100 merges one pair whose maps agree (|cos| 0.970) and the scans at 200 and 300 merge nothing,
-so the fit ends with 63 of 64 components at log-likelihood -3.3410 (-3.3394 with sharing off; measured with the finished epic #324, issue #351).
+so the fit ends with 63 of 64 components at log-likelihood -3.3410 (-3.3393 with sharing off; measured with the finished epic #324, issue #351).
 Right after this change, before the reference's iteration order (issue #339) and the later changes of epic #324, the same fit merged three such pairs (|cos| 0.956 to 0.971),
 and the old metric three whose maps did not (|cos| 0.06, 0.35 and 0.55).
 

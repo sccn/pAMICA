@@ -17,7 +17,7 @@ what remains, as of epic #324 (after v0.3.3). User-facing detail is in `docs/cha
   sample data).
 - **Metrics:** single-model LL ~ -3.40 (Fortran -3.4018); Hungarian-matched component correlation
   ~0.997, clearing the >0.95 gate. Re-measured under epic #324 (#351) against the bundled
-  200-iteration fixture: LL -3.4017 vs -3.4019, correlation 0.998, Amari 4.8e-3, on all three backends.
+  200-iteration fixture: LL within 1.4e-4, correlation 0.998, Amari 4.8e-3, on all three backends.
 
 ### Adaptive PDF selection (issue #26)
 - All five `amica15.f90` `pdftype` density families ported to `AMICATorchNG`: 0 generalized
@@ -31,7 +31,7 @@ what remains, as of epic #324 (after v0.3.3). User-facing detail is in `docs/cha
 - Validated by **distributional equivalence**: multi-model AMICA is not partition-identifiable, so
   the NG-vs-Fortran partition cross-correlation distribution is compared with Fortran's own
   run-to-run spread. Re-measured under epic #324 (#351): between minus within-Fortran +0.006
-  (run-level permutation p=0.88; Amari +0.005, p=0.051), final LL -3.3541 vs -3.3543 (KS p=0.83).
+  (run-level permutation p=0.88; Amari +0.005, p=0.051), final LL -3.3541 vs -3.3543 (Kolmogorov-Smirnov (KS) p=0.83).
   Per-block sufficient stats agree with Fortran to round-off.
 - Per-model bias `c` update (`update_c`) ported to both backends, guarded to a no-op for
   `n_models=1` so single-model parity stays bit-exact. See `.context/issue-27/`.
