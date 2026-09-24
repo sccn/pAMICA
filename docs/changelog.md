@@ -653,6 +653,17 @@ and every backend's fitting follows the Fortran reference more closely.
   [Unmapped Fortran keywords](guides/amica-differences.md#unmapped-fortran-keywords) section,
   which names three keywords that are dead in the reference itself (`filter_length`/`dft_length`/`decwindow`)
   and records the `do_rho`-vs-`pdftype` divergence.
+- **The paper credits the Research Skills plugins** as the development harness,
+  in its AI usage disclosure.
+
+### Continuous integration
+
+- **The Python jobs skip changes that touch no code.**
+  A change limited to Markdown, the docs site, the paper (including the rebuilt `paper.pdf`), citation metadata,
+  or the non-Python records under `.context/` runs only spell-checking and, for the paper, the PDF build.
+  Python files under `.context/` still run the full CI.
+- **The rebuilt `paper.pdf` is committed back on `dev` and `main` only.**
+  Feature branches build it as an artifact, so a PR's head is never a bot commit whose checks wait for approval.
 
 ## 0.3.3
 
