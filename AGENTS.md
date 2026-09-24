@@ -216,8 +216,9 @@ update from a merged state seeded through `load_comp_list` matches it to float64
 5. **Test:** Real data only (sample EEG + Fortran binary); see `.rules/testing.md`.
 6. **Document failures:** Log dead ends in `.context/scratch_history.md`.
 7. **Commit:** Atomic, <50 chars, no emojis, no AI attribution.
-8. **PR + review:** Run `/review-pr` and address all findings (`.rules/code_review.md`).
-9. **Merge:** CI green first (see below), then **squash merge** (`gh pr merge <n> --squash --delete-branch`).
+8. **Changelog:** A user-visible change adds its entry under `## Unreleased` in `docs/changelog.md`, in the same PR (`.rules/changelog.md`; the `Changelog` check enforces it for package code).
+9. **PR + review:** Run `/review-pr` and address all findings (`.rules/code_review.md`).
+10. **Merge:** CI green first (see below), then **squash merge** (`gh pr merge <n> --squash --delete-branch`).
 
 ## [CRITICAL] Core Principles
 - **NO MOCKS:** Validate against real sample data and the Fortran binary, never fabricated data. Details: `.rules/testing.md`.
@@ -242,6 +243,7 @@ update from a merged state seeded through `load_comp_list` matches it to float64
 - `.rules/backend_parity.md` - No one-off backends; shared decisions, cross-backend tests
 - `.rules/python.md` - UV, ruff, ty
 - `.rules/git.md` - Commit/branch conventions
+- `.rules/changelog.md` - Changelog entries, format, and the release-notes mechanism
 - `.rules/code_review.md` - PR review toolkit and checklist
 - `.rules/ci_cd.md` - GitHub Actions setup
 - `.rules/documentation.md` - Docs conventions
@@ -259,6 +261,7 @@ update from a merged state seeded through `load_comp_list` matches it to float64
 
 ## Project Docs (top-level)
 - `README.md` - Overview and quick start
+- `CHANGELOG.md` - Pointer to the changelog, `docs/changelog.md`
 
 ---
 Remember: parity with the Fortran reference is the definition of done. Check `.rules/` for detailed guidance.

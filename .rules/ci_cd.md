@@ -56,6 +56,21 @@ recording:
   is a first estimate pending an actual run. GitHub auto-disables a schedule
   trigger after 60 days of repo inactivity; re-enable via the Actions tab or
   `gh workflow enable weekly-macos-slow.yml` if Sunday runs stop appearing.
+- **Code-path filter:** `ci.yml`'s Python jobs run only when a change touches
+  code. Markdown, the docs site, the paper (with the rebuilt `paper.pdf`),
+  citation metadata and the non-Python records under `.context/` skip them;
+  Python files under `.context/` and the test-loaded
+  `.context/issue-27/ensemble.npz` still run them. `typos.yml` runs on every
+  change. `draft-pdf.yml` commits the rebuilt PDF back on `dev` and `main`
+  only, rebasing onto the branch head first because `auto-bump-dev.yml` can
+  push while it builds.
+- **`changelog.yml`** -- on every pull request: into `dev`, a change to
+  package code (`pamica/` outside its tests, `validate_implementations.py`,
+  `pyproject.toml`) must also change `docs/changelog.md`, unless the PR carries
+  the `skip-changelog` label; into `main` (a release), the merged tree must
+  carry the release's `## X.Y.Z - YYYY-MM-DD` section and no `## Unreleased`.
+  `auto-tag.yml` publishes that section as the GitHub release notes, through
+  `scripts/changelog_section.py` (`.rules/changelog.md`).
 - **`release-binaries.yml`**, **`publish.yml`**, **`auto-tag.yml`**,
   **`auto-bump-dev.yml`**, **`sync-dev.yml`**, **`docs.yml`**, **`typos.yml`**,
   **`draft-pdf.yml`** each own one concern (native-binary release assets, PyPI

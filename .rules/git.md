@@ -26,6 +26,10 @@
 
 ## Versioning (automated)
 Versions are managed by CI; do not hand-edit `pyproject.toml` to bump.
+The one manual step is choosing a minor or major release: release prep sets
+`X.Y.0.dev0` with `scripts/sync_version.py` in a pull request into `dev`, and
+renames the changelog's `## Unreleased` section to the release
+(`.rules/changelog.md`).
 
 | Event | Version effect | Workflow |
 |---|---|---|
