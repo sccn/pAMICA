@@ -104,7 +104,7 @@ over 50 run pairs the distance between the implementations (0.004) is close to t
 A mixture of ICA models is not partition-identifiable,
 so the implementations are compared by the distributions of solutions they sample, over ensembles of 20 runs each (\autoref{fig:ensemble}).
 One-sided run-level permutation tests of whether cross-implementation agreement is worse than the reference's own run-to-run agreement
-give $p=0.88$ by correlation and $p=0.051$ by Amari distance, by which `pamica`'s ensemble spreads slightly more than the reference's.
+give $p=0.88$ by correlation and $p=0.051$ by Amari distance, on which `pamica`'s ensemble spreads slightly more than the reference's.
 
 | Regime | Metric (dataset) | Result (mean) |
 |---|---|---|
@@ -132,9 +132,11 @@ Double precision remains the default for parity work, and double-precision CUDA 
 
 On real 70-channel EEG at `block_size=512`, per-iteration cost is 25 ms for MLX on an Apple GPU, 39 ms for double-precision CUDA on an RTX 4090,
 and 30 ms for native Fortran on a 24-core i9-13900K, against 193 ms for PyTorch on an Apple-Silicon CPU and 255 ms for PyTorch-Metal.
-That comparison is block-size-confounded: PyTorch-Metal is far more block-size-sensitive than the CPU it runs beside, falling from 431 to 30.5 ms/iteration on the bundled 32-channel sample
-between `block_size=512` and `pamica`'s current 8192 default, still behind the CPU's 21.7 ms/iteration there, and to 13.5 ms/iteration, below the CPU's 15.8 ms,
-at a further-tuned single-block setting that is memory-limited rather than a free win, since peak block memory scales with `block_size`, which is why 8192 stays the shipped default.
+That comparison is block-size-confounded: PyTorch-Metal is far more block-size-sensitive than the CPU it runs beside,
+falling from 431 to 30.5 ms/iteration on the bundled 32-channel sample between `block_size=512` and `pamica`'s current 8192 default,
+still behind the CPU's 21.7 ms/iteration there,
+and to 13.5 ms/iteration, below the CPU's 15.8 ms, at a further-tuned single-block setting.
+Peak block memory grows with `block_size`, which is why 8192 stays the shipped default.
 MLX stays the fastest Apple backend throughout the sweep.
 Full tables, the data-size sweep, and reproduction commands are in the [documentation](https://eeglab.org/pAMICA/guides/validation/); the correctness harness never uses synthetic data.
 The harness and sample data are in the source repository, and every row of Table 1 but the two on002718 entries re-runs from the bundled sample alone.
