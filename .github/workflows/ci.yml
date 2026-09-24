@@ -1,10 +1,15 @@
 name: CI
 
-# Python jobs (lint/test/build) skip when a change touches only prose or
-# metadata -- Markdown, the docs site, the JOSS paper (paper.md/paper.bib), and
-# citation/archive metadata (CITATION.cff, .zenodo.json, LICENSE) -- none of
-# which affect the package. Spell-checking (typos.yml) and the paper PDF build
-# (draft-pdf.yml) have their own triggers, so prose is still checked.
+# Python jobs (lint/test/build) skip when a change touches no code: only
+# Markdown, the docs site, the JOSS paper (paper.md/paper.bib and the rebuilt
+# paper.pdf), citation/archive metadata (CITATION.cff, .zenodo.json, LICENSE),
+# or the non-Python records under .context/ (notes, raw run outputs, figures).
+# Python files under .context/ still run CI: ruff lints them, and the test
+# suite loads .context/issue-27/amari_distance.py with its ensemble.npz, which
+# is re-included for that reason. The filter is `paths` with negations, where a
+# later positive pattern re-includes what an earlier negation dropped.
+# Spell-checking (typos.yml) and the paper PDF build (draft-pdf.yml) have their
+# own triggers, so prose is still checked.
 #
 # push runs on both `main` (release branch) and `dev` (integration branch, the
 # default branch): post-merge pushes to dev are what catch drift that only
@@ -42,23 +47,33 @@ name: CI
 on:
   push:
     branches: [main, dev]
-    paths-ignore:
-      - "**.md"
-      - "**.bib"
-      - "docs/**"
-      - "mkdocs.yml"
-      - "CITATION.cff"
-      - ".zenodo.json"
-      - "LICENSE"
+    paths:
+      - "**"
+      - "!**.md"
+      - "!**.bib"
+      - "!docs/**"
+      - "!mkdocs.yml"
+      - "!CITATION.cff"
+      - "!.zenodo.json"
+      - "!LICENSE"
+      - "!paper.pdf"
+      - "!.context/**"
+      - ".context/**.py"
+      - ".context/issue-27/ensemble.npz"
   pull_request:
-    paths-ignore:
-      - "**.md"
-      - "**.bib"
-      - "docs/**"
-      - "mkdocs.yml"
-      - "CITATION.cff"
-      - ".zenodo.json"
-      - "LICENSE"
+    paths:
+      - "**"
+      - "!**.md"
+      - "!**.bib"
+      - "!docs/**"
+      - "!mkdocs.yml"
+      - "!CITATION.cff"
+      - "!.zenodo.json"
+      - "!LICENSE"
+      - "!paper.pdf"
+      - "!.context/**"
+      - ".context/**.py"
+      - ".context/issue-27/ensemble.npz"
 
 concurrency:
   # push: per-SHA group (each push to main/dev gets its own run, never

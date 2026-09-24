@@ -3,10 +3,13 @@ name: Draft PDF
 # Builds paper.md into a JOSS-formatted PDF (Pandoc + inara, via the official
 # openjournals action). Not a JOSS submission step -- this just keeps the
 # committed paper.pdf in the repo root in sync with paper.md/paper.bib for
-# local review. On a push to a branch it commits the rebuilt PDF back. Skipped
-# for pull_request runs (a PR checkout is a detached merge ref, not the head
-# branch) and for tag pushes (also detached, e.g. the v* tag a release creates),
-# where pushing would go to the wrong place or fail outright.
+# local review. On a push to `dev` or `main` it commits the rebuilt PDF back.
+# Feature branches only build it (the PDF is uploaded as an artifact): a bot
+# commit at a PR's head leaves that PR's CI runs waiting for approval, and the
+# PDF is rebuilt on `dev` once the PR merges. Skipped for pull_request runs (a
+# PR checkout is a detached merge ref, not the head branch) and for tag pushes
+# (also detached, e.g. the v* tag a release creates), where pushing would go to
+# the wrong place or fail outright.
 on:
   push:
     paths:
@@ -42,7 +45,7 @@ jobs:
           # The action writes the compiled PDF next to the paper source.
           path: paper.pdf
       - name: Commit and push rebuilt PDF
-        if: github.event_name == 'push' && github.ref_type == 'branch'
+        if: github.event_name == 'push' && github.ref_type == 'branch' && (github.ref_name == 'dev' || github.ref_name == 'main')
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
