@@ -48,12 +48,20 @@ def _real_data(n_samples: int = 4096) -> np.ndarray:
 def _shared_fit(
     max_iter: int = 10,
     share_comps: bool = True,
-    share_start: int = 2,
+    share_start: int = 8,
     share_int: int = 8,
     **kwargs,
 ):
-    """A 2-model fit with sharing on: merge at iteration ``share_start``, the
-    6-iteration A-freeze, then iterations where A moves again."""
+    """A 2-model fit with sharing on: merge at iteration ``share_start``, a
+    multiple of ``share_int`` as with the reference's defaults, so the
+    reference's A-freeze (iterations 8-13, issue #345) starts on the merge
+    iteration.
+
+    With ``share_comps=False`` the freeze still applies (it does not depend on
+    sharing), but a 3-iteration fit ends before it, so the direct M-steps the
+    tests below take from that state, at iteration 3, move A. (With the
+    previous ``share_start=2`` they were held, and a test on A would have
+    compared a matrix that never moved.)"""
     model = AMICA(
         num_models=2,
         num_mix=3,
@@ -81,7 +89,7 @@ def _force_merged_column(model):
     """
     kept = int(model.comp_list[0, 0])
     dead = int(model.comp_list[0, 1])
-    model.A[:, dead] = model.A[:, kept]
+    model.A[dead, :] = model.A[kept, :]  # the retired component row (issue #334)
     model.comp_list[model.comp_list == dead] = kept
     model.comp_used = np.zeros(model.num_comps, dtype=bool)
     model.comp_used[np.unique(model.comp_list)] = True
@@ -103,9 +111,11 @@ def _force_merged_column(model):
 def test_share_constructor_validation(kwargs, match):
     """Rejected up front, and for the same reasons as AMICATorchNG.
 
-    ``share_int <= 6`` is the one that bites: the post-merge A-freeze window is
-    6 iterations long, so a shorter cycle would hold A frozen on every iteration
-    of every cycle and the fit would silently stop moving its mixing matrix.
+    ``share_int <= 6`` is the one that bites: the reference holds A on every
+    iteration whose remainder mod ``share_int`` is 0 to 5, so a shorter cycle
+    would hold A frozen on every iteration of every cycle and the fit would
+    silently stop moving its mixing matrix. (That one is rejected with sharing
+    off too; see ``test_iteration_order.py``.)
     """
     with pytest.raises(ValueError, match=match):
         AMICA(num_models=2, share_comps=True, use_tqdm=False, **kwargs)
@@ -120,8 +130,9 @@ def test_comp_used_survives_a_second_identify_call():
     A mask built during that loop comes back all-True.
     """
     model = _shared_fit(max_iter=3, share_comps=False)
-    model.A[:, int(model.comp_list[0, 1])] = model.A[:, int(model.comp_list[0, 0])]
-    atil = model._pinv_sphere() @ model.A
+    # Source 0 of model 1 gets model 0's source-0 component (a row, issue #334).
+    model.A[int(model.comp_list[0, 1]), :] = model.A[int(model.comp_list[0, 0]), :]
+    atil = model._component_sensor_maps()
 
     comp_list_after, used_first = identify_shared_components(
         atil, model.comp_list.copy(), model.comp_thresh
@@ -175,14 +186,16 @@ def test_sharing_leaves_finite_mixture_parameters():
 
 
 def test_unused_columns_keep_their_last_finite_value():
-    """Frozen, not zeroed: an unused column keeps the value it last held.
+    """Frozen, not zeroed: an unused component keeps the value it last held.
 
     The merge is forced rather than hoped for, so a stale all-True mask fails
-    here instead of skipping. ``doscaling`` is off so the comparison can be
-    exact: the rescale pass normalizes every column, dead ones included, which
-    multiplies their mu by a norm that is 1.0 only to within a ULP.
+    here instead of skipping. The rescale runs (``doscaling`` on, the
+    default): a merged-away row is in no model's block, so its scale is
+    exactly 1 and the comparison is exact. (Before issue #334 this test turned
+    ``doscaling`` off, because the rescale then renormalized such a stored
+    column at ULP scale.)
     """
-    model = _shared_fit(max_iter=3, share_comps=False, doscaling=False)
+    model = _shared_fit(max_iter=3, share_comps=False)
     _, dead = _force_merged_column(model)
     unused = ~model.comp_used
     assert unused.any(), "setup failed: no column was merged away"
@@ -282,12 +295,13 @@ def test_checkpoints_never_persist_non_finite_parameters(tmp_path):
     """A mid-fit checkpoint must not write a degenerate state to disk.
 
     ``fit``'s final write is not the only write: ``writestep`` checkpoints run
-    inside the loop, and a state that goes non-finite early is still on the
-    object for every later checkpoint. Persisting it would leave a run whose
-    only on-disk artifact is corrupt -- ``loadmodout`` reads NaN back without
+    inside the loop. Persisting a non-finite state would leave a run whose only
+    on-disk artifact is corrupt -- ``loadmodout`` reads NaN back without
     complaint. The collapse lands at iteration 2 of 4 with ``writestep=1``, so
-    the first checkpoint is valid and every later one must be refused, loudly,
-    without disturbing what the valid one wrote.
+    the first checkpoint is valid. Since the issue #339 review the fit stops
+    right after that update (``nan_params``), before its checkpoint; the
+    checkpoint's own refusal stays as the backstop and is exercised directly
+    at the end, without disturbing what the valid checkpoint wrote.
     """
     model = _collapsing_model(tmp_path, max_iter=4, collapse_iter=1, writestep=1)
     with pytest.warns(RuntimeWarning, match="invalid value"):
@@ -305,12 +319,19 @@ def test_checkpoints_never_persist_non_finite_parameters(tmp_path):
         assert value is not None, f"{name} missing from the written output"
         assert np.all(np.isfinite(np.asarray(value))), f"{name} written non-finite"
 
-    # Refused loudly, naming the parameter. Once here rather than once per
-    # remaining iteration: the NaN mu makes the next likelihood non-finite, so
-    # restart-on-NaN takes over and its `continue` skips the checkpoint entirely.
+    # The fit stopped on the collapse, before that iteration's checkpoint.
+    assert model.stop_reason == f"{AMICA._NONFINITE_PARAMS_REASON}: mu"
+    log_text = (tmp_path / "out" / "out.txt").read_text()
+    assert "Skipping the results checkpoint" not in log_text
+
+    # The checkpoint refuses a non-finite state loudly, naming the parameter,
+    # and leaves the valid checkpoint alone.
+    written = (tmp_path / "out" / "W").read_bytes()
+    assert model._write_checkpoint("results") is False
     log_text = (tmp_path / "out" / "out.txt").read_text()
     assert "Skipping the results checkpoint" in log_text
     assert "non-finite mu" in log_text
+    assert (tmp_path / "out" / "W").read_bytes() == written
 
 
 # --- one gm-weighted A step per shared column (#242) ------------------------
@@ -346,15 +367,17 @@ def test_shared_column_takes_one_gm_weighted_step():
     # Fortran: one dAk, gm-weighted across contributing models, divided by
     # zeta = sum_h gm[h], applied once (amica15.f90:1749-1761 build, DAXPY at
     # :1807/:1814).
+    # Row k of A is component k (issue #334), so model h's step
+    # dir_h^T @ A[comp_list[:, h], :] lands on the rows comp_list[:, h] names.
     dAk = np.zeros_like(A_before)
     zeta = np.zeros(model.num_comps)
     for h in range(model.num_models):
         zeta[model.comp_list[:, h]] += gm_before[h]
     for h in range(model.num_models):
         idx = model.comp_list[:, h]
-        dAk[:, idx] += gm_before[h] * np.dot(directions[h].T, A_before[:, idx])
+        dAk[idx, :] += gm_before[h] * np.dot(directions[h].T, A_before[idx, :])
     nonzero = zeta > 0
-    dAk[:, nonzero] /= zeta[nonzero]
+    dAk[nonzero, :] /= zeta[nonzero][:, None]
     expected = A_before - lrate * dAk
 
     # Same arithmetic in a different association order, so the agreement is at
@@ -365,32 +388,36 @@ def test_shared_column_takes_one_gm_weighted_step():
     sequential = A_before.copy()
     for h in range(model.num_models):
         idx = model.comp_list[:, h]
-        sequential[:, idx] = sequential[:, idx] - lrate * np.dot(
-            directions[h].T, sequential[:, idx]
+        sequential[idx, :] = sequential[idx, :] - lrate * np.dot(
+            directions[h].T, sequential[idx, :]
         )
-    assert np.abs(model.A[:, kept] - sequential[:, kept]).max() > 1e-3, (
+    assert np.abs(model.A[kept, :] - sequential[kept, :]).max() > 1e-3, (
         "the two A-update semantics are indistinguishable on this state, so the "
         "test above would pass with the per-model loop restored"
     )
 
 
 def test_merged_away_column_does_not_move():
-    """A column no contributor references gets exactly zero dAk, so it holds."""
-    model = _shared_fit(max_iter=3, share_comps=False, doscaling=False)
+    """A component no contributor references gets exactly zero dAk, so its
+    row holds, the rescale included (its scale is exactly 1)."""
+    model = _shared_fit(max_iter=3, share_comps=False)
     _, dead = _force_merged_column(model)
-    dead_before = model.A[:, dead].copy()
+    dead_before = model.A[dead, :].copy()
 
     model._update_parameters(model._get_updates_and_likelihood())
 
-    np.testing.assert_array_equal(model.A[:, dead], dead_before)
+    np.testing.assert_array_equal(model.A[dead, :], dead_before)
 
 
 # --- post-merge A-freeze (#242) ---------------------------------------------
-def test_a_frozen_window_matches_the_torch_schedule():
-    """Identical window to AMICATorchNG: the merge iteration and the 5 after."""
+@pytest.mark.parametrize("share_comps, num_models", [(True, 2), (False, 2), (False, 1)])
+def test_a_frozen_window_matches_the_torch_schedule(share_comps, num_models):
+    """Identical window to AMICATorchNG, the reference's ``iter >= share_start``
+    and ``mod(iter, share_int) <= 5`` (amica15.f90:1803, 1-indexed), with
+    sharing on or off and for any model count (issue #345)."""
     model = AMICA(
-        num_models=2,
-        share_comps=True,
+        num_models=num_models,
+        share_comps=share_comps,
         share_start=10,
         share_int=20,
         use_tqdm=False,
@@ -400,19 +427,18 @@ def test_a_frozen_window_matches_the_torch_schedule():
         model.iter = itf - 1  # _a_frozen works in Fortran-style 1-indexed iters
         return model._a_frozen()
 
-    assert not any(frozen(i) for i in range(1, 10))  # before share_start
-    assert all(frozen(i) for i in range(10, 16))  # merge iteration + 5
-    assert not any(frozen(i) for i in range(16, 30))  # A moves again
-    assert all(frozen(i) for i in range(30, 36))  # next cycle
+    assert not any(frozen(i) for i in range(1, 20))  # remainder above 5 or early
+    assert all(frozen(i) for i in range(20, 26))  # remainder 0..5
+    assert not any(frozen(i) for i in range(26, 40))  # A moves again
+    assert all(frozen(i) for i in range(40, 46))  # next cycle
 
 
-def test_a_frozen_is_off_for_a_single_model():
-    """A model cannot share with itself, so sharing never freezes A there."""
-    model = AMICA(
-        num_models=1, share_comps=True, share_start=1, share_int=8, use_tqdm=False
-    )
+def test_a_frozen_applies_to_a_single_model_without_sharing():
+    """The reference never checks share_comps in the A-update guard, so a
+    one-model fit with sharing off is held too (issue #345)."""
+    model = AMICA(num_models=1, share_start=1, share_int=8, use_tqdm=False)
     model.iter = 0
-    assert model._a_frozen() is False
+    assert model._a_frozen() is True
 
 
 def test_freeze_holds_A_but_still_measures_the_gradient():
@@ -432,13 +458,14 @@ def test_freeze_holds_A_but_still_measures_the_gradient():
     assert model._a_frozen() is True
     A_before = model.A.copy()
     lrate_before = model.lrate
-    nd_count = len(model.nd)
 
-    model._update_parameters(model._get_updates_and_likelihood())
+    updates = model._get_updates_and_likelihood()
+    step = model._update_direction(updates)
+    model._update_parameters(updates, step)
 
     np.testing.assert_array_equal(model.A, A_before)
     assert model.lrate == lrate_before  # the ramp is held with the step
-    assert len(model.nd) == nd_count + 1 and model.nd[-1] > 0.0
+    assert step.nd > 0.0
 
 
 # --- cross-backend agreement (.rules/backend_parity.md) ---------------------
@@ -469,6 +496,7 @@ def test_shared_column_update_matches_the_torch_backend():
     ng.comp_list = torch.from_numpy(model.comp_list.copy())
     ng.lrate = model.lrate
     ng.rholrate = model.rholrate
+    ng.rholrate_cap = model.rholrate_cap
     ng.iteration = model.iter
     ng._update_unmixing_matrices()
     assert int(ng.comp_used.sum()) == int(model.comp_used.sum())
@@ -479,14 +507,14 @@ def test_shared_column_update_matches_the_torch_backend():
 
     assert ng.A is not None
     A_torch = ng.A.numpy()
-    assert np.abs(model.A[:, kept] - A_before[:, kept]).max() > 1e-6, (
-        "the shared column did not move, so this compares nothing"
+    assert np.abs(model.A[kept, :] - A_before[kept, :]).max() > 1e-6, (
+        "the shared component did not move, so this compares nothing"
     )
-    np.testing.assert_allclose(model.A[:, kept], A_torch[:, kept], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(model.A[kept, :], A_torch[kept, :], rtol=0, atol=1e-12)
     np.testing.assert_allclose(model.A, A_torch, rtol=0, atol=1e-12)
-    # The dead column is frozen in both, but both still run it through their own
-    # rescale, whose column norm agrees only to a ULP across array libraries.
-    np.testing.assert_allclose(model.A[:, dead], A_torch[:, dead], rtol=0, atol=1e-12)
+    # The dead row is frozen in both, the rescale included (its scale is 1).
+    np.testing.assert_array_equal(model.A[dead, :], A_before[dead, :])
+    np.testing.assert_array_equal(A_torch[dead, :], A_before[dead, :])
 
 
 def test_forced_merge_fit_is_finite_in_both_backends():
@@ -551,8 +579,8 @@ def test_numpy_merge_decision_matches_torch_backend():
     """Acceptance test: from one matched fitted state, the two backends reach
     the identical merge decision now that both compare sensor-space
     (de-sphered) mixing columns -- ``pinv(sphere) @ A`` -- mirroring
-    ``AMICATorchNG._identify_shared_comps`` exactly (torch_impl/core.py:1696-
-    1741) instead of numpy's former sphered-space comparison.
+    ``AMICATorchNG._identify_shared_comps`` exactly, instead of numpy's former
+    sphered-space comparison.
     """
     model = _shared_fit(max_iter=3, share_comps=False)
     # Perturb one cross-model column into near- (not exact-) collinearity, so
@@ -561,7 +589,7 @@ def test_numpy_merge_decision_matches_torch_backend():
     i0 = int(model.comp_list[0, 0])
     i1 = int(model.comp_list[0, 1])
     rng = np.random.RandomState(0)
-    model.A[:, i1] = model.A[:, i0] + 1e-3 * rng.standard_normal(model.A.shape[0])
+    model.A[i1, :] = model.A[i0, :] + 1e-3 * rng.standard_normal(model.A.shape[1])
     model._update_unmixing_matrices()
     thresh = 0.9
 
@@ -582,7 +610,7 @@ def test_numpy_merge_decision_matches_torch_backend():
     ng.comp_thresh = thresh
 
     numpy_comp_list, _ = identify_shared_components(
-        model._pinv_sphere() @ model.A, model.comp_list.copy(), thresh
+        model._component_sensor_maps(), model.comp_list.copy(), thresh
     )
     ng._identify_shared_comps()
 
@@ -642,8 +670,8 @@ def test_zero_norm_column_is_not_merged_and_raises_no_warning():
     model = _shared_fit(max_iter=3, share_comps=False)
     zero_idx = int(model.comp_list[0, 1])
     other_idx = int(model.comp_list[0, 0])
-    model.A[:, zero_idx] = 0.0
-    atil = model._pinv_sphere() @ model.A
+    model.A[zero_idx, :] = 0.0
+    atil = model._component_sensor_maps()
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

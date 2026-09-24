@@ -19,8 +19,10 @@ from pamica.amica import AMICA
 from pamica.fortran_params import (
     FORTRAN_TO_PAMICA_KEY,
     FORTRAN_UNSUPPORTED_KEYS,
+    JSON_ALIAS_TO_CANONICAL,
     _fortran_accepted_keys,
     read_fortran_param_file,
+    read_params_file,
 )
 from pamica.torch_impl.utils import load_eeglab_data
 
@@ -133,6 +135,20 @@ def test_block_size_search_keys_translate(parsed):
         assert key not in FORTRAN_UNSUPPORTED_KEYS
 
 
+def test_checkpoint_keys_translate(parsed):
+    """writestep/do_history/histstep moved out of the unsupported table
+    (issue #304): the reader translates what ANY backend supports, and the
+    legacy NumPy backend implements periodic on-disk checkpointing under
+    these exact names/semantics. Torch/MLX have no matching mechanism yet
+    (issue #312), so their consumer (AMICA.fit) is the one that warns."""
+    assert parsed["do_history"] is False
+    assert parsed["writestep"] == 20
+    assert parsed["histstep"] == 10
+    for key in ("writestep", "do_history", "histstep"):
+        assert FORTRAN_TO_PAMICA_KEY[key] == key
+        assert key not in FORTRAN_UNSUPPORTED_KEYS
+
+
 def test_block_size_search_keys_reach_the_backend(tmp_path):
     """The reader targets the actual Python call surface, so the four keys must
     land on AMICATorchNG constructor keywords rather than being dropped by
@@ -157,6 +173,17 @@ def test_mapping_tables_partition_every_known_fortran_key():
     unsupported = set(FORTRAN_UNSUPPORTED_KEYS)
     assert mapped & unsupported == set()
     assert accepted == mapped | unsupported
+
+
+def test_table_sizes_match_the_documented_counts():
+    """Pins the module docstring's/docs' "60 keys covering 59 distinct
+    pamica-side names" and "29 keywords" figures, so a future move between
+    FORTRAN_TO_PAMICA_KEY and FORTRAN_UNSUPPORTED_KEYS (like writestep/
+    do_history/histstep's issue #304 move) forces those counts to be
+    revisited rather than silently going stale."""
+    assert len(FORTRAN_TO_PAMICA_KEY) == 60
+    assert len(set(FORTRAN_TO_PAMICA_KEY.values())) == 59
+    assert len(FORTRAN_UNSUPPORTED_KEYS) == 29
 
 
 def test_missing_source_disables_unrecognized_filtering(tmp_path, monkeypatch):
@@ -389,6 +416,41 @@ class TestFitAppliesFileDefaults:
         assert "data_dim" in warnings
         assert "files" in warnings
 
+    def test_checkpoint_settings_warn_not_applied(self, real_data, caplog):
+        """writestep/do_history/histstep are translated (issue #304) because
+        the legacy NumPy backend supports them, but AMICATorchNG has no
+        matching constructor keyword (issue #312), so fitting from
+        input.param -- which sets all three -- must still name them in the
+        "not applied" warning rather than silently dropping them."""
+        model = AMICA.from_params_file(str(PARAM_FILE), verbose=False)
+        with caplog.at_level(logging.WARNING, logger="pamica.amica"):
+            model.fit(real_data[:, :4096], max_iter=1, seed=0)
+        warnings = "\n".join(r.message for r in caplog.records)
+        assert "writestep" in warnings
+        assert "do_history" in warnings
+        assert "histstep" in warnings
+
+    def test_json_alias_settings_now_reach_the_backend(self, real_data, caplog):
+        """Issue #304 behavior change: sample_params.json's own alias
+        spellings (max_decs/min_grad_norm/share_int) are translated to the
+        canonical/constructor names (maxdecs/min_nd/share_iter) by
+        read_params_file, so they now reach AMICATorchNG -- previously they
+        matched neither a named fit() parameter nor an AMICATorchNG keyword
+        under their raw JSON spelling, so they were only named in the "not
+        applied" warning rather than actually applied."""
+        model = AMICA.from_params_file(str(JSON_FILE), verbose=False)
+        with caplog.at_level(logging.WARNING, logger="pamica.amica"):
+            model.fit(real_data[:, :4096], max_iter=3, seed=0)
+        backend = model.model_
+        assert backend is not None
+        assert backend.maxdecs == 3  # sample_params.json's max_decs
+        assert backend.min_nd == 1e-7  # sample_params.json's min_grad_norm
+        assert backend.share_iter == 100  # sample_params.json's share_int
+        warnings = "\n".join(r.message for r in caplog.records)
+        assert "max_decs" not in warnings
+        assert "min_grad_norm" not in warnings
+        assert "share_int" not in warnings
+
     def test_fit_without_from_params_file_is_unaffected(self, real_data):
         """A plain AMICA(...) instance has no _file_params, so fit() must
         behave exactly as before (hard-coded defaults, no warning)."""
@@ -398,26 +460,99 @@ class TestFitAppliesFileDefaults:
         assert model.model_.do_newton is False  # the ordinary hard default
 
 
-def test_param_and_json_agree_on_overlapping_settings():
-    """Round trip: sample_data/input.param and sample_data/sample_params.json
-    describe the same reference run, so every setting present in both must
-    agree once the Fortran reader's renames are applied. `files` is excluded:
-    the two files spell the same data file's path relative to different
-    working directories (input.param relative to sample_data/, sample_params.json
-    relative to the repo root), which is a path-context difference, not a
-    parameter-translation one."""
-    from_param = read_fortran_param_file(PARAM_FILE)
-    from_json = json.loads(JSON_FILE.read_text())
+class TestReadParamsFile:
+    """``read_params_file`` (issue #304): the single params-file entry point
+    every backend should use -- content-sniffed JSON/Fortran-text dispatch,
+    both landing on the same canonical pamica keys."""
 
-    common = sorted((set(from_param) & set(from_json)) - {"files"})
-    # 39 as of this writing (min_grad_norm/max_decs/share_int no longer
-    # overlap by construction: this reader targets the constructor's
-    # min_nd/maxdecs/share_iter spelling, which sample_params.json's own
-    # schema does not use -- see FORTRAN_TO_PAMICA_KEY's module docstring).
-    assert len(common) >= 35  # sanity: most settings really do overlap
-    mismatched = {
-        key: (from_param[key], from_json[key])
-        for key in common
-        if from_param[key] != from_json[key]
-    }
-    assert mismatched == {}
+    def test_param_and_json_agree_on_overlapping_settings(self):
+        """Anti-drift: sample_data/input.param and sample_data/sample_params.json
+        describe the same reference run, so every canonical key present in
+        both must agree once each format's own translation (Fortran renames /
+        JSON aliases) is applied. `files` is excluded: the two files spell
+        the same data file's path relative to different working directories
+        (input.param relative to sample_data/, sample_params.json relative to
+        the repo root), which is a path-context difference, not a
+        parameter-translation one."""
+        from_param = read_params_file(PARAM_FILE)
+        from_json = read_params_file(JSON_FILE)
+
+        common = sorted((set(from_param) & set(from_json)) - {"files"})
+        # 49 as of this writing (min_grad_norm/max_decs/share_int now DO
+        # overlap, unlike the pre-#304 raw-json comparison: both formats are
+        # translated to the same canonical min_nd/maxdecs/share_iter keys).
+        assert len(common) >= 47
+        mismatched = {
+            key: (from_param[key], from_json[key])
+            for key in common
+            if from_param[key] != from_json[key]
+        }
+        assert mismatched == {}
+        # "files" is the only shared key excluded above, and it really is a
+        # (path-context) difference, not an accidental agreement masked by
+        # the exclusion.
+        assert "files" in from_param and "files" in from_json
+        assert from_param["files"] != from_json["files"]
+
+    def test_json_top_level_must_be_an_object(self, tmp_path):
+        dest = tmp_path / "params.json"
+        dest.write_text("[1, 2, 3]")
+        with pytest.raises(ValueError, match="top level must be an object"):
+            read_params_file(dest)
+
+    def test_json_alias_and_canonical_key_conflict_raises(self, tmp_path):
+        dest = tmp_path / "params.json"
+        dest.write_text(json.dumps({"max_decs": 3, "maxdecs": 5}))
+        with pytest.raises(ValueError, match="max_decs.*maxdecs|maxdecs.*max_decs"):
+            read_params_file(dest)
+
+    def test_json_alias_is_translated_to_canonical(self, tmp_path):
+        dest = tmp_path / "params.json"
+        dest.write_text(
+            json.dumps(
+                {
+                    "min_grad_norm": 1e-6,
+                    "max_decs": 4,
+                    "numrej": 2,
+                    "num_mix_comps": 5,
+                    "share_int": 50,
+                }
+            )
+        )
+        got = read_params_file(dest)
+        assert got == {
+            "min_nd": 1e-6,
+            "maxdecs": 4,
+            "maxrej": 2,
+            "num_mix": 5,
+            "share_iter": 50,
+        }
+
+    def test_json_non_aliased_keys_pass_through_unchanged(self, tmp_path):
+        dest = tmp_path / "params.json"
+        dest.write_text(json.dumps({"kurt_start": 3, "pdftype": 1}))
+        assert read_params_file(dest) == {"kurt_start": 3, "pdftype": 1}
+
+    def test_unparsable_non_json_text_raises(self, tmp_path):
+        """Content that starts with neither ``{``/``[`` nor a valid Fortran
+        ``key value`` line falls through to the Fortran reader, which raises
+        rather than silently returning all defaults."""
+        dest = tmp_path / "params.txt"
+        dest.write_text("this is not a parameter file at all, just prose.\n")
+        with pytest.raises(ValueError):
+            read_params_file(dest)
+
+    def test_fortran_text_still_dispatches_to_the_fortran_reader(self):
+        assert read_params_file(PARAM_FILE) == read_fortran_param_file(PARAM_FILE)
+
+    def test_alias_table_derived_from_fortran_renames_plus_share_int(self):
+        """JSON_ALIAS_TO_CANONICAL has exactly the module docstring's five
+        entries: the three Fortran renames, num_mix_comps, and the JSON-only
+        share_int addition."""
+        assert JSON_ALIAS_TO_CANONICAL == {
+            "min_grad_norm": "min_nd",
+            "max_decs": "maxdecs",
+            "numrej": "maxrej",
+            "num_mix_comps": "num_mix",
+            "share_int": "share_iter",
+        }

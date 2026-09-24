@@ -72,7 +72,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -104,6 +104,55 @@ DEFAULT_ENSEMBLE_MAX_ITER = 100
 BUNDLED_SEED_START = 301
 EXTERNAL_SEED_START = 201
 MULTIMODEL_SEED_START = 1
+
+
+# The reference's settings for every Table 1 run: the values of the bundled
+# pamica/sample_data/input.param, which AMICANative's defaults mirrored when
+# the table was measured, and do_approx_sphere 1, the binary's compiled value
+# for a key that file leaves unset (AMICANative writes it since issue #354).
+# Spelled out, so that a change of AMICANative's own defaults cannot change
+# this protocol; each call adds its model count, iteration budget and the
+# settings it overrides.
+REFERENCE_SETTINGS: dict[str, Any] = {
+    "block_size": 512, "do_opt_block": 0, "blk_min": 256, "blk_step": 256,
+    "blk_max": 1024, "use_min_dll": 1, "min_dll": 1e-09, "use_grad_norm": 1,
+    "min_grad_norm": 1e-07, "pdftype": 0, "share_comps": 0, "share_start": 100,
+    "comp_thresh": 0.99, "share_iter": 100, "lrate": 0.05, "minlrate": 1e-08,
+    "mineig": 1e-12, "lratefact": 0.5, "rholrate": 0.05, "rho0": 1.5,
+    "minrho": 1.0, "maxrho": 2.0, "rholratefact": 0.5, "kurt_start": 3,
+    "num_kurt": 5, "kurt_int": 1, "do_newton": 1, "newt_start": 50,
+    "newt_ramp": 10, "newtrate": 1.0, "do_reject": 0, "numrej": 3,
+    "rejsig": 3.0, "rejstart": 2, "rejint": 3, "decwindow": 1, "max_decs": 3,
+    "fix_init": 0, "update_A": 1, "update_c": 1, "update_gm": 1,
+    "update_alpha": 1, "update_mu": 1, "update_beta": 1, "invsigmax": 100.0,
+    "invsigmin": 0.0, "do_rho": 1, "do_mean": 1, "do_sphere": 1,
+    "do_approx_sphere": 1, "doPCA": 1, "pcadb": 30.0, "byte_size": 4,
+    "doscaling": 1, "scalestep": 1,
+}  # fmt: skip
+
+
+def single_model_reference_kwargs(max_iter: int) -> dict[str, Any]:
+    """``AMICANative`` settings of the single-model sweep: Newton and the
+    reference's early stops off, so both sides run the full budget."""
+    return {
+        **REFERENCE_SETTINGS,
+        "num_models": 1,
+        "num_mix_comps": 3,
+        "max_iter": max_iter,
+        "do_newton": 0,
+        "use_min_dll": 0,
+        "use_grad_norm": 0,
+    }
+
+
+def multimodel_reference_kwargs(max_iter: int) -> dict[str, Any]:
+    """``AMICANative`` settings of the multi-model ensemble (the #27 protocol)."""
+    return {
+        **REFERENCE_SETTINGS,
+        "num_models": 2,
+        "num_mix_comps": 3,
+        "max_iter": max_iter,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -334,13 +383,7 @@ def run_single_model_sweep(
                 threads=threads,
                 max_threads=threads,
                 timeout=3600,
-                n_models=1,
-                n_mix=3,
-                max_iter=max_iter,
-                do_newton=0,
-                use_min_dll=0,
-                use_grad_norm=0,
-                block_size=512,
+                **single_model_reference_kwargs(max_iter),
             )
             eng.fit(data)
         except (RuntimeError, TimeoutError) as exc:
@@ -481,9 +524,7 @@ def run_multimodel_ensemble(
                 threads=threads,
                 max_threads=threads,
                 timeout=1800,
-                n_models=2,
-                n_mix=3,
-                max_iter=max_iter,
+                **multimodel_reference_kwargs(max_iter),
             )
             eng.fit(data)
         except RuntimeError as exc:
@@ -499,6 +540,9 @@ def run_multimodel_ensemble(
         model.fit(
             data,
             max_iter=max_iter,
+            # The #27 protocol's rate (input.param), pinned so the ensemble does
+            # not follow a change of the wrapper's default.
+            lrate=0.05,
             do_newton=True,
             seed=MULTIMODEL_SEED_START + i,
             block_size=512,
@@ -595,10 +639,12 @@ def run_multimodel_ensemble(
 # (matches test_ng_backend.py::test_sufficient_stats_match_numpy_reference).
 # ---------------------------------------------------------------------------
 
+# The reference's log-normalizers: each default-kind literal is rounded to
+# single precision before ``dble`` widens it (issue #344); 4.0 is exact.
 _LOG4 = math.log(4.0)
-_LSQ2PI = math.log(2.506628274)
-_LNSUB = math.log(4.132731354)
-_LNSUP = math.log(1.858073988)
+_LSQ2PI = math.log(float(np.float32(2.506628274)))
+_LNSUB = math.log(float(np.float32(4.132731354)))
+_LNSUP = math.log(float(np.float32(1.858073988)))
 
 
 def _fortran_z0(y: np.ndarray, code: int) -> np.ndarray:

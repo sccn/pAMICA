@@ -1,5 +1,11 @@
 # Multi-model NG log-likelihood: best-iterate safeguard (issue #51)
 
+> **Historical record.** These figures predate epic #324, which changed every
+> backend's default trajectory. The re-measured `keep_best` ensemble (seeded,
+> against the pinned v0.3.3 native binary) is in `.context/issue-351/findings.md`
+> (script `.context/issue-351/keep_best_ensemble.py`) and in ADR 0003's
+> "Re-measured after epic #324" section.
+
 **Bottom line.** The multi-model NG log-likelihood was ~0.02 lower and ~13x more
 variable than Fortran because `AMICATorchNG.fit` returned the *last* EM iterate
 under a deliberately non-monotone learning-rate schedule. Returning the *best*

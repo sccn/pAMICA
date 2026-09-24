@@ -1,0 +1,238 @@
+{
+  "runs": {
+    "fortran_fixinit": {
+      "final_ll": -3.697811900183683,
+      "seconds": 3393.1054351329803
+    },
+    "fortran_seed1": {
+      "final_ll": -3.6978038496639263,
+      "seconds": 3529.269710302353
+    },
+    "fortran_seed2": {
+      "final_ll": -3.6977085058389902,
+      "seconds": 2824.826691389084
+    },
+    "pamica_fixinit": {
+      "final_ll": -3.697811975919964,
+      "stop_reason": "max_iter",
+      "n_newton_fallbacks": 0,
+      "end_newtrate": 0.5,
+      "seconds": 4322.5316915512085
+    },
+    "pamica_seed13": {
+      "final_ll": -3.6978163881752835,
+      "stop_reason": "max_iter",
+      "n_newton_fallbacks": 0,
+      "end_newtrate": 0.5,
+      "seconds": 6239.20730638504
+    },
+    "pamica_seed42": {
+      "final_ll": -3.6975690998613517,
+      "stop_reason": "max_iter",
+      "n_newton_fallbacks": 0,
+      "end_newtrate": 0.5,
+      "seconds": 5206.991969823837
+    },
+    "pamica_seed7": {
+      "final_ll": -3.6978123737664954,
+      "stop_reason": "max_iter",
+      "n_newton_fallbacks": 0,
+      "end_newtrate": 0.5,
+      "seconds": 5979.722954750061
+    }
+  },
+  "pairs": {
+    "fortran_seed1 vs fortran_seed2": {
+      "mean": 0.9845232160684182,
+      "min": 0.8413590217123816,
+      "n_below_0.9": 2,
+      "worst5": [
+        0.841,
+        0.851,
+        0.932,
+        0.937,
+        0.94
+      ]
+    },
+    "pamica_seed13 vs fortran_seed1": {
+      "mean": 0.9956494072840422,
+      "min": 0.9456874180196005,
+      "n_below_0.9": 0,
+      "worst5": [
+        0.946,
+        0.966,
+        0.986,
+        0.989,
+        0.989
+      ]
+    },
+    "pamica_seed13 vs fortran_seed2": {
+      "mean": 0.9814609218531232,
+      "min": 0.7726103993365133,
+      "n_below_0.9": 3,
+      "worst5": [
+        0.773,
+        0.838,
+        0.897,
+        0.918,
+        0.938
+      ]
+    },
+    "pamica_seed42 vs fortran_seed1": {
+      "mean": 0.9632013836844461,
+      "min": 0.6669135684644986,
+      "n_below_0.9": 8,
+      "worst5": [
+        0.667,
+        0.757,
+        0.8,
+        0.822,
+        0.832
+      ]
+    },
+    "pamica_seed42 vs fortran_seed2": {
+      "mean": 0.9864819095469834,
+      "min": 0.8583950552591829,
+      "n_below_0.9": 3,
+      "worst5": [
+        0.858,
+        0.863,
+        0.896,
+        0.908,
+        0.964
+      ]
+    },
+    "pamica_seed7 vs fortran_seed1": {
+      "mean": 0.9949488656298753,
+      "min": 0.9431185504188633,
+      "n_below_0.9": 0,
+      "worst5": [
+        0.943,
+        0.978,
+        0.984,
+        0.984,
+        0.988
+      ]
+    },
+    "pamica_seed7 vs fortran_seed2": {
+      "mean": 0.9818638960989596,
+      "min": 0.785890714613924,
+      "n_below_0.9": 3,
+      "worst5": [
+        0.786,
+        0.825,
+        0.897,
+        0.925,
+        0.935
+      ]
+    },
+    "pamica_seed13 vs pamica_seed42": {
+      "mean": 0.9623214361648936,
+      "min": 0.657888742144425,
+      "n_below_0.9": 7,
+      "worst5": [
+        0.658,
+        0.675,
+        0.809,
+        0.846,
+        0.861
+      ]
+    },
+    "pamica_seed13 vs pamica_seed7": {
+      "mean": 0.9991797816142324,
+      "min": 0.9906842414174939,
+      "n_below_0.9": 0,
+      "worst5": [
+        0.991,
+        0.995,
+        0.997,
+        0.997,
+        0.998
+      ]
+    },
+    "pamica_seed42 vs pamica_seed7": {
+      "mean": 0.9643885413233992,
+      "min": 0.6694651529069076,
+      "n_below_0.9": 7,
+      "worst5": [
+        0.669,
+        0.679,
+        0.806,
+        0.848,
+        0.868
+      ]
+    },
+    "pamica_fixinit vs fortran_fixinit": {
+      "mean": 0.9999997990780136,
+      "min": 0.9999964129902119,
+      "n_below_0.9": 0,
+      "worst5": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "fortran_fixinit vs fortran_seed1": {
+      "mean": 0.9960136346706421,
+      "min": 0.9551047201618098,
+      "n_below_0.9": 0,
+      "worst5": [
+        0.955,
+        0.977,
+        0.988,
+        0.988,
+        0.99
+      ]
+    },
+    "fortran_fixinit vs fortran_seed2": {
+      "mean": 0.9822761943412508,
+      "min": 0.7852272438593741,
+      "n_below_0.9": 2,
+      "worst5": [
+        0.785,
+        0.829,
+        0.902,
+        0.926,
+        0.938
+      ]
+    },
+    "pamica_fixinit vs pamica_seed13": {
+      "mean": 0.9993247579335198,
+      "min": 0.9917649489800673,
+      "n_below_0.9": 0,
+      "worst5": [
+        0.992,
+        0.997,
+        0.997,
+        0.998,
+        0.998
+      ]
+    },
+    "pamica_fixinit vs pamica_seed42": {
+      "mean": 0.9635912741837158,
+      "min": 0.6674551834143085,
+      "n_below_0.9": 7,
+      "worst5": [
+        0.667,
+        0.677,
+        0.805,
+        0.847,
+        0.848
+      ]
+    },
+    "pamica_fixinit vs pamica_seed7": {
+      "mean": 0.9998199920891492,
+      "min": 0.9980012380369315,
+      "n_below_0.9": 0,
+      "worst5": [
+        0.998,
+        0.998,
+        0.999,
+        0.999,
+        1.0
+      ]
+    }
+  }
+}

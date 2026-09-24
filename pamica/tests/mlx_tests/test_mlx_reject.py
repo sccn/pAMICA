@@ -27,6 +27,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from pamica.mlx_impl import AMICAMLXNG  # noqa: E402  (after the MLX importorskip)
+from pamica.mlx_impl.core import _KEEP_BEST_TOL  # noqa: E402
 
 SAMPLE_DIR = Path(__file__).resolve().parents[2] / "sample_data"
 DATA_FILE = SAMPLE_DIR / "eeglab_data.fdt"
@@ -60,10 +61,14 @@ def _model(**kwargs: Any) -> AMICAMLXNG:
 
 # --- constructor validation --------------------------------------------
 def test_reject_param_validation():
-    """Matches AMICATorchNG's validation exactly (torch_impl/core.py:
-    679-685): rejint<1 would ZeroDivisionError in the reject schedule,
-    rejsig<=0 breaks the reject-below-mean semantics, maxrej<0 is a sanity
-    guard. rejstart is NOT validated (torch does not validate it either)."""
+    """Matches AMICATorchNG's validation exactly: rejint<1 would
+    ZeroDivisionError in the reject schedule, rejsig<=0 breaks the
+    reject-below-mean semantics, maxrej<0 is a sanity guard, and rejstart
+    counts from 1, so rejstart<=0 would silently skip the unconditional first
+    pass (issue #335; the cross-backend message check is
+    ``test_schedule_gates.py``)."""
+    with pytest.raises(ValueError, match="rejstart"):
+        _model(do_reject=True, rejstart=0)
     with pytest.raises(ValueError, match="rejint"):
         _model(do_reject=True, rejint=0)
     with pytest.raises(ValueError, match="rejsig"):
@@ -98,10 +103,12 @@ def test_do_reject_false_leaves_good_idx_unset(real_data):
 
 # --- the reject schedule -------------------------------------------------
 def test_rejection_shrinks_good_sample_set_on_the_expected_schedule(real_data):
-    """rejstart=2/rejint=3/maxrej=2: rejection fires at it=2 (unconditional)
-    and it=5 (max(1,5-2)%3==0, numrej<2), then is capped -- no more passes
-    at it=8/11 despite the modulo condition recurring, matching Fortran's
-    schedule (amica15.f90:1142) and the torch/NumPy backends' own tests."""
+    """rejstart=2/rejint=3/maxrej=2: rejection fires at iteration 2
+    (unconditional) and 5 (max(1,5-2)%3==0, numrej<2), then is capped -- no
+    more passes at 8/11 despite the modulo condition recurring, matching
+    Fortran's schedule (amica15.f90:1136, iterations counted from 1 as the
+    reference counts them, issue #335) and the torch/NumPy backends' own
+    tests."""
     n_total = real_data.shape[1]
     m = _model(
         seed=42,
@@ -203,7 +210,7 @@ def test_keep_best_inactive_reason_prefers_do_reject_when_both_are_on(
 ):
     """PR #311 review: when do_reject AND share_comps are BOTH on, the
     reported reason must be "do_reject", matching AMICATorchNG's exact
-    precedence (torch_impl/core.py:2425, ``"do_reject" if self.do_reject
+    precedence (``AMICATorchNG._fit_once``: ``"do_reject" if self.do_reject
     else "share_comps"``) -- the two backends must report the same reason
     for the same configuration, not whichever flag MLX happened to check
     first."""
@@ -229,29 +236,57 @@ def test_keep_best_inactive_reason_prefers_do_reject_when_both_are_on(
     assert "keep_best is inactive under share_comps" not in text
 
 
+# The aggressive-Newton recipe that genuinely overshoots on this backend
+# (test_mlx_keepbest.py's module docstring), plus a single rejection pass.
+# newt_start and rejstart count from 1 since issue #335: 2 and 6 are the run
+# measured as 1 and 5 before.
+_OVERSHOOT_KWARGS: dict[str, Any] = dict(
+    n_models=2,
+    seed=0,
+    do_newton=True,
+    newt_start=2,
+    lrate=0.5,
+    newtrate=3.0,
+    use_min_dll=True,
+    min_dll=1e-8,
+    maxincs=0,
+    use_grad_norm=False,
+)
+_REJECT_KWARGS: dict[str, Any] = dict(
+    do_reject=True, rejsig=3.0, rejstart=6, rejint=5, maxrej=1
+)
+_OVERSHOOT_MAX_ITER = 150
+
+
 def test_keep_best_restore_never_fires_under_do_reject(real_data):
-    """Even the aggressive-Newton recipe known to overshoot under plain
-    keep_best (test_mlx_llt_stash.py) never restores when do_reject is on:
-    fit() always returns the last iterate there."""
-    m = _model(
-        n_models=2,
-        seed=0,
-        do_newton=True,
-        newt_start=1,
-        lrate=0.5,
-        use_min_dll=True,
-        min_dll=1e-4,
-        maxincs=2,
-        use_grad_norm=False,
-        do_reject=True,
-        rejsig=3.0,
-        rejstart=5,
-        rejint=5,
-        maxrej=1,
-    )
-    m.fit(real_data, max_iter=30, verbose=False)
-    if m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS:
-        pytest.skip("run ended degenerate; not the case under test")
+    """A recipe that overshoots its own peak never restores when do_reject is
+    on: fit() returns the last iterate there.
+
+    Non-vacuous on both counts, measured on an Apple M4 Pro. Without
+    do_reject the same fit restores (peak at iteration 13, stop at 14, 1.6e-3
+    below the peak). With do_reject its own trajectory also ends below an
+    earlier peak (after the rejection pass at iteration 6: peak at 13, stop at
+    14, 9.4e-3 below), so a restore would fire if the safeguard were active,
+    and it does not. Both stop on their first likelihood decrease
+    (``maxincs=0``, ``min_dll=1e-8``), so the overshoot does not depend on
+    round-off: across 12 relative data perturbations of 1e-6 it held in all,
+    9.4e-3 to 1.1e-2 below the peak with do_reject. The ``min_dll=1e-4``/
+    ``maxincs=2`` stop used until issue #339 ended at the peak in 2 of those
+    12, and on the macOS CI runner. The version before that (``newtrate`` 0.5,
+    30 iterations) ran monotone once issue #333 changed ``doscaling`` to
+    rescale components, so it could not have failed.
+    """
+    plain = _model(keep_best=True, **_OVERSHOOT_KWARGS)
+    plain.fit(real_data, max_iter=_OVERSHOOT_MAX_ITER, verbose=False)
+    assert plain.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert max(plain.ll_history) - plain.ll_history[-1] > _KEEP_BEST_TOL
+    assert plain.final_ll_ == max(plain.ll_history) > plain.ll_history[-1]
+
+    m = _model(keep_best=True, **_OVERSHOOT_KWARGS, **_REJECT_KWARGS)
+    m.fit(real_data, max_iter=_OVERSHOOT_MAX_ITER, verbose=False)
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS
+    assert m.numrej >= 1  # rejection fired, so keep_best is inactive
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL
     assert m.final_ll_ == m.ll_history[-1]
 
 

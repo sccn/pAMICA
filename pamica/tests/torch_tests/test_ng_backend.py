@@ -280,7 +280,9 @@ def test_forward_ll_per_source_factorization_order():
         abs_y = np.abs(y)
         gg = -(abs_y ** rho[k][None, :]) - np.log(2.0) - sp.gammaln(1.0 + 1.0 / rho[k])
         lap = -abs_y - np.log(2.0)
-        gau = -y * y - 0.5 * np.log(np.pi)
+        # The reference's rho == 2 normalizer, log(dble(1.772453851)): the
+        # literal rounded to single precision (amica15.f90:1313, issue #344).
+        gau = -y * y - np.log(float(np.float32(1.772453851)))
         log_pdf = np.where(rho[k] == 2.0, gau, np.where(rho[k] == 1.0, lap, gg))
         z0[:, :, k] = np.log(alpha[k])[None, :] + np.log(beta[k])[None, :] + log_pdf
 
@@ -489,7 +491,8 @@ def test_newton_posdef_mstep_composition():
     (issue #21), so the posdef branch never fires in a plain fit. Here the
     finalized stats are forced positive definite to exercise that branch, and
     the resulting ``A`` is checked against an independent recomputation of the
-    exact composition (slice -> H -> ``A + lrate*(A@H)`` -> column rescale).
+    exact composition (slice -> H -> ``A + lrate*(A@H)`` -> component rescale:
+    each component is a ROW of the stored block, issue #333).
     """
     data = _load_real_data()
     blk = 256
@@ -519,9 +522,10 @@ def test_newton_posdef_mstep_composition():
     idx = ng.comp_list[:, 0]
     A_expected = A_before.clone()
     A_expected[:, idx] = A_before[:, idx] - lrate_after * (H.T @ A_before[:, idx])
-    scale = torch.sqrt((A_expected**2).sum(dim=0))
-    nz = scale > 0
-    A_expected[:, nz] = A_expected[:, nz] / scale[nz]
+    block = A_expected[:, idx]
+    norm = torch.sqrt((block**2).sum(dim=1, keepdim=True))
+    # The production zero-norm guard: a zero-norm row is left as it is.
+    A_expected[:, idx] = block / torch.where(norm > 0, norm, torch.ones_like(norm))
 
     with mock.patch.object(ng, "_finalize_newton_stats", side_effect=forced):
         ng._update_parameters(acc, blk)
@@ -1056,6 +1060,7 @@ def test_state_dict_roundtrip_all_fields():
         "lrate_cap",
         "newtrate",
         "rholrate",
+        "rholrate_cap",  # issue #339: the rho-rate ceiling, beside the working rate
         "final_ll_",  # issue #51: the returned iterate's LL survives a round-trip
         "keep_best",
     ):
@@ -1153,7 +1158,7 @@ def test_state_dict_snapshots_not_aliases():
 
 @pytest.mark.slow
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
-def test_end_to_end_correlation_vs_fortran():
+def test_end_to_end_correlation_vs_fortran(tmp_path):
     """Epic definition-of-done: Hungarian-matched component correlation vs the
     Fortran binary > 0.95 on the sample data.
 
@@ -1177,8 +1182,7 @@ def test_end_to_end_correlation_vs_fortran():
     data, params = load_sample_data()
     params = dict(params)
     params["max_iter"] = 100
-    out = root / "pamica" / "tests" / "torch_tests" / "_ng_e2e_tmp"
-    out.mkdir(parents=True, exist_ok=True)
+    out = tmp_path
     fortran = run_fortran_amica(data, params, out, SEED)
     assert fortran is not None, "Fortran binary run failed"
 
@@ -1208,7 +1212,7 @@ def test_end_to_end_correlation_vs_fortran():
 
 @pytest.mark.slow
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
-def test_end_to_end_correlation_vs_fortran_from_sample_params_json():
+def test_end_to_end_correlation_vs_fortran_from_sample_params_json(tmp_path):
     """Same correctness bar as ``test_end_to_end_correlation_vs_fortran``, but
     built the way a user actually reproduces the paper's Table 1 numbers: via
     ``run_pytorch_amica``, which maps ``sample_data/sample_params.json`` onto
@@ -1260,8 +1264,7 @@ def test_end_to_end_correlation_vs_fortran_from_sample_params_json():
         "whitening instead of symmetric ZCA sphering)"
     )
 
-    out = root / "pamica" / "tests" / "torch_tests" / "_ng_e2e_json_tmp"
-    out.mkdir(parents=True, exist_ok=True)
+    out = tmp_path
     fortran = run_fortran_amica(data, params, out, SEED)
     assert fortran is not None, "Fortran binary run failed"
 
@@ -1400,14 +1403,22 @@ def test_keep_best_snapshot_restore_roundtrip():
         assert torch.equal(getattr(m, name), snap_val), name
 
 
-def _multimodel_keep_best(seed: int, keep_best: bool) -> AMICATorchNG:
+def _multimodel_keep_best(keep_best: bool) -> AMICATorchNG:
+    """The aggressive-Newton overshoot recipe of ``test_ng_convergence.py``
+    (``_OVERSHOOT_KWARGS``) on the same 4096 real samples, so the same
+    trajectory: ``maxincs=0``/``min_dll=1e-8`` stop it on its first likelihood
+    decrease, iteration 14, 1.6e-3 below the peak at 13 (``newt_start=2``,
+    counted from 1 since issue #335, is the run measured as 1 before it).
+    Endings left to the trajectory were not portable: a fixed 60-iteration
+    budget, and later a ``min_dll=1e-4``/``maxincs=2`` stop, each overshot on
+    one machine and ended at the peak on another."""
     m = AMICATorchNG(
-        n_channels=NW, n_models=2, n_mix=NMIX, seed=seed, device="cpu",
-        dtype=torch.float64, block_size=512, lrate=0.05, maxdecs=3,
-        do_newton=True, newt_start=50, newt_ramp=10, newtrate=1.0,
-        keep_best=keep_best,
+        n_channels=NW, n_models=2, n_mix=NMIX, seed=0, device="cpu",
+        dtype=torch.float64, block_size=1024, do_newton=True, newt_start=2,
+        lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-8, maxincs=0,
+        use_grad_norm=False, keep_best=keep_best,
     )  # fmt: skip
-    m.fit(_load_real_data(), max_iter=100, verbose=False)
+    m.fit(_load_real_data()[:, :4096], max_iter=150, verbose=False)
     return m
 
 
@@ -1419,11 +1430,18 @@ def test_keep_best_returns_within_tol_of_peak():
     the raw ``ll_history[-1]``, which stays the true trajectory). keep_best does
     not change the optimization path, only which iterate is returned, so the
     ``keep_best=False`` run has the same trajectory but returns the (lower) last
-    iterate. seed 8 reaches the plateau where natural-gradient AMICA dips below
-    its own peak, so the restore branch runs; the invariants also hold if a
-    platform's BLAS makes the run monotone (see the explicit skip below)."""
-    on = _multimodel_keep_best(8, keep_best=True)
-    off = _multimodel_keep_best(8, keep_best=False)
+    iterate.
+
+    Issue #333 changed the config. The #51 one (seed 8, ``lrate=0.05``, Newton
+    from iteration 50, 100 iterations on the whole record) dipped below its
+    own peak only because ``doscaling`` normalized stored columns; with
+    components rescaled it runs monotone (as do seeds 0 to 5), so the restore
+    branch never ran. The aggressive-Newton recipe used instead genuinely
+    overshoots. The recompute check now also comes after the overshoot guard:
+    it holds only for a restored iterate, whose parameters are the ones that
+    produced ``final_ll_``, not for a monotone run's post-update parameters."""
+    on = _multimodel_keep_best(keep_best=True)
+    off = _multimodel_keep_best(keep_best=False)
 
     # keep_best does not alter the trajectory, only the returned iterate.
     assert on.ll_history == off.ll_history
@@ -1436,19 +1454,19 @@ def test_keep_best_returns_within_tol_of_peak():
     # The returned LL is within tolerance of the peak and never below the last.
     assert abs(on.final_ll_ - peak) <= _KEEP_BEST_TOL
     assert on.final_ll_ >= on.ll_history[-1]
-    # The returned parameters really sit at final_ll_ (recompute the E-step LL).
-    data = _load_real_data()
-    X_t = on._preprocess(data)
+
+    # The restore branch must run, or this test is vacuous: fail, not skip.
+    assert peak - on.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
+    # It did overshoot, so keep_best strictly beat return-last ...
+    assert on.final_ll_ > off.final_ll_
+    # ... and the restored parameters really sit at final_ll_ (recompute the
+    # E-step LL).
+    X_t = on._preprocess(_load_real_data()[:, :4096])
     acc = on._accumulate_blocks(X_t)
     ll_model = float(acc["ll"] / (X_t.shape[1] * NW))
     assert abs(ll_model - on.final_ll_) < 1e-9
-
-    # Make branch coverage visible rather than silently vacuous: if this run did
-    # not overshoot on this platform, the restore branch was not exercised.
-    if peak - on.ll_history[-1] <= _KEEP_BEST_TOL:
-        pytest.skip("seed 8 did not overshoot here; restore branch not exercised")
-    # It did overshoot, so keep_best strictly beat return-last.
-    assert on.final_ll_ > off.final_ll_
 
 
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
@@ -1456,15 +1474,37 @@ def test_keep_best_inactive_under_reject():
     """The safeguard is disabled under ``do_reject`` (the good-sample set, hence
     the LL normalization, changes across iterations, so per-iteration LLs are not
     comparable): ``final_ll_`` is exactly the last trajectory value, no restore
-    fires (issue #51)."""
-    data = _load_real_data()
-    m = AMICATorchNG(
-        n_channels=NW, n_models=2, n_mix=NMIX, seed=SEED, device="cpu",
-        dtype=torch.float64, block_size=512, do_reject=True, rejsig=2.0,
-        rejstart=2, rejint=3, maxrej=2, keep_best=True,
+    fires (issue #51).
+
+    Non-vacuous on both counts: the recipe (the aggressive-Newton overshoot
+    recipe of ``test_ng_convergence.py``, ``_OVERSHOOT_KWARGS``, with its
+    first-decrease ``min_dll`` stop) restores without
+    ``do_reject`` (peak at iteration 13, stop at 14, 1.6e-3 below the peak),
+    and with ``do_reject`` its own trajectory also ends below an earlier peak
+    (the one rejection pass at iteration 6, then peak at 13, stop at 14,
+    9.3e-3 below), so a restore would fire if the safeguard were active. The previous config (``lrate=0.1`` natural
+    gradient, 12 iterations) was monotone, so it could not have failed.
+    """
+    x = _load_real_data()[:, :4096]
+    kwargs: dict[str, Any] = dict(
+        n_channels=NW, n_models=2, n_mix=NMIX, seed=0, device="cpu",
+        dtype=torch.float64, block_size=1024, do_newton=True, newt_start=2,
+        lrate=0.5, newtrate=3.0, use_min_dll=True, min_dll=1e-8, maxincs=0,
+        use_grad_norm=False, keep_best=True,
     )  # fmt: skip
-    m.fit(data, max_iter=12, verbose=False)
+    plain = AMICATorchNG(**kwargs)
+    plain.fit(x, max_iter=150, verbose=False)
+    assert plain.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS
+    assert max(plain.ll_history) - plain.ll_history[-1] > _KEEP_BEST_TOL
+    assert plain.final_ll_ == max(plain.ll_history) > plain.ll_history[-1]
+
+    m = AMICATorchNG(
+        **kwargs, do_reject=True, rejsig=3.0, rejstart=6, rejint=5, maxrej=1
+    )
+    m.fit(x, max_iter=150, verbose=False)
+    assert m.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS
     assert m.numrej >= 1  # rejection actually fired, so the good set changed
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL
     assert m.final_ll_ == m.ll_history[-1]  # no best-iterate restore under reject
 
 
@@ -1495,7 +1535,7 @@ class _NaNAfterIteration(AMICATorchNG):
 @pytest.mark.skipif(not DATA_FILE.exists(), reason="sample data missing")
 def test_keep_best_does_not_rescue_a_diverged_fit_that_peaked_earlier():
     """The end-of-fit restore guard's ``stop_reason not in
-    _DEGENERATE_STOP_REASONS`` exclusion (core.py:2725) had zero coverage:
+    _DEGENERATE_STOP_REASONS`` exclusion (``AMICATorchNG._fit_once``) had zero coverage:
     every existing keep_best test either never diverges or diverges on
     iteration 0 (no ``best_snapshot`` yet to wrongly rescue). This forces a
     fit to run ``_DEGENERATE_NAN_AFTER`` real iterations -- so a genuine,
@@ -1559,20 +1599,28 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
     """Issue #193: the rho learning rate is a maxdecs-ratcheted *ceiling*, not a
     per-LL-decrease monotone decay.
 
-    Fortran resets ``rholrate = rholrate0`` every iteration before the rho update
-    (amica15.f90:1806/1813) and only tightens the ceiling at ``maxdecs``
-    (amica15.f90:1068, gated on ``iter > newt_start``). torch previously decayed
-    ``rholrate`` on EVERY LL decrease with no reset, collapsing it to ~1e-5 within
-    a few hundred iterations and freezing rho at a stale shape.
+    Fortran scales the working ``rholrate`` on each decrease (amica15.f90:1063),
+    resets it to the ceiling ``rholrate0`` in every A update before the rho
+    update (amica15.f90:1806/1813), and only tightens the ceiling at ``maxdecs``
+    (amica15.f90:1068, gated on ``iter > newt_start``). pamica names that
+    ceiling ``rholrate_cap`` (issue #339). torch previously decayed the one
+    ``rholrate`` on EVERY LL decrease with no reset, collapsing it to ~1e-5
+    within a few hundred iterations and freezing rho at a stale shape.
 
     On the real sample data a long-enough Newton run overshoots and triggers
-    several LL decreases. The surviving ``rholrate`` must have ratcheted exactly
+    several LL decreases. The surviving ceiling must have ratcheted exactly
     as often as ``newtrate`` (both gated on ``iter > newt_start`` at ``maxdecs``,
     matched 0.5 factor here), NOT once per decrease.
+
+    ``newtrate=3.0`` since issue #333: with ``doscaling`` rescaling components
+    instead of stored columns, the ``newtrate=1.0`` run is monotone through all
+    300 iterations (no decrease, so no ratchet to test); at 3.0 it decreases 6
+    times and both ceilings ratchet twice. ``newt_start=51`` since issue #335,
+    which counts it from 1: the run measured as 50 before.
     """
     data = _load_real_data()
     m = _fresh_ng(
-        block_size=512, do_newton=True, newt_start=50, newtrate=1.0, lrate=0.05,
+        block_size=512, do_newton=True, newt_start=51, newtrate=3.0, lrate=0.05,
         lratefact=0.5, rholrate=0.05, rholratefact=0.5, maxdecs=3,
     )  # fmt: skip
     m.fit(data, max_iter=300, verbose=False)
@@ -1586,8 +1634,8 @@ def test_rholrate_ratchets_at_maxdecs_not_per_decrease():
 
     # rholrate and newtrate share the maxdecs ratchet schedule, so the surviving
     # rho ceiling ratcheted the same number of times as newtrate.
-    assert m.rholrate == pytest.approx(m.rholrate0 * (m.newtrate / m.newtrate0))
+    assert m.rholrate_cap == pytest.approx(m.rholrate0 * (m.newtrate / m.newtrate0))
     # The old per-decrease decay (rholrate0 * rholratefact**n_dec) sits orders of
     # magnitude below the fixed ceiling; guard against a regression to it.
     buggy = m.rholrate0 * (m.rholratefact**n_dec)
-    assert m.rholrate > buggy * 10
+    assert m.rholrate_cap > buggy * 10

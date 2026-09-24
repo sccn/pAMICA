@@ -56,36 +56,43 @@ def identify_shared_components(atil, comp_list, comp_thresh=0.99):
     Identify components that are shared between different models, in sensor space.
 
     Two components (model ``h`` source ``i`` and model ``hh`` source ``ii``,
-    ``h < hh``) are identified when the angle between their mixing columns,
+    ``h < hh``) are identified when the angle between their mixing vectors,
     measured in the original (de-sphered) data space, is below the
     ``comp_thresh`` cutoff::
 
         t0 = |a . b| / (||a|| ||b||),   a = atil[:, ci], b = atil[:, cj]
 
-    ``atil`` must already be the de-sphered (sensor-space) mixing columns --
-    callers pass ``pinv(sphere) @ A``, the Fortran ``Spinv`` back-map
-    (amica15.f90:568-578) applied to the mixing matrix, mirroring
-    ``identify_shared_comps`` (amica15.f90:1916). This is a cross-backend
-    agreement contract (.rules/backend_parity.md): ``AMICATorchNG._identify_shared_comps``
-    (torch_impl/core.py) computes the identical ``pinv(sphere) @ A`` metric,
-    so both backends make the same merge decision from the same fitted state
-    (see ``tests/test_numpy_share_comps.py::test_numpy_merge_decision_matches_torch_backend``).
+    with ``ci = comp_list[i, h]`` and ``cj = comp_list[ii, hh]``. ``atil`` must
+    already hold the de-sphered (sensor-space) component mixing vectors as
+    columns -- callers pass ``pinv(sphere) @ A.T``, the Fortran ``Spinv``
+    back-map (amica15.f90:568-578) applied to the component rows of ``A``
+    (issue #334), so column ``comp_list[i, h]`` is column ``i`` of that model's
+    ``get_sensor_mixing_matrix``. This mirrors ``identify_shared_comps``
+    (amica15.f90:1916) and is a cross-backend agreement contract
+    (.rules/backend_parity.md): ``AMICATorchNG._identify_shared_comps``
+    (torch_impl/core.py) computes the identical metric, so the backends make the
+    same merge decision from the same fitted state (see
+    ``tests/test_numpy_share_comps.py::test_numpy_merge_decision_matches_torch_backend``).
     Before issue #258 this function compared raw columns of the *sphered* ``A``
     directly, which could disagree with the PyTorch backend under rank
-    reduction or PCA whitening, where the sphere is not orthonormal.
+    reduction or PCA whitening, where the sphere is not orthonormal; before
+    issue #334 its callers passed stored columns of a component-column layout,
+    which are not components.
 
     On a match, ``cj`` is folded into ``ci``: every ``comp_list`` entry equal
-    to ``cj`` is reassigned to ``ci``, so the two now share one mixing column
-    and one density.
+    to ``cj`` is reassigned to ``ci``, so the two sources now share component
+    ``ci``'s mixing vector and density (nothing is copied or averaged, as in
+    the reference).
 
     Greedy and order-dependent, matching the reference's quadruple loop.
-    Skips a pair already merged, or one whose two columns coexist in some
+    Skips a pair already merged, or one whose two components coexist in some
     single model (a model cannot share a component with itself).
 
     Parameters
     ----------
     atil : ndarray of shape (data_dim_in, num_comps)
-        De-sphered (sensor-space) mixing columns, i.e. ``pinv(sphere) @ A``.
+        De-sphered (sensor-space) component mixing vectors, one per column,
+        i.e. ``pinv(sphere) @ A.T``.
     comp_list : ndarray of shape (data_dim, num_models)
         Component assignments. Not mutated -- a copy is merged and returned.
     comp_thresh : float
@@ -114,7 +121,7 @@ def identify_shared_components(atil, comp_list, comp_thresh=0.99):
                     t0 = np.abs(atil[:, ci] @ atil[:, cj]) / (
                         norms[ci] * norms[cj] + tiny
                     )
-                    # NaN t0 (e.g. a zero-norm column) must NOT merge:
+                    # NaN t0 (e.g. a zero-norm vector) must NOT merge:
                     # `NaN >= thresh` is False either way, but guard finiteness
                     # explicitly so a future rewrite of the comparison direction
                     # cannot silently start merging on NaN.
@@ -122,7 +129,7 @@ def identify_shared_components(atil, comp_list, comp_thresh=0.99):
                         continue
 
                     # A model cannot share a component with itself: skip if any
-                    # single model already uses both columns.
+                    # single model already uses both components.
                     if any(
                         (cl[:, k] == ci).any() and (cl[:, k] == cj).any()
                         for k in range(num_models)
@@ -132,10 +139,10 @@ def identify_shared_components(atil, comp_list, comp_thresh=0.99):
                     cl[cl == cj] = ci  # fold cj into ci everywhere
 
     # Derive comp_used from the final comp_list rather than tracking it during
-    # the merge loop. A fresh np.ones() per call forgot every column merged away
-    # in an earlier call: once comp_list is fully merged the ci == cj guard skips
-    # every pair, and the mask came back all-True while half the columns were
-    # dead (issue #240). Matches AMICATorchNG.comp_used, which is a property
+    # the merge loop. A fresh np.ones() per call forgot every component merged
+    # away in an earlier call: once comp_list is fully merged the ci == cj guard
+    # skips every pair, and the mask came back all-True while half the
+    # components were dead (issue #240). Matches AMICATorchNG.comp_used, which is a property
     # derived the same way.
     num_comps = atil.shape[1]
     comp_used = np.zeros(num_comps, dtype=bool)
@@ -148,31 +155,30 @@ def get_unmixing_matrices(A, comp_list):
     """
     Compute unmixing matrices from mixing matrix and component assignments.
 
-    For each model, constructs the unmixing matrix by inverting the appropriate
-    subset of the mixing matrix columns as specified by the component assignments.
-    The unmixing matrices are used to transform the mixed signals back into their
-    source components.
+    Model ``h``'s unmixing matrix is the inverse of its block of component rows,
+    ``inv(A[comp_list[:, h], :])`` (issue #334 layout; the stored ``W`` is the
+    transpose of the true unmixing, issue #24 convention).
 
     Parameters
     ----------
-    A : ndarray
-        Mixing matrix
-    comp_list : ndarray
-        Component assignments
+    A : ndarray of shape (num_comps, data_dim)
+        Mixing matrix, one component per row.
+    comp_list : ndarray of shape (data_dim, num_models)
+        Component assignments.
 
     Returns
     -------
-    W : ndarray
+    W : ndarray of shape (data_dim, data_dim, num_models)
         Unmixing matrices
     """
-    data_dim = A.shape[0]
+    data_dim = A.shape[1]
     num_models = comp_list.shape[1]
 
     W = np.zeros((data_dim, data_dim, num_models))
 
     for h in range(num_models):
         idx = comp_list[:, h]
-        W[:, :, h] = np.linalg.inv(A[:, idx])
+        W[:, :, h] = np.linalg.inv(A[idx, :])
 
     return W
 

@@ -6,6 +6,18 @@ This module implements the Adaptive Mixture Independent Component Analysis (AMIC
 algorithm, which performs blind source separation using a mixture of adaptive
 independent component analyzers.
 
+Source-density family scope (issue #304, the ``.rules/backend_parity.md``
+narrow exception): this backend implements only the generalized-Gaussian
+source density (``pdftype=0``) -- ``_compute_log_pdf``, the fit-path density
+function, has no ``pdftype`` parameter and always runs the GG update.
+``AMICA(pdftype=...)`` with anything other than ``0`` raises
+``NotImplementedError`` at construction rather than silently ignoring the
+setting. The extended-Infomax adaptive switcher (``pdftype=1``), Gaussian
+(``pdftype=2``), logistic (``pdftype=3``) and sub-Gaussian cosh+
+(``pdftype=4``) families are implemented on the PyTorch (``AMICATorchNG``,
+via the :class:`~pamica.amica.AMICA` wrapper) and MLX (``AMICAMLXNG``)
+backends instead.
+
 Key Features
 -----------
 * Multiple Source Models: Can learn different mixing models for different parts of the data
@@ -57,7 +69,7 @@ The algorithm automatically:
 
 See Also
 --------
-pdf : PDF implementations
+pdf : Generalized Gaussian density for plotting
 utils : Utility functions
 viz : Visualization tools
 cli : Command-line interface
@@ -70,48 +82,377 @@ References
    Component Analyzers with Shared Components." 2012.
 """
 
+import difflib
+import functools
+import inspect
+import logging
+import time
+from pathlib import Path
+from typing import Dict, List, NamedTuple, Optional, Tuple, Union
+
 import numpy as np
 from scipy import linalg
 from scipy.special import digamma
-import logging
-import json
-import time
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
 from tqdm import tqdm
+
 from .. import blocktune
 from .. import restarts
-from ..rank import MINEIG, MINEIG_REL, numerical_rank
+from .. import schedule
+from ..fortran_params import read_params_file
+from ..initialization import initial_mixing, validate_supplied_mixing
+from ..rank import (
+    MINEIG,
+    MINEIG_REL,
+    log_ignored_pca_request,
+    numerical_rank,
+    validate_pca_reduction,
+)
+
+# The density normalizers and the rho-update guard, at the values the binary
+# uses: its single-precision literals widened to double (issue #344).
+from ..reference_constants import EPSDBLE, LOG2, LOG_SQRT_PI
 from .utils import (
     gammaln,
     identify_shared_components,
     get_unmixing_matrices,
 )
 
+logger = logging.getLogger(__name__)
+
+
+class _UpdateStep(NamedTuple):
+    """The mixing-matrix step one E-step implies, computed before the
+    iteration's stopping checks and applied after them (the reference's
+    ``dAk`` and ``ndtmpsum``, built in ``accum_updates_and_likelihood``,
+    amica15.f90:1749-1761, before ``update_params``, :1782). See
+    :meth:`AMICA._update_direction`."""
+
+    dAk: np.ndarray  # (num_comps, data_dim), before the lrate scaling
+    newton_active: bool  # the Newton schedule is on this iteration
+    no_newt: bool  # some model failed the positive-definiteness guard
+    nd: float  # the weight-gradient norm ndtmpsum
+
+
+# Data-location keys: not AMICA hyperparameters, so they are excluded from
+# load_default_params()'s return value. AMICA.__init__ reads files/data_dim/
+# field_dim off the same parsed dict separately (see _config_files/
+# _config_data_dim/_config_field_dim below); num_samples has no NumPy-backend
+# consumer at all (fit() derives sample count from the loaded data itself).
+_DATA_LOCATION_KEYS = frozenset({"files", "num_samples", "data_dim", "field_dim"})
+
+# Canonical pamica key (read_params_file's output spelling, issue #304) ->
+# this backend's own constructor/attribute spelling, for the three settings
+# where they differ. maxrej/num_mix need no entry here: this backend already
+# spells them the same as the canonical name (see fortran_params.py's
+# FORTRAN_TO_PAMICA_KEY rename table and its JSON_ALIAS_TO_CANONICAL).
+_CANONICAL_TO_NUMPY_KEY = {
+    "min_nd": "min_grad_norm",
+    "maxdecs": "max_decs",
+    "share_iter": "share_int",
+}
+
+# Every params-file key this constructor actually reads (via params.get(...)
+# below, or files/data_dim/field_dim via the raw parsed dict), keyed by this
+# backend's own spelling. Built explicitly from those call sites rather than
+# guessed, so a key can only be "consumed" here if the constructor truly uses
+# it (see the unconsumed-key warning in __init__). num_samples is
+# deliberately absent: see _DATA_LOCATION_KEYS.
+_CONSUMED_KEYS = frozenset(
+    {
+        "num_models",
+        "num_mix",
+        "max_iter",
+        "do_newton",
+        "newt_start",
+        "newt_ramp",
+        "newtrate",
+        "do_reject",
+        "rejsig",
+        "rejstart",
+        "rejint",
+        "maxrej",
+        "num_comps",
+        "lrate",
+        "minlrate",
+        "lratefact",
+        "rho0",
+        "minrho",
+        "maxrho",
+        "rholrate",
+        "rholratefact",
+        "invsigmax",
+        "invsigmin",
+        "do_history",
+        "histstep",
+        "do_opt_block",
+        "block_size",
+        "blk_min",
+        "blk_max",
+        "blk_step",
+        "share_comps",
+        "comp_thresh",
+        "share_start",
+        "share_int",
+        "doscaling",
+        "scalestep",
+        "do_sphere",
+        "do_mean",
+        "do_approx_sphere",
+        "pcakeep",
+        "pcadb",
+        "mineig",
+        "mineig_rel",
+        "writestep",
+        "max_decs",
+        "maxincs",
+        "restartiter",
+        "maxrestarts",
+        "min_dll",
+        "min_grad_norm",
+        "use_min_dll",
+        "use_grad_norm",
+        "pdftype",
+        "outdir",
+        "seed",
+        "n_restarts",
+        "restart_seeds",
+        # Data-location metadata, read from the same parsed dict via
+        # _config_files/_config_data_dim/_config_field_dim (fit()'s no-data
+        # path), not via params.get().
+        "files",
+        "data_dim",
+        "field_dim",
+    }
+)
+
+# The canonical spelling of the three settings _CANONICAL_TO_NUMPY_KEY renames
+# (min_nd, maxdecs, share_iter -- AMICATorchNG's own constructor spelling, and
+# the name a params file's JSON_ALIAS_TO_CANONICAL/FORTRAN_TO_PAMICA_KEY
+# resolve to). The params-file route already accepts either spelling and
+# lands on the same setting (_read_numpy_keyed_params translates it); a
+# keyword argument now does too (issue #346), so passing the canonical name
+# directly -- as AMICATorchNG itself spells it -- is not treated as unknown.
+# Passing both spellings of the same setting at once is ambiguous, so
+# __init__ rejects that the same way fortran_params._apply_json_aliases
+# rejects it for a params file (see _translate_canonical_kwargs).
+_CANONICAL_ALIAS_KWARGS = frozenset(_CANONICAL_TO_NUMPY_KEY)
+
+# This constructor's own explicit (non-**kwargs) parameters. They can never
+# actually land inside **kwargs when spelled correctly -- Python binds a
+# matching keyword to the named parameter directly -- but are included in
+# _ACCEPTED_KWARGS below so a typo of one (e.g. ``verbos=True``) is named and
+# gets a "did you mean" suggestion instead of silently vanishing into the
+# ignored params dict, which is exactly the failure mode issue #346 is about.
+_CONSTRUCTOR_ONLY_KWARGS = frozenset({"params_file", "use_tqdm", "verbose"})
+
+# Every keyword name AMICA_NumPy(**kwargs) accepts (issue #346). Derived from
+# the same _CONSUMED_KEYS/_CANONICAL_TO_NUMPY_KEY the params-file routing
+# uses, plus this constructor's own named parameters, so the kwargs-accepted
+# set and the params-file-accepted set cannot drift apart.
+_ACCEPTED_KWARGS = _CONSUMED_KEYS | _CANONICAL_ALIAS_KWARGS | _CONSTRUCTOR_ONLY_KWARGS
+
+# AMICATorchNG constructor names that mean the same setting as one of this
+# backend's own names, just spelled differently -- not "unsupported" (PR
+# #347 review): the generic torch-only message ("use AMICA(backend='torch')")
+# would be actively wrong here, since this backend *does* support the
+# setting, just under a different name. Keyed by the torch spelling, valued
+# by this backend's spelling.
+_ALTERNATE_SPELLING = {
+    "n_models": "num_models",
+    "n_mix": "num_mix",
+}
+
+# n_channels gets its own message rather than landing in _ALTERNATE_SPELLING
+# or the torch-only bucket below: it is not a settable hyperparameter on any
+# backend's public fit path, torch included. AMICATorchNG's raw constructor
+# takes it, but the AMICA wrapper's own fit(**kwargs) deliberately excludes
+# it (amica.py's _ctor_params subtracts {"n_channels", "n_models", "n_mix",
+# "device"} -- the wrapper infers it from the data and passes it itself), so
+# "use AMICA(backend='torch')" would be wrong. This backend infers it from
+# the data the same way.
+_N_CHANNELS_OPTION = "n_channels"
+
+
+@functools.cache
+def _torch_only_options() -> frozenset:
+    """Constructor keywords ``AMICATorchNG`` accepts that this backend
+    genuinely does not implement at all (PR #347 review item 2/5) -- not a
+    spelling difference (``_ALTERNATE_SPELLING``) or a shape difference
+    (``_N_CHANNELS_OPTION``), which get their own messages in
+    ``_reject_unknown_kwargs`` instead of this one:
+
+    - ``device``: this backend always runs on CPU; there is no device to
+      select.
+    - ``dtype``: this backend always computes in float64; there is no dtype
+      to choose.
+    - ``keep_best``: the best-iterate restore (issue #51) is not ported to
+      this backend's fit loop.
+    - ``kurt_start``/``num_kurt``/``kurt_int``: the kurtosis-switch schedule
+      for the extended-Infomax adaptive pdf family (``pdftype=1``) -- this
+      backend implements only the generalized-Gaussian density
+      (``pdftype=0``), so the switch schedule has nothing to switch (see the
+      ``pdftype != 0`` guard below).
+
+    Computed from ``AMICATorchNG``'s own signature minus everything else
+    this backend recognizes, so it stays in sync with that constructor
+    instead of drifting as options are added there (rather than a hand-
+    picked list -- the assertion in ``TestKeySetMatchesReadSites`` that every
+    member here really has no NumPy equivalent is the actual anti-drift
+    check; this docstring is not it).
+
+    Imports ``AMICATorchNG`` lazily and only on the error path (PR #347
+    review item 5): ``__init__`` calls this only after already finding an
+    unrecognized keyword, so a normal, valid construction of
+    ``AMICA_NumPy`` never imports ``torch_impl`` -- ``numpy_impl`` keeps no
+    module-level dependency on the PyTorch backend. ``functools.cache``
+    means the import, and the signature introspection, run at most once per
+    process.
+    """
+    from ..torch_impl.core import AMICATorchNG
+
+    return (
+        frozenset(inspect.signature(AMICATorchNG).parameters)
+        - _ACCEPTED_KWARGS
+        - frozenset(_ALTERNATE_SPELLING)
+        - {_N_CHANNELS_OPTION}
+    )
+
+
+def _reject_unknown_kwargs(kwargs: Dict) -> None:
+    """Reject keyword arguments ``AMICA_NumPy(**kwargs)`` does not recognize
+    (issue #346), before any other constructor processing runs.
+
+    Every offending name is categorized -- alternate spelling
+    (``_ALTERNATE_SPELLING``), ``n_channels``, genuinely torch-only
+    (``_torch_only_options()``), or unrecognized -- *before* anything is
+    raised, and every category present is named in ONE ``TypeError`` (PR
+    #347 review item 3): a first version of this function raised on the
+    first category it found, so ``AMICA_NumPy(n_models=2, totally_bogus=1)``
+    named only ``n_models`` and silently dropped ``totally_bogus`` from the
+    message, which is the same silent-drop failure mode issue #346 itself is
+    about, just one layer in.
+
+    ``TypeError`` throughout (matching the ``AMICA.fit`` cross-backend
+    keyword check in ``pamica/amica.py``'s single-category branches: every
+    unrecognized name here is a keyword argument this callable does not
+    accept, which is what ``TypeError`` means in Python's own calling
+    convention). Distinct from the existing ``pdftype != 0``
+    ``NotImplementedError`` (a *value* of an accepted keyword this backend
+    cannot honor, not an unrecognized keyword).
+
+    An unrecognized name with no close match, or one that is not one of the
+    special cases above, gets a "did you mean" suggestion
+    (``difflib.get_close_matches``) against every name this constructor does
+    accept, when one exists.
+    """
+    unknown = sorted(set(kwargs) - _ACCEPTED_KWARGS)
+    if not unknown:
+        return
+
+    alt_spelling = [name for name in unknown if name in _ALTERNATE_SPELLING]
+    n_channels = [name for name in unknown if name == _N_CHANNELS_OPTION]
+    torch_only_names = _torch_only_options()
+    torch_only = [name for name in unknown if name in torch_only_names]
+    categorized = set(alt_spelling) | set(n_channels) | set(torch_only)
+    remaining = [name for name in unknown if name not in categorized]
+
+    segments = []
+    if alt_spelling:
+        renames = ", ".join(
+            f"{name!r} -> {_ALTERNATE_SPELLING[name]!r}" for name in alt_spelling
+        )
+        segments.append(
+            f"{alt_spelling} name the same setting AMICATorchNG spells that "
+            f"way; this backend uses its own name instead ({renames})"
+        )
+    if n_channels:
+        segments.append(
+            "'n_channels' is inferred from the data passed to fit() on "
+            "every pamica backend, this one included; it is not a "
+            "constructor keyword here, nor on AMICA(backend='torch') "
+            "(AMICA.fit's own **kwargs surface excludes it too, for the "
+            "same reason)"
+        )
+    if torch_only:
+        segments.append(
+            f"{torch_only} implemented on the PyTorch backend (AMICATorchNG) "
+            "but not the legacy NumPy backend; use AMICA(backend='torch') "
+            "for these options"
+        )
+    if remaining:
+        hints = []
+        for name in remaining:
+            match = difflib.get_close_matches(name, _ACCEPTED_KWARGS, n=1)
+            hints.append(
+                f"{name!r}" + (f" (did you mean {match[0]!r}?)" if match else "")
+            )
+        segments.append(
+            f"unexpected keyword argument(s) {remaining}: {'; '.join(hints)}"
+        )
+
+    raise TypeError(
+        "AMICA_NumPy got invalid keyword argument(s): " + "; ".join(segments)
+    )
+
+
+def _translate_canonical_kwargs(kwargs: Dict) -> Dict:
+    """Map a keyword argument spelled with the canonical name
+    (``min_nd``/``maxdecs``/``share_iter``) to this backend's own attribute
+    name (``_CANONICAL_TO_NUMPY_KEY``), the same translation
+    ``_read_numpy_keyed_params`` already applies to a params file.
+
+    Passing both spellings of the same setting at once is ambiguous -- which
+    one would silently win is an arbitrary choice -- so, mirroring
+    ``fortran_params._apply_json_aliases``'s identical guard for a params
+    file, this raises rather than picking one.
+    """
+    conflicts = sorted(
+        (canonical, numpy_key)
+        for canonical, numpy_key in _CANONICAL_TO_NUMPY_KEY.items()
+        if canonical in kwargs and numpy_key in kwargs
+    )
+    if conflicts:
+        names = ", ".join(f"{c!r}/{n!r}" for c, n in conflicts)
+        raise TypeError(
+            f"AMICA_NumPy got both the canonical and this backend's own "
+            f"spelling of the same setting ({names}); keep only one."
+        )
+    return {_CANONICAL_TO_NUMPY_KEY.get(k, k): v for k, v in kwargs.items()}
+
+
+def _read_numpy_keyed_params(params_file: Optional[Union[str, Path]]) -> Dict:
+    """Parse a params file and map its canonical keys to this backend's own
+    spellings (``_CANONICAL_TO_NUMPY_KEY``), without stripping anything.
+
+    Reads through :func:`pamica.fortran_params.read_params_file` (issue
+    #304), so both pamica's JSON schema and the literal Fortran
+    ``input.param`` text format are accepted, for both the bundled default
+    params.json (``params_file=None``) and a user-supplied file.
+    """
+    if params_file is None:
+        params_file = Path(__file__).parent / "params.json"
+    canonical = read_params_file(params_file)
+    return {_CANONICAL_TO_NUMPY_KEY.get(k, k): v for k, v in canonical.items()}
+
 
 def load_default_params(params_file: Optional[Union[str, Path]] = None) -> Dict:
     """
-    Load default parameters from JSON file.
+    Load default parameters from a params file.
 
     Parameters
     ----------
     params_file : str, optional
-        Path to JSON parameter file. If None, uses default params.json
+        Path to a JSON or Fortran-format (``input.param``) parameter file
+        (issue #304). If None, uses the bundled default params.json.
 
     Returns
     -------
     params : dict
-        Dictionary of default parameters
+        Dictionary of default parameters, keyed by this backend's own
+        spellings, excluding data-location keys (see ``_DATA_LOCATION_KEYS``).
     """
-    if params_file is None:
-        params_file = Path(__file__).parent / "params.json"
-
-    with open(params_file) as f:
-        params = json.load(f)
-
-    # Remove data-specific parameters
-    data_params = {"files", "num_samples", "data_dim", "field_dim"}
-    return {k: v for k, v in params.items() if k not in data_params}
+    params = _read_numpy_keyed_params(params_file)
+    return {k: v for k, v in params.items() if k not in _DATA_LOCATION_KEYS}
 
 
 class AMICA:
@@ -140,7 +481,8 @@ class AMICA:
         Parameters
         ----------
         params_file : str, optional
-            Path to JSON parameter file with default values
+            Path to a JSON or Fortran-format (``input.param``) parameter
+            file with default values (issue #304).
         use_tqdm : bool, default=True
             Whether to use tqdm progress bar (False will use per-line printing)
         verbose : bool, default=False
@@ -170,26 +512,143 @@ class AMICA:
             pamica extension: Fortran has no search over seeds, and it is
             unrelated to ``maxrestarts``/``restartiter``, its recovery path
             after an early non-finite likelihood. See :mod:`pamica.restarts`.
+
+            ``pcakeep`` (None) and ``pcadb`` (None) carry AMICATorchNG's
+            names, defaults, validation and semantics (issue #323): explicit
+            PCA reduction capped by the detected numerical rank. ``pcakeep``
+            must be an integer >= 1 and ``pcadb`` a finite number > 0, or the
+            constructor raises ``ValueError``; when both are set ``pcakeep``
+            takes precedence and ``pcadb`` is ignored, as in the reference
+            (which parses ``pcadb`` but never uses it). Both are ignored, with
+            one WARNING, when ``do_sphere`` is False, as in the reference. See
+            :mod:`pamica.rank`.
+
+            ``newt_start`` (20), ``rejstart`` (2), ``writestep`` (100) and
+            ``histstep`` (10) name iterations counted from 1, as the
+            reference's do (issue #335): Newton takes its first step on
+            iteration ``newt_start``, the first rejection follows iteration
+            ``rejstart``, and a checkpoint lands on every ``writestep``-th
+            iteration. ``newt_start`` must be an integer >= 0 (0 and 1 fit
+            identically), ``rejstart`` an integer >= 1 when ``do_reject`` is
+            on, and ``histstep`` an integer >= 1 when ``do_history`` is on,
+            or the constructor raises ``ValueError`` (for ``newt_start`` and
+            ``rejstart``, with the same messages as the PyTorch and MLX
+            backends). See :mod:`pamica.schedule`.
+
+            ``restartiter`` (10) and ``maxrestarts`` (3) configure the
+            restart-on-NaN recovery (Fortran amica15.f90:1022-1050): a
+            non-finite likelihood within the first ``restartiter`` iterations,
+            counted from 1, redraws the mixing matrix and continues, up to
+            ``maxrestarts`` times; ``restartiter=0`` disables it, as in the
+            reference. Both must be integers >= 0. The restart count, and what
+            the fit does after a restart, differ from the reference; see
+            ``docs/guides/amica-differences.md``. The PyTorch and MLX backends
+            have no restart-on-NaN path: they stop on a non-finite likelihood.
+
+            ``doscaling`` (True) and ``scalestep`` (1) carry AMICATorchNG's
+            names, defaults, validation and semantics (issue #333): each
+            component's mixing vector (a row of the stored ``A``, issue #334)
+            is rescaled to unit norm, with the matching ``mu``/``beta``
+            rescale, on iterations ``scalestep``, ``2*scalestep``, ...
+            counted from 1 (see :meth:`_rescale_components`). ``scalestep`` is
+            validated only when ``doscaling`` is on (an integer >= 1, or the
+            constructor raises ``ValueError``); with ``doscaling`` off it is
+            inert, never read.
+
+            ``outdir`` (None) is where the fit writes its ``out.txt`` log,
+            its ``writestep`` checkpoints, its ``do_history`` snapshots and its
+            final results, in the Fortran ``amicaout`` layout. The default
+            writes no files at all, like the PyTorch and MLX backends; set it
+            (here, in a params file, or with the CLI's ``--outdir``) to get the
+            reference's on-disk output.
+
+            ``min_nd``, ``maxdecs`` and ``share_iter`` -- the canonical
+            spelling of ``min_grad_norm``, ``max_decs`` and ``share_int``
+            (this backend's own names), which matches ``AMICATorchNG``'s
+            constructor and the spelling a params file already resolves
+            either way -- are also accepted here directly (issue #346) and
+            translated to this backend's own attribute. Passing both
+            spellings of the same setting at once raises ``TypeError``
+            rather than silently picking one.
+
+            ``files``, ``data_dim`` and ``field_dim`` -- data-location
+            metadata (used by :meth:`fit` when it is called with no data),
+            normally read from ``params_file`` -- are also accepted here
+            directly, with the same meaning (issue #346). Setting both
+            ``params_file`` and a keyword argument to a *different* value
+            for the same one of these three raises ``TypeError``; the same
+            value from both is not a conflict.
+
+        Raises
+        ------
+        TypeError
+            If ``**kwargs`` holds a name this constructor does not recognize
+            (issue #346), or both ``params_file`` and a keyword argument set
+            ``files``/``data_dim``/``field_dim`` to different values. An
+            unrecognized name gets one of: the correct name, for
+            ``n_models``/``n_mix`` (this backend's own spelling of the same
+            setting); an explanation, for ``n_channels`` (inferred from the
+            data passed to :meth:`fit`, here and in the ``AMICA`` wrapper,
+            which builds the raw PyTorch and MLX constructors with it); a
+            name implemented on the PyTorch
+            backend but not this one (e.g. ``keep_best``, ``device``,
+            ``dtype``), pointing to ``AMICA(backend='torch')``; or a generic
+            "unexpected keyword argument" message with a ``difflib``-based
+            "did you mean" suggestion when one exists. Every offending name
+            is checked and named in ONE error, whatever mix of these applies.
+            Checked before any other keyword is applied, so a typo (e.g.
+            ``max_iters=50``) can no longer construct silently.
         """
+        # Reject an unrecognized keyword before anything else runs (issue
+        # #346): a typo or a cross-backend-only option used to construct
+        # silently and have no effect.
+        _reject_unknown_kwargs(kwargs)
         # Store progress bar settings
         self.use_tqdm = use_tqdm
         self.verbose = verbose
-        # Load default parameters
-        params = load_default_params(params_file)
+        # Load default parameters (issue #304: both the bundled default and a
+        # user-supplied params_file are read through the same translator, so
+        # a literal Fortran input.param works here too, not just JSON). Kept
+        # unstripped (raw_params) so the data-location keys below can be read
+        # off the same parse instead of a second file read.
+        raw_params = _read_numpy_keyed_params(params_file)
+        params = {k: v for k, v in raw_params.items() if k not in _DATA_LOCATION_KEYS}
 
-        # Override with any provided parameters
-        params.update(kwargs)
+        # A params-file setting this backend does not consume is silently
+        # dropped nowhere else in this constructor, so name it here rather
+        # than letting it vanish (issue #304). Checked before the **kwargs
+        # override below: kwargs are explicit Python-level arguments, not
+        # file settings, so they are not subject to this warning.
+        unconsumed = sorted(set(raw_params) - _CONSUMED_KEYS)
+        if unconsumed:
+            logger.warning(
+                "AMICA (NumPy): %d parameter-file setting(s) have no "
+                "NumPy-backend equivalent and are not applied: %s",
+                len(unconsumed),
+                unconsumed,
+            )
+
+        # Override with any provided parameters. A canonical-spelling kwarg
+        # (min_nd/maxdecs/share_iter) is translated to this backend's own
+        # name first, exactly as a params file's setting already is (issue
+        # #346), so it takes effect instead of landing under a key nothing
+        # reads.
+        params.update(_translate_canonical_kwargs(kwargs))
 
         # Store parameters
         self.num_models = params.get("num_models", 1)
         if self.num_models < 1:
             raise ValueError(f"num_models must be >= 1, got {self.num_models}")
         self.num_mix = params.get("num_mix", 3)
-        self.max_iter = params.get("max_iter", 2000)
+        self.max_iter = params.get("max_iter", 100)
         if self.max_iter < 1:
             raise ValueError(f"max_iter must be >= 1, got {self.max_iter}")
         self.do_newton = params.get("do_newton", False)
         self.newt_start = params.get("newt_start", 20)
+        # Validated whether or not do_newton is on: newt_start also gates the
+        # rho-rate ceiling ratchet on the natural-gradient path
+        # (schedule.past_newton_start, amica15.f90:1067).
+        schedule.validate_iteration_setting("newt_start", self.newt_start, 0)
         self.newt_ramp = params.get("newt_ramp", 10)
         self.newtrate = params.get("newtrate", 0.5)
         self.do_reject = params.get("do_reject", False)
@@ -204,15 +663,16 @@ class AMICA:
             # reject-below-the-mean semantics (at 0 the threshold is the mean, so
             # ~half the samples drop every pass, and negative values invert it);
             # maxrej<0 is a sanity guard (it would just make rejection inert via
-            # the maxrej>0 schedule gate); rejstart<0 is nonsensical.
+            # the maxrej>0 schedule gate); rejstart counts from 1, so
+            # rejstart<=0 would silently disable the reference's unconditional
+            # ``iter == rejstart`` pass.
             if self.rejint < 1:
                 raise ValueError(f"rejint must be >= 1, got {self.rejint}")
             if self.rejsig <= 0:
                 raise ValueError(f"rejsig must be > 0, got {self.rejsig}")
             if self.maxrej < 0:
                 raise ValueError(f"maxrej must be >= 0, got {self.maxrej}")
-            if self.rejstart < 0:
-                raise ValueError(f"rejstart must be >= 0, got {self.rejstart}")
+            schedule.validate_iteration_setting("rejstart", self.rejstart, 1)
         self.num_comps = params.get("num_comps", -1)
         self.lrate = params.get("lrate", 0.1)
         self.lrate0 = self.lrate
@@ -221,13 +681,23 @@ class AMICA:
         self.rho0 = params.get("rho0", 1.5)
         self.minrho = params.get("minrho", 1.0)
         self.maxrho = params.get("maxrho", 2.0)
+        # Working rho rate, its ceiling and the constructor value, as the other
+        # backends keep them (the reference's rholrate/rholrate0,
+        # amica15.f90:1063-1068, 1806/1813): a decrease scales the working
+        # rate, a maxdecs ratchet the ceiling, and every A update resets the
+        # working rate to the ceiling.
         self.rholrate = params.get("rholrate", 0.05)
+        self.rholrate_cap = self.rholrate
         self.rholrate0 = self.rholrate
         self.rholratefact = params.get("rholratefact", 0.1)
         self.invsigmax = params.get("invsigmax", 1000.0)
         self.invsigmin = params.get("invsigmin", 1e-4)
         self.do_history = params.get("do_history", False)
         self.histstep = params.get("histstep", 10)
+        if self.do_history:
+            # A history snapshot fires on ``mod(iter, histstep) == 0``; 0 was a
+            # bare ZeroDivisionError on the first iteration of the fit.
+            schedule.validate_iteration_setting("histstep", self.histstep, 1)
         # Block-size search (issue #232). OFF by default, unlike Fortran, whose
         # header default is .true.: the choice is timing-based and therefore
         # machine-dependent, so a parity run has to be able to pin block_size.
@@ -251,28 +721,38 @@ class AMICA:
         self.comp_thresh = params.get("comp_thresh", 0.99)
         self.share_start = params.get("share_start", 100)
         self.share_int = params.get("share_int", 100)
+        # The reference's A-freeze reads share_start/share_int whether or not
+        # share_comps is on (issue #345), so both are validated always, with
+        # AMICATorchNG's messages (pamica.schedule): share_start >= 1, and a
+        # share_int below 7, which would hold A for every iteration of every
+        # cycle, is rejected under both of this backend's spellings.
+        schedule.validate_share_start(self.share_start)
+        schedule.validate_share_iter(self.share_int, "share_int/share_iter")
         if self.share_comps:
-            # Same validation (and the same reasons) as AMICATorchNG: the merge
-            # schedule is 1-indexed, and the post-merge A-freeze settle window is
-            # 6 iterations, so a share_int of 6 or less would hold A frozen for
-            # every iteration of every cycle -- a fit that silently never moves
-            # its mixing matrix again. comp_thresh is a cosine cutoff, so it is
-            # only meaningful in (0, 1]; at 0 every pair of columns merges.
-            if self.share_start < 1:
-                raise ValueError(f"share_start must be >= 1, got {self.share_start}")
-            if self.share_int <= 6:
-                raise ValueError(f"share_int must be > 6, got {self.share_int}")
+            # Same validation (and the same reason) as AMICATorchNG: comp_thresh
+            # is a cosine cutoff, so it is only meaningful in (0, 1]; at 0 every
+            # pair of columns merges.
             if not 0.0 < self.comp_thresh <= 1.0:
                 raise ValueError(
                     f"comp_thresh must be in (0, 1], got {self.comp_thresh}"
                 )
         self.doscaling = params.get("doscaling", True)
         self.scalestep = params.get("scalestep", 1)
+        if self.doscaling:
+            # Same check and message as AMICATorchNG: a zero cadence divides by
+            # zero mid-fit; the reference never reads scalestep.
+            schedule.validate_iteration_setting("scalestep", self.scalestep, 1)
         self.do_sphere = params.get("do_sphere", True)
         self.do_mean = params.get("do_mean", True)
         self.do_approx_sphere = params.get("do_approx_sphere", True)
         self.pcakeep = params.get("pcakeep")
         self.pcadb = params.get("pcadb")
+        # Explicit PCA reduction, validated by the policy shared with the
+        # PyTorch and MLX backends (pamica/rank.py, issue #323): a bad value
+        # fails here rather than as a silently wrongly sized or degenerate fit;
+        # then one log line for any part of it a fit will ignore.
+        validate_pca_reduction(self.pcakeep, self.pcadb)
+        log_ignored_pca_request(self.pcakeep, self.pcadb, self.do_sphere)
         # Numerical-rank floors (issue #223); see pamica/rank.py and ADR 0004.
         self.mineig = params.get("mineig", MINEIG)
         self.mineig_rel = params.get("mineig_rel", MINEIG_REL)
@@ -282,10 +762,16 @@ class AMICA:
         # (Fortran maxincs, amica17.f90:1087).
         self.maxincs = params.get("maxincs", 5)
         # Restart-on-NaN (Fortran amica15.f90:1022-1052): if the LL goes
-        # non-finite at iter <= restartiter, reinitialize and start over, up to
-        # maxrestarts times; a later NaN stops the fit (Fortran exits too).
+        # non-finite within the first restartiter iterations, counted from 1 as
+        # the reference counts them (``iter .le. restartiter``), reinitialize and
+        # start over, up to maxrestarts times; a later NaN stops the fit (Fortran
+        # exits too). restartiter=0 therefore disables the recovery, as in the
+        # reference. The restart count differs from the reference's; see
+        # docs/guides/amica-differences.md.
         self.restartiter = params.get("restartiter", 10)
         self.maxrestarts = params.get("maxrestarts", 3)
+        schedule.validate_iteration_setting("restartiter", self.restartiter, 0)
+        schedule.validate_iteration_setting("maxrestarts", self.maxrestarts, 0)
         self.numrestarts = 0
         # Set by fit(): whether the fit ended usable, and the reason it stopped.
         # converged=False signals a terminal non-finite LL or non-finite fitted
@@ -303,25 +789,80 @@ class AMICA:
         self.min_grad_norm = params.get("min_grad_norm", 1e-7)
         self.use_min_dll = params.get("use_min_dll", True)
         self.use_grad_norm = params.get("use_grad_norm", True)
-        # Inert: never read after assignment (this backend always runs the GG
-        # update; _compute_log_pdf takes no pdftype). Aligned to 0 to match
-        # the torch/MLX constructor default, for surface consistency only.
+        # This backend implements only the generalized-Gaussian source
+        # density (pdftype 0): _compute_log_pdf takes no pdftype and always
+        # runs the GG update, so a non-zero pdftype would silently configure
+        # nothing (issue #304; the narrow-exception rule in
+        # .rules/backend_parity.md). pdftype 1 (extended-Infomax adaptive
+        # switcher), 2 (Gaussian), 3 (logistic) and 4 (sub-Gaussian cosh+) are
+        # available on AMICA/AMICATorchNG and AMICAMLXNG instead of silently
+        # doing nothing here.
         self.pdftype = params.get("pdftype", 0)
-        self.outdir = Path(params.get("outdir", "output"))
+        if self.pdftype != 0:
+            raise NotImplementedError(
+                "AMICA_NumPy implements only the generalized-Gaussian source "
+                f"density (pdftype=0); got pdftype={self.pdftype}. pdftype "
+                "1 (extended-Infomax adaptive switcher), 2 (Gaussian), 3 "
+                "(logistic) and 4 (sub-Gaussian cosh+) are available on "
+                "AMICA (AMICATorchNG) and AMICAMLXNG."
+            )
+        # Where results are written. None (the default) writes nothing: no
+        # out.txt log, no writestep checkpoints, no history and no final
+        # results, the same as the PyTorch and MLX backends, which never write
+        # unless asked. An explicit outdir (keyword, params file or the CLI's
+        # --outdir) writes all of them there, as the reference binary does.
+        outdir = params.get("outdir")
+        self.outdir: Optional[Path] = None if outdir is None else Path(outdir)
 
         # Data-source config (used by fit() when called without explicit
-        # data). load_default_params() strips 'files'/'data_dim'/'field_dim'
-        # from `params` (they are data-specific, not hyperparameters), so
-        # read them directly from the raw params_file JSON instead.
-        self._config_files = None
-        self._config_data_dim = None
-        self._config_field_dim = None
-        if params_file is not None:
-            with open(params_file) as f:
-                raw_params = json.load(f)
-            self._config_files = raw_params.get("files")
-            self._config_data_dim = raw_params.get("data_dim")
-            self._config_field_dim = raw_params.get("field_dim")
+        # data): files/data_dim/field_dim are data-specific, not
+        # hyperparameters, so load_default_params()/the _DATA_LOCATION_KEYS
+        # filter above strips them out of `params`, and **kwargs is never
+        # routed through `params`/`raw_params` for these three -- they are
+        # read directly off `raw_params` (a params file, issue #304: no
+        # second file read) and off `kwargs` itself here instead. Accepting
+        # them as keyword arguments directly, with the same meaning as in a
+        # params file, is PR #347 review item 1: before this, a kwarg of one
+        # of these three names passed the unknown-kwarg check (they are in
+        # _CONSUMED_KEYS/_ACCEPTED_KWARGS) but was silently inert, so
+        # fit()'s no-data path still said "no 'files' configured" even
+        # though the caller had just set one. Setting both a params file and
+        # a keyword argument to different values is ambiguous, so this
+        # raises rather than picking one, following the same precedent as
+        # the min_nd/maxdecs/share_iter alias conflict above
+        # (_translate_canonical_kwargs) -- unlike that guard, this one is
+        # "different values", not "either given", since a params file and an
+        # explicit kwarg agreeing is not a conflict.
+        file_files = raw_params.get("files") if params_file is not None else None
+        file_data_dim = raw_params.get("data_dim") if params_file is not None else None
+        file_field_dim = (
+            raw_params.get("field_dim") if params_file is not None else None
+        )
+        kwarg_files = kwargs.get("files")
+        kwarg_data_dim = kwargs.get("data_dim")
+        kwarg_field_dim = kwargs.get("field_dim")
+        for name, from_file, from_kwarg in (
+            ("files", file_files, kwarg_files),
+            ("data_dim", file_data_dim, kwarg_data_dim),
+            ("field_dim", file_field_dim, kwarg_field_dim),
+        ):
+            if (
+                from_file is not None
+                and from_kwarg is not None
+                and from_file != from_kwarg
+            ):
+                raise TypeError(
+                    f"AMICA_NumPy got {name!r} from both params_file and a "
+                    f"keyword argument, with different values ({from_file!r} "
+                    f"vs {from_kwarg!r}); keep only one."
+                )
+        self._config_files = kwarg_files if kwarg_files is not None else file_files
+        self._config_data_dim = (
+            kwarg_data_dim if kwarg_data_dim is not None else file_data_dim
+        )
+        self._config_field_dim = (
+            kwarg_field_dim if kwarg_field_dim is not None else file_field_dim
+        )
 
         # Initialize random state
         self.seed = params.get("seed")
@@ -360,11 +901,13 @@ class AMICA:
             "lrate0": self.lrate0,
             "newtrate": self.newtrate,
             "rholrate": self.rholrate,
+            "rholrate_cap": self.rholrate_cap,
             "block_size": self.block_size,
         }
 
         # Initialize model parameters
-        self.A: Optional[np.ndarray] = None  # Mixing matrix
+        # Mixing matrix, one component per row: (num_comps, data_dim) (#334)
+        self.A: Optional[np.ndarray] = None
         self.W: Optional[np.ndarray] = None  # Unmixing matrix
         self.c: Optional[np.ndarray] = None  # Bias terms
         self.mu: Optional[np.ndarray] = None  # Means of mixture components
@@ -416,7 +959,11 @@ class AMICA:
         self.iter = 0
         self.ll = []  # Log likelihood history
         # ``self.ll[-1]`` is this backend's equivalent of AMICATorchNG's
-        # ``final_ll_``: the LL of the returned model. Under ``share_comps``,
+        # ``final_ll_``: the LL of the returned model. Exactly so when the fit
+        # ended on a convergence stop, which exits before that iteration's
+        # update as the reference does (issue #339); after max_iter the last
+        # iteration's update follows its LL, so it is the LL one update before
+        # the returned parameters, also as in the reference. Under ``share_comps``,
         # if a merge fires on the LAST fit iteration, ``self.A``/``comp_list``
         # are already post-merge but ``self.ll[-1]`` still reports the
         # pre-merge log-likelihood -- the merge runs after that iteration's LL
@@ -441,11 +988,6 @@ class AMICA:
         self.logger = logging.getLogger("AMICA")
         self.logger.setLevel(logging.INFO)
 
-        # Ensure output directory exists
-        self.outdir = Path(self.outdir)
-        if not self.outdir.exists():
-            self.outdir.mkdir(parents=True)
-
         # Remove any existing handlers
         for handler in self.logger.handlers[:]:
             self.logger.removeHandler(handler)
@@ -456,22 +998,35 @@ class AMICA:
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
 
-        # Add file handler for out.txt
-        self.file_path = self.outdir / "out.txt"
-        file_handler = logging.FileHandler(self.file_path, mode="w")
-        file_formatter = logging.Formatter("%(message)s")
-        file_handler.setFormatter(file_formatter)
-        self.logger.addHandler(file_handler)
+        # Add file handler for out.txt, only when an output directory was given.
+        self.file_path: Optional[Path] = None
+        if self.outdir is not None:
+            self.outdir.mkdir(parents=True, exist_ok=True)
+            self.file_path = self.outdir / "out.txt"
+            file_handler = logging.FileHandler(self.file_path, mode="w")
+            file_formatter = logging.Formatter("%(message)s")
+            file_handler.setFormatter(file_formatter)
+            self.logger.addHandler(file_handler)
 
         # Prevent propagation to avoid duplicate logging
         self.logger.propagate = False
 
-    @classmethod
-    def from_json_file(cls, params_file: str, **kwargs) -> "AMICA":
-        """
-        Construct an AMICA model from a JSON parameter file.
+    def _append_to_log_file(self, line: str) -> None:
+        """Append ``line`` to ``outdir/out.txt``; a no-op without an outdir."""
+        if self.file_path is not None:
+            with open(self.file_path, "a") as f:
+                f.write(line + "\n")
 
-        Equivalent to ``AMICA(params_file=params_file, **kwargs)``. If the
+    @classmethod
+    def from_params_file(cls, params_file: str, **kwargs) -> "AMICA":
+        """
+        Construct an AMICA model from a parameter file.
+
+        Equivalent to ``AMICA(params_file=params_file, **kwargs)``. Accepts
+        both pamica's own JSON schema and the literal Fortran ``input.param``
+        text format, auto-detected from the file's content (issue #304; see
+        :func:`pamica.fortran_params.read_params_file`) -- matches the
+        PyTorch wrapper's :meth:`~pamica.amica.AMICA.from_params_file`. If the
         parameter file defines ``files``/``data_dim``/``field_dim``, a
         subsequent call to :meth:`fit` with no arguments will load the data
         described there (see :meth:`fit`).
@@ -479,7 +1034,7 @@ class AMICA:
         Parameters
         ----------
         params_file : str
-            Path to JSON parameter file.
+            Path to a JSON or Fortran-format parameter file.
         **kwargs
             Additional overrides passed through to the constructor.
 
@@ -530,6 +1085,50 @@ class AMICA:
             self._sphere_pinv = np.linalg.pinv(self.sphere)
         return self._sphere_pinv
 
+    def _check_usable(self, action: str) -> None:
+        """Refuse to serve output from a degenerate fit (issue #306; port of
+        ``AMICATorchNG._check_usable`` for the legacy NumPy backend).
+
+        Callers first check their own unfitted marker(s) and raise the
+        existing ``"Model has not been fitted yet"`` ``RuntimeError``
+        (unchanged); this assumes a fit has actually run. NumPy's single
+        ``converged`` flag already folds together every degenerate cause
+        (non-finite LL, non-finite exit parameters, or a restart error, see
+        :meth:`_fit_once`) that the PyTorch/MLX backends track via
+        ``stop_reason``/``_DEGENERATE_STOP_REASONS``, so the equivalent gate
+        here is simply ``not self.converged``; the defense-in-depth isfinite
+        sweep reuses :meth:`_nonfinite_params`, the same predicate ``fit()``'s
+        own outcome bookkeeping and every checkpoint write already trust.
+        """
+        if not self.converged:
+            raise RuntimeError(
+                f"Refusing to {action}: fit ended degenerate (stop_reason="
+                f"{self.stop_reason!r}), so the model holds non-finite "
+                f"parameters and would produce NaN output. Lower lrate, "
+                f"disable Newton, or check data conditioning, then refit."
+            )
+        nonfinite = self._nonfinite_params()
+        if nonfinite:
+            raise RuntimeError(
+                f"Refusing to {action}: parameters {nonfinite} hold "
+                f"non-finite values (stop_reason={self.stop_reason!r})."
+            )
+
+    def _check_input_shape(self, data: np.ndarray) -> None:
+        """Validate a data array against the fitted input channel count,
+        mirroring :meth:`fit`'s own ``data`` validation (issue #306): a raw
+        matmul/broadcast error deep inside a method is less useful than this
+        named ``ValueError`` at the entry point."""
+        if data.ndim != 2:
+            raise ValueError(
+                f"data must be a 2D array (n_channels, n_samples), got shape "
+                f"{data.shape}"
+            )
+        if data.shape[0] != self.data_dim_in:
+            raise ValueError(
+                f"data has {data.shape[0]} channels, model expects {self.data_dim_in}"
+            )
+
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space.
 
@@ -537,10 +1136,18 @@ class AMICA:
         ``Spinv`` mapping (amica15.f90:568-578), and the only way to recover
         sensor maps when rank reduction has made the sphere non-square
         (issue #223). Mirrors ``AMICATorchNG.get_sensor_mixing_matrix``.
+
+        ``A`` here is the true mixing matrix, the model's component rows of the
+        stored ``A`` transposed (issue #334 layout): the stored ``W =
+        inv(A[comp_list[:, h], :])`` is itself the transpose of the unmixing
+        (:meth:`get_weights`, issue #24 convention). So the result inverts the
+        spatial filter the sources come from, ``get_weights() @ sphere @ result
+        == I``, and each column is one component's sensor map.
         """
         if self.sphere is None or self.A is None or self.comp_list is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
-        A = self.A[:, self.comp_list[:, model_idx]]
+        self._check_usable("get the sensor mixing matrix")
+        A = self.A[self.comp_list[:, model_idx], :].T
         return self._pinv_sphere() @ A
 
     def get_weights(self) -> np.ndarray:
@@ -554,6 +1161,7 @@ class AMICA:
         """
         if self.W is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
+        self._check_usable("get the weights (unmixing matrix)")
         # Internal W = inv(A) is stored transposed relative to the true unmixing
         # (the E-step forms activations as (X-c)^T @ W), so return W^T (issue #24).
         # This is the raw unmixing matrix; it does not account for the per-model
@@ -570,7 +1178,7 @@ class AMICA:
         data : ndarray of shape (n_channels, n_samples), optional
             The input data to fit the model to. If omitted, the data is
             loaded from the ``files``/``data_dim``/``field_dim`` parameters
-            supplied via ``params_file`` (see :meth:`from_json_file`).
+            supplied via ``params_file`` (see :meth:`from_params_file`).
 
         Returns
         -------
@@ -579,6 +1187,20 @@ class AMICA:
 
         Notes
         -----
+        Iteration order (issue #339), as in ``AMICATorchNG.fit`` and
+        ``AMICAMLXNG.fit``: each iteration runs the E-step, then the
+        restart-on-NaN window, the likelihood-decrease response and the
+        stopping checks, and only then, unless a check fired, the update with
+        the rates just set, followed by the share merge, the checkpoints and
+        rejection. ``self.ll`` and ``self.nd`` record every iteration whose
+        likelihood was finite, and nothing else. A convergence stop takes no
+        update on its stopping iteration, so the returned parameters are the
+        ones whose likelihood is ``self.ll[-1]``; a fit that runs to
+        ``max_iter`` updates on its last iteration, as the reference does. A
+        non-finite likelihood outside the restart window, a non-finite update
+        direction, and non-finite parameters after an update each stop the fit
+        with ``converged=False`` (see ``_DEGENERATE_STOP_REASONS``).
+
         Under ``share_comps``, if a merge fires on the LAST iteration, the
         returned ``A``/``comp_list`` are already post-merge but ``self.ll[-1]``
         still reports the pre-merge log-likelihood -- the merge's effect on
@@ -603,14 +1225,16 @@ class AMICA:
         if data is None:
             if not self._config_files:
                 raise ValueError(
-                    "No data provided and no 'files' configured in params_file; "
-                    "either pass data explicitly or set 'files'/'data_dim'/'field_dim'."
+                    "No data provided and no 'files' configured (via "
+                    "params_file or as a keyword argument); either pass "
+                    "data explicitly or set 'files'/'data_dim'/'field_dim'."
                 )
             if self._config_data_dim is None or self._config_field_dim is None:
                 raise ValueError(
-                    "No data provided and 'data_dim'/'field_dim' are not both "
-                    "configured in params_file; either pass data explicitly or "
-                    "set 'files'/'data_dim'/'field_dim'."
+                    "No data provided and 'data_dim'/'field_dim' are not "
+                    "both configured (via params_file or as a keyword "
+                    "argument); either pass data explicitly or set "
+                    "'files'/'data_dim'/'field_dim'."
                 )
             if len(self._config_files) != len(self._config_field_dim):
                 raise ValueError(
@@ -675,8 +1299,9 @@ class AMICA:
         # every checkpoint, so a run that diverged to a non-finite LL (issue #39)
         # or ended holding non-finite parameters (issue #240) cannot overwrite
         # the last good on-disk result with NaNs. Under best-of-N restarts this
-        # writes the WINNER, whose state is live by the time it runs.
-        if self.converged:
+        # writes the WINNER, whose state is live by the time it runs. Nothing
+        # is written without an outdir.
+        if self.converged and self.outdir is not None:
             self._write_results()
 
         return self
@@ -847,15 +1472,25 @@ class AMICA:
         # Main optimization loop
         self._optimize()
 
-        # Record the outcome: a terminal non-finite LL means the fit diverged
-        # (even restart-on-NaN could not recover), which callers/CLI must be
-        # able to detect rather than silently trusting model.A/W.
-        self.converged = len(self.ll) > 0 and bool(np.isfinite(self.ll[-1]))
-        if not self.converged:
+        # Record the outcome: a degenerate stop (a non-finite likelihood that
+        # restart-on-NaN could not recover, a non-finite update direction, or
+        # non-finite parameters after an update) means the fit diverged, which
+        # callers/CLI must be able to detect rather than silently trusting
+        # model.A/W. self.ll holds only finite values, so the stop reason, not
+        # its last entry, is what says so.
+        degenerate_stop = self._is_degenerate_stop(self.stop_reason)
+        self.converged = len(self.ll) > 0 and not degenerate_stop
+        if degenerate_stop:
             self.logger.error(
-                "AMICA did not converge: the log-likelihood is non-finite "
-                "(diverged after %d restart(s)); results were not written.",
+                "AMICA did not converge: %s (after %d restart(s)); results were "
+                "not written.",
+                self.stop_reason,
                 self.numrestarts,
+            )
+        elif not self.converged:
+            self.logger.error(
+                "AMICA did not converge: no iteration completed; results were "
+                "not written."
             )
         else:
             # A finite likelihood is not on its own proof of a usable fit: a
@@ -893,7 +1528,7 @@ class AMICA:
         # ... the ratcheted learning-rate ceilings (this backend anneals lrate0
         # and newtrate in place), the tuned block size, and the seed/RNG the
         # winning restart ran from.
-        "lrate", "lrate0", "newtrate", "rholrate",
+        "lrate", "lrate0", "newtrate", "rholrate", "rholrate_cap",
         "block_size", "seed", "rng",
     )  # fmt: skip
     # Written by the fit path but identical across the restarts of one fit()
@@ -903,6 +1538,26 @@ class AMICA:
         "data", "data_dim", "num_samples", "num_comps",
         "mean", "sphere", "sldet", "_sphere_pinv",
     )  # fmt: skip
+
+    # The stop reasons that mark a fit degenerate, in this backend's prose
+    # vocabulary: a non-finite likelihood (the PyTorch/MLX "nan_ll" and
+    # "singular_ll"), a non-finite update direction ("nan_direction"),
+    # non-finite parameters after an update ("nan_params", followed by ": " and
+    # the offenders' names, as the exit check's reason is), and a restart that
+    # raised. fit() reports converged=False for each (_is_degenerate_stop).
+    _NONFINITE_LL_REASON = "Non-finite likelihood (NaN/-inf) encountered"
+    _NONFINITE_DIRECTION_REASON = "Non-finite update direction (NaN/inf) encountered"
+    _NONFINITE_PARAMS_REASON = "Non-finite parameters after an update"
+    _DEGENERATE_STOP_REASONS = (
+        _NONFINITE_LL_REASON,
+        _NONFINITE_DIRECTION_REASON,
+        _NONFINITE_PARAMS_REASON,
+        restarts.ERROR_STOP_REASON,
+    )
+
+    # What the post-update guard checks, in the order AMICAMLXNG's guard names
+    # them (it adds its cached log-determinant of W).
+    _POST_UPDATE_CHECKED = ("A", "mu", "alpha", "beta", "rho", "gm", "c", "W")
 
     # Every parameter a caller can read back off disk or off the object. `A` and
     # `W` are the decomposition; `c`/`mu`/`alpha`/`beta`/`rho`/`gm` are the model
@@ -921,7 +1576,16 @@ class AMICA:
         "mean",
     )
 
-    def _nonfinite_params(self) -> List[str]:
+    @classmethod
+    def _is_degenerate_stop(cls, reason: Optional[str]) -> bool:
+        """Whether ``reason`` is one of :attr:`_DEGENERATE_STOP_REASONS`,
+        with or without the ``": names"`` suffix the parameter reason carries."""
+        return reason is not None and any(
+            reason == known or reason.startswith(f"{known}: ")
+            for known in cls._DEGENERATE_STOP_REASONS
+        )
+
+    def _nonfinite_params(self, names: Optional[Tuple[str, ...]] = None) -> List[str]:
         """Names of fitted parameters currently holding a non-finite value.
 
         The single definition of "this state is safe to persist or report as a
@@ -931,11 +1595,13 @@ class AMICA:
         non-finite rather than only *that* something did.
 
         Parameters not yet allocated (before ``_initialize_parameters``) are
-        skipped rather than treated as bad.
+        skipped rather than treated as bad. ``names`` narrows the sweep (the
+        post-update guard in :meth:`_optimize` passes
+        :attr:`_POST_UPDATE_CHECKED`); the default is :attr:`_FITTED_PARAMS`.
         """
         return [
             name
-            for name in self._FITTED_PARAMS
+            for name in (self._FITTED_PARAMS if names is None else names)
             if getattr(self, name, None) is not None
             and not np.all(np.isfinite(np.asarray(getattr(self, name))))
         ]
@@ -1071,24 +1737,38 @@ class AMICA:
     def _initialize_parameters(self):
         """Initialize all model parameters."""
         assert self.data_dim is not None
-        # Initialize mixing/unmixing matrices
-        if self.A is None:
-            self.A = np.zeros((self.data_dim, self.num_comps))
-            for h in range(self.num_models):
-                if not hasattr(self, "fix_init") or not self.fix_init:
-                    self.A[:, h * self.data_dim : (h + 1) * self.data_dim] = np.eye(
-                        self.data_dim
-                    ) + 0.01 * (0.5 - self.rng.rand(self.data_dim, self.data_dim))
-                else:
-                    self.A[:, h * self.data_dim : (h + 1) * self.data_dim] = np.eye(
-                        self.data_dim
-                    )
-
         # Initialize component assignments
         self.comp_list = np.zeros((self.data_dim, self.num_models), dtype=int)
         self.comp_used = np.ones(self.num_comps, dtype=bool)
         for h in range(self.num_models):
             self.comp_list[:, h] = np.arange(h * self.data_dim, (h + 1) * self.data_dim)
+
+        # Initialize mixing/unmixing matrices. A holds one component per row
+        # (issue #334, pamica.component_layout): model h's block is rows
+        # h*data_dim..(h+1)*data_dim-1 under the default comp_list above. A
+        # drawn A is normalized to unit-norm components as the reference does
+        # (issue #341, pamica.initialization), here and in the restart after a
+        # non-finite likelihood, which redraws through this method. An A
+        # supplied before fit() (or left by a previous fit on this instance) is
+        # used as is, like the reference's loaded A, once it is checked: a
+        # wrong shape, a non-finite entry or a singular model block raises
+        # ValueError here instead of failing deep in the fit.
+        if self.A is None:
+            drawn = initial_mixing(
+                self.rng,
+                self.data_dim,
+                self.num_models,
+                fix_init=bool(getattr(self, "fix_init", False)),
+            )
+            self.A = np.zeros((self.num_comps, self.data_dim))
+            self.A[: drawn.shape[0], :] = drawn
+        else:
+            validate_supplied_mixing(
+                self.A,
+                (self.num_comps, self.data_dim),
+                self.comp_list,
+                owner="AMICA_NumPy",
+            )
 
         # Outlier-rejection state (do_reject): start with every sample good
         # (good_idx = all indices), mirroring AMICATorchNG. num_good_samples
@@ -1147,7 +1827,9 @@ class AMICA:
 
         Matches Fortran's restart path (amica15.f90:1026-1046): it re-draws
         *only* the mixing matrix ``A`` (from the already-advanced RNG, a new
-        random basin) and recomputes ``comp_list``/``W``; the last-successful
+        random basin), normalizes each redrawn component to unit norm as the
+        reference does (:1039-1040, issue #341), and recomputes
+        ``comp_list``/``W``; the last-successful
         mixture parameters (``mu``/``alpha``/``beta``/``rho``/``gm``/``c``) are
         kept, not cold-reset. The learning rate and the LL/gradient-norm history
         are reset so the restarted run is judged from scratch; preprocessing
@@ -1168,8 +1850,10 @@ class AMICA:
             self.good_idx = saved_good_idx
             self.num_good_samples = saved_num_good
         self.lrate = self.lrate0
-        # rholrate is the (maxdecs-ratcheted) rho-rate ceiling; restore it to the
-        # pristine rholrate0 so a re-fit starts fresh (issue #193).
+        # rholrate_cap is the (maxdecs-ratcheted) rho-rate ceiling; restore it,
+        # and the working rate with it, to the pristine rholrate0 so a re-fit
+        # starts fresh (issue #193).
+        self.rholrate_cap = self.rholrate0
         self.rholrate = self.rholrate0
         self.ll = []
         self.nd = []
@@ -1200,17 +1884,18 @@ class AMICA:
         """
         if rho == 1.0:
             # Laplace distribution
-            log_pdf = -np.abs(y) - np.log(2.0)
+            log_pdf = -np.abs(y) - LOG2
             pdf = np.exp(log_pdf)
             dpdf = -np.sign(y) * pdf
         elif rho == 2.0:
-            # Gaussian distribution
-            log_pdf = -y * y - 0.5 * np.log(np.pi)
+            # Gaussian distribution, with the reference's single-precision
+            # normalizer log(dble(1.772453851)) (amica15.f90:1313, issue #344)
+            log_pdf = -y * y - LOG_SQRT_PI
             pdf = np.exp(log_pdf)
             dpdf = -2 * y * pdf
         else:
             # Generalized Gaussian distribution
-            log_pdf = -np.power(np.abs(y), rho) - np.log(2.0) - gammaln(1.0 + 1.0 / rho)
+            log_pdf = -np.power(np.abs(y), rho) - LOG2 - gammaln(1.0 + 1.0 / rho)
             pdf = np.exp(log_pdf)
             dpdf = -rho * np.power(np.abs(y), rho - 1) * np.sign(y) * pdf
 
@@ -1579,10 +2264,10 @@ class AMICA:
                     ay = np.abs(y)
                     ayrho = np.power(ay, self.rho[j, k])
                     logab = self.rho[j, k] * np.log(np.maximum(ay, tiny))
-                    # Fortran zeros the term when |y|^rho < epsdble=1e-16
-                    # (amica17.f90:1570 / amica17_header.f90:73), not at denormal
-                    # underflow; use 1e-16 to match, not np.finfo.tiny.
-                    logab = np.where(ayrho < 1e-16, 0.0, logab)
+                    # Fortran zeros the term when |y|^rho < epsdble
+                    # (amica15.f90:1558 / amica15_header.f90:73), not at denormal
+                    # underflow; use its value to match, not np.finfo.tiny.
+                    logab = np.where(ayrho < EPSDBLE, 0.0, logab)
                     updates["drho_n"][j, k] += np.sum(u * ayrho * logab)
 
                     if self.do_newton:
@@ -1633,9 +2318,12 @@ class AMICA:
         (amica15.f90:996, 1122, 1124-1127), so the ``LLt`` written at any
         checkpoint is the E-step of the parameters as they stood BEFORE that
         iteration's M-step: one M-step older than the ``W``/``A`` written beside
-        it. pamica's loop has the same three steps in the same order, so
-        stashing reproduces that exactly, and the on-disk ``LLt`` is comparable
-        with the binary's. The invariant this pins down, on both sides, is
+        it. The same holds for the final write after a fit that ran to
+        ``max_iter``; after a convergence stop the loop exits before the
+        update (amica15.f90:1111, issue #339), so the final ``LLt`` is the
+        E-step of the written parameters themselves. pamica's loop has the
+        same steps in the same order, so stashing reproduces that exactly, and
+        the on-disk ``LLt`` is comparable with the binary's. The invariant this pins down, on both sides, is
         ``Lt.sum() / (num_good_samples * data_dim) == self.ll[-1]``.
 
         That equality holds bit for bit except on a write whose iteration also
@@ -1669,7 +2357,143 @@ class AMICA:
             return None, None
         return self._llt_logv.T, self._llt_ll
 
-    def _update_parameters(self, updates: Dict):
+    def _update_direction(self, updates: Dict) -> _UpdateStep:
+        """The natural-gradient or Newton step for ``A`` from this iteration's
+        sufficient statistics, and its norm, without changing ``A`` or any
+        density parameter.
+
+        The reference computes both in ``accum_updates_and_likelihood``
+        (amica15.f90:1666-1761), with ``LL(iter)``, before the likelihood-
+        decrease response and the stopping checks read ``ndtmpsum`` and before
+        ``update_params`` applies the step. It finalizes the Newton curvature
+        (``sigma2``/``lambda_``/``kappa``) as it goes but records nothing:
+        :meth:`_optimize` appends the iteration's likelihood and the returned
+        norm to ``self.ll``/``self.nd`` once the likelihood is known to be
+        finite, as the PyTorch and MLX loops append ``ll_history``, and hands
+        the step to :meth:`_update_parameters` once the checks have run.
+        """
+        assert (
+            self.data_dim is not None
+            and self.gm is not None
+            and self.comp_list is not None
+            and self.A is not None
+        )
+        used = (
+            self.comp_used
+            if self.comp_used is not None
+            else np.ones(self.num_comps, dtype=bool)
+        )
+        newton_active = schedule.newton_active(
+            self.do_newton, self.iter, self.newt_start
+        )
+        if newton_active:
+            # Finalize Newton curvature statistics (Fortran amica17.f90:1762-1776).
+            # The dsigma2/dkappa/dlambda accumulators already carry the sbeta^2
+            # and baralpha-weighted mu^2 factors, so finalization is a plain
+            # division by the model mass dgm = sum_t v_h.
+            #
+            # dgm is (num_models,) and the accumulators are (data_dim,
+            # num_models), so the model mass broadcasts along the LAST axis
+            # (issue #267). The old ``[:, None]`` made it (num_models, 1), which
+            # only happens to broadcast when num_models == 1: every multi-model
+            # Newton fit raised "operands could not be broadcast together with
+            # shapes (data_dim, num_models) (num_models, 1)". Same as the torch
+            # backend's ``dgm.unsqueeze(0)`` (``AMICATorchNG._finalize_newton_stats``).
+            dgm = updates["dgm"][None, :]
+            self.sigma2 = updates["dsigma2"] / dgm
+            self.lambda_ = updates["dlambda"] / dgm
+            self.kappa = updates["dkappa"] / dgm
+
+        # Per-model direction: Newton H if the model is positive definite,
+        # otherwise natural gradient. Matching Fortran (amica17.f90:1814-1837),
+        # if any off-diagonal pair fails sk1*sk2 > 1 the whole model falls
+        # back to the natural gradient and the ramp targets lrate0, not newtrate.
+        directions = []
+        no_newt = False
+        for h in range(self.num_models):
+            dA = -updates["dWtmp"][:, :, h] / updates["dgm"][h]
+            dA[np.diag_indices_from(dA)] += 1
+
+            if newton_active:
+                assert (
+                    self.lambda_ is not None
+                    and self.sigma2 is not None
+                    and self.kappa is not None
+                )
+                H = np.zeros_like(dA)
+                posdef = True
+                for i in range(self.data_dim):
+                    for j in range(self.data_dim):
+                        if i == j:
+                            H[i, i] = dA[i, i] / self.lambda_[i, h]
+                        else:
+                            sk1 = self.sigma2[i, h] * self.kappa[j, h]
+                            sk2 = self.sigma2[j, h] * self.kappa[i, h]
+                            if sk1 * sk2 > 1.0:
+                                H[i, j] = (sk1 * dA[i, j] - dA[j, i]) / (
+                                    sk1 * sk2 - 1.0
+                                )
+                            else:
+                                posdef = False
+                if posdef:
+                    directions.append(H)
+                else:
+                    no_newt = True
+                    directions.append(dA)
+            else:
+                directions.append(dA)
+
+        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1749-1761). Computed
+        # HERE, before the A step and before rescaling, because Fortran builds dAk
+        # inside accum_updates_and_likelihood (:1731-1743) strictly before
+        # update_params applies it (:1789). Using the post-update, post-rescale A
+        # would measure a different quantity. Computed every iteration, including
+        # a frozen one, because Fortran computes it in the accumulation pass that
+        # runs unconditionally -- the grad-norm stop needs the true gradient
+        # magnitude, not just the magnitude on iterations where A moves.
+        #
+        # dAk is the gm-weighted average of the per-model directions mapped
+        # through A (Fortran dAk/zeta, amica15.f90:1749-1761): each contributing
+        # model adds gm[h]/zeta of its step to the shared component's row, where
+        # zeta = sum of gm over the models that reference the component. Weighted
+        # by the PRE-update model weights (gm is not reassigned until
+        # _update_parameters), because Fortran builds dAk before update_params
+        # reassigns gm (issue #219).
+        #
+        # The weights are normalized per model (gm[h]/zeta) rather than summed and
+        # then divided (Fortran's literal sum-then-divide, and AMICATorchNG's):
+        # mathematically the same average, but a component with a single
+        # contributor then has weight exactly gm[h]/gm[h] == 1.0, so the step is
+        # bit-identical to the pre-#242 per-model update instead of drifting by
+        # the ULP that a multiply-then-divide round trip can introduce. Every
+        # component has exactly one contributor unless share_comps merged one,
+        # so this keeps the default multi-model trajectory byte-for-byte.
+        #
+        # ndtmpsum is then the RMS of the used rows of dAk:
+        # ||dAk[used, :]|| / sqrt(nw * n_used), with NO lrate factor. Fortran
+        # measures the gradient direction before the step, not the applied update
+        # lrate*dAk, and does not divide by lrate either (amica15.f90:1760-1761) --
+        # there is no missing factor here.
+        zeta = np.zeros(self.num_comps)
+        for h in range(self.num_models):
+            zeta[self.comp_list[:, h]] += self.gm[h]
+        dAk = np.zeros_like(self.A)
+        for h in range(self.num_models):
+            # comp_list[:, h] holds distinct indices within a model
+            # (identify_shared_components never merges two components that
+            # appear in the same model), so buffered `+=` on fancy indices cannot
+            # drop a contribution here. Row i of the model's step is source i's
+            # component, comp_list[i, h] (issue #334).
+            idx = self.comp_list[:, h]
+            weight = self.gm[h] / np.maximum(zeta[idx], np.finfo(np.float64).tiny)
+            dAk[idx, :] += weight[:, None] * np.dot(directions[h].T, self.A[idx, :])
+        nd_value = float(
+            np.sqrt(np.sum(dAk[used, :] ** 2) / (self.data_dim * int(used.sum())))
+        )
+
+        return _UpdateStep(dAk, newton_active, no_newt, nd_value)
+
+    def _update_parameters(self, updates: Dict, step: Optional[_UpdateStep] = None):
         """
         Update model parameters using computed updates.
 
@@ -1677,6 +2501,13 @@ class AMICA:
         ----------
         updates : dict
             Dictionary containing parameter updates
+        step : _UpdateStep, optional
+            The mixing-matrix step :meth:`_update_direction` computed from the
+            same ``updates``: :meth:`_optimize` passes the one its stopping
+            checks already read, so nothing is computed twice. A direct call
+            may omit it, and it is then computed here first; neither path
+            records anything in ``self.ll``/``self.nd``, which only
+            :meth:`_optimize` appends to.
         """
         assert (
             self.data_dim is not None
@@ -1689,12 +2520,11 @@ class AMICA:
             and self.comp_list is not None
             and self.A is not None
         )
-        # Fortran builds dAk from the model weights of the *previous* iteration:
-        # gm is not reassigned until update_params (amica15.f90:1788+), which runs
-        # after accum_updates_and_likelihood (:1731-1743). Snapshot it here so the
-        # nd block below weights by the same gm Fortran would (issue #219).
-        assert self.gm is not None
-        gm_prev = self.gm.copy()
+        if step is None:
+            step = self._update_direction(updates)
+        # The step was built with the pre-update gm (_update_direction), so gm
+        # can be reassigned now (Fortran reassigns it in update_params,
+        # amica15.f90:1788, after accum_updates_and_likelihood; issue #219).
 
         # Update model weights, normalizing by the number of samples the E-step
         # actually summed over: the good set under do_reject, else all samples.
@@ -1765,6 +2595,58 @@ class AMICA:
                 self.iter,
             )
 
+        # The A branch, where the reference has it: after gm/alpha/c and before
+        # mu/sbeta/rho (amica15.f90:1803-1816).
+        #
+        # A is stored as Fortran's A^T, one component per row (issue #334; true
+        # unmixing = W^T = inv(block)^T), so the Fortran step on a model's block
+        # A_fort(:, comp_list(:,h)) @ dir becomes dir^T @ A[comp_list[:, h], :]
+        # (LEFT-multiply by the TRANSPOSED direction), which _update_direction
+        # built into step.dAk. Right-multiply by the untransposed dir is
+        # invisible at the fixed point but sends the fit downhill -- issue #24
+        # root cause.
+        #
+        # ONE application of the averaged dAk (Fortran's single DAXPY,
+        # amica15.f90:1807/1814), not the per-model loop this used to run: a
+        # component shared by two models took one step per contributing model,
+        # the second against an already-stepped A, which is a different
+        # operation from Fortran's single weighted average (issue #242). A
+        # merged-away component has no contributor, so its dAk row stays
+        # exactly zero and it holds the value it was merged away with. On an
+        # iteration the reference holds A (pamica.schedule.share_freeze),
+        # everything inside the branch is skipped together: the
+        # Newton-fallback message, the lrate ramp, the reset of the working rho
+        # rate to its ceiling and the step itself. The step was built from the
+        # parameters the E-step saw, so taking it before the mixture updates
+        # changes nothing they read.
+        if not self._a_frozen():
+            if step.newton_active and step.no_newt:
+                # Fortran prints this whenever a model is not positive definite
+                # (amica17.f90:1911-1913); surface it rather than falling back
+                # silently.
+                self.logger.info(
+                    "Hessian not positive definite at iter %d; using natural gradient.",
+                    self.iter,
+                )
+
+            # The ramp starts from this iteration's lrate, which a likelihood
+            # decrease has already halved (_optimize runs the response before
+            # the update, as the reference does, issue #339).
+            if step.newton_active and not step.no_newt:
+                self.lrate = min(
+                    self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
+                )
+            else:
+                self.lrate = min(
+                    self.lrate0, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
+                )
+            # rho moves at the ceiling (``rholrate = rholrate0``, :1806/:1813),
+            # so a decrease's scaling of the working rate reaches it only on a
+            # held iteration.
+            self.rholrate = self.rholrate_cap
+
+            self.A = self.A - self.lrate * step.dAk
+
         # Exact-EM mixture location/scale (Fortran :1978/:1993). These are
         # fixed-point updates -- mu += dmu_n/dmu_d, beta *= sqrt(dbeta_n/dbeta_d)
         # -- NOT first-order gradient steps, so they carry no lrate.
@@ -1814,196 +2696,104 @@ class AMICA:
                 new_rho = np.where(nan_mask, self.rho0, new_rho)
             self.rho[:, cols] = np.clip(new_rho, self.minrho, self.maxrho)
 
-        # Update unmixing matrices
-        newton_active = self.do_newton and self.iter >= self.newt_start
-        if newton_active:
-            # Finalize Newton curvature statistics (Fortran amica17.f90:1762-1776).
-            # The dsigma2/dkappa/dlambda accumulators already carry the sbeta^2
-            # and baralpha-weighted mu^2 factors, so finalization is a plain
-            # division by the model mass dgm = sum_t v_h.
-            #
-            # dgm is (num_models,) and the accumulators are (data_dim,
-            # num_models), so the model mass broadcasts along the LAST axis
-            # (issue #267). The old ``[:, None]`` made it (num_models, 1), which
-            # only happens to broadcast when num_models == 1: every multi-model
-            # Newton fit raised "operands could not be broadcast together with
-            # shapes (data_dim, num_models) (num_models, 1)". Same as the torch
-            # backend's ``dgm.unsqueeze(0)`` (torch_impl/core.py:1323).
-            dgm = updates["dgm"][None, :]
-            self.sigma2 = updates["dsigma2"] / dgm
-            self.lambda_ = updates["dlambda"] / dgm
-            self.kappa = updates["dkappa"] / dgm
-
-        # Per-model direction: Newton H if the model is positive definite,
-        # otherwise natural gradient. Matching Fortran (amica17.f90:1814-1837),
-        # if any off-diagonal pair fails sk1*sk2 > 1 the whole model falls
-        # back to the natural gradient and the ramp targets lrate0, not newtrate.
-        directions = []
-        no_newt = False
-        for h in range(self.num_models):
-            dA = -updates["dWtmp"][:, :, h] / updates["dgm"][h]
-            dA[np.diag_indices_from(dA)] += 1
-
-            if newton_active:
-                assert (
-                    self.lambda_ is not None
-                    and self.sigma2 is not None
-                    and self.kappa is not None
-                )
-                H = np.zeros_like(dA)
-                posdef = True
-                for i in range(self.data_dim):
-                    for j in range(self.data_dim):
-                        if i == j:
-                            H[i, i] = dA[i, i] / self.lambda_[i, h]
-                        else:
-                            sk1 = self.sigma2[i, h] * self.kappa[j, h]
-                            sk2 = self.sigma2[j, h] * self.kappa[i, h]
-                            if sk1 * sk2 > 1.0:
-                                H[i, j] = (sk1 * dA[i, j] - dA[j, i]) / (
-                                    sk1 * sk2 - 1.0
-                                )
-                            else:
-                                posdef = False
-                if posdef:
-                    directions.append(H)
-                else:
-                    no_newt = True
-                    directions.append(dA)
-            else:
-                directions.append(dA)
-
-        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1749-1761). Computed
-        # HERE, before the A step and before rescaling, because Fortran builds dAk
-        # inside accum_updates_and_likelihood (:1731-1743) strictly before
-        # update_params applies it (:1789). Using the post-update, post-rescale A
-        # would measure a different quantity. Computed every iteration, including
-        # a frozen one, because Fortran computes it in the accumulation pass that
-        # runs unconditionally -- the grad-norm stop needs the true gradient
-        # magnitude, not just the magnitude on iterations where A moves.
-        #
-        # dAk is the gm-weighted average of the per-model directions mapped
-        # through A (Fortran dAk/zeta, amica15.f90:1749-1761): each contributing
-        # model adds gm[h]/zeta of its direction to the shared column, where
-        # zeta = sum of gm over the models that reference the column. Weighted by
-        # gm_prev, the PRE-update model weights, because Fortran builds dAk before
-        # update_params reassigns gm (issue #219).
-        #
-        # The weights are normalized per model (gm[h]/zeta) rather than summed and
-        # then divided (Fortran's literal sum-then-divide, and AMICATorchNG's):
-        # mathematically the same average, but a column with a single contributor
-        # then has weight exactly gm[h]/gm[h] == 1.0, so the step is bit-identical
-        # to the pre-#242 per-model update instead of drifting by the ULP that a
-        # multiply-then-divide round trip can introduce. Every column has exactly
-        # one contributor unless share_comps merged one, so this keeps the default
-        # multi-model trajectory byte-for-byte.
-        #
-        # ndtmpsum is then the RMS of the used columns of dAk:
-        # ||dAk[:, used]|| / sqrt(nw * n_used), with NO lrate factor. Fortran
-        # measures the gradient direction before the step, not the applied update
-        # lrate*dAk, and does not divide by lrate either (amica15.f90:1760-1761) --
-        # there is no missing factor here.
-        zeta = np.zeros(self.num_comps)
-        for h in range(self.num_models):
-            zeta[self.comp_list[:, h]] += gm_prev[h]
-        dAk = np.zeros_like(self.A)
-        for h in range(self.num_models):
-            # comp_list[:, h] holds distinct indices within a model
-            # (identify_shared_components never merges two columns that appear in
-            # the same model), so buffered `+=` on fancy indices cannot drop a
-            # contribution here.
-            idx = self.comp_list[:, h]
-            weight = gm_prev[h] / np.maximum(zeta[idx], np.finfo(np.float64).tiny)
-            dAk[:, idx] += weight * np.dot(directions[h].T, self.A[:, idx])
-        nd_value = float(
-            np.sqrt(np.sum(dAk[:, used] ** 2) / (self.data_dim * int(used.sum())))
-        )
-
-        # A is stored as Fortran's A^T (true unmixing = W^T = inv(A)^T), so the
-        # Fortran step A_fort -= lrate*A_fort @ dir becomes A -= lrate*dir^T @ A
-        # (LEFT-multiply by the TRANSPOSED direction). Right-multiply by the
-        # untransposed dir is invisible at the fixed point but sends the fit
-        # downhill -- issue #24 root cause.
-        #
-        # ONE application of the averaged dAk (Fortran's single DAXPY,
-        # amica15.f90:1807/1814), not the per-model loop this used to run: a
-        # column shared by two models took one step per contributing model, the
-        # second against an already-stepped A, which is a different operation
-        # from Fortran's single weighted average (issue #242). A merged-away
-        # column has no contributor, so its dAk stays exactly zero and it holds
-        # the value it was merged away with. When sharing holds A this iteration
-        # (the post-merge settle window) the step is skipped entirely, along with
-        # the lrate ramp and the Newton-fallback bookkeeping Fortran nests inside
-        # the same guarded block (amica15.f90:1803), so a discarded Newton
-        # direction cannot ratchet the learning rate.
-        if not self._a_frozen():
-            if newton_active and no_newt:
-                # Fortran prints this whenever a model is not positive definite
-                # (amica17.f90:1911-1913); surface it rather than falling back
-                # silently.
-                self.logger.info(
-                    "Hessian not positive definite at iter %d; using natural gradient.",
-                    self.iter,
-                )
-
-            if newton_active and not no_newt:
-                self.lrate = min(
-                    self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
-                )
-            else:
-                self.lrate = min(
-                    self.lrate0, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
-                )
-
-            self.A = self.A - self.lrate * dAk
-
         # (c was updated above, before the mixture/A updates, from dc_numer/dgm.)
 
-        # Rescale parameters if requested
-        if self.doscaling and self.iter % self.scalestep == 0:
-            for k in range(self.num_comps):
-                scale = np.sqrt(np.sum(self.A[:, k] ** 2))
-                if scale > 0:
-                    self.A[:, k] /= scale
-                    self.mu[:, k] *= scale
-                    self.beta[:, k] /= scale
+        # Rescale parameters if requested. The reference rescales every
+        # iteration (it parses ``scalestep`` but never reads it,
+        # amica15.f90:1843/3686); pamica keeps ``scalestep`` as an extension
+        # counted from 1 like the reference's other cadences (iterations s, 2s,
+        # ...; ``schedule.every``), so the default 1 is the reference.
+        if self.doscaling and schedule.every(self.iter, self.scalestep):
+            self._rescale_components()
 
         # Update unmixing matrices
         self._update_unmixing_matrices()
 
-        # Store likelihood
-        self.ll.append(updates["ll"])
+    def _component_sensor_maps(self) -> np.ndarray:
+        """Every component's mixing vector in input-channel (sensor) space.
 
-        # The weight-gradient norm is computed above, before the A step, matching
-        # Fortran's ordering. _check_convergence uses it as the gradient floor in
-        # the decrease-stop condition regardless of use_grad_norm; the flag only
-        # gates the separate final gradient-norm stop.
-        self.nd.append(nd_value)
+        ``pinv(sphere) @ A.T``, shape ``(data_dim_in, num_comps)``: column
+        ``comp_list[i, h]`` is column ``i`` of ``get_sensor_mixing_matrix(h)``
+        (issue #334). These are the vectors the share metric compares.
+        """
+        assert self.A is not None
+        return self._pinv_sphere() @ self.A.T
+
+    def _identify_shared_comps(self) -> None:
+        """Merge near-collinear components across models (Fortran
+        ``identify_shared_comps``, amica15.f90:1916).
+
+        Runs the shared kernel
+        :func:`pamica.numpy_impl.utils.identify_shared_components` on the
+        sensor-space component maps (:meth:`_component_sensor_maps`, issue
+        #258), the metric ``AMICATorchNG._identify_shared_comps`` computes, so
+        both backends make the same merge decision from the same fitted state.
+        A merge folds one component id into another in ``comp_list`` and
+        ``comp_used``; the caller rebuilds ``W``, as the reference's
+        ``get_unmixing_matrices`` follows the scan (amica15.f90:1858,1863).
+        """
+        assert self.comp_list is not None
+        unique_before = int(np.unique(self.comp_list).size)
+        self.comp_list, self.comp_used = identify_shared_components(
+            self._component_sensor_maps(), self.comp_list, self.comp_thresh
+        )
+        unique_after = int(np.unique(self.comp_list).size)
+        # identify_shared_components is stateless, so the merge log (matching
+        # AMICATorchNG's) is emitted here from the before/after unique-component
+        # count instead.
+        if unique_after < unique_before:
+            self.logger.info(
+                "Component sharing (iter %d): %d merge(s), %d unique components.",
+                self.iter,
+                unique_before - unique_after,
+                unique_after,
+            )
+
+    def _rescale_components(self) -> None:
+        """Rescale every component to a unit-norm mixing vector (Fortran
+        ``doscaling``, amica15.f90:1843-1851), an exact change of scale.
+
+        Component ``k`` is row ``k`` of ``A`` (issue #334, ADR 0007), the
+        reference's column ``A(:,k)``. Dividing that row by its norm scales the
+        source up by the norm; ``mu[:, k] *= norm`` and ``beta[:, k] /= norm``
+        rescale its density to match, so the log-likelihood is unchanged. A
+        zero-norm row is left untouched, as in the reference (``Anrmk > 0``).
+        Each component is rescaled once, including a shared one, and a
+        merged-away row is left untouched. Same rule, norms and guard as
+        ``AMICATorchNG._rescale_components``.
+        """
+        assert self.A is not None and self.mu is not None and self.beta is not None
+        assert self.comp_list is not None
+        scale = np.ones(self.A.shape[0])
+        for h in range(self.num_models):
+            # The per-model block, as the A-update and W gather it; a shared row
+            # gets the same norm from every block that holds it. Laid out
+            # column-major, numpy sums each row's squares column by column, the
+            # order the pre-#334 block (a column fancy-index, which numpy lays
+            # out column-major) was reduced in, so the default trajectory stays
+            # bit-identical; a row-major block would sum pairwise instead.
+            idx = self.comp_list[:, h]
+            block = np.asfortranarray(self.A[idx, :])
+            norm = np.sqrt(np.sum(block**2, axis=1))  # (data_dim,)
+            scale[idx] = np.where(norm > 0, norm, 1.0)
+        self.A = self.A / scale[:, None]
+        self.mu = self.mu * scale
+        self.beta = self.beta / scale
 
     def _a_frozen(self) -> bool:
-        """Whether the A-update (and its lrate ramp) is held this iteration.
+        """Whether the reference holds the A update (with its lrate ramp and
+        rho-rate reset) this iteration: once ``iter >= share_start``, every
+        iteration with ``mod(iter, share_int) <= 5``, counted from 1
+        (amica15.f90:1803, :func:`pamica.schedule.share_freeze`), exactly as
+        ``AMICATorchNG._a_frozen`` decides it.
 
-        A is frozen for the first 6 iterations of every ``share_int``-length
-        window once the Fortran-style iteration reaches ``share_start`` -- the
-        merge iteration and the 5 after it -- so the density parameters can
-        settle onto a freshly merged component before the mixing matrix moves
-        again (Fortran A-freeze, amica15.f90:1803). Identical mechanism, anchor
-        and duration as ``AMICATorchNG._a_frozen``; the window fires each cycle
-        whether or not that cycle's merge pass actually merged a pair, matching
-        both the reference and the PyTorch backend.
-
-        Gated behind ``share_comps`` and ``num_models >= 2`` (a model cannot
-        share a component with itself), so with sharing off -- the default --
-        this is always False and the validated trajectory is untouched. The
-        constructor rejects ``share_int <= 6``, so the window can never consume a
-        whole cycle and freeze A permanently.
+        The reference applies this whether or not ``share_comps`` is on and for
+        any number of models (issue #345), so this does too: with the defaults
+        ``share_start = share_int = 100``, every fit of 100 or more iterations
+        holds A on iterations 100-105, 200-205, and so on. The constructor
+        rejects ``share_int < 7``, since a shorter cycle would hold A for good.
         """
-        if not self.share_comps or self.num_models < 2:
-            return False
-        itf = self.iter + 1  # Fortran-style 1-indexed iteration
-        if itf < self.share_start:
-            return False
-        return (itf - self.share_start) % self.share_int <= 5
+        return schedule.share_freeze(self.iter, self.share_start, self.share_int)
 
     def _optimize(self):
         """Main optimization loop."""
@@ -2048,42 +2838,85 @@ class AMICA:
             for iter in iterator:
                 self.iter = iter
                 final_iter = iter
-                # Fortran-style 1-indexed iteration. Every schedule the reference
-                # expresses as `mod(iter, step)` (share_comps, writestep,
-                # histstep) is anchored on this, not on the 0-indexed loop
-                # counter, so an identical setting fires on the same iterations
-                # here, in AMICATorchNG, and in the binary.
-                itf = iter + 1
+                # Every schedule below counts iterations from 1, as the reference
+                # does (pamica.schedule converts this 0-indexed loop counter), so
+                # an identical setting fires on the same iterations here, in
+                # AMICATorchNG, in AMICAMLXNG, and in the binary (issue #335).
 
-                # Get updates and likelihood
+                # One iteration follows the reference's main loop
+                # (amica15.f90:949-1142, issue #339): the E-step, which yields
+                # LL(iter) and the step with its norm; the restart-on-NaN window;
+                # the likelihood-decrease response and the stopping checks; an
+                # exit BEFORE any parameter moves if a check fired; otherwise the
+                # update with the rates the response just set, then the share
+                # merge, the checkpoints and rejection.
                 updates = self._get_updates_and_likelihood()
+                ll = float(updates["ll"])
 
-                # Update parameters
-                self._update_parameters(updates)
-
-                # Restart-on-NaN (Fortran amica15.f90:1022-1050): an early
-                # non-finite LL usually means an unlucky init, so redraw A and
-                # start over, up to maxrestarts times, within the first
-                # restartiter iterations (Fortran's absolute `iter <= restartiter`
-                # window; the iteration counter is not reset on restart here). A
-                # later NaN falls through to _check_convergence, which stops
-                # (Fortran exits too).
-                if (
-                    len(self.ll) > 0
-                    and not np.isfinite(self.ll[-1])
-                    and iter <= self.restartiter
-                    and self.numrestarts < self.maxrestarts
-                ):
-                    self.numrestarts += 1
+                # A non-finite likelihood is never recorded in self.ll, as it is
+                # never recorded in the PyTorch and MLX ll_history: the history
+                # stays the finite trajectory of the parameters the fit
+                # actually visited, and every backend's has the same length for
+                # the same event. A singular W makes logdet -> -inf (not NaN), so
+                # the guard is isfinite, not isnan.
+                if not np.isfinite(ll):
+                    # Restart-on-NaN (Fortran amica15.f90:1022-1050): an early
+                    # non-finite LL usually means an unlucky init, so redraw A
+                    # and start over, up to maxrestarts times, within the first
+                    # restartiter iterations (Fortran's absolute
+                    # `iter <= restartiter` window over its 1-based counter; the
+                    # iteration counter is not reset on restart here). Checked
+                    # before the update, which the reference skips on a restart
+                    # too (``startover``, :1115).
+                    if (
+                        schedule.within_restart_window(iter, self.restartiter)
+                        and self.numrestarts < self.maxrestarts
+                    ):
+                        self.numrestarts += 1
+                        self.logger.warning(
+                            "Non-finite LL at iter %d; reinitializing and "
+                            "starting over (restart %d of %d).",
+                            iter + 1,
+                            self.numrestarts,
+                            self.maxrestarts,
+                        )
+                        self._reinitialize_for_restart()
+                        # The reference's checks still run on its restart
+                        # iteration, and its min_dll comparison with the NaN
+                        # likelihood is false (amica15.f90:1078-1090), so it
+                        # zeroes numincs; its decrease comparison is false too,
+                        # so numdecs is left as it was. Match that state, so
+                        # small gains before the restart cannot count toward a
+                        # min_dll stop after it (issue #339 review).
+                        numincs = 0
+                        continue
+                    # Past the window, or out of restarts: stop, as the
+                    # reference does (amica15.f90:1052-1055).
                     self.logger.warning(
-                        "Non-finite LL at iter %d; reinitializing and starting "
-                        "over (restart %d of %d).",
-                        iter + 1,
-                        self.numrestarts,
-                        self.maxrestarts,
+                        "Non-finite log-likelihood (%s) at iteration %d; stopping.",
+                        ll,
+                        iter,
                     )
-                    self._reinitialize_for_restart()
-                    continue
+                    convergence_reason = self._NONFINITE_LL_REASON
+                    break
+
+                step = self._update_direction(updates)
+                self.ll.append(ll)
+                self.nd.append(step.nd)
+
+                # A non-finite step or norm would pass both gradient-norm checks
+                # (NaN <= min_nd is False) and then be applied, so stop on it
+                # here, before any check reads it and before the update, with
+                # the parameters whose (finite) likelihood was just recorded.
+                if not (np.isfinite(step.nd) and np.all(np.isfinite(step.dAk))):
+                    self.logger.warning(
+                        "Non-finite update direction (ndtmpsum %s) at iteration "
+                        "%d; stopping before the update.",
+                        step.nd,
+                        iter,
+                    )
+                    convergence_reason = self._NONFINITE_DIRECTION_REASON
+                    break
 
                 # Calculate metrics for logging/progress
                 elapsed_time = time.time() - start_time
@@ -2110,87 +2943,94 @@ class AMICA:
                         )
 
                         # Always write detailed logs to the file
-                        with open(self.file_path, "a") as f:
-                            f.write(detailed_log + "\n")
+                        self._append_to_log_file(detailed_log)
 
                         # Also log to console if verbose or not using tqdm
                         if self.verbose or not self.use_tqdm:
                             self.logger.info(detailed_log)
 
                 # Check convergence (threads numdecs/numincs back so they
-                # accumulate across iterations, and ratchets the lrate ceiling).
+                # accumulate across iterations, and applies the likelihood-
+                # decrease response, including the ceiling ratchets).
                 converged, reason, numdecs, numincs = self._check_convergence(
                     numdecs, numincs
                 )
+
+                # Reset the decrease counter when Newton turns on (Fortran
+                # amica15.f90:1099-1102).
+                if schedule.newton_switches_on(self.do_newton, iter, self.newt_start):
+                    numdecs = 0
+
+                # Stop before this iteration's update, as the reference does
+                # (amica15.f90:1111, ahead of update_params at :1122): the
+                # returned parameters are the ones whose likelihood is
+                # self.ll[-1].
                 if converged:
                     convergence_reason = reason
                     break
 
-                # Reset the decrease counter when Newton turns on (Fortran
-                # amica17.f90:1105-1108).
-                if self.do_newton and iter == self.newt_start:
-                    numdecs = 0
+                # Update parameters, with the rates the response above just set.
+                self._update_parameters(updates, step)
 
-                # Reject outliers if requested (Fortran amica17.f90:1142). The
-                # max(1, ...) clamp matches Fortran and AMICATorchNG: without it,
-                # Python's non-negative modulo makes (iter - rejstart) % rejint
-                # hit 0 for iter < rejstart, firing rejection before rejstart.
-                if (
-                    self.do_reject
-                    and self.maxrej > 0
-                    and (
-                        (iter == self.rejstart)
-                        or (
-                            (max(1, iter - self.rejstart) % self.rejint == 0)
-                            and (self.numrej < self.maxrej)
-                        )
+                # Surface a corrupted update (a collapsed mixture component, a
+                # singular inverse) on the iteration it happens, with the same
+                # check and message as AMICAMLXNG and AMICATorchNG: otherwise a
+                # corruption on the last iteration would end as a max_iter fit
+                # holding non-finite parameters. One difference, for this
+                # backend's restart-on-NaN, which redraws A (and so W) and keeps
+                # the mixture parameters, as the reference's does
+                # (amica15.f90:1026-1046): when only A/W went non-finite and the
+                # next iteration still falls inside the restart window with a
+                # restart left, the next E-step's non-finite likelihood restarts
+                # the fit, as the reference's would, so the loop goes on to it.
+                # A restart could not repair any other parameter, so those stop.
+                bad = self._nonfinite_params(self._POST_UPDATE_CHECKED)
+                if bad:
+                    restartable = (
+                        set(bad) <= {"A", "W"}
+                        and iter + 1 < self.max_iter
+                        and schedule.within_restart_window(iter + 1, self.restartiter)
+                        and self.numrestarts < self.maxrestarts
                     )
-                ):
-                    self._reject_outliers()
-                    self.numrej += 1
+                    if not restartable:
+                        self.logger.warning(
+                            "Non-finite %s at iter %d (a mixture component likely "
+                            "collapsed); stopping.",
+                            ", ".join(bad),
+                            iter,
+                        )
+                        convergence_reason = (
+                            f"{self._NONFINITE_PARAMS_REASON}: {', '.join(bad)}"
+                        )
+                        break
+                    self.logger.warning(
+                        "Non-finite %s at iter %d (a mixture component likely "
+                        "collapsed); the next iteration's restart-on-NaN will "
+                        "reinitialize.",
+                        ", ".join(bad),
+                        iter,
+                    )
 
                 # Share components if requested (Fortran identify_shared_comps
                 # schedule, amica15.f90:1856): once per share_int cycle from
-                # share_start, merging near-collinear mixing columns across
+                # share_start, merging near-collinear components across
                 # models using the just-updated A, then rebuilding W from the
                 # merged comp_list (Fortran runs identify_shared_comps before
                 # get_unmixing_matrices, amica15.f90:1858,1863) -- otherwise the
                 # next E-step would read a stale W while indexing the densities
-                # by the merged comp_list. itf is the Fortran-style 1-indexed
-                # iteration (itf, above), the same anchor AMICATorchNG uses, so
-                # an identical (share_start, share_int) fires on the same
-                # iterations in both backends and lines up with _a_frozen.
+                # by the merged comp_list. The schedule is pamica.schedule's, the
+                # one AMICATorchNG and AMICAMLXNG use, so an identical
+                # (share_start, share_int) fires on the same iterations in every
+                # backend.
                 #
-                # This runs AFTER self.ll.append(updates["ll"]) inside
-                # _update_parameters above, so a merge on the final iteration
-                # lands in self.A/comp_list but not in the ll value already
-                # stored -- see the final_ll_ note on self.ll's init (issue
-                # #269).
-                if (
-                    self.share_comps
-                    and itf >= self.share_start
-                    and (itf - self.share_start) % self.share_int == 0
+                # This runs AFTER self.ll recorded this iteration's likelihood
+                # (above), so a merge on the final iteration lands
+                # in self.A/comp_list but not in the ll value already stored --
+                # see the final_ll_ note on self.ll's init (issue #269).
+                if self.share_comps and schedule.periodic_due(
+                    iter, self.share_start, self.share_int
                 ):
-                    # Sensor-space maps (issue #258): pinv(sphere) @ A, matching
-                    # AMICATorchNG._identify_shared_comps so both backends make
-                    # the same merge decision from the same fitted state.
-                    assert self.comp_list is not None
-                    unique_before = int(np.unique(self.comp_list).size)
-                    self.comp_list, self.comp_used = identify_shared_components(
-                        self._pinv_sphere() @ self.A, self.comp_list, self.comp_thresh
-                    )
-                    unique_after = int(np.unique(self.comp_list).size)
-                    # identify_shared_components is stateless, so the merge log
-                    # (matching AMICATorchNG's) is emitted here from the
-                    # before/after unique-component count instead.
-                    if unique_after < unique_before:
-                        self.logger.info(
-                            "Component sharing (iter %d): %d merge(s), %d unique "
-                            "components.",
-                            self.iter,
-                            unique_before - unique_after,
-                            unique_after,
-                        )
+                    self._identify_shared_comps()
                     self._update_unmixing_matrices()
 
                 # Write intermediate results/history if requested, on Fortran's
@@ -2203,11 +3043,36 @@ class AMICA:
                 # than one interval. Both are skipped (loudly) from a non-finite
                 # state so a checkpoint cannot persist NaN parameters that
                 # loadmodout reads back without complaint (issue #240).
-                if self.writestep > 0 and itf % self.writestep == 0:
+                if (
+                    self.outdir is not None
+                    and self.writestep > 0
+                    and schedule.every(iter, self.writestep)
+                ):
                     self._write_checkpoint("results")
 
-                if self.do_history and itf % self.histstep == 0:
+                if (
+                    self.outdir is not None
+                    and self.do_history
+                    and schedule.every(iter, self.histstep)
+                ):
                     self._write_checkpoint("history")
+
+                # Reject outliers if requested, after the update and the
+                # checkpoints, as the reference does (amica15.f90:1136; the
+                # schedule, including its max(1, ...) clamp, is shared with
+                # AMICATorchNG and AMICAMLXNG in pamica.schedule). The statistic
+                # is this iteration's pre-update per-sample likelihood
+                # (_last_ll_samples, captured in the E-step).
+                if schedule.rejection_due(
+                    self.do_reject,
+                    iter,
+                    self.rejstart,
+                    self.rejint,
+                    self.numrej,
+                    self.maxrej,
+                ):
+                    self._reject_outliers()
+                    self.numrej += 1
         finally:
             # Close the progress bar if using tqdm
             if use_tqdm_progress:
@@ -2220,16 +3085,14 @@ class AMICA:
                     )
                     self.logger.info(final_metrics)
                     # Also log to file if using tqdm (since it wouldn't be logged during iterations)
-                    with open(self.file_path, "a") as f:
-                        f.write(final_metrics + "\n")
+                    self._append_to_log_file(final_metrics)
 
             # Record and log the reason the loop stopped (None if it ran to
             # max_iter). fit() uses self.converged for the terminal outcome.
             self.stop_reason = convergence_reason
             if convergence_reason:
                 self.logger.info(convergence_reason)
-                with open(self.file_path, "a") as f:
-                    f.write(convergence_reason + "\n")
+                self._append_to_log_file(convergence_reason)
 
             # Log final message (only once)
             final_message = f"Optimization finished after {final_iter + 1} iterations"
@@ -2247,8 +3110,11 @@ class AMICA:
         rho rate once ``iter > newt_start``; ``newtrate`` under Newton) and
         continues, which is what keeps a long run from oscillating and drifting
         past its converged solution (issue #41). The rho ceiling is
-        ``self.rholrate`` here (reset to ``rholrate0`` each fit), ratcheted only
-        at ``maxdecs`` -- never per-decrease (issue #193). The updated
+        ``self.rholrate_cap`` here (reset to ``rholrate0`` each fit), ratcheted
+        only at ``maxdecs`` (issue #193); each decrease scales the working
+        ``self.rholrate``, which every A update resets to the ceiling. It runs
+        before the iteration's update, as the reference's checks do, so the
+        update already uses the new rates (issue #339). The updated
         ``numdecs``/``numincs`` counters are
         returned so they accumulate across iterations (they previously did not).
 
@@ -2273,14 +3139,10 @@ class AMICA:
 
         # Check for non-finite LL: a singular W makes logdet -> -inf (not NaN),
         # so guard on isfinite, not isnan alone, or a degenerate model would run
-        # to max_iter undetected.
+        # to max_iter undetected. _optimize stops on a non-finite likelihood
+        # before recording it, so this guards a direct caller's history.
         if not np.isfinite(self.ll[-1]):
-            return (
-                True,
-                "Non-finite likelihood (NaN/-inf) encountered",
-                numdecs,
-                numincs,
-            )
+            return (True, self._NONFINITE_LL_REASON, numdecs, numincs)
 
         # The remaining checks compare consecutive iterations; skip until there
         # are two LL values -- the first iteration, or the first iteration after
@@ -2309,18 +3171,22 @@ class AMICA:
                     numincs,
                 )
             self.lrate *= self.lratefact
+            # The working rho rate, as the reference scales it (:1063); every A
+            # update resets it to the ceiling before rho moves, so this reaches
+            # rho only on an iteration on which A is held.
+            self.rholrate *= self.rholratefact
             numdecs += 1
             if numdecs >= self.max_decs:
                 self.lrate0 *= self.lratefact
-                if self.iter > self.newt_start:
-                    # rho rate is a ceiling reset to rholrate0 each iteration
-                    # (Fortran amica15.f90:1806/1813); it ratchets ONLY here at maxdecs
-                    # (amica15.f90:1068), never per LL-decrease. The old per-decrease
-                    # self.rholrate *= rholratefact was a monotone decay with no
-                    # reset that collapsed the rho rate and froze rho at a stale
-                    # shape (issue #193).
-                    self.rholrate *= self.rholratefact
-                if self.do_newton and self.iter > self.newt_start:
+                if schedule.past_newton_start(self.iter, self.newt_start):
+                    # The rho-rate CEILING ratchets only here, at maxdecs
+                    # (amica15.f90:1068), never per LL-decrease: a per-decrease
+                    # decay of the rate rho actually uses, with no reset, collapsed
+                    # the rho rate and froze rho at a stale shape (issue #193).
+                    self.rholrate_cap *= self.rholratefact
+                if self.do_newton and schedule.past_newton_start(
+                    self.iter, self.newt_start
+                ):
                     self.newtrate *= self.lratefact
                 numdecs = 0
 
@@ -2441,13 +3307,18 @@ class AMICA:
         this iteration's M-step. See :meth:`_llt_arrays` for that ordering and
         its Fortran citation.
         """
-        # A is written (Fortran output omits it; loadmodout derives A from W and
-        # S) only so load_results can restore it directly for the viz helpers.
-        # The Fortran 'nd' file (per-component weight-change history) is a
-        # different quantity from pamica's scalar self.nd, so it is not emitted
-        # (loadmodout treats 'nd' as optional).
+        # A is written in the reference's layout, as the binary writes it
+        # (loadmodout derives A from W and S instead); load_results reads it
+        # back for the viz helpers. The Fortran 'nd' file (per-component
+        # weight-change history) is a different quantity from pamica's scalar
+        # self.nd, so it is not emitted (loadmodout treats 'nd' as optional).
         from .load import write_amicaout
 
+        # Raises rather than asserts: ``assert`` is stripped under ``python -O``.
+        if self.outdir is None:
+            raise RuntimeError("_write_results needs an outdir")
+        if self.A is None:
+            raise RuntimeError("_write_results needs a fitted A; call fit() first")
         Lht, Lt = self._llt_arrays()
 
         write_amicaout(
@@ -2463,7 +3334,9 @@ class AMICA:
             rho=self.rho,
             comp_list=self.comp_list,
             ll=np.asarray(self.ll),
-            A=self.A,
+            # The reference layout, (nw, num_comps) with component k in column
+            # k: the component-row A transposed (issue #334).
+            A=self.A.T,
             Lht=Lht,
             Lt=Lt,
         )
@@ -2486,6 +3359,7 @@ class AMICA:
             and self.sphere is not None
             and self.comp_list is not None
         )
+        assert self.outdir is not None, "_write_history needs an outdir"
         hist_dir = self.outdir / "history" / f"{self.iter:06d}"
         if not hist_dir.exists():
             hist_dir.mkdir(parents=True)
@@ -2519,9 +3393,18 @@ class AMICA:
         -------
         S : ndarray of shape (n_components, n_samples, n_models)
             The unmixed sources for each model
+
+        Raises
+        ------
+        RuntimeError
+            If the model is unfitted, or the fit ended degenerate (issue #306).
+        ValueError
+            If ``data`` is not a 2D array of the fitted input channel count.
         """
         if self.W is None or self.comp_list is None or self.c is None:
             raise RuntimeError("Model has not been fitted yet; call fit() first.")
+        self._check_usable("transform")
+        self._check_input_shape(data)
 
         if self.mean is not None:
             data = data - self.mean

@@ -1,7 +1,7 @@
 """MIR/PMI diagnostics on the MLX backend -- issue #137, epic #278 Phase
-3/#289 (port of ``AMICATorchNG.mir``/``pmi``, torch_impl/core.py:2929-3036,
-and the ``fit(mir_step=...)`` waypoint machinery, torch_impl/core.py's
-issue #161 tests in ``test_ng_convergence.py``/``test_amica_ng_wrapper.py``).
+3/#289 (port of ``AMICATorchNG.mir``/``pmi``, and the ``fit(mir_step=...)``
+waypoint machinery, torch_impl/core.py's issue #161 tests in
+``test_ng_convergence.py``/``test_amica_ng_wrapper.py``).
 
 MLX-only mechanics: the composition pin (against ``pamica.metrics.mir``
 directly, order-independent of any other backend), the ``mir_step``
@@ -29,6 +29,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from pamica.mlx_impl import AMICAMLXNG  # noqa: E402  (after the MLX importorskip)
+from pamica.mlx_impl.core import _KEEP_BEST_TOL  # noqa: E402
 from pamica.metrics import mir as mir_metric  # noqa: E402
 from pamica.metrics import pairwise_mi  # noqa: E402
 
@@ -210,7 +211,7 @@ def test_max_iter_zero_raises(real_data):
 
 
 def test_mir_step_zero_matches_omitted_argument(real_data):
-    """mir_step=0 (explicit) must leave fit() behaviour byte-for-byte
+    """mir_step=0 (explicit) must leave fit() behavior byte-for-byte
     identical to not passing mir_step at all."""
     default_m = _fit(real_data, max_iter=3, keep_best=False)
     explicit_m = AMICAMLXNG(
@@ -275,8 +276,8 @@ def test_failing_mir_waypoint_does_not_kill_the_fit(real_data, monkeypatch, capl
 # --- the #300 fitted-geometry PCA guard -------------------------------------
 def test_mir_raises_under_auto_detected_rank_reduction(real_data):
     """Rank reduction from AUTOMATIC mineig/mineig_rel numerical-rank
-    detection (no explicit pcakeep/pcadb -- this backend has none) must
-    trip the documented ValueError, not an opaque LinAlgError. Real EEG
+    detection (no explicit pcakeep/pcadb requested) must trip the
+    documented ValueError, not an opaque LinAlgError. Real EEG
     projected onto a rank-16 subspace via SVD, matching
     test_amica_ng_wrapper.py::test_mir_raises_under_auto_detected_rank_reduction."""
     x = real_data - real_data.mean(axis=1, keepdims=True)
@@ -305,8 +306,9 @@ def test_mir_step_on_rank_reduced_data_completes_with_one_warned_nan_waypoint(
 ):
     """No upfront mir_step gate exists for AUTOMATIC rank reduction on
     EITHER backend (see amica-differences.md's "mir_step's upfront
-    PCA-reduction gate" section -- this is intentional torch-parity, not a
-    gap): fit(mir_step=N) on rank-reduced real data must still complete.
+    PCA-reduction gate" section; the gate sees only an explicit
+    pcakeep/pcadb request, identically on both): fit(mir_step=N) on
+    rank-reduced real data must still complete.
     The PCA-reduction ValueError is a geometry fact of this fit -- it will
     fire identically on EVERY scheduled waypoint for as long as the fit
     runs -- so PR #318's flood fix means only the FIRST scheduled waypoint
@@ -354,41 +356,65 @@ def test_mir_history_survives_keep_best_restore(real_data):
     """mir_history_ is a TRUE trajectory that a keep_best restore does NOT
     rewrite: its last entry is computed from the pre-restore, discarded
     parameters, not the restored ones fit() actually returns. Uses the
-    same forced-overshoot recipe as test_mlx_llt_stash.py, with
+    same forced-overshoot recipe as test_mlx_llt_stash.py (from seed 7), with
     mir_step=1 so a waypoint lands strictly inside the truncation window a
     buggy restore would damage (mirrors test_ng_convergence.py's
-    identically-named test and its mir_step=1 rationale)."""
+    identically-named test and its mir_step=1 rationale).
+
+    Since issue #339 the min_dll stop exits before its own update, so the
+    last waypoint is the one right after the restored iterate, and the
+    recipe stops on its first likelihood decrease (``maxincs=0``,
+    ``min_dll=1e-8``): iteration 15, 2.5e-2 below the peak at 14. The MIR of
+    that one discarded step moves by 2.5e-3 relative, well past the 1e-4
+    float32 margin below, and by 2.3e-3 to 2.9e-3 across 8 relative data
+    perturbations of 1e-6. Seed 0 served until issue #341: from its
+    normalized initial A the step moved the MIR by only 2.1e-4 (3.4e-5 to
+    2.1e-3 across the same perturbations, and inside the margin on a CI
+    GPU), where it had moved it by 9.4e-4 before; of seeds 0-11, seed 7 has
+    the largest smallest shift over the perturbations. Seed 1 with
+    ``min_dll=1e-4``/``maxincs=2``, the choice from issue #333 until issue
+    #339, moved it by 2.5e-5 under the new order."""
     m = AMICAMLXNG(
         n_channels=NW,
         n_models=2,
         n_mix=NMIX,
-        seed=0,
+        seed=7,
         block_size=BLOCK,
         do_newton=True,
-        newt_start=1,
+        newt_start=2,
         lrate=0.5,
+        newtrate=3.0,  # overshoots since issue #333 (test_mlx_keepbest.py)
         use_min_dll=True,
-        min_dll=1e-4,
-        maxincs=2,
+        min_dll=1e-8,
+        maxincs=0,
         use_grad_norm=False,
         keep_best=True,
     )
-    m.fit(real_data, max_iter=60, verbose=False, mir_step=1)
-    if m.stop_reason in AMICAMLXNG._DEGENERATE_STOP_REASONS:
-        pytest.skip("aggressive run ended degenerate; not the case under test")
+    m.fit(real_data, max_iter=150, verbose=False, mir_step=1)
+    assert m.stop_reason not in AMICAMLXNG._DEGENERATE_STOP_REASONS, (
+        "the overshoot recipe ended degenerate: retune it"
+    )
     assert m.final_ll_ is not None
-    if np.isclose(m.ll_history[-1], m.final_ll_):
-        pytest.skip("run was monotone; keep_best restore did not fire")
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
 
     assert m.mir_history_, "test setup: mir_step recorded nothing"
     final_it = len(m.ll_history) - 1
+    # A convergence stop exits before its iteration's update, as the reference
+    # does (issue #339), so that iteration records no waypoint; a max_iter fit
+    # updates, and records one, on its last iteration.
+    last_update_it = final_it if m.stop_reason == "max_iter" else final_it - 1
     best_it = m.ll_history.index(m.final_ll_)
-    assert best_it < final_it, (
-        "test setup: the restore must discard at least one iteration"
+    # Waypoint i comes from the parameters after iteration i's update, so
+    # every waypoint from best_it on was computed from parameters the restore
+    # discards (see test_ng_convergence.py's identically-named test).
+    assert best_it <= last_update_it, (
+        "test setup: the restore must discard at least one waypoint"
     )
     last_it, last_mir, _ = m.mir_history_[-1]
-    assert last_it == final_it, "the post-peak waypoints were dropped"
-    assert len(m.mir_history_) == final_it + 1, (
+    assert last_it == last_update_it, "the post-peak waypoints were dropped"
+    assert len(m.mir_history_) == last_update_it + 1, (
         "mir_history_ is not the full per-iteration trajectory"
     )
 

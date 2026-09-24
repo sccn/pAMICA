@@ -64,7 +64,7 @@ Repository = "https://github.com/sccn/pAMICA"
 packages = ["pamica", "pamica.numpy_impl", "pamica.torch_impl", "pamica.mlx_impl", "pamica.metrics", "pamica.native", "pamica.mne_compat"]
 # numpy_impl/params.json is the NumPy backend's default parameter file, loaded at
 # runtime via importlib/__file__, so it must ship in the wheel.
-package-data = {"pamica" = ["data/*"], "pamica.numpy_impl" = ["params.json"]}
+package-data = {"pamica.numpy_impl" = ["params.json"]}
 
 [dependency-groups]
 dev = [

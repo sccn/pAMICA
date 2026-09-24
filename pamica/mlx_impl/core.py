@@ -34,7 +34,9 @@ export), and the MIR/PMI diagnostics (``mir``/``pmi``, ``fit(mir_step=...)``
 waypoints) are implemented (epic #278 Phase 3, issue #289). The EEGLAB
 back-projected-variance component order (``variance_order``) landed in the
 epic's post-Phase-3 polish round, ahead of merge to ``dev``, closing the one
-accessor gap Phase 3 left open: every AMICATorchNG-supported feature this
+accessor gap Phase 3 left open. Explicit PCA reduction (``pcakeep``/``pcadb``,
+with AMICATorchNG's validation, precedence and upfront ``mir_step`` gate) joined
+in epic #324 Phase 1 (issue #323), so every AMICATorchNG-supported feature this
 backend can support (float32 GPU limits aside) is now ported.
 
 Newton (issue #264) runs entirely in float32 on the GPU stream: the curvature
@@ -59,8 +61,8 @@ The GG shape parameter ``rho`` is frozen for every non-GG family
 (``self.dorho = pdftype == 0``, Fortran ``dorho=.false.``), which also gates
 the ``drho_n`` accumulation and the per-iteration lgamma-table refresh here.
 AMICATorchNG already gates its digamma pull behind the same ``self.dorho``
-flag (core.py:1664-1678), so that is not a divergence; its genuine dead work
-for a non-GG fit is the ``drho_n`` accumulation, which it computes
+flag (``AMICATorchNG._update_parameters``), so that is not a divergence; its genuine
+dead work for a non-GG fit is the ``drho_n`` accumulation, which it computes
 unconditionally in ``_get_block_updates`` (no ``dorho`` gate there), and the
 inline ``torch.lgamma(1+1/rho)`` term ``_log_pdf_only`` recomputes on every
 call to build the (dead, for non-GG) GG-fallthrough branch. This backend
@@ -81,7 +83,12 @@ same defaults, same ``stop_reason`` strings (``"min_dll"``, ``"grad_norm"``,
 ``"grad_norm_floor"``), so a configuration moved from the PyTorch backend does the
 same work here. The gradient norm ``ndtmpsum`` is computed every iteration and
 masked by ``comp_used`` (Fortran amica15.f90:1761); without component sharing
-every column is used, so the mask is all-True and drops out exactly.
+every component is used, so the mask is all-True and drops out exactly.
+
+``A`` stores one component per ROW, shape ``(n_comps, n_channels)`` (issue
+#334, :mod:`pamica.component_layout`, ADR 0007), exactly as in AMICATorchNG:
+row ``k`` is the reference's column ``A(:, k)`` and model ``h``'s block is
+``A[comp_list[:, h], :]``.
 """
 
 from __future__ import annotations
@@ -91,7 +98,7 @@ import logging
 import math
 import time
 import zipfile
-from typing import List, Optional, Sequence, Tuple
+from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 # mlx ships as a compiled extension with no type stubs, so ty cannot resolve
 # it statically even when installed; scope the suppression to this one import.
@@ -101,16 +108,39 @@ from scipy.special import digamma, gamma, gammaln
 
 from .. import blocktune
 from .. import restarts
+from .. import schedule
+from ..component_layout import rows_from_legacy_columns
+from ..initialization import initial_mixing
 from ..metrics import mir as mir_metric
-from ..metrics import pairwise_mi
+from ..metrics import model_probability_from_loglik, pairwise_mi
 from ..numpy_impl.utils import identify_shared_components
-from ..rank import MINEIG, MINEIG_REL, numerical_rank
+from ..rank import (
+    MINEIG,
+    MINEIG_REL,
+    log_ignored_pca_request,
+    numerical_rank,
+    pca_reduction_requested,
+    validate_pca_reduction,
+)
+
+# The density normalizers and the rho-update guard, at the values the binary
+# uses: its single-precision literals widened to double (issue #344), cast to
+# float32 where they meet the float32 arrays.
+from ..reference_constants import (
+    EPSDBLE,
+    LOG2,
+    LOG4,
+    LOG_NORM_COSH_SUB,
+    LOG_NORM_COSH_SUP,
+    LOG_SQRT_2PI,
+    LOG_SQRT_PI,
+)
 
 logger = logging.getLogger(__name__)
 
 # Human-readable names for the ``pdftype``/``pdtype`` source-density family
-# codes (issue #265, mirroring AMICATorchNG's PDFTYPE_NAMES, torch core.py:
-# 65-71 -- duplicated rather than imported so this module keeps no torch
+# codes (issue #265, mirroring ``pamica.torch_impl.core.PDFTYPE_NAMES`` --
+# duplicated rather than imported so this module keeps no torch
 # dependency). Exposed alongside the numeric codes so a fitted model's
 # per-source density family is inspectable (issue #142).
 PDFTYPE_NAMES = {
@@ -121,19 +151,6 @@ PDFTYPE_NAMES = {
     4: "sub_gaussian_cosh",
 }
 
-_LOG2 = math.log(2.0)
-_LOG4 = math.log(4.0)  # logistic-family normalizer (amica15.f90:1346)
-# Log-normalizers for the non-GG density families, using Fortran's exact literal
-# constants (amica15.f90:1333/1359/1371) so the log-density matches the reference
-# binary bit-for-bit: 2.506628274 = sqrt(2*pi) (Gaussian, pdtype 2); 4.132731354 /
-# 1.858073988 = the sub-/super-Gaussian cosh normalizers (pdtype 4 / 1). Ported
-# verbatim from AMICATorchNG (core.py:76-82, policy 1).
-_LOG_SQRT_2PI = math.log(2.506628274)
-_LOG_NORM_COSH_SUB = math.log(4.132731354)
-_LOG_NORM_COSH_SUP = math.log(1.858073988)
-# Fortran epsdble: zero the rho*ln|y| term when |y|^rho underflows below this
-# (amica17.f90:1570), matching AMICATorchNG.
-_EPSDBLE = 1e-16
 # MLX linalg runs on the CPU stream only (float32-accurate); the GPU stream
 # raises "not yet supported on the GPU" for inv/slogdet/eigh/solve.
 _CPU = mx.cpu
@@ -179,10 +196,10 @@ _CPU = mx.cpu
 # this guard already makes rare in practice.
 _INV_COND_THRESHOLD = 1e12
 
-# Best-iterate safeguard (issue #51, ported from AMICATorchNG core.py:90-113 --
-# epic #278 Phase 2, issue #288). The lrate schedule is deliberately
-# non-monotone: it anneals only *after* an LL decrease, so a late Newton
-# fallback can overshoot and a run can end below a peak it already reached.
+# Best-iterate safeguard (issue #51, ported from
+# ``pamica.torch_impl.core._KEEP_BEST_TOL`` -- epic #278 Phase 2, issue #288). The lrate
+# schedule is deliberately non-monotone: it anneals only *after* an LL decrease, so a
+# late Newton fallback can overshoot and a run can end below a peak it already reached.
 # fit() therefore tracks the highest-LL iterate and restores it when the final
 # LL falls more than this tolerance below that peak. Units: mean
 # log-likelihood per sample-channel, the same normalized scale as
@@ -200,19 +217,18 @@ _KEEP_BEST_TOL = 1e-9
 
 def _logcosh(x: mx.array) -> mx.array:
     """Numerically stable ``log cosh(x) = |x| - log2 + log1p(exp(-2|x|))``
-    (AMICATorchNG ``_logcosh``, core.py:113-116). Naive ``mx.log(mx.cosh(x))``
+    (``pamica.torch_impl.core._logcosh``). Naive ``mx.log(mx.cosh(x))``
     overflows to inf in float32 by ``|x| == 90`` (measured crossover: finite at
     89.0, inf at 89.5; ``cosh`` itself overflows first) -- reachable, since
     ``beta`` clips at ``invsigmax=1000`` -- while this form stays within float32
     precision (~1e-4 absolute; measured 2.9e-5 at ``x=1000``) out to at least
     1e3 (policy 3; no ``mlx.nn`` import)."""
     ax = mx.abs(x)
-    return ax - _LOG2 + mx.log1p(mx.exp(-2.0 * ax))
+    return ax - LOG2 + mx.log1p(mx.exp(-2.0 * ax))
 
 
 def _score(y: mx.array, rho: mx.array, pdtype: Optional[mx.array] = None) -> mx.array:
-    """Source-density score ``fp = -d(log pdf)/dy`` (AMICATorchNG ``_score``,
-    core.py:184-222).
+    """Source-density score ``fp = -d(log pdf)/dy`` (``pamica.torch_impl.core._score``).
 
     ``pdtype is None`` (the ``pdftype=0`` fast path): GG score only -- exactly
     the pre-#265 ``_score_gg`` body, so it adds ZERO extra graph nodes relative
@@ -254,13 +270,15 @@ def _log_pdf(
     pdtype: Optional[mx.array] = None,
 ) -> tuple[mx.array, Optional[mx.array]]:
     """GG log-density and ``|y|^rho``, extended with the fixed non-GG families
-    (AMICATorchNG ``_log_pdf_only``, core.py:225-267).
+    (``pamica.torch_impl.core._log_pdf_only``).
 
     ``pdtype is None`` (the ``pdftype=0`` fast path): byte-for-byte the
     pre-#265 ``_log_pdf_gg`` body -- ``lgamma_table = lgamma(1+1/rho)``
     (precomputed host-side; MLX has no ``lgamma``) makes the uniform GG form
-    reduce to the exact Laplace (rho=1) and Gaussian (rho=2) log-densities, and
-    ``az_rho`` is returned for the rho-update accumulator (policy 2).
+    reduce to the Laplace (rho=1) log-density, and to the reference's Gaussian
+    (rho=2) one, whose single-precision normalizer
+    :meth:`AMICAMLXNG._refresh_lgamma_table` puts in the table; ``az_rho`` is
+    returned for the rho-update accumulator (policy 2).
 
     Otherwise selects per source among the fixed families (Fortran ``z0``
     select, amica15.f90:1333/1346/1359/1371), in AMICATorchNG's nesting order
@@ -273,15 +291,15 @@ def _log_pdf(
     """
     abs_y = mx.abs(y)
     az_rho = mx.power(abs_y, rho)  # reused by the rho-update accumulator (GG only)
-    log_pdf_gg = -az_rho - _LOG2 - lgamma_table
+    log_pdf_gg = -az_rho - LOG2 - lgamma_table
     if pdtype is None:
         return log_pdf_gg, az_rho
 
-    log_pdf_2 = -0.5 * y * y - _LOG_SQRT_2PI  # Gaussian
-    log_pdf_3 = -2.0 * _logcosh(0.5 * y) - _LOG4  # logistic (sech^2)
+    log_pdf_2 = -0.5 * y * y - LOG_SQRT_2PI  # Gaussian
+    log_pdf_3 = -2.0 * _logcosh(0.5 * y) - LOG4  # logistic (sech^2)
     lc = _logcosh(y)
-    log_pdf_4 = -0.5 * y * y + lc - _LOG_NORM_COSH_SUB  # sub-Gaussian cosh+
-    log_pdf_1 = -0.5 * y * y - lc - _LOG_NORM_COSH_SUP  # super-Gaussian cosh-
+    log_pdf_4 = -0.5 * y * y + lc - LOG_NORM_COSH_SUB  # sub-Gaussian cosh+
+    log_pdf_1 = -0.5 * y * y - lc - LOG_NORM_COSH_SUP  # super-Gaussian cosh-
     log_pdf = mx.where(
         pdtype == 2,
         log_pdf_2,
@@ -327,12 +345,58 @@ def _safe_int_cast(name: str, value: np.ndarray, dtype) -> np.ndarray:
     return rounded.astype(dtype)
 
 
+# The learning rates a save carries (issue #339 review). rholrate_cap is
+# additive: a save written before issue #339 kept one rho rate, the ceiling,
+# under "rholrate", and a fit that never held A ends with the working rate
+# equal to it.
+_SAVED_RATES = ("lrate", "lrate_cap", "newtrate", "rholrate")
+
+
+def _saved_rates(extra: dict, owner: str) -> dict:
+    """The saved learning rates, each a finite number, or a named ValueError.
+
+    A missing rate is reported like a missing parameter tensor, and a
+    non-finite or non-numeric one is refused: a NaN rate would load silently
+    and turn the next refit's first update into NaN parameters.
+    """
+    missing = [name for name in _SAVED_RATES if name not in extra]
+    if missing:
+        raise ValueError(f"malformed {owner} state: missing extra fields {missing}")
+    rates = {name: extra[name] for name in _SAVED_RATES}
+    rates["rholrate_cap"] = extra.get("rholrate_cap", extra["rholrate"])
+    for name, value in rates.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError(
+                f"malformed {owner} state: extra field {name!r} must be a finite "
+                f"number, got {value!r}"
+            )
+    return rates
+
+
+class _UpdateStep(NamedTuple):
+    """The mixing-matrix step one E-step implies, computed before the
+    iteration's stopping checks and applied after them (the reference's
+    ``dAk``, built in ``accum_updates_and_likelihood``, amica15.f90:1749-1761,
+    before ``update_params``, :1782; ``AMICATorchNG``'s type of the same name).
+    See :meth:`AMICAMLXNG._update_direction`."""
+
+    dAk: mx.array  # (n_comps, n_channels), before the lrate scaling
+    newton_active: bool  # the Newton schedule is on this iteration
+    no_newt: bool  # some model failed the positive-definiteness guard
+
+
 class AMICAMLXNG:
     """MLX natural-gradient EM backend, full torch-equivalent surface (#76/#81, epic #278).
 
-    Parameters mirror the subset of :class:`AMICATorchNG` that is supported;
-    the same ``seed`` produces the same initial parameters as the PyTorch/NumPy
-    backends, so cross-backend equivalence is testable.
+    Parameters are :class:`AMICATorchNG`'s, with the same names, defaults and
+    validation, except ``device`` and ``dtype``: MLX runs on its default
+    device (the Apple GPU) in float32 only. The same ``seed`` produces the same
+    initial parameters as the PyTorch/NumPy backends, so cross-backend
+    equivalence is testable.
 
     The convergence-stop parameters (issue #248) carry AMICATorchNG's names,
     defaults and semantics exactly, so the two backends stop on the same
@@ -352,8 +416,8 @@ class AMICAMLXNG:
         regardless of ``use_grad_norm``. Under the shipped defaults
         ``"grad_norm"`` shadows ``"grad_norm_floor"`` -- see AMICATorchNG's
         ``use_grad_norm`` docstring, whose precedence note applies verbatim.
-        ``min_nd`` is not reachable on small recordings in any backend (issue
-        #218); the Fortran-faithful default is kept rather than retuned.
+        ``min_nd`` is not reachable on small recordings in any backend
+        (issue #218); the Fortran-faithful default is kept rather than retuned.
 
     All three checks require two log-likelihood values, so none can fire on the
     first iteration (Fortran's ``if (iter > 1)``, amica15.f90:1051).
@@ -365,24 +429,33 @@ class AMICAMLXNG:
         Enable multi-model component sharing (Fortran ``share_comps`` /
         ``identify_shared_comps``, amica15.f90:1916): components that are
         near-collinear across different models are merged so they share one
-        mixing column and one density. Requires ``n_models >= 2`` (a model
-        cannot share with itself); accepted but inert otherwise. OFF by default,
-        so default fits are unchanged. There is no bit-exact oracle -- the
+        mixing vector (one row of ``A``) and one density. Requires
+        ``n_models >= 2`` (a model cannot share with itself); accepted but
+        inert otherwise. OFF by default, so default fits are unchanged. The
         reference's similarity metric is never initialized (like the dead
-        ``do_choose_pdfs``, #26) -- so this implements the intended algorithm,
-        validated by real-data behavior and against the PyTorch backend. A
+        ``do_choose_pdfs``, #26), so it has no bit-exact oracle; this implements
+        the intended algorithm on the component rows (issue #334), validated
+        against the PyTorch backend, whose update from a merged state matches
+        the reference. A
         merge that fires on the LAST fit iteration is reflected in the
         returned model but trails in ``final_ll_``; see that attribute's
         comment (issue #269).
     ``share_start`` (100) / ``share_iter`` (100)
-        Sharing schedule: first iteration to attempt merges and the interval
-        between attempts. The A-update is held for the first 6 iterations of
-        every cycle (whether or not a merge fired) so the densities can settle;
-        ``share_iter`` must be ``> 6`` so that window never consumes the whole
-        cycle, and ``share_start`` must be ``>= 1``.
+        Sharing schedule: first iteration to attempt merges (counted from 1)
+        and the interval between attempts. They also set the reference's
+        A-freeze, which applies to every fit, sharing on or off (issue #345):
+        from iteration ``share_start`` on, the update of ``A`` (with its lrate
+        ramp) is held on every iteration whose number, counted from 1, has a
+        remainder of 0 to 5 modulo ``share_iter`` (amica15.f90:1803), so with
+        the defaults on iterations 100-105, 200-205, and so on.
+        Both are validated whether or not ``share_comps`` is on:
+        ``share_start`` must be an integer >= 1, and ``share_iter`` an
+        integer >= 7, or the freeze would hold A permanently from
+        ``share_start`` on.
     ``comp_thresh`` (0.99)
         Cosine-similarity cutoff, in the de-sphered (sensor-space) metric, above
-        which two mixing columns are identified and merged. Must be in
+        which two components' mixing vectors are identified and merged. Must be
+        in
         ``(0, 1]``. The de-sphering uses ``pinv(sphere)``, so sharing also works
         on rank-reduced and rank-deficient fits (issues #253, #221); see
         :meth:`_identify_shared_comps`.
@@ -392,21 +465,32 @@ class AMICAMLXNG:
 
     ``do_newton`` (False)
         Precondition the ``A``/``W`` natural gradient with the approximate
-        Hessian once ``iteration >= newt_start`` (Fortran ``do_newton``: the
+        Hessian from iteration ``newt_start`` on (Fortran ``do_newton``: the
         2x2 solve and its positive-definiteness guard at amica15.f90:1718-1741,
-        the ramp and fallback at :1803-1816). Natural gradient alone plateaus
-        short of the Fortran solution; the Newton step is what closes the gap.
-        OFF by default, and every accumulator it needs is gated on it, so a
+        the ramp and fallback at :1803-1816), which converges faster near the
+        optimum. OFF by default, as in the reference's compiled default (the
+        bundled reference ``input.param`` turns it on), and every accumulator
+        it needs is gated on it, so a
         default fit is bit-for-bit what it was before #264.
     ``newt_start`` (20)
         Iteration at which the Newton step switches on (natural gradient runs
-        before it, letting the mixture parameters settle first). It also gates
-        the ``rholrate`` ceiling ratchet, independently of ``do_newton``
-        (Fortran amica15.f90:1067).
+        before it, letting the mixture parameters settle first). Counted from
+        1, as the reference counts it (``iter .ge. newt_start``): the Newton
+        step is taken on the ``newt_start``-th iteration, i.e. once
+        ``iteration + 1 >= newt_start`` for the 0-based ``iteration``
+        attribute (issue #335). ``newt_start=0`` fits exactly as ``1`` does,
+        Newton from the first iteration. It also gates the ``maxdecs`` ratchet
+        of the ``rholrate`` ceiling, independently of ``do_newton``, and under
+        Newton that of ``newtrate``, to iterations after ``newt_start``
+        (Fortran amica15.f90:1067/1070), so it is validated (an integer
+        >= 0) whether or not ``do_newton`` is on.
     ``newtrate`` (0.5)
         Maximum learning rate the ramp climbs to while Newton is active and
         positive definite; the natural-gradient phase (and any fallback
-        iteration) is capped at ``lrate_cap`` instead.
+        iteration) is capped at ``lrate_cap`` instead. A ceiling itself: under
+        Newton it ratchets down by ``lratefact`` at each ``maxdecs`` cycle
+        completed after iteration ``newt_start`` (amica15.f90:1070), and is
+        reset to its constructor value at the start of every fit.
     ``newt_ramp`` (10)
         Denominator of the per-iteration learning-rate ramp toward the current
         ceiling: ``lrate = min(ceiling, lrate + min(1/newt_ramp, lrate))``.
@@ -415,6 +499,20 @@ class AMICAMLXNG:
     model falls back to the natural gradient for that iteration and
     ``n_newton_fallbacks`` counts it (as AMICATorchNG does), so an all-fallback
     run is visible without re-instrumenting.
+
+    The rho learning rate carries AMICATorchNG's names and semantics too:
+
+    ``rholrate`` (0.05) / ``rholratefact`` (0.1)
+        Learning rate of the generalized-Gaussian shape ``rho``. As in the
+        reference (``rholrate``/``rholrate0``, amica15.f90:1063-1068), it has
+        a working value (``rholrate``), which each likelihood decrease
+        multiplies by ``rholratefact``, and a ceiling (``rholrate_cap``),
+        which the ``maxdecs`` ratchet multiplies by ``rholratefact`` after
+        ``newt_start``; every update of ``A`` resets the working value to the
+        ceiling before ``rho`` moves (:1806/:1813), so the decrease scaling
+        reaches ``rho`` only on an iteration on which ``A`` is held (see
+        ``share_iter``). Both are reset to the constructor value at the start
+        of every fit and saved with the model (issue #339).
 
     The source-density family parameters (issue #265, porting AMICATorchNG's
     issue #26) likewise carry AMICATorchNG's names, defaults and semantics:
@@ -437,12 +535,13 @@ class AMICAMLXNG:
         (code 0).
     ``kurt_start`` (3) / ``num_kurt`` (5) / ``kurt_int`` (1)
         Adaptive-switch schedule (only used when ``pdftype=1``): first
-        iteration to re-estimate kurtosis, number of switch passes, and the
-        iteration interval between them. ``num_kurt=0`` disables switching (the
-        family stays at its super-Gaussian init). No bit-exact oracle -- the
-        reference's own switch is dead code (``do_choose_pdfs`` is set but
-        ``m2sum``/``m4sum`` are never accumulated, amica15.f90:608-615) -- so
-        this is behavior-validated on real data (ADR 0002).
+        iteration to re-estimate kurtosis (counted from 1), number of switch
+        passes, and the iteration interval between them. ``num_kurt=0``
+        disables switching (the family stays at its super-Gaussian init). No
+        bit-exact oracle -- the reference's own switch is dead code
+        (``do_choose_pdfs`` is set but ``m2sum``/``m4sum`` are never
+        accumulated, amica15.f90:608-615) -- so this is behavior-validated on
+        real data (ADR 0002).
 
     The block-size search parameters (issue #232) likewise carry
     AMICATorchNG's names, defaults and semantics:
@@ -470,8 +569,8 @@ class AMICAMLXNG:
     ``n_restarts`` (1)
         Number of independent fits to run from different seeds, keeping the one
         with the highest ``final_ll_``. ``1`` (the default) bypasses the restart
-        machinery entirely, so a default fit is bit-for-bit what it was before
-        #198. ``n_restarts > 1`` requires a base ``seed`` (or explicit
+        machinery entirely, so a default fit is bit-for-bit what it was
+        before #198. ``n_restarts > 1`` requires a base ``seed`` (or explicit
         ``restart_seeds``) so the winner can be reproduced, and costs
         ``n_restarts`` times as long (restarts run serially). This is a pamica
         extension: Fortran has no search over seeds. See
@@ -497,8 +596,11 @@ class AMICAMLXNG:
         Reject a sample when its log-likelihood is below ``mean - rejsig *
         std`` (population std) over the current good set.
     ``rejstart`` (2) / ``rejint`` (3) / ``maxrej`` (1)
-        Rejection schedule: first iteration to reject, interval between
-        subsequent passes, and the maximum number of passes.
+        Rejection schedule: first iteration to reject (counted from 1, as the
+        reference counts it; issue #335), interval between subsequent passes,
+        and the maximum number of passes. ``rejstart`` must be an integer
+        >= 1 when ``do_reject`` is on: ``rejstart <= 0`` would silently skip
+        the reference's unconditional first pass.
 
     The best-iterate safeguard (issue #51, epic #278 Phase 2/#288) likewise
     carries AMICATorchNG's name, default and semantics:
@@ -516,6 +618,50 @@ class AMICAMLXNG:
         the merge; issue #269) and under ``do_reject`` (the good-sample set,
         and so the LL normalization, changes across iterations, so
         per-iteration LLs are not comparable), matching AMICATorchNG.
+
+    The explicit PCA-reduction parameters (issue #323) likewise carry
+    AMICATorchNG's names, defaults, validation and semantics. The validation
+    and the precedence rule are the shared :mod:`pamica.rank` policy, so the
+    three array backends cannot disagree on them:
+
+    ``pcakeep`` (None)
+        Keep this many principal dimensions (Fortran ``pcakeep``). Must be an
+        integer >= 1, or the constructor raises ``ValueError``. Capped by the
+        detected numerical rank, matching Fortran's ``numeigs = min(pcakeep,
+        count(eigs > mineig))`` (amica15.f90:413), so ``pcakeep >=
+        n_channels`` keeps every dimension the data have.
+    ``pcadb`` (None)
+        Keep the dimensions whose covariance eigenvalue lies within ``pcadb``
+        dB of the largest. Must be a finite number > 0, or the constructor
+        raises ``ValueError``. A pamica extension: the reference parses
+        ``pcadb`` (amica15.f90:3459-3461) but never uses it. When both are
+        set, ``pcakeep`` takes precedence and ``pcadb`` is ignored (one INFO
+        log line), as in the reference.
+
+    Both are ignored, with one WARNING, when ``do_sphere=False``: reduction
+    happens only while sphering, as in the reference (``numeigs = nx`` in its
+    no-sphere branch, amica15.f90:527).
+
+    With both ``None`` (the default) only automatic ``mineig``/``mineig_rel``
+    rank detection sizes the model, exactly as before #323. A reduced fit has
+    a non-square ``(n_channels, n_channels_in)`` sphere; map its components
+    back to the input channels with :meth:`get_sensor_mixing_matrix`.
+    ``fit(mir_step > 0)`` rejects an explicit reduction request up front, as
+    AMICATorchNG does (see :meth:`_fit_once`).
+
+    The rescale parameters (issue #333) likewise carry AMICATorchNG's names,
+    defaults, validation and semantics:
+
+    ``doscaling`` (True)
+        Rescale each component's mixing vector (a row of the stored ``A``) to
+        unit norm, with the matching ``mu``/``beta`` rescale,
+        an exact change of scale (see :meth:`_rescale_components`).
+    ``scalestep`` (1)
+        Run the rescale on iterations ``scalestep``, ``2*scalestep``, ...
+        counted from 1; the default 1 rescales every iteration, as the
+        reference always does (it ignores ``scalestep``). Validated only when
+        ``doscaling`` is on (an integer >= 1, or the constructor raises
+        ``ValueError``); with ``doscaling`` off it is inert, never read.
     """
 
     def __init__(
@@ -566,6 +712,8 @@ class AMICAMLXNG:
         do_mean: bool = True,
         do_sphere: bool = True,
         do_approx_sphere: bool = True,
+        pcakeep: Optional[int] = None,
+        pcadb: Optional[float] = None,
         mineig: float = MINEIG,
         mineig_rel: Optional[float] = MINEIG_REL,
         seed: Optional[int] = None,
@@ -574,6 +722,10 @@ class AMICAMLXNG:
         keep_best: bool = True,
     ):
         self.n_channels = n_channels
+        # The input channel count, kept apart from n_channels, which
+        # _preprocess shrinks to the kept rank on any rank reduction; same
+        # role as AMICATorchNG._n_input_channels (see _fit_once).
+        self._n_input_channels = n_channels
         self.n_models = n_models  # multi-model (#81) + component sharing (#263)
         self.n_mix = n_mix
         self.n_comps = n_channels * n_models
@@ -613,7 +765,9 @@ class AMICAMLXNG:
         # do_newton (amica15.f90:1067) -- so it stays meaningful for a
         # natural-gradient fit too. newtrate is a CEILING that ratchets down at
         # maxdecs during fit, so keep the constructor value for the per-fit reset
-        # in _initialize_parameters (as lrate0/rholrate0 do).
+        # in _initialize_parameters (as lrate0/rholrate0 do). Validated whether
+        # or not do_newton is on, for that same ratchet gate.
+        schedule.validate_iteration_setting("newt_start", newt_start, 0)
         self.newt_start = newt_start
         self.newtrate = newtrate
         self.newtrate0 = newtrate
@@ -625,7 +779,7 @@ class AMICAMLXNG:
 
         # Outlier rejection (issue #123's AMICATorchNG mechanism, epic #278
         # Phase 3/#289), same names/defaults/validation as AMICATorchNG
-        # (torch_impl/core.py:593-597, 679-685; Fortran do_reject/rejsig/
+        # (``AMICATorchNG.__init__``; Fortran do_reject/rejsig/
         # rejstart/rejint/maxrej, amica15_header.f90). numrej/good_idx are set
         # up per fit in _fit_once (good_idx = None until then, matching the
         # do_reject=False no-op path).
@@ -641,18 +795,26 @@ class AMICAMLXNG:
                 raise ValueError(f"rejsig must be > 0, got {rejsig}")
             if maxrej < 0:
                 raise ValueError(f"maxrej must be >= 0, got {maxrej}")
+            # Counted from 1, so rejstart <= 0 would silently disable the
+            # reference's unconditional ``iter == rejstart`` pass.
+            schedule.validate_iteration_setting("rejstart", rejstart, 1)
         self.numrej = 0
         self.good_idx: Optional[mx.array] = None
 
         self.rho0 = rho0
         self.minrho = minrho
         self.maxrho = maxrho
+        # Working rho rate and its ceiling, as AMICATorchNG keeps them (the
+        # reference's rholrate/rholrate0, amica15.f90:1063-1068, 1806/1813):
+        # a decrease scales the working rate, a maxdecs ratchet the ceiling, and
+        # every A update resets the working rate to the ceiling.
         self.rholrate0 = rholrate
         self.rholrate = rholrate
+        self.rholrate_cap = rholrate
         self.rholratefact = rholratefact
 
         # Source-density family selection (issue #265, porting AMICATorchNG's
-        # issue #26 -- see torch_impl/core.py:640-676 for the identical block).
+        # issue #26 -- see ``AMICATorchNG.__init__`` for the identical block).
         # Values match Fortran's per-source pdtype codes: 0 generalized Gaussian
         # (the default, GG-mixture with adaptive rho), 2 Gaussian mixture, 3
         # logistic (sech^2) mixture, 4 sub-Gaussian cosh+ (single component).
@@ -700,6 +862,10 @@ class AMICAMLXNG:
         self.invsigmax = invsigmax
         self.doscaling = doscaling
         self.scalestep = scalestep
+        if doscaling:
+            # A zero cadence divides by zero mid-fit; a fractional one fires on
+            # no meaningful schedule. The reference never reads scalestep.
+            schedule.validate_iteration_setting("scalestep", scalestep, 1)
 
         # Component sharing (issue #263), same names/defaults/validation as
         # AMICATorchNG (torch_impl/core.py). OFF by default and inert for
@@ -709,19 +875,26 @@ class AMICAMLXNG:
         self.share_start = share_start
         self.share_iter = share_iter
         self.comp_thresh = comp_thresh
+        # The A-freeze schedule reads share_start/share_iter whether or not
+        # share_comps is on (issue #345), so both are validated always, with
+        # AMICATorchNG's messages.
+        schedule.validate_share_start(share_start)
+        schedule.validate_share_iter(share_iter)
         if share_comps:
-            if share_start < 1:
-                raise ValueError(f"share_start must be >= 1, got {share_start}")
-            if share_iter <= 6:
-                # The A-freeze settle window is 6 iterations; a smaller cycle
-                # would freeze A permanently (never leaving room to update it).
-                raise ValueError(f"share_iter must be > 6, got {share_iter}")
             if not 0.0 < comp_thresh <= 1.0:
                 raise ValueError(f"comp_thresh must be in (0, 1], got {comp_thresh}")
 
         self.do_mean = do_mean
         self.do_sphere = do_sphere
         self.do_approx_sphere = do_approx_sphere
+        # Explicit PCA reduction (issue #323), validated by the policy shared
+        # with the PyTorch and NumPy backends (pamica/rank.py) so a bad value
+        # fails here, before any data is touched, exactly as it does there;
+        # then one log line for any part of it a fit will ignore.
+        validate_pca_reduction(pcakeep, pcadb)
+        log_ignored_pca_request(pcakeep, pcadb, do_sphere)
+        self.pcakeep = pcakeep
+        self.pcadb = pcadb
         # Numerical-rank floors (issue #223); see pamica/rank.py and ADR 0004.
         self.mineig = mineig
         self.mineig_rel = mineig_rel
@@ -759,11 +932,14 @@ class AMICAMLXNG:
         # index-aligned with ll_history: the entry for iteration i is
         # computed AFTER that iteration's _update_parameters, while
         # ll_history[i] is the likelihood of the parameters BEFORE it, so
-        # the two describe states one update apart (issue #161).
+        # the two describe states one update apart (issue #161). An
+        # iteration that ends the fit on a stop records no waypoint.
         self.mir_history_: list[tuple[int, float, float]] = []
         # Log-likelihood of the returned parameters, set by fit() to
         # ll_history[-1], or to the best iterate's LL if the keep_best
-        # safeguard (issue #51) restores it -- see _fit_once. Under
+        # safeguard (issue #51) restores it -- see _fit_once, which also says
+        # when that is exact (a convergence stop) and when it trails the
+        # returned parameters by one update (max_iter, issue #339). Under
         # share_comps, if a merge fires on the LAST fit iteration, the
         # returned A/W/comp_list are already post-merge but final_ll_ still
         # reports the pre-merge log-likelihood -- the merge runs after that
@@ -816,10 +992,10 @@ class AMICAMLXNG:
             None  # scalar: log|det W|, refreshed per iter
         )
         # Weight-gradient norm (Fortran ndtmpsum), recomputed every iteration by
-        # _update_parameters and read by fit()'s two grad-norm checks. Held as
+        # _update_direction and read by fit()'s two grad-norm checks. Held as
         # the unevaluated MLX scalar rather than a Python float (AMICATorchNG's
-        # eager ``_ndtmpsum`` float) so materializing it joins fit()'s single
-        # per-iteration mx.eval instead of adding a second sync; the
+        # eager ``_ndtmpsum`` float) so materializing it joins fit()'s
+        # per-iteration likelihood sync instead of adding one; the
         # ``_ndtmpsum`` property below is the float view the checks and
         # cross-backend tests read.
         self._nd_arr: Optional[mx.array] = None
@@ -828,7 +1004,7 @@ class AMICAMLXNG:
         # issue #155), STASHED as the training E-step computes it rather than
         # recomputed by a separate forward pass at write time (issue #157;
         # epic #278 Phase 3, issue #289 -- port of AMICATorchNG's identical
-        # mechanism, torch_impl/core.py:880-902). ``_llt_logv``/``_llt_ll``
+        # mechanism in ``AMICATorchNG.__init__``). ``_llt_logv``/``_llt_ll``
         # are the live per-fit buffers (Fortran's ``modloglik``/``loglik``),
         # zero-filled so a ``do_reject`` sample keeps Fortran's zero
         # sentinel. ``fit`` converts them into the compact numpy
@@ -842,12 +1018,17 @@ class AMICAMLXNG:
         self._llt_lht: Optional[np.ndarray] = None
         self._llt_lt: Optional[np.ndarray] = None
 
-    # The last entry is only reachable under best-of-N restarts (issue #198): a
-    # restart whose fit raised rather than stopping, recorded as degenerate so a
-    # search in which every restart crashed still reports an unusable model.
+    # Stop reasons that mark a fit as degenerate, the same set as
+    # AMICATorchNG's: a non-finite log-likelihood ("nan_ll"/"singular_ll"), a
+    # non-finite update direction ("nan_direction"), non-finite parameters after
+    # an update ("nan_params"). The last entry is only reachable under best-of-N
+    # restarts (issue #198): a restart whose fit raised rather than stopping,
+    # recorded as degenerate so a search in which every restart crashed still
+    # reports an unusable model.
     _DEGENERATE_STOP_REASONS = (
         "nan_ll",
         "singular_ll",
+        "nan_direction",
         "nan_params",
         restarts.ERROR_STOP_REASON,
     )
@@ -855,9 +1036,10 @@ class AMICAMLXNG:
     @property
     def _ndtmpsum(self) -> Optional[float]:
         """Latest weight-gradient norm as a host float (AMICATorchNG's
-        ``_ndtmpsum``), or None before the first M-step. Cheap after fit()'s
-        mx.eval has materialized it; forces evaluation otherwise, so a direct
-        ``_update_parameters`` call still reads the current iteration's value."""
+        ``_ndtmpsum``), or None before the first step is built. Cheap after
+        fit()'s mx.eval has materialized it; forces evaluation otherwise, so a
+        direct ``_update_direction``/``_update_parameters`` call still reads the
+        current iteration's value."""
         if self._nd_arr is None:
             return None
         return float(self._nd_arr.item())
@@ -884,17 +1066,22 @@ class AMICAMLXNG:
         if self.do_sphere:
             # Population covariance (/N), matching Fortran's DSYRK scatter, not
             # numpy's default sample covariance (/(N-1)) -- the same choice, and
-            # the reasoning for it, at torch_impl/core.py:823-827.
+            # the reasoning for it, in ``AMICATorchNG._preprocess``.
             cov = np.cov(Xc, bias=True)
             evals, evecs = np.linalg.eigh(cov)
             order = np.argsort(evals)[::-1]
             evals = evals[order]
             evecs = evecs[:, order]
-            # Numerical rank, decided by the policy shared with the PyTorch and
-            # NumPy backends (pamica/rank.py, issue #223) so the three cannot
-            # disagree. Fortran: numeigs = min(pcakeep, count(eigs > mineig)).
+            # Numerical rank plus explicit PCA reduction, decided by the policy
+            # shared with the PyTorch and NumPy backends (pamica/rank.py,
+            # issues #223/#323) so the three cannot disagree. Fortran:
+            # numeigs = min(pcakeep, count(eigs > mineig)).
             n_comp = numerical_rank(
-                evals, mineig=self.mineig, mineig_rel=self.mineig_rel
+                evals,
+                mineig=self.mineig,
+                mineig_rel=self.mineig_rel,
+                pcakeep=self.pcakeep,
+                pcadb=self.pcadb,
             )
             evals = evals[:n_comp]
             V = evecs[:, :n_comp]
@@ -939,18 +1126,19 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _initialize_parameters(self):
         """Initialize parameters with the *same* ``np.random.RandomState`` draw
-        order as AMICATorchNG/AMICA_NumPy (core.py:918-973), so a shared seed
+        order as ``AMICATorchNG._initialize_parameters``/AMICA_NumPy, so a shared seed
         gives a bit-identical (float32-cast) starting point."""
         rng = np.random.RandomState(self.seed)
         n, m, ncomp, nmix = self.n_channels, self.n_models, self.n_comps, self.n_mix
 
-        # Per-model mixing blocks + comp_list mapping each (channel, model) to its
-        # column in A (identical RNG draw order to AMICATorchNG; for m=1 the loop
-        # runs once, so single-model init stays byte-for-byte).
-        A_np = np.zeros((n, ncomp))
+        # Per-model mixing blocks, drawn and normalized to unit-norm components
+        # as the reference does (issue #341, pamica.initialization), in float64
+        # before the float32 cast; comp_list maps each (source, model) to its
+        # component, a row of A (issue #334). Identical RNG draw order to
+        # AMICATorchNG.
+        A_np = initial_mixing(rng, n, m)
         comp_list_np = np.zeros((n, m), dtype=np.int64)
         for h in range(m):
-            A_np[:, h * n : (h + 1) * n] = np.eye(n) + 0.01 * (0.5 - rng.rand(n, n))
             comp_list_np[:, h] = np.arange(h * n, (h + 1) * n)
 
         mu_np = np.zeros((nmix, ncomp))
@@ -964,8 +1152,8 @@ class AMICAMLXNG:
 
         self.A = mx.array(A_np.astype(np.float32))
         self.comp_list = mx.array(comp_list_np)  # (n_channels, n_models) int
-        # Every column is referenced by the default block comp_list; reset here
-        # (not only in __init__) so a re-fit cannot inherit a merged mask.
+        # Every component is referenced by the default block comp_list; reset
+        # here (not only in __init__) so a re-fit cannot inherit a merged mask.
         self._comp_used_arr = mx.array(np.ones(ncomp, dtype=bool))
         self.mu = mx.array(mu_np.astype(np.float32))
         self.alpha = mx.array(alpha_np.astype(np.float32))
@@ -975,20 +1163,22 @@ class AMICAMLXNG:
         self.c = mx.array(np.zeros((n, m), dtype=np.float32))
 
         # Per-source density-family codes, Fortran `pdtype = pdftype`
-        # (amica15.f90:611; AMICATorchNG core.py:960-963). In adaptive mode
+        # (amica15.f90:611; ``AMICATorchNG._initialize_parameters``). In adaptive mode
         # (pdftype==1) every source starts as the super-Gaussian code (1),
         # since self.pdftype IS 1 there -- no special-case fill needed.
         self.pdtype = mx.array(np.full((n, m), self.pdftype, dtype=np.int32))
         self.n_kurt_done = 0
 
         # Reset the mutable optimization state to the pristine constructor values
-        # (lrate_cap, newtrate and rholrate are ratcheted down during fit, and
-        # n_newton_fallbacks counts one fit), so a re-fit starts fresh --
-        # AMICATorchNG does the same at core.py:966-971/:1936.
+        # (lrate/lrate_cap, newtrate and rholrate/rholrate_cap are annealed or
+        # ratcheted down during fit, and n_newton_fallbacks counts one fit), so
+        # a re-fit starts fresh -- AMICATorchNG does the same in
+        # ``_initialize_parameters``/``_fit_once``.
         self.lrate = self.lrate0
         self.lrate_cap = self.lrate0
         self.newtrate = self.newtrate0
         self.rholrate = self.rholrate0
+        self.rholrate_cap = self.rholrate0
         self.n_newton_fallbacks = 0
         self.iteration = 0
         self._refresh_lgamma_table()
@@ -996,12 +1186,22 @@ class AMICAMLXNG:
 
     def _refresh_lgamma_table(self):
         """Recompute ``lgamma(1+1/rho)`` host-side (MLX has no lgamma). Called at
-        init and after every rho update. Cheap: rho is ``(n_mix, n_comps)``."""
+        init and after every rho update. Cheap: rho is ``(n_mix, n_comps)``.
+
+        ``_log_pdf`` subtracts ``LOG2 + table``. At ``rho == 2`` the reference
+        takes its exact-Gaussian branch, whose normalizer is its own
+        single-precision literal (amica15.f90:1313, issue #344), so the entry
+        there is ``LOG_SQRT_PI - LOG2`` rather than ``lgamma(1.5)``: the same
+        normalizer the PyTorch and NumPy backends subtract, cast to float32. At
+        ``rho == 1`` the Laplace branch's ``log(2)`` is exact and
+        ``lgamma(2) == 0``, so the general form already matches it."""
         rho_np = np.array(self.rho, dtype=np.float64)
-        self._lgamma_table = mx.array(gammaln(1.0 + 1.0 / rho_np).astype(np.float32))
+        table = gammaln(1.0 + 1.0 / rho_np)
+        table = np.where(rho_np == 2.0, LOG_SQRT_PI - LOG2, table)
+        self._lgamma_table = mx.array(table.astype(np.float32))
 
     def _update_unmixing_matrices(self):
-        """Per-model ``W_h = inv(A[:, comp_list[:, h]])`` and the LL Jacobian
+        """Per-model ``W_h = inv(A[comp_list[:, h], :])`` and the LL Jacobian
         ``log|det W_h|``, on the CPU stream (MLX linalg is CPU-only), hoisted to
         once per iteration. ``W`` is ``(n_models, n, n)`` and ``_logdet_W`` is
         ``(n_models,)``. For n_models=1 this is ``inv(A)`` unchanged.
@@ -1056,14 +1256,14 @@ class AMICAMLXNG:
         assert self.A is not None and self.comp_list is not None
         ws, logdets = [], []
         for h in range(self.n_models):
-            A_h = self.A[:, self.comp_list[:, h]]
+            A_h = self.A[self.comp_list[:, h], :]
             a_h_np = np.array(A_h, dtype=np.float32, copy=False)
             finite_mask = np.isfinite(a_h_np)
             # A matrix with ZERO finite entries carries no signal to check --
             # this is exactly the observed shape of a dead-model corruption
             # (a zero-responsibility model dividing by dgm==0 propagates
             # NaN/inf through the WHOLE per-model direction matrix, so all
-            # comp_list columns for that model go non-finite together, not
+            # of that model's component rows go non-finite together, not
             # just one entry -- confirmed on a real fitted 2-model dead-model
             # state). Skipping here reproduces the pre-guard behavior exactly:
             # mx.linalg.inv on a wholly non-finite A does not abort -- it
@@ -1122,7 +1322,7 @@ class AMICAMLXNG:
                     self.stop_reason = restarts.ERROR_STOP_REASON
                     raise RuntimeError(
                         f"Singular unmixing matrix for model {h} at iteration "
-                        f"{self.iteration}: cond(A[:, comp_list[:, {h}]]) = "
+                        f"{self.iteration}: cond(A[comp_list[:, {h}], :]) = "
                         f"{cond:.3e} exceeds the float32 threshold "
                         f"{_INV_COND_THRESHOLD:.1e} (MLX's CPU-stream inv "
                         "would otherwise abort the process instead of "
@@ -1139,7 +1339,7 @@ class AMICAMLXNG:
     def _pdtype_h(self, h: int) -> Optional[mx.array]:
         """Per-source density-family codes for model ``h``, shaped for
         broadcasting against ``(batch, n_channels, n_mix)`` arrays (AMICATorchNG
-        ``_pdtype_h``, core.py:984-993), or ``None`` on the default
+        ``_pdtype_h``), or ``None`` on the default
         ``pdftype=0`` (GG-only) fast path so the E-step stays bit-identical to
         the pre-#265 implementation (policy 2).
         """
@@ -1152,8 +1352,8 @@ class AMICAMLXNG:
     # E-step
     # ------------------------------------------------------------------
     def _forward(self, Xb: mx.array):
-        """E-step forward pass for one block, per model (AMICATorchNG._forward,
-        core.py:998-1071). ``Xb`` is ``(n_channels, batch)``. Returns ``logV``
+        """E-step forward pass for one block, per model (``AMICATorchNG._forward``).
+        ``Xb`` is ``(n_channels, batch)``. Returns ``logV``
         ``(batch, n_models)`` and per-model lists ``(b, z, y, az_rho)``. For
         n_models=1 (c=0, gm=1, comp_list=identity) this is numerically identical
         to the single-model path. Each model's ``az_rho`` entry is ``None`` when
@@ -1197,8 +1397,8 @@ class AMICAMLXNG:
         return logV, b_list, z_list, y_list, azrho_list
 
     def _get_block_updates(self, Xb: mx.array) -> dict:
-        """Exact-EM sufficient statistics for one block (AMICATorchNG.
-        _get_block_updates, core.py:1141-1283). Mixture stats are scattered into
+        """Exact-EM sufficient statistics for one block
+        (``AMICATorchNG._get_block_updates``). Mixture stats are scattered into
         their ``comp_list`` columns; ``dWtmp``/``dgm``/``dc_numer`` are
         per-model. For n_models=1 (v==1, identity comp_list) this reproduces the
         single-model accumulators exactly.
@@ -1229,7 +1429,7 @@ class AMICAMLXNG:
         # Per-sample total log-likelihood (Fortran ``P``/``loglik``,
         # amica15.f90:1402), kept as a vector rather than folded straight into
         # the scalar sum so the LLt stash can reuse it (issue #157, epic #278
-        # Phase 3/#289, porting AMICATorchNG core.py:1222-1227); ``block_ll``
+        # Phase 3/#289, porting ``AMICATorchNG._get_block_updates``); ``block_ll``
         # is the same summation as before, bit for bit.
         block_ll_samples = mx.logsumexp(logV, axis=1)
         block_ll = block_ll_samples.sum()
@@ -1272,8 +1472,8 @@ class AMICAMLXNG:
             dmu_n = dmu_n.at[:, idx].add(ufp.sum(0).T)
             # Phase A guard: float32 can round y to exactly 0 (fp(0)=0 => ufp=0),
             # so ufp/y is 0/0=NaN; where y==0, 0/1 contributes 0 (issue #75).
-            # torch's safe_y substitution (core.py:1231) is mirrored exactly for
-            # every family here, even though the true fp/y limit at y->0 is a
+            # torch's safe_y substitution (``_get_block_updates``) is mirrored exactly
+            # for every family here, even though the true fp/y limit at y->0 is a
             # finite nonzero constant for codes 2/3/1 (fp'(0): 1 Gaussian
             # (fp=y), 0.5 logistic (fp=tanh(y/2)), 2 super-Gaussian
             # (fp=y+tanh(y))) and 0 for code 4 (fp=y-tanh(y), whose Taylor
@@ -1287,7 +1487,7 @@ class AMICAMLXNG:
 
             if self.dorho:
                 logab = rho_h * mx.log(mx.maximum(mx.abs(y), tiny))
-                logab = mx.where(az_rho < _EPSDBLE, mx.zeros_like(logab), logab)
+                logab = mx.where(az_rho < EPSDBLE, mx.zeros_like(logab), logab)
                 drho_n = drho_n.at[:, idx].add((u * (az_rho * logab)).sum(0).T)
 
             g = (beta_h * ufp).sum(-1)  # (batch, n_channels)
@@ -1343,10 +1543,9 @@ class AMICAMLXNG:
             Scatter each block's per-sample ``logV``/``ll_samples`` into the
             ``_llt_logv``/``_llt_ll`` buffers as it goes, so the LLt output
             never needs a second pass over the data (issue #157, epic #278
-            Phase 3/#289 -- port of AMICATorchNG._accumulate_blocks,
-            torch_impl/core.py:1339-1388). The scatter is itself just another
-            lazy MLX op (``self._llt_logv[rows] = logv``), so it joins the
-            same per-iteration graph ``fit`` already evaluates once -- no
+            Phase 3/#289 -- port of ``AMICATorchNG._accumulate_blocks``). The scatter is
+            itself just another lazy MLX op (``self._llt_logv[rows] = logv``), so it
+            joins the same per-iteration graph ``fit`` already evaluates once -- no
             extra sync is added here. Only the training loop sets this; the
             ``_tune_block_size`` probes leave the buffers untouched, so the
             tuner still leaves no state behind. The per-sample values are
@@ -1459,7 +1658,7 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _finalize_newton_stats(self, acc: dict):
         """Reduce the Newton block accumulators into ``(sigma2, lambda_, kappa)``
-        (AMICATorchNG._finalize_newton_stats, core.py:1307-1331; Fortran
+        (``AMICATorchNG._finalize_newton_stats``; Fortran
         amica15.f90:1666-1680).
 
         The Fortran ``baralpha``/``dkappa_denom``/``dlambda_denom``
@@ -1498,7 +1697,7 @@ class AMICAMLXNG:
 
     def _newton_direction(self, dA_h, sigma2_h, lambda_h, kappa_h):
         """Per-model Newton direction ``H`` from the natural gradient ``dA_h``
-        (AMICATorchNG._newton_direction, core.py:1333-1361).
+        (``AMICATorchNG._newton_direction``).
 
         Vectorized port of the per-source-pair 2x2 solve (Fortran
         amica15.f90:1718-1741):
@@ -1540,30 +1739,152 @@ class AMICAMLXNG:
         posdef = bool(mx.all(mx.logical_or(valid, eye_bool)).item())
         return H, posdef
 
-    def _update_parameters(self, acc: dict, n_samples: int):
+    def _update_direction(self, acc: dict) -> _UpdateStep:
+        """The natural-gradient or Newton step for ``A`` from this iteration's
+        sufficient statistics, and its norm, without changing any parameter
+        (``AMICATorchNG._update_direction``).
+
+        The reference computes both in ``accum_updates_and_likelihood``
+        (amica15.f90:1666-1761), with ``LL(iter)``, before the likelihood-
+        decrease response and the stopping checks read ``ndtmpsum`` and before
+        ``update_params`` applies the step; :meth:`fit` calls this first and
+        hands the result to :meth:`_update_parameters` once the checks have
+        run. Sets ``self._nd_arr`` (lazily; read through ``_ndtmpsum``).
+
+        Everything here reads the parameters as the E-step saw them: the Newton
+        curvature folds in the pre-update ``mu``, and ``dAk`` weights the models
+        by the pre-update ``gm`` (the reference does not reassign ``gm`` until
+        ``update_params``, :1788; issue #219). MLX arrays are immutable and
+        every parameter is only ever rebound, so nothing here needs a copy.
+        """
+        assert (
+            self.mu is not None
+            and self.A is not None
+            and self.comp_list is not None
+            and self.gm is not None
+            and self._comp_used_arr is not None
+        )
+        tiny = float(np.finfo(np.float32).tiny)
+        # Finalize the Newton curvature with the PRE-update mu. Fortran folds the
+        # mu^2 term into lambda during E-step accumulation, before the M-step
+        # moves mu (amica15.f90:1666-1680); doing it here, before
+        # _update_parameters moves anything, is what reproduces that. Finalize
+        # after the mu update instead and lambda silently uses the updated mu: no
+        # error, no NaN, just a subtly wrong Hessian (the torch backend's issue
+        # #24 bug, pinned there and here by
+        # test_newton_finalize_uses_preupdate_mu).
+        newton_active = schedule.newton_active(
+            self.do_newton, self.iteration, self.newt_start
+        )
+        if newton_active:
+            sigma2, lambda_, kappa = self._finalize_newton_stats(acc)
+
+        # Natural-gradient A-update. A is stored as Fortran's A^T, one component
+        # per row (issue #334), so the update is a LEFT-multiply by the
+        # transposed direction (as in ``AMICATorchNG._update_parameters``, #24
+        # root cause). Each model's step is scattered into its component rows as
+        # a gm-weighted average (Fortran dAk/zeta) using the PRE-update gm (see
+        # the docstring): for the default disjoint
+        # comp_list every component has one contributor, so gm cancels and
+        # n_models=1 is byte-for-byte the old `A - lrate*(dA.T@A)`; a SHARED
+        # component (#263) takes Fortran's responsibility-weighted average of the
+        # models' steps for its one mixing vector, NOT a raw sum (a raw sum would
+        # over-step by the contributor count). A merged-away component needs no
+        # special case: nothing scatters into its row, so its zeta is 0 and its
+        # dAk is 0/tiny = 0, i.e. it takes no step. The rescale in
+        # _update_parameters does not touch it either: it rescales the rows of
+        # each model's block, and a merged-away row is in no model's block.
+        #
+        # The direction/dAk/gradient-norm computation below runs
+        # UNCONDITIONALLY, not gated on _a_frozen(): Fortran computes dAk and
+        # ndtmpsum every iteration in accum_updates_and_likelihood
+        # (amica15.f90:1749-1761), strictly before the separate, freeze-guarded
+        # update_A block (:1803) that steps A. Only the step itself -- and the
+        # lrate ramp and rho-rate reset Fortran nests inside that same guarded
+        # block -- are conditional (issue #207: the grad-norm stop must see the
+        # true gradient magnitude every iteration, not only when A moves).
+        # Newton only swaps out the per-model DIRECTION; the dAk/zeta scatter,
+        # the gradient norm and the freeze are untouched by it
+        # (``AMICATorchNG._update_parameters``). A model whose curvature fails the
+        # positive-definiteness guard falls back to its natural gradient for this
+        # iteration, and -- as in Fortran -- ANY model falling back also sends
+        # the lrate ramp to lrate_cap instead of newtrate.
+        eye = mx.eye(self.n_channels)
+        directions = []
+        no_newt = False
+        for h in range(self.n_models):
+            dA_h = -acc["dWtmp"][h] / acc["dgm"][h] + eye  # I - <g b^T>/dgm
+            if newton_active:
+                H, posdef = self._newton_direction(
+                    dA_h, sigma2[h], lambda_[h], kappa[h]
+                )
+                if posdef:
+                    directions.append(H)
+                else:
+                    no_newt = True
+                    directions.append(dA_h)  # fall back to natural gradient
+            else:
+                directions.append(dA_h)
+
+        dAk = mx.zeros_like(self.A)
+        zeta = mx.zeros((self.n_comps,), dtype=mx.float32)
+        for h in range(self.n_models):
+            idx = self.comp_list[:, h]
+            dAk = dAk.at[idx, :].add(self.gm[h] * (directions[h].T @ self.A[idx, :]))
+            zeta = zeta.at[idx].add(self.gm[h] + mx.zeros((self.n_channels,)))
+        dAk = dAk / mx.maximum(zeta, tiny)[:, None]
+
+        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1760-1761):
+        # ``sqrt(sum(dAk**2, mask=comp_used) / (nw*count(comp_used)))``, built
+        # from the step direction BEFORE the lrate scaling and before the A step
+        # applies it, exactly as Fortran does in accum_updates_and_likelihood
+        # (:1749-1761) ahead of update_params' A step (:1803-1815). Read by
+        # fit()'s two grad-norm checks (AMICATorchNG._update_parameters computes
+        # the same quantity). One squared norm per component row, as the
+        # reference sums each component's column. The comp_used mask matters
+        # only once share_comps has merged components away: without sharing it
+        # is all-True, so the select returns nd unchanged and the count is
+        # n_comps, leaving this the plain RMS over dAk. Kept as a lazy scalar
+        # (no .item() here) so it rides fit()'s single per-iteration mx.eval.
+        #
+        # SELECT, not multiply-by-mask: 0*NaN is NaN, so a single non-finite
+        # row would poison the whole reduction, and a NaN ndtmpsum would
+        # disable BOTH grad-norm stops (NaN <= min_nd is False) if fit() did not
+        # stop on it ("nan_direction"); a masked-away row must not trigger that
+        # stop. mx.where drops the masked lanes structurally instead. Unreachable today (a merged-away row's
+        # dAk is exactly 0), but Phase 3's Newton direction feeds this same dAk.
+        used_f = self._comp_used_arr.astype(mx.float32)
+        nd = (dAk**2).sum(axis=1)  # (n_comps,)
+        nd = mx.where(self._comp_used_arr, nd, mx.zeros_like(nd))
+        self._nd_arr = mx.sqrt(
+            nd.sum() / (self.n_channels * mx.maximum(used_f.sum(), 1.0))
+        )
+
+        return _UpdateStep(dAk, newton_active, no_newt)
+
+    def _update_parameters(
+        self, acc: dict, n_samples: int, step: Optional[_UpdateStep] = None
+    ):
         """Exact-EM mixture updates + natural-gradient A-update, optionally
-        Newton-preconditioned (AMICATorchNG._update_parameters,
-        core.py:1363-1616)."""
-        # Fortran builds dAk from the PREVIOUS iteration's model weights: gm is
-        # not reassigned until update_params (amica15.f90:1788+), after the
-        # dAk/zeta accumulation in accum_updates_and_likelihood (:1749-1761).
-        # Snapshot before overwriting, as AMICATorchNG does (the ordering
-        # question issue #219 raised, fixed there and now here); MLX arrays are
-        # immutable and gm is
-        # only ever rebound, so a plain rebinding is a safe snapshot (torch
-        # clones because its tensors could be written in place). Exactly gm for
-        # n_models=1 (both are 1.0) and cancelling for a disjoint comp_list, so
-        # the single-model and unshared multi-model paths are unchanged.
-        assert self.gm is not None
-        gm_prev = self.gm
+        Newton-preconditioned (``AMICATorchNG._update_parameters``).
+
+        ``step`` is the mixing-matrix step :meth:`_update_direction` computed
+        from the same ``acc``: :meth:`fit` passes the one its stopping checks
+        already read, so nothing is computed twice. A direct call may omit it,
+        and the step is then computed here first, from the parameters as they
+        stand."""
+        if step is None:
+            step = self._update_direction(acc)
+        # The step was built with the pre-update gm (_update_direction), so gm
+        # can be rebound now.
         self.gm = acc["dgm"] / n_samples  # (n_models,); == 1 for single model
         tiny = float(np.finfo(np.float32).tiny)
 
         # Per-model data-space bias c[i,h] = sum_t v_h*x / sum_t v_h (Fortran
-        # update_c, core.py:1401-1423). Skipped for n_models=1 (v==1 => c is the
-        # zero data mean; the update would add a float-sum residual and break the
-        # #24 bit-exact single-model path). A dead model (dgm[h]==0) keeps its
-        # prior c rather than writing 0/0, and is surfaced (matching AMICATorchNG).
+        # update_c, as in ``AMICATorchNG._update_parameters``). Skipped for n_models=1
+        # (v==1 => c is the zero data mean; the update would add a float-sum residual
+        # and break the #24 bit-exact single-model path). A dead model (dgm[h]==0) keeps
+        # its prior c rather than writing 0/0, and is surfaced (matching AMICATorchNG).
         if self.n_models > 1:
             dgm = acc["dgm"]
             live = dgm > 0.0
@@ -1595,16 +1916,44 @@ class AMICAMLXNG:
             self.alpha,
         )
 
-        # Finalize the Newton curvature with the PRE-update mu. Fortran folds the
-        # mu^2 term into lambda during E-step accumulation, before the M-step
-        # moves mu (amica15.f90:1666-1680); doing it here -- between the alpha
-        # update and the mu reassignment below -- is what reproduces that. Move
-        # it one line later and lambda silently uses the updated mu: no error, no
-        # NaN, just a subtly wrong Hessian (the torch backend's issue #24 bug,
-        # pinned there and here by test_newton_finalize_uses_preupdate_mu).
-        newton_active = self.do_newton and self.iteration >= self.newt_start
-        if newton_active:
-            sigma2, lambda_, kappa = self._finalize_newton_stats(acc)
+        # The A branch, where the reference has it: after gm/alpha/c and before
+        # mu/sbeta/rho (amica15.f90:1803-1816; ``AMICATorchNG._update_parameters``).
+        # On an iteration the reference holds A
+        # (:func:`pamica.schedule.share_freeze`), everything inside it is skipped
+        # together: the Newton-fallback bookkeeping (so a discarded Newton
+        # direction cannot pollute the fallback counter), the lrate ramp, the
+        # reset of the working rho rate to its ceiling, and the step itself. The
+        # step was built by _update_direction from the parameters the E-step
+        # saw, so taking it before the mixture updates changes nothing they read.
+        if not self._a_frozen():
+            if step.newton_active and step.no_newt:
+                # Fortran prints "Hessian not positive definite, using natural
+                # gradient" (amica15.f90:1809-1811). Surface the same signal so
+                # an all-fallback run is visible without re-instrumenting.
+                self.n_newton_fallbacks += 1
+                logger.warning(
+                    "Newton not positive definite at iter %d; using natural gradient.",
+                    self.iteration,
+                )
+
+            # Learning-rate ramp: toward newtrate while Newton is active and
+            # stable, otherwise toward lrate_cap (Fortran amica15.f90:1803-1816),
+            # from this iteration's lrate, which a likelihood decrease has
+            # already halved (fit runs the response first, issue #339).
+            if step.newton_active and not step.no_newt:
+                self.lrate = min(
+                    self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
+                )
+            else:
+                self.lrate = min(
+                    self.lrate_cap, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
+                )
+            # rho moves at the ceiling (``rholrate = rholrate0``, :1806/:1813),
+            # so a decrease's scaling of the working rate reaches it only on a
+            # held iteration.
+            self.rholrate = self.rholrate_cap
+
+            self.A = self.A - self.lrate * step.dAk
 
         self.mu = mx.where(used, self.mu + acc["dmu_n"] / acc["dmu_d"], self.mu)
         self.beta = mx.where(
@@ -1620,9 +1969,9 @@ class AMICAMLXNG:
         # GG shape update with the 1/psi(1+1/rho) digamma factor (Fortran
         # :2013-2014); digamma is computed host-side (MLX has none). A NaN here
         # (e.g. from an upstream mu/beta blow-up) is reset to rho0 and surfaced,
-        # matching AMICATorchNG (core.py:1671-1693), so it does not silently
+        # matching ``AMICATorchNG._update_parameters``, so it does not silently
         # poison the lgamma table and every subsequent E-step.
-        # Deliberate divergence from AMICATorchNG (core.py:1671-1675), which also
+        # Deliberate divergence from ``AMICATorchNG._update_parameters``, which also
         # skips the update when rho is pinned to a boundary (all 1.0 or all 2.0):
         # that early-exit needs a host sync on a (n_mix, n_comps) reduction over
         # rho every iteration. This backend does make a few scalar host syncs per
@@ -1656,127 +2005,13 @@ class AMICAMLXNG:
                 used, mx.clip(new_rho, self.minrho, self.maxrho), self.rho
             )
 
-        # Natural-gradient A-update. A is stored as Fortran's A^T, so the update
-        # is a LEFT-multiply by the transposed direction (core.py:1506-1514,
-        # #24 root cause). Each model's direction is scattered into its mixing
-        # columns as a gm-weighted average (Fortran dAk/zeta, core.py:1546-1561)
-        # using the PREVIOUS iteration's gm (gm_prev, see the snapshot above):
-        # for the default disjoint comp_list every column has one contributor, so
-        # gm cancels and n_models=1 is byte-for-byte the old `A - lrate*(dA.T@A)`;
-        # a SHARED column (#263) takes Fortran's responsibility-weighted average,
-        # NOT a raw sum (a raw sum would over-step by the contributor count). A
-        # merged-away column needs no special case: nothing scatters into it, so
-        # its zeta is 0 and its dAk is 0/tiny = 0, i.e. it takes no step. It is
-        # NOT a zero-norm column, and the rescale below does renormalize it like
-        # any other -- but by its own retained (already ~unit) norm, so that is a
-        # near-identity that perturbs it only at ULP scale. Hence
-        # test_merged_away_columns_keep_their_last_finite_value disables
-        # doscaling, to compare a frozen column exactly.
-        #
-        # The direction/dAk/gradient-norm computation below runs
-        # UNCONDITIONALLY, not gated on _a_frozen(): Fortran computes dAk and
-        # ndtmpsum every iteration in accum_updates_and_likelihood
-        # (amica15.f90:1749-1761), strictly before the separate, share-freeze
-        # guarded update_A block (:1803) that steps A. Only the step itself --
-        # and the lrate ramp Fortran nests inside that same guarded block -- are
-        # conditional (issue #207: the grad-norm stop must see the true gradient
-        # magnitude every iteration, not only when A moves). _a_frozen() is
-        # always False with sharing off, so the default path is unchanged.
-        # Newton only swaps out the per-model DIRECTION; the dAk/zeta scatter,
-        # the gradient norm and the freeze structure below are untouched by it
-        # (AMICATorchNG core.py:1531-1545). A model whose curvature fails the
-        # positive-definiteness guard falls back to its natural gradient for this
-        # iteration, and -- as in Fortran -- ANY model falling back also sends
-        # the lrate ramp to lrate_cap instead of newtrate.
-        eye = mx.eye(self.n_channels)
-        directions = []
-        no_newt = False
-        for h in range(self.n_models):
-            dA_h = -acc["dWtmp"][h] / acc["dgm"][h] + eye  # I - <g b^T>/dgm
-            if newton_active:
-                H, posdef = self._newton_direction(
-                    dA_h, sigma2[h], lambda_[h], kappa[h]
-                )
-                if posdef:
-                    directions.append(H)
-                else:
-                    no_newt = True
-                    directions.append(dA_h)  # fall back to natural gradient
-            else:
-                directions.append(dA_h)
-
-        assert self.A is not None and self.comp_list is not None
-        dAk = mx.zeros_like(self.A)
-        zeta = mx.zeros((self.n_comps,), dtype=mx.float32)
-        for h in range(self.n_models):
-            idx = self.comp_list[:, h]
-            dAk = dAk.at[:, idx].add(gm_prev[h] * (directions[h].T @ self.A[:, idx]))
-            zeta = zeta.at[idx].add(gm_prev[h] + mx.zeros((self.n_channels,)))
-        dAk = dAk / mx.maximum(zeta, tiny)
-
-        # Weight-gradient norm (Fortran ndtmpsum, amica15.f90:1760-1761):
-        # ``sqrt(sum(dAk**2, mask=comp_used) / (nw*count(comp_used)))``, built
-        # from the step direction BEFORE the lrate scaling and before the A step
-        # applies it, exactly as Fortran does in accum_updates_and_likelihood
-        # (:1749-1761) ahead of update_params' A step (:1803-1815). Read by
-        # fit()'s two grad-norm checks (AMICATorchNG._update_parameters computes
-        # the same quantity). The comp_used mask matters only once share_comps
-        # has merged columns away: without sharing it is all-True, so the select
-        # returns nd unchanged and the count is n_comps, leaving this bit-for-bit
-        # the plain RMS over dAk. Kept as a lazy scalar (no .item() here) so it
-        # rides fit()'s single per-iteration mx.eval.
-        #
-        # SELECT, not multiply-by-mask: 0*NaN is NaN, so a single non-finite
-        # column would poison the whole reduction, and a NaN ndtmpsum silently
-        # disables BOTH grad-norm stops (NaN <= min_nd is False), burning the
-        # entire iteration budget with no diagnostic. mx.where drops the masked
-        # lanes structurally instead. Unreachable today (a merged-away column's
-        # dAk is exactly 0), but Phase 3's Newton direction feeds this same dAk.
-        used_f = self._comp_used_arr.astype(mx.float32)
-        nd = (dAk**2).sum(axis=0)  # (n_comps,)
-        nd = mx.where(self._comp_used_arr, nd, mx.zeros_like(nd))
-        self._nd_arr = mx.sqrt(
-            nd.sum() / (self.n_channels * mx.maximum(used_f.sum(), 1.0))
-        )
-
-        # A-update. When sharing holds A this iteration (the post-merge settle
-        # window, Fortran amica15.f90:1803), skip the step -- the lrate ramp, the
-        # Newton-fallback bookkeeping, and the step itself -- so a discarded
-        # Newton direction cannot pollute the fallback counter.
-        if not self._a_frozen():
-            if newton_active and no_newt:
-                # Fortran prints "Hessian not positive definite, using natural
-                # gradient" (amica15.f90:1809-1811). Surface the same signal so
-                # an all-fallback run is visible without re-instrumenting.
-                self.n_newton_fallbacks += 1
-                logger.warning(
-                    "Newton not positive definite at iter %d; using natural gradient.",
-                    self.iteration,
-                )
-
-            # Learning-rate ramp: toward newtrate while Newton is active and
-            # stable, otherwise toward lrate_cap (Fortran amica15.f90:1803-1816).
-            if newton_active and not no_newt:
-                self.lrate = min(
-                    self.newtrate, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
-                )
-            else:
-                self.lrate = min(
-                    self.lrate_cap, self.lrate + min(1.0 / self.newt_ramp, self.lrate)
-                )
-
-            self.A = self.A - self.lrate * dAk
-
-        if self.doscaling and (self.iteration % self.scalestep == 0):
-            scale = mx.sqrt((self.A**2).sum(axis=0))  # (n_comps,)
-            # A zero-norm (collapsed) column is left untouched, not rescaled:
-            # safe_scale is 1 there, so A/beta are unchanged and mu*safe_scale
-            # keeps its prior value (matching AMICATorchNG's nonzero mask,
-            # core.py:1608-1614 -- using raw `scale` would zero mu instead).
-            safe_scale = mx.where(scale > 0, scale, mx.ones_like(scale))
-            self.A = self.A / safe_scale
-            self.mu = self.mu * safe_scale
-            self.beta = self.beta / safe_scale
+        # The reference rescales every iteration (it parses ``scalestep`` but
+        # never reads it, amica15.f90:1843/3686); pamica keeps ``scalestep`` as
+        # an extension counted from 1 like the reference's other cadences
+        # (iterations s, 2s, ...; ``schedule.every``), so the default 1 is the
+        # reference.
+        if self.doscaling and schedule.every(self.iteration, self.scalestep):
+            self._rescale_components()
 
         # rho is frozen for every non-GG family (self.dorho is False), so the
         # table it feeds (used only on the GG _log_pdf path) cannot have
@@ -1790,12 +2025,47 @@ class AMICAMLXNG:
             self._refresh_lgamma_table()
         self._update_unmixing_matrices()
 
+    def _rescale_components(self) -> None:
+        """Rescale every component to a unit-norm mixing vector (Fortran
+        ``doscaling``, amica15.f90:1843-1851), an exact change of scale; the
+        same rule, norms, order and zero-norm guard as
+        ``AMICATorchNG._rescale_components``.
+
+        Component ``k`` is row ``k`` of ``A`` (issue #334, ADR 0007), so that
+        row is divided by its norm while ``mu[:, k]``/``beta[:, k]`` are
+        multiplied/divided by it, leaving the log-likelihood unchanged (the
+        column rule issue #333 replaced was not a change of scale). A zero-norm
+        (or NaN-norm) row keeps its values: the scale is 1 there, so
+        ``A``/``mu``/``beta`` are unchanged rather than ``mu`` being zeroed.
+        Each component is rescaled exactly once, including one that
+        ``share_comps`` merged into several models, and a merged-away row
+        (in no model's block) keeps its scale of 1. The norms come from each
+        model's block ``A[comp_list[:, h], :]``, the same gathers as before
+        issue #334, and every attribute is rebound to a new array as the rest
+        of the M-step does, never mutated in place.
+        """
+        assert (
+            self.A is not None
+            and self.mu is not None
+            and self.beta is not None
+            and self.comp_list is not None
+        )
+        scale = mx.ones((self.n_comps,), dtype=mx.float32)
+        for h in range(self.n_models):
+            idx = self.comp_list[:, h]
+            norm = mx.sqrt((self.A[idx, :] ** 2).sum(axis=1))  # (n_channels,)
+            # A shared row gets the same norm from every block that holds it.
+            scale[idx] = mx.where(norm > 0, norm, mx.ones_like(norm))
+        self.A = self.A / scale[:, None]
+        self.mu = self.mu * scale
+        self.beta = self.beta / scale
+
     # ------------------------------------------------------------------
     # Adaptive PDF switch (issue #265; AMICATorchNG's #26 port)
     # ------------------------------------------------------------------
     def _choose_pdfs(self, X: mx.array) -> None:
         """Extended-Infomax adaptive PDF switch (Fortran ``do_choose_pdfs``,
-        AMICATorchNG ``_choose_pdfs``, core.py:1790-1823).
+        ``AMICATorchNG._choose_pdfs``).
 
         Re-estimates each source's kurtosis from the current model activations
         and sets its density family to the super-Gaussian (code 1) or
@@ -1868,7 +2138,7 @@ class AMICAMLXNG:
 
     def _pdtype_from_kurtosis(self, kurt: np.ndarray, nsub: np.ndarray) -> np.ndarray:
         """Map per-source excess kurtosis to a density-family code (pure numpy;
-        AMICATorchNG ``_pdtype_from_kurtosis``, core.py:1825-1852).
+        ``AMICATorchNG._pdtype_from_kurtosis``).
 
         Super-Gaussian (positive kurtosis) -> code 1; sub-Gaussian -> code 4.
         Only sources with a meaningful signal switch: a dead model
@@ -1897,7 +2167,7 @@ class AMICAMLXNG:
 
     # ------------------------------------------------------------------
     # Best-iterate safeguard (issue #51, epic #278 Phase 2/#288; port of
-    # AMICATorchNG._snapshot_params/_restore_params, core.py:2025-2062)
+    # AMICATorchNG._snapshot_params/_restore_params)
     # ------------------------------------------------------------------
     def _snapshot_params(self) -> dict:
         """Snapshot the fitted state for the best-iterate safeguard (issue #51).
@@ -1915,7 +2185,7 @@ class AMICAMLXNG:
         fix this ports).
 
         Also captures the LLt stash (issue #157, epic #278 Phase 3/#289; port
-        of AMICATorchNG._snapshot_params, torch_impl/core.py:2025-2057).
+        of ``AMICATorchNG._snapshot_params``).
         ``fit`` snapshots immediately after the E-step that produced both the
         candidate ``best_ll`` and this iteration's ``_llt_logv``/``_llt_ll``,
         so a restore rolls the on-disk LLt back to the E-step of the restored
@@ -2046,41 +2316,43 @@ class AMICAMLXNG:
     # Component sharing (issue #263; AMICATorchNG's #60 port)
     # ------------------------------------------------------------------
     def _a_frozen(self) -> bool:
-        """Whether the A-update (and its lrate ramp) is held this iteration.
+        """Whether the reference holds the A update (with its lrate ramp and
+        rho-rate reset) this iteration: once ``iter >= share_start``, every
+        iteration with ``mod(iter, share_iter) <= 5``, counted from 1
+        (amica15.f90:1803, :func:`pamica.schedule.share_freeze`;
+        ``AMICATorchNG._a_frozen``).
 
-        A is frozen for the first 6 iterations of every ``share_iter``-length
-        window once ``iter >= share_start`` -- the merge iteration and the 5
-        after it -- so the density parameters can settle onto any freshly merged
-        component before the mixing matrix moves again (Fortran A-freeze,
-        amica15.f90:1803). The window fires each cycle regardless of whether that
-        cycle's :meth:`_identify_shared_comps` actually merged a pair.
-
-        Anchored on ``(itf - share_start) % share_iter`` so it stays aligned with
-        the merge schedule for any ``share_start``; the literal Fortran formula
-        uses ``mod(iter, share_iter)`` (misaligned unless share_start is a
-        multiple of share_iter, and a permanent freeze for ``share_iter <= 6``),
-        but that path is dead in the reference (see :meth:`_identify_shared_comps`)
-        so there is no parity constraint -- the constructor requires
-        ``share_iter > 6`` so the window never consumes the whole cycle. Gated
-        behind ``share_comps`` and ``n_models >= 2``, so with sharing off it is
-        always False and the validated default trajectory is untouched.
+        The reference applies this whether or not ``share_comps`` is on and for
+        any number of models (issue #345), so this does too: with the defaults
+        ``share_start = share_iter = 100``, every fit of 100 or more iterations
+        holds A on iterations 100-105, 200-205, and so on. The reference's own
+        scan never merges (see :meth:`_identify_shared_comps`), so this
+        unconditional schedule is the only freeze it ever shows. The
+        constructor requires ``share_iter >= 7``, since a shorter cycle would
+        hold A for good (:func:`pamica.schedule.validate_share_iter`).
         """
-        if not self.share_comps or self.n_models < 2:
-            return False
-        itf = self.iteration + 1  # Fortran-style 1-indexed iteration
-        if itf < self.share_start:
-            return False
-        return (itf - self.share_start) % self.share_iter <= 5
+        return schedule.share_freeze(self.iteration, self.share_start, self.share_iter)
+
+    def _component_sensor_maps(self) -> np.ndarray:
+        """Every component's mixing vector in input-channel (sensor) space.
+
+        ``pinv(sphere) @ A.T`` on the host in float64, shape ``(n_channels_in,
+        n_comps)``: column ``comp_list[i, h]`` is column ``i`` of
+        :meth:`get_sensor_mixing_matrix` for model ``h`` (issue #334). These
+        are the vectors the share metric compares.
+        """
+        assert self.A is not None
+        return self._pinv_sphere() @ np.array(self.A, dtype=np.float64).T
 
     def _identify_shared_comps(self) -> None:
-        """Merge near-collinear mixing columns across models (Fortran
+        """Merge near-collinear components across models (Fortran
         ``identify_shared_comps``, amica15.f90:1916).
 
         Two components (model ``h`` source ``i`` and model ``hh`` source ``ii``,
-        ``h < hh``) are identified when the angle between their mixing columns,
-        measured in the original (de-sphered) data space, is below the
-        ``comp_thresh`` cutoff; on a match ``cj`` is folded into ``ci``, so the
-        two share one mixing column and one density.
+        ``h < hh``) are identified when the angle between their mixing vectors
+        (rows of ``A``, issue #334), measured in the original (de-sphered) data
+        space, is below the ``comp_thresh`` cutoff; on a match ``cj`` is folded
+        into ``ci``, so the two share one mixing vector and one density.
 
         The decision itself is NOT reimplemented here: it runs
         :func:`pamica.numpy_impl.utils.identify_shared_components` on host
@@ -2093,21 +2365,23 @@ class AMICAMLXNG:
         materialized by fit's per-iteration ``mx.eval``, so the host pull is
         cheap.
 
-        No bit-exact oracle: the reference's ``Spinv2`` metric is *declared* but
-        never *allocated* in ``amica15.f90``, so invoking the routine there would
-        read an unallocated array -- it is effectively unrunnable (cf. the dead
-        ``do_choose_pdfs`` switch, #26). This implements the intended algorithm
-        and is validated on real data, not against byte parity.
+        No bit-exact oracle for the metric: the reference's ``Spinv2`` is
+        *declared* but never *allocated* in ``amica15.f90``, so the routine
+        there reads an unallocated array, every similarity comes out NaN and it
+        never merges (cf. the dead ``do_choose_pdfs`` switch, #26). The merged
+        state it produces is checked against the reference through
+        ``load_comp_list`` on the float64 backends, and this backend is pinned
+        to AMICATorchNG.
         """
         if self.n_models < 2:
             return
         assert self.A is not None and self.comp_list is not None
         # _pinv_sphere raises on a non-finite sphere, so the metric below can
         # only be garbage if A itself is (guarded per-pair inside the kernel).
-        atil = self._pinv_sphere() @ np.array(self.A, dtype=np.float64)
+        atil = self._component_sensor_maps()
         cl = np.array(self.comp_list)
         new_cl, new_used = identify_shared_components(atil, cl, self.comp_thresh)
-        # Each fold removes exactly one column from the referenced set, so the
+        # Each fold removes exactly one component from the referenced set, so the
         # drop in unique count IS the merge count (the kernel does not report it).
         merged = int(np.unique(cl).size - np.unique(new_cl).size)
         if merged:
@@ -2167,8 +2441,9 @@ class AMICAMLXNG:
         """Boolean mask (n_comps,) of components still referenced by comp_list.
 
         A component drops out of use when it is folded into another by
-        :meth:`_identify_shared_comps`; unused columns receive no gradient and
-        are never read by the E-step.
+        :meth:`_identify_shared_comps`; an unused component (its row of ``A``
+        and its density columns) receives no update and is never read by the
+        E-step.
 
         CACHED (set all-True at init, rewritten by each merge) rather than
         derived from ``comp_list`` on every read, which is how
@@ -2188,16 +2463,19 @@ class AMICAMLXNG:
         """Components shared across models by ``share_comps`` (issue #263).
 
         ``share_comps`` folds near-collinear components of different models onto
-        one shared mixing column + density, recorded as a repeated index in
-        ``comp_list``. Returns one group per shared column: a list of
-        ``(model_idx, source_idx)`` pairs that all reference it. Empty when no
-        component is shared across two or more models (always for one model, and
-        for a default multi-model fit with ``share_comps`` off).
+        one shared component (one row of ``A`` and one density), recorded as a
+        repeated index in ``comp_list``. Returns one group per shared
+        component: a list of ``(model_idx, source_idx)`` pairs that all
+        reference it, whose columns of :meth:`get_sensor_mixing_matrix` are
+        therefore identical. Empty when no component is shared across two or
+        more models (always for one model, and for a default multi-model fit
+        with ``share_comps`` off).
 
-        Note that a merge synchronizes only the mixture parameters routed
-        through ``comp_list`` (``mu``/``alpha``/``beta``/``rho``); the
+        Note that a merge synchronizes only the parameters routed through
+        ``comp_list`` (the mixing vector and ``mu``/``alpha``/``beta``/``rho``);
+        the
         per-source density *family* code ``pdtype`` is a separate array and is
-        not synchronized (issue #265, matching AMICATorchNG core.py:2669-2673),
+        not synchronized (issue #265, matching ``AMICATorchNG.shared_components``),
         so under the adaptive switcher (``pdftype=1``) a shared pair can still
         report different :meth:`get_pdftype` codes.
 
@@ -2210,6 +2488,7 @@ class AMICAMLXNG:
                 "AMICAMLXNG.shared_components() requires a fitted model; call "
                 "fit() first."
             )
+        self._check_usable("get the shared components")
         cl = np.array(self.comp_list)  # (n_channels, n_models)
         groups = []
         for col in np.unique(cl):
@@ -2237,7 +2516,7 @@ class AMICAMLXNG:
         # ... the schedule/counters a fit mutates ...
         "iteration", "ll_history", "final_ll_", "stop_reason",
         "n_newton_fallbacks", "n_kurt_done",
-        "lrate", "lrate_cap", "newtrate", "rholrate",
+        "lrate", "lrate_cap", "newtrate", "rholrate", "rholrate_cap",
         # ... the LLt stash and its materialized arrays (issue #157, epic
         # #278 Phase 3/#289) ...
         "_llt_logv", "_llt_ll", "_llt_lht", "_llt_lt",
@@ -2303,8 +2582,8 @@ class AMICAMLXNG:
         Records (index-aligned, always populated): ``restart_seeds_``,
         ``restart_lls_`` (NaN where a restart ended degenerate) and
         ``restart_stop_reasons_``; the winner is named in one INFO log line. A
-        degenerate restart (``nan_ll``/``singular_ll``/``nan_params``) is
-        excluded from selection but recorded; if every restart is degenerate the
+        degenerate restart (``nan_ll``/``singular_ll``/``nan_direction``/
+        ``nan_params``) is excluded from selection but recorded; if every restart is degenerate the
         model is left holding the last one.
 
         ``mir_step``, as :meth:`_fit_once`, is passed through to every
@@ -2389,6 +2668,25 @@ class AMICAMLXNG:
         """Run one fit (one initialization, one EM loop) -- what :meth:`fit`
         calls once per restart. ``X`` is ``(n_channels, n_samples)``.
 
+        Iteration order (issue #339), as in ``AMICATorchNG._fit_once``: each
+        iteration runs the E-step (its likelihood is appended to
+        ``ll_history``, and the step for ``A`` and its norm are built), then
+        the likelihood-decrease response and the stopping checks, and only
+        then, unless a check fired, the parameter update with the rates just
+        set. ``iteration`` is the 0-based index of the last iteration whose
+        E-step ran. A convergence stop (``"min_dll"``, ``"grad_norm"``,
+        ``"grad_norm_floor"``, ``"lrate_floor"``) takes no update on the
+        stopping iteration, so ``final_ll_`` (without a keep-best restore) is
+        exactly the log-likelihood of the returned parameters; a fit that runs
+        to ``max_iter`` takes the last iteration's update, so its
+        ``final_ll_ == ll_history[-1]`` is the likelihood one update before the
+        returned parameters, as in the reference. A ``"nan_direction"`` stop
+        (a non-finite step or gradient norm, caught before any check reads it)
+        and a ``"nan_params"`` stop (non-finite parameters right after an
+        update) both record their iteration's (finite) likelihood; a
+        ``"nan_ll"``/``"singular_ll"`` stop does not record the non-finite one.
+        All four are degenerate (``_DEGENERATE_STOP_REASONS``).
+
         Under ``share_comps``, if a merge fires on the LAST iteration, the
         returned ``A``/``W``/``comp_list`` are already post-merge but
         ``final_ll_`` still reports the pre-merge log-likelihood; see that
@@ -2398,50 +2696,45 @@ class AMICAMLXNG:
         ``LLt`` (``_llt_lht``/``_llt_lt``, written by
         :meth:`write_amica_output`) is the per-sample log-likelihood stashed
         by the E-step that produced ``final_ll_``, never a separate post-fit
-        forward pass -- so it is one M-step older than the returned ``W``/
-        ``A`` (Fortran's own convention; see ``docs/guides/amica-differences.md``'s
-        "one M-step older" section) unless the ``keep_best`` safeguard
-        restored an earlier iterate, in which case the restored stash and the
-        restored parameters come from the same point in the loop and there is
-        no staleness at all.
+        forward pass -- so after a fit that ran to ``max_iter`` it is one
+        M-step older than the returned ``W``/``A`` (Fortran's own convention;
+        see ``docs/guides/amica-differences.md``'s "one M-step older"
+        section). After a convergence stop, or a ``keep_best`` restore of an
+        earlier iterate, the stash and the returned parameters come from the
+        same point in the loop and there is no staleness at all.
 
         ``mir_step`` (issue #137, epic #278 Phase 3/#289), if > 0, computes
         MIR from the current ``W``/``sphere`` every ``mir_step`` iterations
         and appends it to ``mir_history_`` as ``(iteration, mir_nats,
         variance)``. ``0`` (default) disables the waypoints and leaves fit
-        behaviour byte-for-byte unchanged. ``mir_history_`` is a true
+        behavior byte-for-byte unchanged. ``mir_history_`` is a true
         trajectory like ``ll_history``: a ``keep_best`` restore does not
         rewrite it, so the fit-end MIR is ``self.mir(X)`` on the returned
         parameters, not ``mir_history_[-1]``. Not index-aligned with
         ``ll_history``: entry ``i`` is computed after iteration ``i``'s
         parameter update, while ``ll_history[i]`` is the likelihood of the
-        parameters before it, so the two are one update apart (issue #161).
-        There is no upfront PCA-reduction ``ValueError`` gate here, but this
-        is NOT a knowability limitation -- the fitted sphere's shape is
-        known immediately after :meth:`_preprocess` runs, a few lines below
-        this docstring, well before the iteration loop (let alone the first
-        waypoint) starts. It is PARITY with ``AMICATorchNG``'s own deliberate
-        scope: that backend's upfront gate (``_pca_reduction_requested()``)
-        only ever fires for an EXPLICIT ``pcakeep``/``pcadb`` request --
-        checked before ``_preprocess`` runs at all, purely so a bad explicit
-        config fails fast without paying for any preprocessing work -- and
-        never for AUTOMATIC ``mineig``/``mineig_rel``-detected reduction,
-        which torch itself only catches downstream, per-waypoint, inside its
-        own :meth:`mir` call (issue #283's fix targeted exactly that
-        automatic-detection gap, not the upfront-vs-downstream split, which
-        issue #300 chose to keep). This backend has no explicit
-        ``pcakeep``/``pcadb`` parameter at all, so there is nothing for an
-        upfront gate to check regardless of preprocessing order -- the
-        automatic-reduction case is caught the same way on both backends:
-        downstream, per-waypoint, inside :meth:`mir`'s own :meth:`_pca_reduced`
-        guard, whose ``ValueError`` is caught and logged here rather than
-        propagated.
+        parameters before it, so the two are one update apart (issue #161);
+        an iteration that ends the fit on a stop takes no update and records
+        no waypoint.
+        Incompatible with PCA reduction, same as :meth:`mir` itself, and
+        gated exactly as ``AMICATorchNG._fit_once`` gates it (issue #323):
+        an explicit reduction request, ``pcakeep < n_channels`` or any
+        ``pcadb`` while sphering (``pcakeep >= n_channels`` keeps every
+        dimension, and ``do_sphere=False`` never reduces, so neither is one),
+        raises ``ValueError`` up front, before :meth:`_preprocess`
+        runs, so a bad explicit config fails without paying for any
+        preprocessing. AUTOMATIC ``mineig``/``mineig_rel`` reduction is not a
+        request, and is caught the same way on both backends: downstream,
+        per-waypoint, inside :meth:`mir`'s own :meth:`_pca_reduced` guard,
+        whose ``ValueError`` is caught and logged here rather than propagated
+        (issue #283; issue #300 chose to keep that upfront-vs-downstream
+        split).
         """
         if X.ndim != 2:
             raise ValueError(f"X must be 2D (n_channels, n_samples), got {X.shape}")
-        if X.shape[0] != self.n_channels:
+        if X.shape[0] != self._n_input_channels:
             raise ValueError(
-                f"X has {X.shape[0]} channels, model expects {self.n_channels}"
+                f"X has {X.shape[0]} channels, model expects {self._n_input_channels}"
             )
         if mir_step < 0:
             raise ValueError(f"mir_step must be >= 0, got {mir_step}")
@@ -2454,6 +2747,23 @@ class AMICAMLXNG:
             # "did an E-step ever actually run", only "did stop_reason end
             # up degenerate". Reject up front instead.
             raise ValueError(f"max_iter must be >= 1, got {max_iter}")
+        # Same gate and message as AMICATorchNG._fit_once (issue #323). It
+        # sees only the explicit request; automatic reduction is caught per
+        # waypoint by mir()'s fitted-geometry guard below.
+        if mir_step > 0 and self._pca_reduction_requested(X.shape[0]):
+            raise ValueError(
+                "mir_step > 0 is incompatible with PCA reduction "
+                "(pcakeep/pcadb): the sphere is rank-deficient, so MIR's "
+                "log-Jacobian term is undefined. Rejected up front rather "
+                "than failing mid-fit at the first waypoint."
+            )
+
+        # Size every fit from the input geometry, as AMICATorchNG._fit_once
+        # does. _preprocess shrinks n_channels/n_comps to the kept rank, so
+        # without this a refit, or the second of n_restarts, would start from
+        # the previous fit's rank. A no-op for full-rank data.
+        self.n_channels = self._n_input_channels
+        self.n_comps = self.n_channels * self.n_models
 
         X_t = self._preprocess(X)
         n_total = X_t.shape[1]
@@ -2513,7 +2823,7 @@ class AMICAMLXNG:
             # keep_best defaults on, so a user enabling sharing/rejection
             # would otherwise silently lose the safeguard; surface it once.
             # do_reject checked first, matching AMICATorchNG's precedence
-            # exactly (torch_impl/core.py:2425) -- both can be true at once
+            # exactly (``AMICATorchNG._fit_once``) -- both can be true at once
             # (see test_mlx_reject.py's genuine-merge-plus-reject test), and
             # the two backends must report the same reason for the same
             # configuration.
@@ -2538,17 +2848,29 @@ class AMICAMLXNG:
             except ImportError:
                 pass
 
+        # One iteration follows the reference's main loop (amica15.f90:949-1142,
+        # issue #339; ``AMICATorchNG._fit_once``): the E-step with LL(iter), the
+        # step and its norm; the likelihood-decrease response and the stopping
+        # checks; an exit BEFORE any parameter moves if a check fired; otherwise
+        # the update with the rates the response just set, then the remaining
+        # hooks and rejection.
         for it in rng:
             self.iteration = it
             X_use = X_t[:, self.good_idx] if self.do_reject else X_t
             n_use = X_use.shape[1]
             acc = self._accumulate_blocks(X_use, stash_llt=True)
+            # The step and its norm come from the same E-step and are read by
+            # the checks below (the reference builds both in
+            # accum_updates_and_likelihood, amica15.f90:1749-1761). Built lazily
+            # here so the sync below materializes them with the likelihood, one
+            # sync as before; a non-finite likelihood simply discards them.
+            step = self._update_direction(acc)
 
             ll_arr = acc["ll"] / (n_use * self.n_channels)
             # The stash scatter (_accumulate_blocks) is part of the same lazy
             # graph as ll_arr, so materializing both here costs exactly the
             # one sync this line already paid -- not a second one (issue #157).
-            mx.eval(ll_arr, self._llt_logv, self._llt_ll)
+            mx.eval(ll_arr, self._llt_logv, self._llt_ll, step.dAk, self._nd_arr)
             ll = float(ll_arr.item())
             if not math.isfinite(ll):
                 self.stop_reason = "nan_ll" if math.isnan(ll) else "singular_ll"
@@ -2559,13 +2881,165 @@ class AMICAMLXNG:
 
             # Best-iterate safeguard (issue #51): remember the parameters that
             # produced this LL when it is the best seen, so a later overshoot
-            # does not leave the returned model below this peak.
+            # does not leave the returned model below this peak. Nothing has
+            # moved them since the E-step, so the snapshot pairs them with ll.
             if track_best and ll > best_ll:
                 best_ll = ll
                 best_snapshot = self._snapshot_params()
 
+            self.ll_history.append(ll)
+
+            # A non-finite step or norm would pass both gradient-norm checks
+            # below (NaN <= min_nd is False) and then be applied, so stop on it
+            # here, before any check reads it and before the update, with the
+            # parameters whose (finite) likelihood was just recorded (as
+            # AMICATorchNG does). Both were materialized with the likelihood.
+            nd_now = self._ndtmpsum
+            if not (
+                nd_now is not None
+                and math.isfinite(nd_now)
+                and bool(mx.all(mx.isfinite(step.dAk)).item())
+            ):
+                self.stop_reason = "nan_direction"
+                logger.warning(
+                    "Non-finite update direction (ndtmpsum %s) at iteration %d; "
+                    "stopping before the update.",
+                    nd_now,
+                    it,
+                )
+                break
+
+            # Learning-rate control (Fortran amica15.f90:1051-1097): anneal the
+            # working lrate (and the working rho rate) on an LL decrease; ratchet
+            # the ceilings after maxdecs persistent decreases. All of it runs
+            # before this iteration's update, as in the reference, so the update
+            # below already uses the new rates.
+            #
+            # The working rho rate is scaled on every decrease, as the
+            # reference's is (:1063), but every update of A resets it to its
+            # ceiling before rho moves (_update_parameters, amica15.f90:1806/
+            # 1813), so the scaling only reaches rho on an iteration on which A
+            # is held. It is not a monotone decay (the issue #195 collapse):
+            # nothing but the maxdecs ratchet lowers the ceiling.
+            #
+            # have_prev mirrors Fortran's outer ``if (iter > 1)``
+            # (amica15.f90:1051), which wraps the decrease branch AND the two
+            # stops below, so none of the three can fire on the first iteration.
+            #
+            # PRECEDENCE NOTE (mirroring the same note in AMICATorchNG.fit): the
+            # three blocks are independent -- none is gated on ``leave`` already
+            # being True from an earlier block this same iteration, matching
+            # Fortran's own structure of independent ``leave = .true.``
+            # assignments with no declared precedence. Whichever block runs LAST
+            # and finds its condition true wins the reported stop_reason, so with
+            # this source order the standalone grad_norm block always has final
+            # say; under the shipped use_grad_norm=True default that makes the
+            # decrease branch's "grad_norm_floor" unreachable as the FINAL reason
+            # (its condition is strictly narrower). Deliberately not restructured
+            # into an explicit precedence, to keep this a direct port of
+            # amica15.f90:1051-1098.
+            have_prev = len(self.ll_history) > 1
+            leave = False
+            if have_prev and ll < self.ll_history[-2]:
+                if self.lrate <= self.minlrate:
+                    logger.warning(
+                        "lrate floor (%g) reached at iter %d; stopping.",
+                        self.minlrate,
+                        it,
+                    )
+                    self.stop_reason = "lrate_floor"
+                    leave = True
+                elif self._ndtmpsum is not None and self._ndtmpsum <= self.min_nd:
+                    # Fortran amica15.f90:1058's ``.or. (ndtmpsum .le. min_nd)``
+                    # half of the decrease stop (issue #207 gap 3, #248 here):
+                    # the same per-iteration value use_grad_norm reads below, so
+                    # a run whose lrate oscillates instead of annealing still
+                    # stops instead of burning the whole budget.
+                    logger.warning(
+                        "gradient-norm floor (%g) reached at iter %d on a "
+                        "likelihood decrease; stopping.",
+                        self.min_nd,
+                        it,
+                    )
+                    self.stop_reason = "grad_norm_floor"
+                    leave = True
+                else:
+                    self.lrate *= self.lratefact
+                    self.rholrate *= self.rholratefact
+                    numdecs += 1
+                    if numdecs >= self.maxdecs:
+                        self.lrate_cap *= self.lratefact
+                        if schedule.past_newton_start(it, self.newt_start):
+                            self.rholrate_cap *= self.rholratefact
+                        if self.do_newton and schedule.past_newton_start(
+                            it, self.newt_start
+                        ):
+                            # The Newton ceiling ratchets on the same maxdecs
+                            # cadence as lrate_cap/rholrate_cap (Fortran
+                            # amica15.f90:1056-1077), so a run that keeps
+                            # overshooting at newtrate anneals instead of
+                            # oscillating there.
+                            self.newtrate *= self.lratefact
+                        numdecs = 0
+
+            # Small-likelihood-increase stop (Fortran amica15.f90:1078-1090,
+            # use_min_dll/min_dll/maxincs). Independent of the decrease branch
+            # above: it runs every iteration once have_prev, including iterations
+            # where the LL just decreased (a decrease is always "less than" a
+            # positive min_dll, so it also increments numincs there, matching
+            # Fortran exactly). numincs resets to 0 on any gain >= min_dll; stops
+            # only after MORE than maxincs *consecutive* small gains.
+            if have_prev and self.use_min_dll:
+                if ll - self.ll_history[-2] < self.min_dll:
+                    numincs += 1
+                    if numincs > self.maxincs:
+                        logger.warning(
+                            "likelihood increasing by less than %g for more than "
+                            "%d iterations; stopping at iter %d.",
+                            self.min_dll,
+                            self.maxincs,
+                            it,
+                        )
+                        self.stop_reason = "min_dll"
+                        leave = True
+                else:
+                    numincs = 0
+
+            # Weight-gradient-norm stop (Fortran amica15.f90:1091-1097,
+            # use_grad_norm/min_nd). Also independent of the decrease branch:
+            # this is the unconditional every-iteration check, as opposed to the
+            # decrease-gated grad_norm_floor above.
+            if (
+                have_prev
+                and self.use_grad_norm
+                and self._ndtmpsum is not None
+                and self._ndtmpsum <= self.min_nd
+            ):
+                logger.warning(
+                    "norm of weight gradient <= %g at iter %d; stopping.",
+                    self.min_nd,
+                    it,
+                )
+                self.stop_reason = "grad_norm"
+                leave = True
+
+            # Switching Newton on changes the step direction, so the decrease
+            # counter accumulated during the natural-gradient phase no longer
+            # describes the schedule now running: Fortran clears it on the
+            # switch-on iteration (amica15.f90:1099-1102,
+            # ``AMICATorchNG._fit_once``).
+            if schedule.newton_switches_on(self.do_newton, it, self.newt_start):
+                numdecs = 0
+
+            # Stop before this iteration's update, as the reference does
+            # (amica15.f90:1111, ahead of update_params at :1122): the returned
+            # parameters are the ones whose LL was just recorded.
+            if leave:
+                break
+
             # Whether rejection fires this iteration (Fortran schedule,
-            # amica15.f90:1142). Captured here, before _update_parameters, so
+            # amica15.f90:1136, with rejstart counted from 1 as the reference
+            # counts it; issue #335). Captured here, before _update_parameters, so
             # the statistic is the PRE-update per-sample log-likelihood --
             # matching Fortran's ordering (loglik is filled in
             # get_updates_and_likelihood, before update_params runs).
@@ -2581,16 +3055,8 @@ class AMICAMLXNG:
             # second pass in the first place. Fancy-indexed straight out of
             # the mx stash, so no host round-trip is needed to decide whether
             # to reject.
-            will_reject = (
-                self.do_reject
-                and self.maxrej > 0
-                and (
-                    it == self.rejstart
-                    or (
-                        max(1, it - self.rejstart) % self.rejint == 0
-                        and self.numrej < self.maxrej
-                    )
-                )
+            will_reject = schedule.rejection_due(
+                self.do_reject, it, self.rejstart, self.rejint, self.numrej, self.maxrej
             )
             if will_reject:
                 assert self.good_idx is not None and self._llt_ll is not None
@@ -2598,14 +3064,13 @@ class AMICAMLXNG:
             else:
                 reject_ll = None
 
-            self._update_parameters(acc, n_use)
+            self._update_parameters(acc, n_use, step)
             # One eval per iteration bounds the lazy graph to a single iteration's
             # worth of ops (the updated params feed the next accumulate). gm/c are
             # included so their dependency chain is materialized each iteration too
             # (c depends on the prior iteration's c), not left to grow unbounded.
-            # _nd_arr (the grad-norm stops' input) rides along here rather than
-            # being materialized inside _update_parameters, so reading it below
-            # costs no extra sync.
+            # _nd_arr (the grad-norm stops' input) was materialized with the
+            # likelihood above, before the checks read it.
             mx.eval(
                 self.A,
                 self.W,
@@ -2615,7 +3080,6 @@ class AMICAMLXNG:
                 self.rho,
                 self.gm,
                 self.c,
-                self._nd_arr,
                 self._logdet_W,
             )
 
@@ -2625,10 +3089,10 @@ class AMICAMLXNG:
             # blow-up would otherwise complete as max_iter with silently NaN
             # parameters (the torch backend has state_dict as a backstop; the
             # MLX backend does not, so guard in fit()). Params are already
-            # materialized by the mx.eval above, so this is a cheap read.
-            # _nd_arr is included as defense in depth: a non-finite gradient norm
-            # silently disables both grad-norm stops (NaN <= min_nd is False), so
-            # it must not be the one quantity nothing checks.
+            # materialized by the mx.eval above, so this is a cheap read. The
+            # gradient norm is not among them: a non-finite one already stopped
+            # the fit before the update ("nan_direction", above). AMICATorchNG
+            # and the NumPy backend run the same check with the same message.
             checked = {
                 "A": self.A,
                 "mu": self.mu,
@@ -2637,7 +3101,6 @@ class AMICAMLXNG:
                 "rho": self.rho,
                 "gm": self.gm,
                 "c": self.c,
-                "ndtmpsum": self._nd_arr,
                 # W and its log-determinant are DERIVED from A by
                 # mx.linalg.inv/slogdet, so a non-finite value can reach the
                 # caller while A itself is still finite -- and nothing else
@@ -2667,10 +3130,8 @@ class AMICAMLXNG:
                 params_finite = params_finite & mx.all(mx.isfinite(value))
             if not bool(params_finite.item()):
                 # Name the offenders. Everything here is already materialized, so
-                # the per-tensor reads add no mid-graph sync -- this is the MLX
-                # stand-in for AMICATorchNG's inline mu/beta/alpha canary
-                # (torch_impl/core.py:1461-1474), which MLX cannot afford inside
-                # _update_parameters because it would sync the lazy graph.
+                # the per-tensor reads add no mid-graph sync (a check inside
+                # _update_parameters would sync the lazy graph mid-update).
                 bad = [
                     name
                     for name, value in checked.items()
@@ -2686,12 +3147,12 @@ class AMICAMLXNG:
                 break
 
             # Extended-Infomax adaptive PDF switch (Fortran do_choose_pdfs,
-            # AMICATorchNG core.py:2030-2042). Runs on the
+            # ``AMICATorchNG._fit_once``). Runs on the
             # kurt_start/num_kurt/kurt_int schedule using the just-updated W;
             # the new per-source families take effect from the next E-step.
-            # itf is the Fortran-style 1-indexed iteration. num_kurt=0 disables
-            # switching (the family stays at its pdftype=1 super-Gaussian
-            # init). Placed BEFORE the sharing hook below, matching
+            # kurt_start counts from 1, like every reference schedule. num_kurt=0
+            # disables switching (the family stays at its pdftype=1
+            # super-Gaussian init). Placed BEFORE the sharing hook below, matching
             # AMICATorchNG's source order -- component sharing does not
             # synchronize pdtype across merged columns (see
             # shared_components()), so running the switch first means a
@@ -2702,37 +3163,28 @@ class AMICAMLXNG:
             # x pdftype=1 has no bit-exact oracle either way to pin against), so
             # a future accidental swap would not be caught by the suite.
             if self.do_choose_pdfs and self.n_kurt_done < self.num_kurt:
-                itf = it + 1
-                if (
-                    itf >= self.kurt_start
-                    and (itf - self.kurt_start) % self.kurt_int == 0
-                ):
+                if schedule.periodic_due(it, self.kurt_start, self.kurt_int):
                     self._choose_pdfs(X_use)
                     self.n_kurt_done += 1
 
             # Component sharing (Fortran identify_shared_comps schedule,
             # amica15.f90:1856): once per share_iter cycle from share_start,
-            # merge near-collinear mixing columns across models using the
+            # merge near-collinear components across models using the
             # just-updated A. Fortran runs identify_shared_comps BEFORE
             # get_unmixing_matrices (amica15.f90:1858,1863), so rebuild W from
             # the merged comp_list -- otherwise the next E-step would read a
             # stale W (pre-merge comp_list) while indexing the densities by the
             # merged comp_list. No-op when share_comps is off or n_models == 1.
             #
-            # This runs AFTER ``ll`` (this iteration's LL) was captured above,
+            # This runs AFTER ``ll`` (this iteration's LL) was recorded above,
             # so a merge on the final iteration lands in the returned
-            # A/W/comp_list but not in the ``ll_history``/``final_ll_`` value
-            # appended just below -- see final_ll_'s comment (issue #269).
-            if self.share_comps:
-                itf = it + 1
-                if (
-                    itf >= self.share_start
-                    and (itf - self.share_start) % self.share_iter == 0
-                ):
-                    self._identify_shared_comps()
-                    self._update_unmixing_matrices()
-
-            self.ll_history.append(ll)
+            # A/W/comp_list but not in ``ll_history``/``final_ll_`` -- see
+            # final_ll_'s comment (issue #269).
+            if self.share_comps and schedule.periodic_due(
+                it, self.share_start, self.share_iter
+            ):
+                self._identify_shared_comps()
+                self._update_unmixing_matrices()
 
             # MIR waypoint (issue #137), following AMICATorchNG's idiom.
             # Computed from the CURRENT W/sphere (just rebuilt above by
@@ -2788,131 +3240,8 @@ class AMICAMLXNG:
                 else:
                     self.mir_history_.append((it, mir_nats, mir_var))
 
-            # Learning-rate control (Fortran amica17.f90:1062-1108): anneal on an
-            # LL decrease; ratchet the ceilings after maxdecs persistent decreases.
-            #
-            # rholrate is a maxdecs-ratcheted CEILING, not a per-decrease-annealed
-            # working rate. Fortran resets rholrate=rholrate0 every iteration before
-            # the rho update (amica15.f90:1806/1813) and only tightens the rholrate0
-            # ceiling at maxdecs (amica15.f90:1068, gated on iter > newt_start), so
-            # its per-decrease rholrate*=rholratefact (:1045) never reaches the rho
-            # update. rho has no ramp, so self.rholrate carries that ceiling directly
-            # (reset to rholrate0 at fit start, nothing re-inflates it) and must
-            # ratchet ONLY at maxdecs. The previous per-decrease decay collapsed the
-            # rho rate to ~1e-5 within a few hundred iterations and froze rho at a
-            # stale shape (issue #195, mirroring the torch/numpy fix in #193/#194).
-            #
-            # have_prev mirrors Fortran's outer ``if (iter > 1)``
-            # (amica15.f90:1051), which wraps the decrease branch AND the two
-            # stops below, so none of the three can fire on the first iteration.
-            #
-            # PRECEDENCE NOTE (mirroring the same note in AMICATorchNG.fit): the
-            # three blocks are independent -- none is gated on ``leave`` already
-            # being True from an earlier block this same iteration, matching
-            # Fortran's own structure of independent ``leave = .true.``
-            # assignments with no declared precedence. Whichever block runs LAST
-            # and finds its condition true wins the reported stop_reason, so with
-            # this source order the standalone grad_norm block always has final
-            # say; under the shipped use_grad_norm=True default that makes the
-            # decrease branch's "grad_norm_floor" unreachable as the FINAL reason
-            # (its condition is strictly narrower). Deliberately not restructured
-            # into an explicit precedence, to keep this a direct port of
-            # amica15.f90:1051-1098.
-            have_prev = len(self.ll_history) > 1
-            leave = False
-            if have_prev and ll < self.ll_history[-2]:
-                if self.lrate <= self.minlrate:
-                    logger.warning(
-                        "lrate floor (%g) reached at iter %d; stopping.",
-                        self.minlrate,
-                        it,
-                    )
-                    self.stop_reason = "lrate_floor"
-                    leave = True
-                elif self._ndtmpsum is not None and self._ndtmpsum <= self.min_nd:
-                    # Fortran amica15.f90:1058's ``.or. (ndtmpsum .le. min_nd)``
-                    # half of the decrease stop (issue #207 gap 3, #248 here):
-                    # the same per-iteration value use_grad_norm reads below, so
-                    # a run whose lrate oscillates instead of annealing still
-                    # stops instead of burning the whole budget.
-                    logger.warning(
-                        "gradient-norm floor (%g) reached at iter %d on a "
-                        "likelihood decrease; stopping.",
-                        self.min_nd,
-                        it,
-                    )
-                    self.stop_reason = "grad_norm_floor"
-                    leave = True
-                else:
-                    self.lrate *= self.lratefact
-                    numdecs += 1
-                    if numdecs >= self.maxdecs:
-                        self.lrate_cap *= self.lratefact
-                        if it > self.newt_start:
-                            self.rholrate *= self.rholratefact
-                        if self.do_newton and it > self.newt_start:
-                            # The Newton ceiling ratchets on the same maxdecs
-                            # cadence as lrate_cap/rholrate (Fortran
-                            # amica15.f90:1056-1077), so a run that keeps
-                            # overshooting at newtrate anneals instead of
-                            # oscillating there.
-                            self.newtrate *= self.lratefact
-                        numdecs = 0
-
-            # Small-likelihood-increase stop (Fortran amica15.f90:1078-1090,
-            # use_min_dll/min_dll/maxincs). Independent of the decrease branch
-            # above: it runs every iteration once have_prev, including iterations
-            # where the LL just decreased (a decrease is always "less than" a
-            # positive min_dll, so it also increments numincs there, matching
-            # Fortran exactly). numincs resets to 0 on any gain >= min_dll; stops
-            # only after MORE than maxincs *consecutive* small gains.
-            if have_prev and self.use_min_dll:
-                if ll - self.ll_history[-2] < self.min_dll:
-                    numincs += 1
-                    if numincs > self.maxincs:
-                        logger.warning(
-                            "likelihood increasing by less than %g for more than "
-                            "%d iterations; stopping at iter %d.",
-                            self.min_dll,
-                            self.maxincs,
-                            it,
-                        )
-                        self.stop_reason = "min_dll"
-                        leave = True
-                else:
-                    numincs = 0
-
-            # Weight-gradient-norm stop (Fortran amica15.f90:1091-1097,
-            # use_grad_norm/min_nd). Also independent of the decrease branch:
-            # this is the unconditional every-iteration check, as opposed to the
-            # decrease-gated grad_norm_floor above.
-            if (
-                have_prev
-                and self.use_grad_norm
-                and self._ndtmpsum is not None
-                and self._ndtmpsum <= self.min_nd
-            ):
-                logger.warning(
-                    "norm of weight gradient <= %g at iter %d; stopping.",
-                    self.min_nd,
-                    it,
-                )
-                self.stop_reason = "grad_norm"
-                leave = True
-
-            # Switching Newton on changes the step direction, so the decrease
-            # counter accumulated during the natural-gradient phase no longer
-            # describes the schedule now running: Fortran clears it on the
-            # switch-on iteration (amica15.f90:1099-1102, AMICATorchNG
-            # core.py:2218-2219).
-            if self.do_newton and it == self.newt_start:
-                numdecs = 0
-
-            if leave:
-                break
-
             # Outlier rejection, after the parameter update (Fortran order,
-            # amica15.f90:1141-1146) but using the pre-update per-sample LL
+            # amica15.f90:1136-1140) but using the pre-update per-sample LL
             # captured above.
             if will_reject:
                 assert reject_ll is not None
@@ -2983,7 +3312,7 @@ class AMICAMLXNG:
 
     def transform(self, X: np.ndarray, model_idx: int = 0) -> np.ndarray:
         """Apply the learned unmixing matrix to (new) data (issue #287, port of
-        ``AMICATorchNG.transform``, torch_impl/core.py:2928-2946).
+        ``AMICATorchNG.transform``).
 
         Sources are ``S = W[model_idx]^T @ (sphere @ (X - mean) - c[:,
         model_idx])`` (issue #24 transpose convention, issue #27 per-model
@@ -3004,6 +3333,8 @@ class AMICAMLXNG:
                 "AMICAMLXNG.transform() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("transform")
+        self._check_input_shape(X)
         X_arr = mx.array(np.ascontiguousarray(X).astype(np.float32))
         X_t = self.sphere @ (X_arr - self.mean)
         S = self.W[model_idx].T @ (X_t - self.c[:, model_idx : model_idx + 1])
@@ -3014,7 +3345,7 @@ class AMICAMLXNG:
     # ------------------------------------------------------------------
     def _check_model_idx(self, model_idx: int) -> None:
         """Validate a model index against the fitted ``n_models`` (AMICATorchNG
-        ``_check_model_idx``, core.py:2911-2926). Raises a clear ``ValueError``
+        ``_check_model_idx``). Raises a clear ``ValueError``
         (rejecting negatives, which MLX's negative indexing would otherwise turn
         into a silent wrong-model result) instead of an opaque array error."""
         if not isinstance(model_idx, (int, np.integer)):
@@ -3027,9 +3358,75 @@ class AMICAMLXNG:
                 f"fit (valid: 0..{self.n_models - 1})."
             )
 
+    def _nonfinite_params(self) -> list:
+        """Names of :attr:`_PARAM_ARRAYS` currently holding a non-finite
+        value (matching the legacy NumPy backend's own
+        ``_nonfinite_params``; issue #306 cross-backend review; port of
+        ``AMICATorchNG._nonfinite_params``). Parameters not yet allocated
+        (``None``, e.g. a partially initialized instance) are skipped rather
+        than treated as bad.
+
+        Single-sync fast path: every parameter's ``isfinite().all()`` is
+        stacked into one small array and reduced with exactly one
+        ``.item()`` MLX graph evaluation, instead of one evaluation per
+        parameter -- MLX is lazy, so each ``bool(mx.array)``/``.item()``
+        forces the whole pending graph to materialize on the accelerator,
+        making the naive per-parameter loop essentially the entire cost of a
+        small ``transform()`` call (measured ~2.2 ms across a 12-array
+        sweep, PR #329 review). The per-parameter breakdown -- one further,
+        small evaluation -- is only computed once that reduction is already
+        ``False``.
+        """
+        names = [name for name in self._PARAM_ARRAYS if getattr(self, name) is not None]
+        if not names:
+            return []
+        flags = mx.stack([mx.all(mx.isfinite(getattr(self, name))) for name in names])
+        if bool(mx.all(flags).item()):
+            return []
+        bad = (~flags).tolist()
+        return [name for name, is_bad in zip(names, bad) if is_bad]
+
+    def _check_usable(self, action: str) -> None:
+        """Refuse to serve output from a degenerate fit (issue #306; port of
+        ``AMICATorchNG._check_usable``).
+
+        Callers first check their own unfitted marker(s) and raise the
+        existing ``requires a fitted model`` ``RuntimeError`` (unchanged);
+        this assumes a fit has actually run and adds the two layers
+        :meth:`state_dict`/:meth:`write_amica_output` already use beyond
+        that: the ``stop_reason`` gate, then a defense-in-depth isfinite
+        sweep via :meth:`_nonfinite_params`. Mirrors the
+        :class:`~pamica.AMICA` wrapper's ``_check_usable`` (issue #50) for
+        callers using this backend directly.
+        """
+        if self.stop_reason in self._DEGENERATE_STOP_REASONS:
+            raise RuntimeError(
+                f"Refusing to {action}: fit ended degenerate (stop_reason="
+                f"{self.stop_reason!r}), so the model holds non-finite "
+                f"parameters and would produce NaN output. Lower lrate, "
+                f"disable Newton, or check data conditioning, then refit."
+            )
+        nonfinite = self._nonfinite_params()
+        if nonfinite:
+            raise RuntimeError(
+                f"Refusing to {action}: parameters {nonfinite} hold "
+                f"non-finite values (stop_reason={self.stop_reason!r})."
+            )
+
+    def _check_input_shape(self, X: np.ndarray) -> None:
+        """Validate a data array against the fitted input channel count,
+        mirroring :meth:`fit`'s own ``X`` validation (issue #306; port of
+        ``AMICATorchNG._check_input_shape``)."""
+        if X.ndim != 2:
+            raise ValueError(f"X must be 2D (n_channels, n_samples), got {X.shape}")
+        if X.shape[0] != self.n_channels_in:
+            raise ValueError(
+                f"X has {X.shape[0]} channels, model expects {self.n_channels_in}"
+            )
+
     def get_pdftype(self, model_idx: int = 0) -> np.ndarray:
         """Per-source density-family code for model ``model_idx`` (AMICATorchNG
-        ``get_pdftype``, core.py:2609-2627).
+        ``get_pdftype``).
 
         One integer per source component (0-4; 0 generalized Gaussian, 1
         super-Gaussian cosh, 2 Gaussian, 3 logistic, 4 sub-Gaussian cosh). All
@@ -3047,6 +3444,7 @@ class AMICAMLXNG:
                 "AMICAMLXNG.get_pdftype() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the density family")
         codes = np.array(self.pdtype[:, model_idx], dtype=np.int64)
         # Silent-failure guard: an out-of-range stored code would otherwise
         # fall through the _score/_log_pdf mx.where chain to a stale GG
@@ -3061,38 +3459,42 @@ class AMICAMLXNG:
         return codes
 
     def get_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
-        """True mixing matrix ``A_fort`` = (stored A)^T (issue #24 convention;
-        issue #287 port of ``AMICATorchNG.get_mixing_matrix``, torch_impl/
-        core.py:2948-2956)."""
+        """True mixing matrix of model ``model_idx``: the reference's
+        ``A(:, comp_list(:, h))``, i.e. that model's component rows of the
+        stored ``A`` transposed (issue #24 convention; issue #334 layout;
+        issue #287 port of ``AMICATorchNG.get_mixing_matrix``)."""
         if self.A is None or self.comp_list is None:
             raise RuntimeError(
                 "AMICAMLXNG.get_mixing_matrix() requires a fitted model; call "
                 "fit() first."
             )
         self._check_model_idx(model_idx)
-        return np.array(self.A[:, self.comp_list[:, model_idx]].T)
+        self._check_usable("get the mixing matrix")
+        return np.array(self.A[self.comp_list[:, model_idx], :].T)
 
     @property
     def n_channels_in(self) -> int:
         """Input channel count, i.e. the width of the sphere (issue #287 port
-        of ``AMICATorchNG.n_channels_in``, torch_impl/core.py:2958-2967).
+        of ``AMICATorchNG.n_channels_in``).
 
         Differs from ``n_channels`` only when rank reduction shrank the model
         to the detected numerical rank (issue #223); equal to it for
         full-rank data and before :meth:`fit`/:meth:`from_state_dict`.
-        Derived from the sphere (rather than stored) so it cannot drift from
-        the sphere it describes -- including on a reloaded rank-reduced
-        model, whose ``sphere`` width is exactly this value (see
-        :meth:`_load_params`'s shape guard).
+        Read off the sphere whenever one exists, so it cannot drift from the
+        sphere it describes, including on a reloaded rank-reduced model,
+        whose ``sphere`` width is exactly this value (see
+        :meth:`_load_params`'s shape guard). Before the first fit it is the
+        constructor's channel count, the width :meth:`fit` accepts.
         """
-        return self.n_channels if self.sphere is None else int(self.sphere.shape[1])
+        if self.sphere is None:
+            return self._n_input_channels
+        return int(self.sphere.shape[1])
 
     def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """Mixing matrix mapped back to input-channel space (issue #287 port of
-        ``AMICATorchNG.get_sensor_mixing_matrix``, torch_impl/core.py:
-        2969-2991): ``pinv(sphere) @ A``, via :meth:`_pinv_sphere` -- the only
-        correct back-map when rank reduction has left the sphere non-square
-        (issue #223).
+        ``AMICATorchNG.get_sensor_mixing_matrix``): ``pinv(sphere) @ A``, via
+        :meth:`_pinv_sphere` -- the only correct back-map when rank reduction has left
+        the sphere non-square (issue #223).
         """
         if self.sphere is None:
             raise RuntimeError(
@@ -3105,27 +3507,84 @@ class AMICAMLXNG:
                 "model; call fit() first."
             )
         self._check_model_idx(model_idx)
-        A = np.array(self.A[:, self.comp_list[:, model_idx]].T, dtype=np.float64)
+        self._check_usable("get the sensor mixing matrix")
+        A = np.array(self.A[self.comp_list[:, model_idx], :].T, dtype=np.float64)
         return self._pinv_sphere() @ A
 
     def get_unmixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """True unmixing matrix ``W_fort`` = (stored W)^T (issue #24
-        convention; issue #287 port of ``AMICATorchNG.get_unmixing_matrix``,
-        torch_impl/core.py:2993-3001). MLX's ``W`` is model-major (``(n_models,
-        n, n)``), so the per-model slice is ``W[model_idx]`` rather than
-        torch's ``W[:, :, model_idx]``."""
+        convention; issue #287 port of ``AMICATorchNG.get_unmixing_matrix``). MLX's
+        ``W`` is model-major (``(n_models, n, n)``), so the per-model slice is
+        ``W[model_idx]`` rather than torch's ``W[:, :, model_idx]``."""
         if self.W is None:
             raise RuntimeError(
                 "AMICAMLXNG.get_unmixing_matrix() requires a fitted model; "
                 "call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("get the unmixing matrix")
         return np.array(self.W[model_idx].T)
+
+    # ------------------------------------------------------------------
+    # Preprocessing accessors (issue #313). Same names, shapes and float64
+    # return type as AMICATorchNG's, so a consumer that composes the transform
+    # itself (the MNE export, pamica.mne_compat) reads every backend alike.
+    # ------------------------------------------------------------------
+    def get_sphere(self) -> np.ndarray:
+        """Fitted sphering matrix, shape ``(n_channels, n_channels_in)``
+        (port of ``AMICATorchNG.get_sphere``).
+
+        Square for a full-rank fit and ``(n_kept, n_channels_in)`` after rank
+        reduction (issue #223). Read from ``_sphere_np``, the float64 host
+        copy: after :meth:`fit` it is the float64 sphere :meth:`_preprocess`
+        computed (the GPU computes with its float32 cast, which agrees to
+        float32 rounding), and after :meth:`load` it is the persisted float32
+        sphere upcast (see :meth:`_load_params`). Returned as an independent
+        float64 copy.
+        """
+        if self.sphere is None or self._sphere_np is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_sphere() requires a fitted model; call fit() first."
+            )
+        self._check_usable("get the sphere")
+        return np.array(self._sphere_np, dtype=np.float64)
+
+    def get_mean(self) -> np.ndarray:
+        """Per-channel mean removed before sphering, shape ``(n_channels_in,)``
+        (port of ``AMICATorchNG.get_mean``).
+
+        All zeros for a ``do_mean=False`` fit. The stored mean is float32
+        (this backend's only precision); it is returned as an independent
+        float64 copy of those float32 values.
+        """
+        if self.mean is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_mean() requires a fitted model; call fit() first."
+            )
+        self._check_usable("get the mean")
+        return np.array(self.mean, dtype=np.float64).ravel()
+
+    def get_model_center(self, model_idx: int = 0) -> np.ndarray:
+        """Model ``model_idx``'s center ``c`` in sphered space, shape
+        ``(n_channels,)`` (port of ``AMICATorchNG.get_model_center``).
+
+        The per-model offset :meth:`transform` subtracts after sphering
+        (issue #27). Identically zero for a single-model fit, since the ``c`` update
+        is gated to ``n_models > 1``. Returned as an independent float64 copy
+        of the stored float32 values.
+        """
+        if self.c is None:
+            raise RuntimeError(
+                "AMICAMLXNG.get_model_center() requires a fitted model; call "
+                "fit() first."
+            )
+        self._check_model_idx(model_idx)
+        self._check_usable("get the model center")
+        return np.array(self.c[:, int(model_idx)], dtype=np.float64)
 
     def get_rho(self, model_idx: int = 0) -> np.ndarray:
         """Generalized-Gaussian shape parameter ``rho`` for model
-        ``model_idx`` (issue #287 port of ``AMICATorchNG.get_rho``, torch_impl/
-        core.py:3231-3259; issue #142).
+        ``model_idx`` (issue #287 port of ``AMICATorchNG.get_rho``; issue #142).
 
         One value per (mixture component, source): ``rho == 2`` is Gaussian-
         shaped, ``rho == 1`` Laplacian, ``rho < 1`` heavier-tailed. Only the
@@ -3142,28 +3601,24 @@ class AMICAMLXNG:
                 "AMICAMLXNG.get_rho() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
-        # Defense-in-depth, matching state_dict()'s isfinite sweep: a
-        # degenerate multi-model fit can leave one model's rho non-finite
-        # without the aggregate LL tripping nan_ll. Refuse rather than return
-        # a silent NaN.
-        if not bool(mx.all(mx.isfinite(self.rho)).item()):
-            raise RuntimeError(
-                "AMICAMLXNG.get_rho(): rho holds non-finite values (a "
-                "degenerate fit); inspect stop_reason and refit."
-            )
+        # Folded into the shared guard (issue #306): a degenerate multi-model
+        # fit can leave one model's rho non-finite without the aggregate LL
+        # tripping a _DEGENERATE_STOP_REASONS marker, which _check_usable's
+        # defense-in-depth isfinite sweep over _PARAM_ARRAYS (rho included)
+        # still catches. Refuse rather than return a silent NaN.
+        self._check_usable("get rho")
         idx = self.comp_list[:, model_idx]
         return np.array(self.rho[:, idx])
 
     # ------------------------------------------------------------------
     # EEGLAB drop-in output (issue #92; epic #278 polish port of
-    # AMICATorchNG.variance_order, torch_impl/core.py:3223-3283)
+    # AMICATorchNG.variance_order)
     # ------------------------------------------------------------------
     def variance_order(
         self, model_idx: int = 0, return_svar: bool = False
     ) -> np.ndarray | tuple:
         """EEGLAB back-projected-variance component order (IC1 = highest
-        variance) (port of ``AMICATorchNG.variance_order``, torch_impl/
-        core.py:3223-3283).
+        variance) (port of ``AMICATorchNG.variance_order``).
 
         Returns the source indices sorted by descending back-projected
         variance, the ordering EEGLAB's ``loadmodout15.m`` applies on load
@@ -3209,6 +3664,7 @@ class AMICAMLXNG:
                 "AMICAMLXNG.variance_order() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("compute the variance order")
         cl = self.comp_list[:, model_idx]
         alpha = np.array(self.alpha[:, cl], dtype=np.float64)
         mu = np.array(self.mu[:, cl], dtype=np.float64)
@@ -3232,21 +3688,36 @@ class AMICAMLXNG:
 
     # ------------------------------------------------------------------
     # MIR/PMI diagnostics (issue #137; epic #278 Phase 3/#289 port of
-    # AMICATorchNG.mir/pmi, torch_impl/core.py:2929-3036)
+    # AMICATorchNG.mir/pmi)
     # ------------------------------------------------------------------
+    def _pca_reduction_requested(self, n_channels: int) -> bool:
+        """Whether the explicit ``pcakeep``/``pcadb`` asks to fit fewer than
+        ``n_channels`` dimensions (port of
+        ``AMICATorchNG._pca_reduction_requested``;
+        both delegate to :func:`pamica.rank.pca_reduction_requested`,
+        issue #323).
+
+        ``n_channels`` is the channel count of the data being fitted, not
+        ``self.n_channels``, which :meth:`_preprocess` shrinks to the kept
+        rank. Config-only, not geometry: used solely by :meth:`_fit_once`'s
+        upfront ``mir_step`` gate, which runs before this fit's sphere exists,
+        so AUTOMATIC ``mineig``/``mineig_rel`` reduction is not knowable here.
+        Use :meth:`_pca_reduced` wherever a fitted sphere already exists.
+        """
+        return pca_reduction_requested(
+            self.pcakeep, self.pcadb, n_channels, self.do_sphere
+        )
+
     def _pca_reduced(self) -> bool:
         """Whether the fitted sphere is rank-reduced (non-square) -- the #300
-        fitted-geometry guard (port of ``AMICATorchNG._pca_reduced``,
-        torch_impl/core.py:2942-2956).
+        fitted-geometry guard (port of ``AMICATorchNG._pca_reduced``).
 
-        Derived from the fitted geometry -- ``sphere.shape[0] !=
-        sphere.shape[1]`` -- so it also catches rank reduction from
-        AUTOMATIC numerical-rank detection (``mineig``/``mineig_rel``), not
-        just an explicit reduction request. Unlike ``AMICATorchNG``, this
-        backend has no explicit ``pcakeep``/``pcadb`` constructor parameter
-        (only automatic ``mineig``/``mineig_rel`` reduction), so there is no
-        separate config-only ``_pca_reduction_requested()`` check to make
-        redundant here: this geometry check is the only PCA guard MIR needs.
+        Derived from the fitted geometry (``sphere.shape[0] !=
+        sphere.shape[1]``), so it catches rank reduction from an explicit
+        ``pcakeep``/``pcadb`` and from AUTOMATIC numerical-rank detection
+        (``mineig``/``mineig_rel``) alike. The config-only
+        :meth:`_pca_reduction_requested` complements it for the upfront
+        ``mir_step`` gate, which runs before this fit's sphere exists.
         ``False`` before :meth:`fit` (``sphere`` is ``None``) and for a
         full-rank fit.
         """
@@ -3258,7 +3729,7 @@ class AMICAMLXNG:
         """Mutual Information Reduction (issue #137) of this model's unmixing
         on ``X``.
 
-        Composes the full raw-data-to-sources transform ``W_fort @ sphere``
+        Composes the linear part of the raw-data-to-sources transform, ``W_fort @ sphere``
         -- i.e. ``get_unmixing_matrix(model_idx) @ sphere`` -- and delegates
         to :func:`pamica.metrics.mir`. MIR is shift-invariant, so the
         data-space mean/``c`` centering :meth:`transform` applies is
@@ -3283,11 +3754,13 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted.
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306).
         ValueError
-            If the fitted sphere is rank-reduced (non-square): whether from
-            automatic ``mineig``/``mineig_rel`` numerical-rank detection (the
-            only source of reduction on this backend), the sphere is
+            If ``X`` is not a 2D array of the fitted input channel count, or
+            if the fitted sphere is rank-reduced (non-square): whether from
+            explicit ``pcakeep``/``pcadb`` or from automatic ``mineig``/
+            ``mineig_rel`` numerical-rank detection, the sphere is
             rank-deficient, so MIR's log-Jacobian term is undefined
             (issue #283/#300).
         """
@@ -3296,14 +3769,16 @@ class AMICAMLXNG:
                 "AMICAMLXNG.mir() requires a fitted model; call fit() first."
             )
         self._check_model_idx(model_idx)
+        self._check_usable("compute MIR")
+        self._check_input_shape(X)
         if self._pca_reduced():
             raise ValueError(
                 "mir() is incompatible with PCA reduction: the fitted "
                 f"sphere is rank-deficient ({self.n_channels} of "
-                f"{self.n_channels_in} channels kept) from automatic "
-                "mineig/mineig_rel numerical-rank detection, so MIR's "
-                "log-Jacobian term is undefined for the resulting "
-                "non-square/non-invertible unmixing."
+                f"{self.n_channels_in} channels kept), whether from explicit "
+                "pcakeep/pcadb or automatic mineig/mineig_rel numerical-rank "
+                "detection, so MIR's log-Jacobian term is undefined for the "
+                "resulting non-square/non-invertible unmixing."
             )
         unmixing = np.array(self.W[model_idx].T @ self.sphere)
         return mir_metric(unmixing, X, nbins)
@@ -3333,14 +3808,17 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted (via :meth:`transform`).
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306), both via :meth:`transform`.
+        ValueError
+            If ``X`` is not a 2D array of the fitted input channel count
+            (via :meth:`transform`).
         """
         return pairwise_mi(self.transform(X, model_idx=model_idx), nbins)
 
     # ------------------------------------------------------------------
     # Multi-model posterior (issue #141; epic #278 Phase 3/#289 port of
-    # AMICATorchNG.model_loglik/model_probability, torch_impl/core.py:
-    # 3041-3132)
+    # AMICATorchNG.model_loglik/model_probability)
     # ------------------------------------------------------------------
     def model_loglik(self, X: np.ndarray) -> np.ndarray:
         """Per-model, per-sample log-likelihood ``Lht`` on (new) data.
@@ -3373,14 +3851,30 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted.
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306).
         ValueError
-            If ``X`` contains non-finite (NaN/Inf) values.
+            If ``X`` is not a 2D array of the fitted input channel count, or
+            contains non-finite (NaN/Inf) values.
         """
         if self.sphere is None or self.mean is None or self.W is None:
             raise RuntimeError(
                 "AMICAMLXNG.model_loglik() requires a fitted model; call fit() first."
             )
+        self._check_usable("compute the model log-likelihood")
+        self._check_input_shape(X)
+        return self._model_loglik_unchecked(X)
+
+    def _model_loglik_unchecked(self, X: np.ndarray) -> np.ndarray:
+        """Core ``Lht`` computation for :meth:`model_loglik`, with no
+        degenerate-fit guard or shape validation of its own (issue #306
+        PR #329 review; port of ``AMICATorchNG._model_loglik_unchecked``):
+        :meth:`model_loglik` and :meth:`model_probability` each do their own
+        single guard + shape check, with their own action wording, then
+        both call this -- so the guard no longer runs twice on a
+        :meth:`model_probability` call, which used to run its own
+        ``_check_usable`` and then :meth:`model_loglik`'s (measured ~2x the
+        cost of a single guard evaluation on this backend)."""
         X = np.ascontiguousarray(X)
         if not np.isfinite(X).all():
             bad = np.flatnonzero(~np.isfinite(X).all(axis=1))
@@ -3418,28 +3912,36 @@ class AMICAMLXNG:
         Raises
         ------
         RuntimeError
-            If the model is unfitted.
+            If the model is unfitted, or the fit ended degenerate
+            (issue #306).
         ValueError
-            If ``X`` is non-finite, or if every model underflows to ``-inf``
+            If ``X`` is not a 2D array of the fitted input channel count, if
+            ``X`` is non-finite, if every model underflows to ``-inf``
             log-likelihood at some sample (the posterior is undefined
-            there).
+            there), or if a log-likelihood is NaN (numerical corruption,
+            distinct from the ``-inf`` underflow case above).
         """
-        Lht = self.model_loglik(X)
-        col_max = Lht.max(axis=0, keepdims=True)
-        if not np.isfinite(col_max).all():
-            n_bad = int((~np.isfinite(col_max)).sum())
-            raise ValueError(
-                f"AMICAMLXNG.model_probability(): every model has -inf "
-                f"log-likelihood at {n_bad} sample(s), so the posterior is "
-                "undefined there (an extreme outlier under a tight source "
-                "density)."
+        if self.sphere is None or self.mean is None or self.W is None:
+            raise RuntimeError(
+                "AMICAMLXNG.model_probability() requires a fitted model; "
+                "call fit() first."
             )
-        ex = np.exp(Lht - col_max)
-        return ex / ex.sum(axis=0, keepdims=True)
+        self._check_usable("compute the model probability")
+        self._check_input_shape(X)
+        Lht = self._model_loglik_unchecked(X)
+        # NaN and -inf are different failure modes and must not share a
+        # message: -inf is every model underflowing at a real sample (an
+        # extreme outlier), while NaN is numerical corruption. isfinite alone
+        # conflates them (PR #311 review scope extension, issue #306). The
+        # diagnosis + normalization is shared with AMICATorchNG (PR #329
+        # review) rather than duplicated per backend.
+        return model_probability_from_loglik(
+            Lht, caller="AMICAMLXNG.model_probability()"
+        )
 
     # ------------------------------------------------------------------
     # EEGLAB export (issue #92; epic #278 Phase 3/#289 port of
-    # AMICATorchNG.write_amica_output, torch_impl/core.py:3359-3471)
+    # AMICATorchNG.write_amica_output)
     # ------------------------------------------------------------------
     def write_amica_output(self, outdir) -> None:
         """Write this fitted model as the Fortran/EEGLAB AMICA output
@@ -3455,11 +3957,12 @@ class AMICAMLXNG:
         order. Single-model output is byte-compatible with the Fortran
         reference.
 
-        Also writes ``LLt`` (the per-sample/per-model log-likelihood, issue
-        #155) for a model that was just :meth:`fit` in this process, from the
+        Also writes ``LLt`` (the per-sample/per-model log-likelihood,
+        issue #155) for a model that was just :meth:`fit` in this process, from the
         stash the training E-step filled (issue #157) -- so, exactly as in
-        the reference, ``LLt`` is the E-step of the returned iterate and is
-        one M-step older than the ``W``/``A`` written beside it (see
+        the reference, ``LLt`` is the E-step of the returned iterate: one
+        M-step older than the ``W``/``A`` written beside it after a fit that ran
+        to ``max_iter``, their own after a convergence stop (see
         :meth:`_fit_once`'s docstring). A model restored via
         :meth:`from_state_dict`/:meth:`load` carries no stash, so ``LLt`` is
         omitted for it (a warning is logged) -- the rest of the output is
@@ -3471,10 +3974,11 @@ class AMICAMLXNG:
 
         Raises if the model is unfitted or degenerate (a fit that ended on a
         non-finite log-likelihood): a NaN model must not be written silently.
-        This backend has no scikit-learn-style wrapper in front of it (unlike
-        :class:`~pamica.AMICA`, which already refuses this via its own
-        usability gate for the PyTorch backend), so the guard has to live
-        here -- mirrors :meth:`state_dict`'s two-layer guard (stop_reason
+        The scikit-learn-style :class:`~pamica.AMICA` wrapper
+        (``backend="mlx"``, issue #313) already refuses this via its own
+        usability gate, but a caller using :class:`AMICAMLXNG` directly has
+        no such gate in front of this method, so the guard lives here too --
+        mirrors :meth:`state_dict`'s two-layer guard (stop_reason
         refusal, then a defense-in-depth isfinite sweep over the parameter
         arrays) so the same protection applies to a direct
         ``write_amica_output`` call (PR #311 review).
@@ -3491,7 +3995,7 @@ class AMICAMLXNG:
         if self.stop_reason in self._DEGENERATE_STOP_REASONS:
             raise RuntimeError(
                 f"Refusing to write output for a degenerate model (stop_reason="
-                f"{self.stop_reason!r}): fit() hit a non-finite log-likelihood "
+                f"{self.stop_reason!r}): fit() hit a non-finite value "
                 f"at iteration {self.iteration}. Fix the instability (lower "
                 f"lrate, disable Newton, or check data conditioning) before "
                 f"writing."
@@ -3499,13 +4003,9 @@ class AMICAMLXNG:
         # Defense-in-depth, mirroring state_dict(): catch a non-finite
         # parameter even if stop_reason bookkeeping ever misses it. Also
         # neutralizes a stale LLt stash: a failed final iteration's
-        # _llt_lht/_llt_lt (from before the nan_params/nan_ll break) can no
+        # _llt_lht/_llt_lt (from before a degenerate break) can no
         # longer reach disk once this guard refuses the write outright.
-        nonfinite = [
-            name
-            for name in self._PARAM_ARRAYS
-            if not bool(mx.all(mx.isfinite(getattr(self, name))).item())
-        ]
+        nonfinite = self._nonfinite_params()
         if nonfinite:
             raise RuntimeError(
                 f"Refusing to write output for a model with non-finite "
@@ -3563,7 +4063,9 @@ class AMICAMLXNG:
             rho=np.array(self.rho),
             comp_list=np.array(self.comp_list),
             ll=ll,
-            A=np.array(self.A),
+            # The reference layout, (nw, num_comps) with component k in column
+            # k: the component-row A transposed (issue #334).
+            A=np.array(self.A).T,
             Lht=Lht,
             Lt=Lt,
         )
@@ -3572,7 +4074,7 @@ class AMICAMLXNG:
     # Persistence (issue #287)
     # ------------------------------------------------------------------
     # Full fitted-parameter snapshot -- the same 12-name set as AMICATorchNG's
-    # _PARAM_TENSORS (torch_impl/core.py:3484-3489): A/W/c/comp_list/mean/
+    # _PARAM_TENSORS: A/W/c/comp_list/mean/
     # sphere are what transform()/get_*matrix() read back; mu/alpha/beta/rho/
     # gm are the mixture-PDF EM state; pdtype is the per-source density-family
     # code (issue #265) -- a non-default pdftype model, or the adaptive
@@ -3611,10 +4113,15 @@ class AMICAMLXNG:
     )  # fmt: skip
 
     # This backend owns its own format_version, independent of AMICATorchNG's
-    # (currently 3): the two payloads are never interchangeable (different
+    # (currently 4): the two payloads are never interchangeable (different
     # param layouts, no dtype/device fields here), so there is no reason for
-    # the version numbers to track each other.
-    _SAVE_FORMAT_VERSION = 1
+    # the version numbers to track each other. Version 2 (issue #334) stores A
+    # with one component per row, shape (n_comps, n_channels); a version 1
+    # payload stored it as (n_channels, n_comps) and is converted on load when
+    # unmerged, refused when share_comps had merged components
+    # (pamica.component_layout, ADR 0007).
+    _SAVE_FORMAT_VERSION = 2
+    _COLUMN_LAYOUT_FORMAT_VERSION = 1
 
     def state_dict(self) -> dict:
         """Serialize the fitted model to a plain, framework-agnostic dict.
@@ -3636,7 +4143,7 @@ class AMICAMLXNG:
         if self.stop_reason in self._DEGENERATE_STOP_REASONS:
             raise RuntimeError(
                 f"Refusing to serialize a degenerate model (stop_reason="
-                f"{self.stop_reason!r}): fit() hit a non-finite log-likelihood "
+                f"{self.stop_reason!r}): fit() hit a non-finite value "
                 f"at iteration {self.iteration}. Fix the instability (lower "
                 f"lrate, disable Newton, or check data conditioning) before "
                 f"saving."
@@ -3645,11 +4152,7 @@ class AMICAMLXNG:
         # bookkeeping ever misses it (the codebase has known NaN-suppression
         # risks). isfinite on the integer comp_list/pdtype is trivially
         # all-True.
-        nonfinite = [
-            name
-            for name in self._PARAM_ARRAYS
-            if not bool(mx.all(mx.isfinite(getattr(self, name))).item())
-        ]
+        nonfinite = self._nonfinite_params()
         if nonfinite:
             raise RuntimeError(
                 f"Refusing to serialize a model with non-finite parameters "
@@ -3722,6 +4225,14 @@ class AMICAMLXNG:
             "do_mean": self.do_mean,
             "do_sphere": self.do_sphere,
             "do_approx_sphere": self.do_approx_sphere,
+            # Explicit PCA reduction (issue #323). Additive, like keep_best
+            # below: a payload written before #323 lacks both keys, and
+            # cls(**config) then falls back to the constructor defaults (None),
+            # which is what that fit ran with, so no format_version bump. Cast
+            # to plain int/float because save() JSON-encodes config and the
+            # validator accepts numpy scalars (np.int64), which json cannot.
+            "pcakeep": None if self.pcakeep is None else int(self.pcakeep),
+            "pcadb": None if self.pcadb is None else float(self.pcadb),
             "mineig": self.mineig,
             "mineig_rel": self.mineig_rel,
             "seed": self.seed,
@@ -3751,6 +4262,7 @@ class AMICAMLXNG:
             "lrate_cap": float(self.lrate_cap),
             "newtrate": float(self.newtrate),
             "rholrate": float(self.rholrate),
+            "rholrate_cap": float(self.rholrate_cap),
             # Per-restart records (issue #198): which seeds ran, what each
             # returned, and why each stopped.
             "restart_seeds_": list(self.restart_seeds_),
@@ -3785,12 +4297,20 @@ class AMICAMLXNG:
 
         Unlike ``AMICATorchNG.from_state_dict`` there is no ``device``
         argument: this backend always runs on ``mx.default_device()``.
+
+        A ``format_version`` 1 state (components as columns of ``A``, before
+        issue #334) loads unchanged in every other respect: its ``A`` is
+        converted to component rows without loss, unless ``share_comps`` had
+        merged components, which raises ``ValueError`` asking for a refit
+        (:func:`pamica.component_layout.rows_from_legacy_columns`).
         """
         version = state.get("format_version")
-        if version != cls._SAVE_FORMAT_VERSION:
+        if version not in (cls._SAVE_FORMAT_VERSION, cls._COLUMN_LAYOUT_FORMAT_VERSION):
             raise ValueError(
                 f"unsupported AMICAMLXNG state format_version: {version!r} "
-                f"(expected {cls._SAVE_FORMAT_VERSION})"
+                f"(expected {cls._SAVE_FORMAT_VERSION}, or "
+                f"{cls._COLUMN_LAYOUT_FORMAT_VERSION} from before the "
+                "component-row layout)"
             )
         for section in ("config", "params", "extra"):
             if section not in state:
@@ -3799,7 +4319,34 @@ class AMICAMLXNG:
                     f"(format_version={version}); the payload may be truncated."
                 )
         config = dict(state["config"])
-        obj = cls(**config)
+        # A missing/unexpected key in a malformed or foreign-version payload
+        # surfaces as a bare TypeError from the constructor call; every other
+        # validation step in this method already names the payload as the
+        # culprit with a ValueError, so wrap this one the same way instead of
+        # letting a mismatched-keyword TypeError propagate unexplained
+        # (issue #306; :meth:`load`'s .npz path delegates to this method, so
+        # it is covered too).
+        try:
+            obj = cls(**config)
+        except TypeError as exc:
+            raise ValueError(
+                f"malformed AMICAMLXNG state: config does not match the "
+                f"AMICAMLXNG constructor ({exc}); the payload may be "
+                "truncated or from an incompatible version."
+            ) from exc
+        if version == cls._COLUMN_LAYOUT_FORMAT_VERSION:
+            params = state["params"]
+            missing = [name for name in ("A", "comp_list") if name not in params]
+            if missing:
+                raise ValueError(
+                    f"malformed AMICAMLXNG state: missing params {missing}"
+                )
+            A_rows = rows_from_legacy_columns(
+                np.asarray(params["A"]),
+                np.asarray(params["comp_list"]),
+                owner="AMICAMLXNG",
+            )
+            state = {**state, "params": {**params, "A": A_rows}}
         obj._load_params(state)
         return obj
 
@@ -3837,8 +4384,12 @@ class AMICAMLXNG:
                 f"(n_channels, n_channels_in) with n_channels={n}"
             )
         n_channels_in = sphere_shape[1]
+        # config's n_channels is the fitted (possibly reduced) rank, so the
+        # constructor set the input count to it; the restored sphere's width
+        # is the true input count, which a refit validates X against.
+        self._n_input_channels = int(n_channels_in)
         expected_shapes = {
-            "A": (n, ncomp),
+            "A": (ncomp, n),
             "W": (m, n, n),
             "c": (n, m),
             "mu": (nmix, ncomp),
@@ -3935,10 +4486,10 @@ class AMICAMLXNG:
         self.stop_reason = extra["stop_reason"]
         self.n_kurt_done = extra["n_kurt_done"]
         self.n_newton_fallbacks = extra["n_newton_fallbacks"]
-        self.lrate = extra["lrate"]
-        self.lrate_cap = extra["lrate_cap"]
-        self.newtrate = extra["newtrate"]
-        self.rholrate = extra["rholrate"]
+        # The rates, validated (a non-finite one is a named ValueError);
+        # rholrate_cap is additive, NOT in _EXTRA_KEYS, see _saved_rates.
+        for name, value in _saved_rates(extra, "AMICAMLXNG").items():
+            setattr(self, name, value)
         self.restart_seeds_ = list(extra["restart_seeds_"])
         self.restart_lls_ = list(extra["restart_lls_"])
         self.restart_stop_reasons_ = list(extra["restart_stop_reasons_"])
@@ -4006,7 +4557,8 @@ class AMICAMLXNG:
         whose central directory or a member's compressed bytes were cut off)
         each raise a named ``ValueError`` naming what is wrong, rather than
         raising an opaque ``zipfile``/``numpy`` error or loading a silently
-        partial model.
+        partial model. A ``format_version`` 1 file (before issue #334) is
+        converted or refused exactly as :meth:`from_state_dict` describes.
         """
         # Eagerly materialize every array the archive actually contains
         # INSIDE this try, so any corruption -- an unreadable zip (raised by
@@ -4032,10 +4584,12 @@ class AMICAMLXNG:
                     f"{section!r} (the file may be truncated or corrupted)."
                 )
         version = int(raw["format_version"])
-        if version != cls._SAVE_FORMAT_VERSION:
+        if version not in (cls._SAVE_FORMAT_VERSION, cls._COLUMN_LAYOUT_FORMAT_VERSION):
             raise ValueError(
                 f"unsupported AMICAMLXNG save format_version: {version!r} "
-                f"(expected {cls._SAVE_FORMAT_VERSION})"
+                f"(expected {cls._SAVE_FORMAT_VERSION}, or "
+                f"{cls._COLUMN_LAYOUT_FORMAT_VERSION} from before the "
+                "component-row layout)"
             )
         config = json.loads(raw["config"].item())
         extra = json.loads(raw["extra"].item())

@@ -88,11 +88,12 @@ def test_grad_norm_uses_the_pre_step_mixing_matrix():
     updates = model._get_updates_and_likelihood()
     assert model.A is not None  # set by fit(); narrows Optional for the checker
     a_before = np.asarray(model.A).copy()
-    model._update_parameters(updates)
+    step = model._update_direction(updates)
+    model._update_parameters(updates, step)
 
     dAk = (a_before - np.asarray(model.A)) / model.lrate
     expected = np.sqrt(np.sum(dAk**2) / (model.data_dim * model.num_comps))
-    assert np.isclose(model.nd[-1], expected, rtol=1e-8)
+    assert np.isclose(step.nd, expected, rtol=1e-8)
 
 
 # --- gm ordering under sharing (issue #219) ---------------------------------
@@ -129,9 +130,9 @@ def _nd_for_pre_update_gm(model, updates, gm_pre):
         if getattr(model, name, None) is not None
     }
     model.gm = np.array(gm_pre, dtype=float)
-    model.nd = []
-    model._update_parameters(updates)
-    nd = float(np.asarray(model.nd)[-1])
+    step = model._update_direction(updates)
+    model._update_parameters(updates, step)
+    nd = float(step.nd)
     for name, value in saved.items():
         setattr(model, name, value)
     return nd

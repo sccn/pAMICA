@@ -1,0 +1,30 @@
+likelihood increasing by less than 1e-09 for more than 5 iterations; stopping at iter 77.
+pamica 1/20: LL=-3.3709
+pamica 2/20: LL=-3.3565
+Newton not positive definite at iter 98; using natural gradient.
+Newton not positive definite at iter 99; using natural gradient.
+pamica 3/20: LL=-3.3573
+pamica 4/20: LL=-3.3742
+Newton not positive definite at iter 76; using natural gradient.
+pamica 5/20: LL=-3.3665
+pamica 6/20: LL=-3.3550
+pamica 7/20: LL=-3.3611
+likelihood increasing by less than 1e-09 for more than 5 iterations; stopping at iter 83.
+pamica 8/20: LL=-3.3691
+pamica 9/20: LL=-3.3581
+likelihood increasing by less than 1e-09 for more than 5 iterations; stopping at iter 87.
+pamica 10/20: LL=-3.3636
+likelihood increasing by less than 1e-09 for more than 5 iterations; stopping at iter 85.
+pamica 11/20: LL=-3.3656
+pamica 12/20: LL=-3.3569
+pamica 13/20: LL=-3.3586
+likelihood increasing by less than 1e-09 for more than 5 iterations; stopping at iter 94.
+pamica 14/20: LL=-3.3650
+likelihood increasing by less than 1e-09 for more than 5 iterations; stopping at iter 78.
+pamica 15/20: LL=-3.3752
+pamica 16/20: LL=-3.3552
+pamica 17/20: LL=-3.3597
+likelihood increasing by less than 1e-09 for more than 5 iterations; stopping at iter 89.
+pamica 18/20: LL=-3.3660
+pamica 19/20: LL=-3.3641
+pamica 20/20: LL=-3.3564

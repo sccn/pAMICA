@@ -1,0 +1,70 @@
+{
+  "source": ".context/issue-351/raw/table1_bundled/bundled_multimodel_ensemble.npz",
+  "n_fortran": 20,
+  "n_pamica": 20,
+  "ll": {
+    "fortran_mean": -3.354345258775286,
+    "fortran_sd": 0.002081060017571174,
+    "pamica_mean": -3.354145177582788,
+    "pamica_sd": 0.002921024726455666,
+    "pamica_minus_fortran": 0.00020008119249803613,
+    "ks_p": 0.8319696107963263,
+    "mann_whitney_p": 0.5792183523134169
+  },
+  "corr": {
+    "within_Fortran": {
+      "mean": 0.6255295314440862,
+      "sd": 0.036300560820058544
+    },
+    "within_pamica": {
+      "mean": 0.6376031888481765,
+      "sd": 0.0424716014598481
+    },
+    "between": {
+      "mean": 0.6318832725487383,
+      "sd": 0.04158240732116439
+    },
+    "between_minus_within_Fortran": 0.006353741104652144,
+    "perm_p_not_worse": 0.8836558172091395,
+    "range_within_Fortran": [
+      0.5684137031783317,
+      0.868054776369684
+    ],
+    "range_within_pamica": [
+      0.5775638757483479,
+      0.8051347220921952
+    ],
+    "range_between": [
+      0.5644991772631343,
+      0.8445546340425321
+    ]
+  },
+  "amari": {
+    "within_Fortran": {
+      "mean": 0.16630054685403053,
+      "sd": 0.017003169113571776
+    },
+    "within_pamica": {
+      "mean": 0.17623288658259578,
+      "sd": 0.025328776779805127
+    },
+    "between": {
+      "mean": 0.17155089714011276,
+      "sd": 0.02186823769645278
+    },
+    "between_minus_within_Fortran": 0.005250350286082228,
+    "perm_p_not_worse": 0.05089745512724364,
+    "range_within_Fortran": [
+      0.0716072110880876,
+      0.1935216447461059
+    ],
+    "range_within_pamica": [
+      0.09071592396865505,
+      0.21715382793807797
+    ],
+    "range_between": [
+      0.08186463933601121,
+      0.20506707922833445
+    ]
+  }
+}

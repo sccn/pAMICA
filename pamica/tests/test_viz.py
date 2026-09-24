@@ -329,7 +329,7 @@ def test_plot_model_probability_smoothing_edge_corrected_not_dragged_to_zero(
     """A naive convolve(..., mode="same") zero-pads beyond the data; since Lht
     sits around -100 (nowhere near 0), that would drag the boundary samples
     violently toward zero. The edge-corrected smoothing must keep the first
-    and last smoothed samples close to their neighbours instead (issue #136
+    and last smoothed samples close to their neighbors instead (issue #136
     MATLAB-oracle finding)."""
     srate = eeglab_metadata["srate"]
     fig = plot_model_probability(two_model_output, srate=srate, smooth_sec=1.0)

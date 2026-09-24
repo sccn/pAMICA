@@ -56,11 +56,13 @@ pytestmark = [
 ]
 
 # Fortran log-normalizer literals (amica15.f90:1333/1346/1359/1371), matching
-# torch_tests/test_ng_pdf_families.py.
+# torch_tests/test_ng_pdf_families.py. The binary rounds each default-kind
+# literal to single precision before ``dble`` widens it (issue #344), so the
+# reference's values are the float32 roundings; 4.0 is exact.
 _LOG4 = math.log(4.0)
-_LSQ2PI = math.log(2.506628274)
-_LNSUB = math.log(4.132731354)
-_LNSUP = math.log(1.858073988)
+_LSQ2PI = math.log(float(np.float32(2.506628274)))
+_LNSUB = math.log(float(np.float32(4.132731354)))
+_LNSUP = math.log(float(np.float32(1.858073988)))
 
 
 def _real_data(n_samples: int = 4096) -> np.ndarray:
@@ -240,6 +242,7 @@ def _torch_twin(model, x_t):
     ng._sphere_pinv = None
     ng.lrate = model.lrate
     ng.rholrate = model.rholrate
+    ng.rholrate_cap = model.rholrate_cap
     ng.iteration = model.iteration
     ng.sldet = model.sldet
     ng._update_unmixing_matrices()

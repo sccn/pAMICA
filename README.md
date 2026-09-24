@@ -13,10 +13,9 @@ EEG/EMG blind source separation and is a drop-in replacement for EEGLAB's AMICA:
 single-model output is written in exactly the reference's on-disk format and
 loads directly in EEGLAB.
 
-Single-model results match the Fortran reference (Hungarian-matched component correlation ~ 0.998
-on well-determined data, Newton disabled); see the
-[documentation](https://eeglab.org/pAMICA/) for validation details and the
-backend-selection guide.
+Single-model results match the Fortran reference (Hungarian-matched component correlation 0.9996
+on well-determined data, Newton disabled, with the reference agreeing with itself at 0.998); see the
+[documentation](https://eeglab.org/pAMICA/) for validation details and the backend-selection guide.
 
 ## Overview
 
@@ -31,7 +30,10 @@ AMICA (Adaptive Mixture ICA) is an advanced blind source separation algorithm th
 
 ## Installation
 
-The canonical environment is [uv](https://docs.astral.sh/uv/):
+Released versions are on PyPI: `uv add pamica` (or `uv pip install pamica`).
+The development version, with the changes listed as unreleased in the
+[changelog](https://eeglab.org/pAMICA/changelog/), installs from source; the
+canonical environment is [uv](https://docs.astral.sh/uv/):
 
 ```bash
 git clone https://github.com/sccn/pAMICA.git
@@ -41,7 +43,7 @@ uv run pytest               # optional: run the tests
 ```
 
 The optional Apple-GPU backend (MLX, Apple Silicon only) installs with the `mlx`
-extra: `uv pip install mlx`.
+extra: `uv sync --extra mlx` from source, or `uv add "pamica[mlx]"`.
 
 ## Usage
 
@@ -56,13 +58,14 @@ from pamica import AMICA
 model = AMICA(n_models=1, n_mix=3).fit(X)
 
 sources = model.transform(X)       # (n_sources, n_samples)
-A = model.get_mixing_matrix()      # sensor-space scalp maps
+maps = model.get_sensor_mixing_matrix()  # scalp maps, (n_channels, n_sources)
 order = model.variance_order()     # EEGLAB IC order (IC1 = highest variance)
 ```
 
 ### Backends and precision
 
-The wrapper auto-selects a device and computes in float64 for Fortran parity.
+The wrapper auto-selects a device and computes in float64 for Fortran parity;
+on a Mac, where the Metal Performance Shaders (MPS) device has no float64, a default fit runs on the CPU.
 
 - CPU and CUDA (float64) are bit-reproducible; use them for parity runs.
 - float32 (about 7 significant digits, not parity) is required on the Apple GPUs
@@ -70,11 +73,12 @@ The wrapper auto-selects a device and computes in float64 for Fortran parity.
   overhead-bound (float32 is about as fast as float64).
 - On Apple Silicon the MLX backend is the fastest option and carries the full
   feature surface (all pdf families, Newton, rejection, EEGLAB export, and
-  Mutual Information Reduction (MIR) diagnostics); import it explicitly.
+  Mutual Information Reduction (MIR) diagnostics); select it with
+  `backend="mlx"` on `AMICA` or the MNE wrapper `AMICAICA` (float32 only).
 
 ```python
 AMICA(device="cuda").fit(X)               # NVIDIA GPU, float64
-from pamica.mlx_impl import AMICAMLXNG    # Apple GPU (install the mlx extra)
+AMICA(backend="mlx").fit(X)               # Apple GPU, float32 (install the mlx extra)
 ```
 
 ### EEGLAB interoperability
@@ -90,9 +94,16 @@ model.write_amica_output("amicaout")   # gm, W, S, mean, c, alpha, mu, sbeta, rh
 mod = loadmodout15('amicaout');   % components in EEGLAB variance order
 ```
 
+pamica's defaults follow the compiled amica15 binary (`lrate` 0.1, Newton off),
+and EEGLAB's `runamica15.m` sets its own (`lrate` 0.05, Newton on).
+To rerun an EEGLAB decomposition, fit from the `input.param` that `runamica15.m` wrote beside its output:
+`AMICA.from_params_file("amicaouttmp/input.param").fit(X)`.
+The [defaults table](https://eeglab.org/pAMICA/guides/amica-differences/#default-settings-issue-354) lists every setting in the three sources.
+
 ### Legacy NumPy CLI
 
-The NumPy reference backend keeps a JSON-driven command-line interface:
+The NumPy reference backend keeps a command-line interface, driven by a
+pamica JSON parameter file or a Fortran `input.param`:
 
 ```bash
 python -m pamica.numpy_impl.cli params.json --outdir results

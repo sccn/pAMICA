@@ -120,8 +120,9 @@ def write_amicaout(
     ``(num_mix, num_comps)`` mixture params column-major) is laid out so EEGLAB's
     ``loadmodout15.m`` reads it correctly. The earlier model-interleaved ``W``
     layout, which round-tripped through :func:`loadmodout` but was not
-    MATLAB-readable, was fixed in #159. (``A`` is exempt: ``loadmodout15`` derives
-    it from ``W``/``S`` and ignores the file; see below.)
+    MATLAB-readable, was fixed in #159. ``A``, which ``loadmodout15`` ignores
+    (it derives the mixing from ``W``/``S``), is written in the reference's
+    layout too, since issue #334.
 
     Parameters
     ----------
@@ -134,10 +135,13 @@ def write_amicaout(
         0-based component ids; written 1-based to match the Fortran format.
     ll : array-like
         Per-iteration log-likelihood history.
-    A : array-like, optional
-        Mixing matrix. ``loadmodout15`` derives ``A`` from ``W`` and ``S`` and
-        ignores this file; it is written (when given) only so pamica's own
-        ``load_results`` can restore ``A`` directly for the viz helpers.
+    A : array-like of shape (nw, num_comps), optional
+        Mixing matrix in the reference's layout: component ``k``'s sphered-space
+        mixing vector in column ``k`` (the backends' component-row ``A``
+        transposed, issue #334). Written column-major, so the file holds exactly
+        the bytes the reference writes for its ``A``. ``loadmodout15`` derives
+        ``A`` from ``W`` and ``S`` and ignores this file; pamica's own
+        ``load_results`` reads it back for the viz helpers.
     Lht : array-like of shape (num_models, n_samples), optional
         Per-model per-sample log-likelihood (Fortran ``modloglik``). Written
         together with ``Lt`` as the ``LLt`` file (issue #155); omitted (as
@@ -166,9 +170,23 @@ def write_amicaout(
             f"W has {W.shape[2]} models but gm has {gm.size}; num_models disagree"
         )
 
+    # mean/gm/LL are 1-D, so their order does not matter.
     _w("gm", gm)
     if A is not None:
-        _w("A", A)
+        # The reference's A(nw, num_comps), column-major like every other 2-D
+        # file here (issue #334). loadmodout15.m ignores it (it derives A from W
+        # and S instead); `load_results` reads the same bytes in C order as the
+        # component-row A, (num_comps, nw), which is this array transposed. Before
+        # #334 this file was the backends' component-column A in C order: the
+        # same bytes for one model, a different layout for several.
+        A = np.asarray(A)
+        expected = (W.shape[0], W.shape[0] * W.shape[2])
+        if A.shape != expected:
+            raise ValueError(
+                f"A must be the reference-layout (nw, num_comps) mixing matrix "
+                f"{expected}; got shape {A.shape}"
+            )
+        _w("A", A, order="F")
     # W is the internal-backend unmixing (b = W.T @ x); Fortran/EEGLAB store the
     # true unmixing W_fortran = W.T with the model axis slowest, column-major
     # within each model. Moving the model axis to the front and writing C-order
@@ -177,13 +195,24 @@ def write_amicaout(
     # this is byte-identical to the old plain C-order write, so single-model
     # output stays byte-compatible with the Fortran reference (issue #92); the
     # multi-model interleave it replaces was never MATLAB-readable (issue #159).
-    # The symmetric sphere S is order-agnostic; mean/gm/LL are 1-D.
     _w("W", np.asarray(W).transpose(2, 0, 1))
     # Fortran always writes S at recl = 2*nbyte*nx*nx (amica15.f90:2423): the
     # array is allocated (nx, nx) and zero-filled, and a rank-reduced sphere
     # occupies only its first `numeigs` rows. Pad to that shape so a reduced fit
     # is readable by loadmodout15.m and by loadmodout() below, which both reshape
     # to (nx, nx) and slice [:num_pcs] (issue #164/#223).
+    #
+    # S is written column-major (order="F") in both branches, like every other
+    # EEGLAB-read 2-D file here (c, alpha, mu, sbeta, rho, comp_list below): that
+    # is what the Fortran reference writes and what both readers (loadmodout15.m
+    # and loadmodout() below) read. (A, above, is column-major too.) The
+    # square branch used to write C order on the reasoning that the default
+    # zero-phase component analysis (ZCA) sphere is its own transpose (true to
+    # ~1e-17) so C order was "byte-identical to the Fortran reference" -- that
+    # reasoning was backwards: the reference itself is column-major, so C
+    # order only happened to match by the sphere's own symmetry, and diverges
+    # (transposed) whenever `do_approx_sphere=False` gives a genuinely
+    # asymmetric sphere (issue #336).
     sphere = np.asarray(sphere)
     if sphere.ndim != 2:
         raise ValueError(f"sphere must be 2-D (nw, nx); got shape {sphere.shape}")
@@ -196,14 +225,9 @@ def write_amicaout(
     if n_keep < n_in:
         padded = np.zeros((n_in, n_in), dtype=np.float64)
         padded[:n_keep] = sphere
-        # Column-major, because the padded array is not symmetric. The square
-        # branch below deliberately keeps its C-order write: the symmetric-ZCA
-        # sphere is its own transpose only to ~1e-17, so switching orders there
-        # would perturb bytes that are guaranteed identical to the Fortran
-        # reference (issue #92).
         _w("S", padded, order="F")
     else:
-        _w("S", sphere)
+        _w("S", sphere, order="F")
     _w("mean", mean)
     # The (num_mix, num_comps) mixture params and (num_comps, num_models) c /
     # comp_list are non-square, so their byte layout DOES depend on order: they

@@ -31,7 +31,7 @@ spells a setting differently from the constructor, this module targets the
 *constructor's* spelling, not the JSON schema's.
 
 ``FORTRAN_TO_PAMICA_KEY`` lists every Fortran keyword this module can
-translate (57 keys covering 56 distinct pamica-side names -- Fortran accepts
+translate (60 keys covering 59 distinct pamica-side names -- Fortran accepts
 both ``num_mix_comps`` and ``num_mix`` for the same setting). Of those, three
 are renamed because Fortran spells them differently from the pamica-side
 name:
@@ -50,29 +50,54 @@ which is not itself a constructor keyword (the constructor takes ``n_mix``);
 the instance at construction time (unchanged pre-existing behavior), so
 those two keys are consumed *before* the rest of the dict ever reaches
 ``fit()``'s per-call-default merge. ``share_iter`` is **not** renamed here --
-it already matches ``AMICATorchNG.share_iter`` exactly. This is a deliberate
-divergence from ``sample_params.json``, whose own schema spells the same
-setting ``share_int`` (and, along with its ``max_decs``/``min_grad_norm``
-keys, does not match the constructor either -- a pre-existing gap in that
-JSON file, out of scope here, that ``AMICA.fit``'s per-call-default merge
-now surfaces as a "not applied" warning when fitting from it).
+it already matches ``AMICATorchNG.share_iter`` exactly, so this table has no
+entry for it. ``sample_params.json``'s own JSON schema instead spells the
+same setting ``share_int``; ``read_params_file``'s ``JSON_ALIAS_TO_CANONICAL``
+table (below) is what maps that JSON-schema spelling -- and the JSON
+schema's ``max_decs``/``min_grad_norm`` spellings for the two renamed
+settings above -- to the canonical names on the way in, not this
+Fortran-keyword table.
 
 Every other translated key keeps its Fortran spelling.
 
-``FORTRAN_UNSUPPORTED_KEYS`` lists the remaining 32 keywords the Fortran
+``writestep``/``do_history``/``histstep`` are identity mappings too, even
+though they configure a mechanism (periodic on-disk checkpointing) that only
+the legacy NumPy backend implements today (``numpy_impl/core.py``'s fit loop
+and ``_write_history``) -- the reader's job is to translate every keyword
+*some* pamica backend can honor, not just the ones this call's target
+backend happens to support; each consumer is responsible for warning about
+what *it* cannot apply. Porting these three to the torch/MLX backends is
+tracked as issue #312; until then, ``AMICA.fit`` (which has no matching
+mechanism) names them in its own "not applied" warning rather than silently
+dropping them, the same way it already handles any other translated key with
+no ``AMICATorchNG`` equivalent.
+
+``FORTRAN_UNSUPPORTED_KEYS`` lists the remaining 29 keywords the Fortran
 parser accepts (checkpoint warm-start, per-family EM freeze toggles, FIR/DFT
-pre-filtering, console/file reporting cadence, ...) that this module does not
-translate -- most with no pamica equivalent anywhere, but a few
-(``writestep``/``do_history``/``histstep``) exist on the legacy NumPy backend
-only (see the table entry below); this module's output targets the torch
-wrapper, which has no matching mechanism (issue #312). These are
-*deliberately* unmapped, not missed, and ``read_fortran_param_file`` warns
-about them by name rather than dropping them in silence. A keyword absent
-from *both* dicts is not a Fortran keyword this module knows about at all
-(a typo, or a different ``amica15.f90`` revision than the one bundled here)
-and is also warned about, separately.
+pre-filtering, console reporting, ...) that this module does not translate --
+none has a pamica equivalent on any backend. These are *deliberately*
+unmapped, not missed, and ``read_fortran_param_file`` warns about them by
+name rather than dropping them in silence. A keyword absent from *both*
+dicts is not a Fortran keyword this module knows about at all (a typo, or a
+different ``amica15.f90`` revision than the one bundled here) and is also
+warned about, separately.
+
+``read_params_file`` (issue #304) is the single params-file entry point every
+backend should use: it JSON-decodes a file whose first non-whitespace
+character is ``{``/``[`` (the JSON top level must be an object) and otherwise
+parses it as Fortran text via :func:`read_fortran_param_file`, so either
+format lands on the same canonical pamica keys. A JSON file's own keys pass
+through ``JSON_ALIAS_TO_CANONICAL`` -- pamica's JSON schema
+(``sample_params.json``, ``numpy_impl/params.json``) spells five settings
+differently from the canonical/constructor name (the same three Fortran
+renames above, plus ``share_int`` for ``share_iter``, which is JSON-schema-
+only -- Fortran's own spelling already matches the canonical name). A JSON
+file that carries both a setting's alias and its canonical key (e.g.
+``max_decs`` and ``maxdecs``) is ambiguous and raises ``ValueError`` naming
+both, rather than picking one silently.
 """
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -253,6 +278,13 @@ FORTRAN_TO_PAMICA_KEY: dict = {
     "invsigmin": "invsigmin",
     # Reproducibility.
     "seed": "seed",
+    # Periodic on-disk checkpointing: identity mappings (Fortran's own
+    # spelling matches pamica's, since only the legacy NumPy backend
+    # implements this mechanism today -- see the module docstring and
+    # issue #312 for the torch/MLX gap).
+    "writestep": "writestep",
+    "do_history": "do_history",
+    "histstep": "histstep",
 }
 
 # ---------------------------------------------------------------------------
@@ -303,19 +335,36 @@ FORTRAN_UNSUPPORTED_KEYS: dict = {
     "print_debug": "Fortran console verbosity, no pamica equivalent",
     "write_nd": "Fortran output-file toggle (weight/gradient dumps)",
     "write_LLt": "Fortran output-file toggle (per-sample log-likelihood dumps)",
-    # Periodic on-disk checkpointing DOES have a pamica equivalent, but only
-    # on the legacy NumPy backend (numpy_impl/core.py's fit loop, ~2195-2198,
-    # and _write_history, ~2460-2489), which implements writestep/do_history/
-    # histstep with the same names and cadence semantics as Fortran. These
-    # stay unsupported HERE only because this module's output targets the
-    # torch wrapper (AMICA.fit/AMICATorchNG), which has no matching
-    # mechanism; porting it to torch/MLX is tracked as issue #312.
-    "writestep": "on-disk checkpoint write cadence; NumPy backend only (issue #312)",
-    "do_history": "periodic weight-history dump; NumPy backend only (issue #312)",
-    "histstep": "weight-history dump cadence; NumPy backend only (issue #312)",
     # Misc.
     "decwindow": "decrease-count window size; pamica exposes only max_decs/maxdecs",
     "fix_init": "fixed initialization scheme, not ported",
+}
+
+# ---------------------------------------------------------------------------
+# JSON-schema key -> canonical pamica key (issue #304). pamica's own JSON
+# schema (sample_params.json, numpy_impl/params.json) spells five settings
+# differently from the canonical/constructor name used above: the same three
+# Fortran renames (min_grad_norm/max_decs/numrej -> min_nd/maxdecs/maxrej),
+# plus num_mix_comps -> num_mix (the JSON schema itself already spells this
+# one "num_mix", so the alias only matters for a file that instead uses
+# Fortran's "num_mix_comps" spelling), plus share_int -> share_iter, which is
+# JSON-schema-only: Fortran's own spelling ("share_iter") already matches the
+# canonical name, so it needs no entry in FORTRAN_TO_PAMICA_KEY's rename table.
+# Derived from FORTRAN_TO_PAMICA_KEY's own renames (the non-identity entries)
+# so the two tables cannot drift apart, plus the one JSON-only addition.
+JSON_ALIAS_TO_CANONICAL: dict = {
+    key: value for key, value in FORTRAN_TO_PAMICA_KEY.items() if key != value
+}
+JSON_ALIAS_TO_CANONICAL["share_int"] = "share_iter"
+
+# Canonical pamica key -> the Fortran keyword it came from, for the settings
+# FORTRAN_TO_PAMICA_KEY actually renames (the inverse of the non-identity
+# entries above). Used by callers that need to go the other way -- write a
+# Fortran-format param file from pamica-keyed settings -- so that knowledge
+# lives in one place too (see validate_implementations.py's
+# write_fortran_param_file).
+PAMICA_KEY_TO_FORTRAN_KEY: dict = {
+    value: key for key, value in FORTRAN_TO_PAMICA_KEY.items() if key != value
 }
 
 
@@ -515,3 +564,68 @@ def read_fortran_param_file(path: Union[str, Path]) -> dict:
             sorted(unsupported),
         )
     return result
+
+
+def _apply_json_aliases(data: dict, path: Union[str, Path]) -> dict:
+    """Translate a parsed JSON parameter file's keys to canonical pamica keys.
+
+    See ``JSON_ALIAS_TO_CANONICAL``. A key that carries both an alias and its
+    own canonical spelling (e.g. both ``max_decs`` and ``maxdecs``) is
+    ambiguous -- which one wins would be an arbitrary silent choice -- so this
+    raises rather than picking one. Non-aliased keys (including NumPy-only
+    JSON keys like ``kurt_start``) pass through unchanged.
+    """
+    conflicts = sorted(
+        (alias, canonical)
+        for alias, canonical in JSON_ALIAS_TO_CANONICAL.items()
+        if alias in data and canonical in data
+    )
+    if conflicts:
+        names = ", ".join(f"{alias!r}/{canonical!r}" for alias, canonical in conflicts)
+        raise ValueError(
+            f"{path}: JSON parameter file has both an alias and its canonical "
+            f"key for the same setting ({names}); keep only one."
+        )
+    return {JSON_ALIAS_TO_CANONICAL.get(k, k): v for k, v in data.items()}
+
+
+def read_params_file(path: Union[str, Path]) -> dict:
+    """Parse a pamica parameter file into canonical pamica keys (issue #304).
+
+    The single params-file entry point every backend should use: content-sniffs
+    the format (JSON if the file's first non-whitespace character is ``{`` or
+    ``[``, otherwise the literal Fortran ``input.param`` text format via
+    :func:`read_fortran_param_file`), rather than trusting the file extension,
+    and returns the same canonical pamica keys either way.
+
+    A JSON top level must be an object (a JSON array has no keys to
+    translate); a JSON file's own keys pass through ``JSON_ALIAS_TO_CANONICAL``
+    (see the module docstring), and a file that sets both an alias and its
+    canonical key for the same setting raises ``ValueError``. Malformed JSON
+    raises ``json.JSONDecodeError`` (a ``ValueError`` subclass). The Fortran
+    branch's own error/warning behavior (malformed lines, unrecognized/
+    unsupported keywords, an effectively-empty file) is documented on
+    :func:`read_fortran_param_file`.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a JSON or Fortran-format parameter file.
+
+    Returns
+    -------
+    dict
+        Parsed settings, keyed by pamica's canonical names (see
+        ``FORTRAN_TO_PAMICA_KEY``).
+    """
+    path = Path(path)
+    text = path.read_text()
+    if text.lstrip()[:1] in ("{", "["):
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"{path}: JSON parameter file's top level must be an object, "
+                f"got {type(data).__name__}"
+            )
+        return _apply_json_aliases(data, path)
+    return read_fortran_param_file(path)

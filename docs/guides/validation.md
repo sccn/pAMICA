@@ -20,22 +20,115 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 |---|---|---|
 | Source-density score and log-density (non-GG families) | vs the literal `amica15.f90` expressions | bit-exact ($<10^{-12}$) |
 | Per-block sufficient statistics and one M-step | vs Fortran | bit-exact ($\sim\!10^{-15}$) |
-| Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | LL within ~0.0005 of $-3.6993$; correlation 0.998 |
-| Single-model solution (`do_newton=0`, bundled, $k\approx30$) | Amari distance vs Fortran | 0.006 |
-| Multi-model solution | distributional similarity over 20-run ensembles | indistinguishable from Fortran's own run-to-run spread ($p = 0.96$) |
+| Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | both at LL $-3.6993$ (gap of the means $6\times10^{-6}$); correlation 0.9996 (Fortran vs Fortran 0.998) |
+| Single-model solution (`do_newton=0`, bundled, $k\approx30$) | Amari distance vs Fortran | 0.011 over the protocol's 5 run pairs, one of whose reference runs ended in another basin; 0.004 over 50 pairs (Fortran vs Fortran 0.005) |
+| Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | from independent starts: LL within 2.8e-4 (the reference's own seed-to-seed standard deviation is 2.6e-4), correlation 0.9991, Amari distance 0.004, for all three; from a shared start: LL within 1.6e-6, correlation 0.99999993 ([per-backend rows](#parity-rows-per-backend)) |
+| Multi-model solution | distributional similarity over 20-run ensembles | between-implementation correlation within 0.006 of Fortran's own run-to-run agreement (one-sided permutation $p = 0.88$; Amari distance $p = 0.051$); final log-likelihood $-3.3541$ against $-3.3543$ (KS $p = 0.83$) |
 | Device and precision invariance | same independent components across CPU/CUDA/MPS/MLX, float32/float64, Linux/macOS | identical (1.000) across all eight torch/MLX combinations |
-| Cross-backend log-likelihood | converged LL across every backend | agree to ~3 significant digits (max pairwise ~0.003) |
+| Cross-backend log-likelihood | same settings and start, 25 iterations, every backend | agree to 1e-5 at 32 and 48 channels; at 70 channels ($k\approx6$) within 1.1e-3, the size of a round-off perturbation's effect ([details](#cross-backend-log-likelihood-agreement-single-model)) |
 | EEGLAB output | `write_amica_output` round-trip through `loadmodout15` | single-model bytes are an exact serialization; loads with correct layout |
-| Degenerate fits | NaN or singular log-likelihood | refused, never returned as NaN sources |
+| Degenerate fits | non-finite log-likelihood, update direction or parameters | refused, never returned as NaN sources |
 
 ## The validation harness
 
-`validate_implementations.py` runs the implementations on real sample EEG,
+`validate_implementations.py` runs pamica's backends and the Fortran reference binary on the bundled sample EEG,
 matches components across implementations with the Hungarian algorithm,
 and reports log-likelihood and per-component correlation. It always uses real sample data and the Fortran binary, never synthetic data.
 Conformity with Fortran is measured with two metrics used throughout this page: Hungarian-matched component correlation,
 and the Amari distance (`amari_distance` in `validate_implementations.py`),
 a standard unmixing-matrix comparison metric (Amari, Cichocki & Yang, 1996) that is permutation- and scale-invariant by construction and so needs no assignment step.
+
+### Running it per backend
+
+`--backend` selects which pamica backends are compared against the reference (issue #315):
+
+```bash
+uv run python validate_implementations.py                  # PyTorch only (the default)
+uv run python validate_implementations.py --backend numpy  # the legacy NumPy backend
+uv run python validate_implementations.py --backend mlx    # Apple Silicon; needs `uv sync --extra mlx`
+uv run python validate_implementations.py --backend all    # torch, numpy and mlx
+```
+
+A comma-separated list such as `--backend torch,mlx` also works.
+Every backend gets the same settings: `sample_params.json` read through the shared canonical reader (`block_size=512`, Newton on from iteration 50),
+plus `--max-iter` (default 100) and `--seed` (default 42).
+The reference runs once, with the same settings, the seed pinned and one thread, and each backend is compared against that one run.
+NumPy receives the settings under its own key names, through the backend's own translation table;
+PyTorch and MLX both run through `AMICA(backend=...)`, whose constructors share the canonical names.
+A setting a backend cannot apply is named in a warning rather than dropped silently.
+
+Each backend gets its own report: `validation_report.txt` for PyTorch (the name the default run has always used),
+and `validation_report_numpy.txt` or `validation_report_mlx.txt` for the others.
+Passing `--backend` explicitly also prints a one-row-per-backend summary with runtimes and saves it as `parity_summary.md`;
+the default run prints exactly the report it always has.
+`--backend mlx` on a host without MLX stops before running anything, with exit status 2 and the install hint.
+
+The reference binary is resolved as before:
+by default the native engine (`PAMICA_NATIVE_BINARY`, or the release binary for the host, cached after the first download),
+falling back, with a warning, to the bundled macOS x86_64 `amica15mac`, which cannot be seeded;
+`--fortran-binary PATH` runs a specific binary.
+
+### Parity rows per backend
+
+Measured on 2026-09-23 with the code of epic #324 (issue #351) on an Apple M4 Pro (14 cores, 64 GB, macOS 27; MLX 0.32.0, PyTorch 2.12.1, NumPy 2.5.0)
+against the v0.3.3 release native engine (`amica15-macos-arm64`, SHA-256 `c8b2ac7f...`), with the harness defaults:
+
+```bash
+uv run python -c "from pamica.native import resolver; print(resolver.resolve(version='v0.3.3'))"
+uv run python validate_implementations.py --backend all \
+  --fortran-binary ~/.cache/pamica/bin/v0.3.3/amica15-macos-arm64
+```
+
+The reference is pinned to that explicit release binary (the first line downloads it and verifies its checksum) rather than to the default resolution,
+because the resolver caches its `latest` download without refreshing it,
+so on a machine that fetched an earlier release the default can run an older binary than the one these rows were measured with.
+
+| Backend | Precision | Final LL | LL difference from Fortran | Mean matched correlation | Min matched correlation | Amari distance | Runtime (s) | Expected bar |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| Fortran (reference) | float64 | -3.411274 | | | | | 10.0 | the reference |
+| PyTorch (`AMICA`) | float64 | -3.411003 | 0.000271 | 0.9991 | 0.9918 | 0.0038 | 18.1 | correlation > 0.95, Amari < 0.05, LL difference < 0.005 |
+| NumPy (`AMICA_NumPy`) | float64 | -3.411003 | 0.000272 | 0.9991 | 0.9917 | 0.0038 | 32.6 | the PyTorch bar, and final LL within 1e-5 of PyTorch's |
+| MLX (`AMICA(backend="mlx")`) | float32 | -3.410998 | 0.000276 | 0.9991 | 0.9917 | 0.0038 | 3.0 | the PyTorch bar, and final LL within 1e-4 of PyTorch's |
+
+Every backend meets its bar.
+All four runs stop at the 100-iteration budget, so the rows compare matched trajectories rather than converged optima;
+the converged single-model evidence is in the next section.
+The two float64 backends agree with each other to about 1e-6 in log-likelihood.
+MLX computes in float32 (about seven significant digits per operation), so its bar against PyTorch is looser:
+it lands within about five significant digits of the float64 likelihood, which is float32 consistency, not float64 parity.
+Runtime is one run's wall-clock time for the fit alone and varies by about a third between runs on the same host;
+the reference's includes process start-up and is single-threaded.
+Epic #324 left the runtimes unchanged: the code before its changes to the fit (e38aa11), run in the same session, took 10.1, 17.9, 32.5 and 3.2 seconds.
+
+**The log-likelihood difference in these rows mostly reflects the two starting points.**
+The harness starts each side from its own draw: numpy's `RandomState(42)` for pamica, gfortran's generator seeded with 42 for the reference.
+After 100 iterations the final log-likelihood still depends on where a fit started.
+Over eight seeds, the reference's own final log-likelihood has a standard deviation of 2.6e-4 and a range of 8.0e-4 (pamica's: 2.7e-4 and 8.0e-4),
+and over the 64 pairs of a pamica start and a reference start the median difference is 3.5e-4 (range 1.7e-5 to 8.2e-4).
+The 2.7e-4 in the table lies within that spread.
+Before those changes the same run showed 2.9e-5, which reflected this particular pair of starts:
+from a shared start, that code trailed the reference by 2.4e-4 after 100 iterations, which offset most of the difference between the two starts.
+
+The update rule itself is compared from a shared start:
+pamica's seed-42 initialization is written into the reference's `load_*` files, and both sides run the harness settings for 100 iterations, the reference on one thread
+(`.context/issue-351/harness_gap.py`).
+
+| Code | LL difference | Mean matched correlation | Amari distance |
+|---|---:|---:|---:|
+| before epic #324's changes to the fit (e38aa11) | 2.4e-4 | 0.99999 | 5.8e-4 |
+| with them | 1.6e-6 | 0.99999993 | 3.9e-5 |
+
+The earlier row starts from that code's own initialization, which predates the component-row layout (issue #334) and the normalized initial mixing matrix (issue #341);
+from each code's seeded state, the reference's first-iteration log-likelihood matches pamica's to 9e-16, so the state was written in the orientation the reference reads.
+Against the bundled `amicaout` output (200 reference iterations with the `input.param` settings, from its own unseeded start),
+the three backends are within 1.3e-4 to 1.4e-4 in log-likelihood, with mean matched correlation 0.9983 (minimum 0.982 to 0.983) and Amari distance 4.8e-3.
+
+The float32 MLX backend and the float64 PyTorch backend draw their start from the same generator, so they can be compared from the same start directly.
+With the harness settings, after 100 iterations they differ by 5.0e-6 in log-likelihood, with mean matched correlation 0.99999991 (minimum 0.9999994) and Amari distance 5.0e-5;
+after 200 iterations by 2.4e-6, 0.9999998 and 6.3e-5 (`.context/issue-351/precision_agreement.py`).
+
+The same bars are pinned by `test_backend_meets_its_parity_bar_against_fortran` in `pamica/tests/test_fortran_param_forwarding.py`,
+which runs when `AMICA_RUN_FORTRAN=1` is set (as the weekly macOS job does).
 
 ## Single-model parity
 
@@ -46,11 +139,48 @@ it is not sensitive to whether a particular small dataset happens to be well-con
 32-channel sample ($k\approx30$, at the project's own data-adequacy boundary) gives a consistent Amari
 distance:
 
-- Log-likelihood ~ -3.6993 ($k\approx153$; Fortran ~ -3.6993, gap ~0.0003).
-- Hungarian-matched component correlation ~0.998 ($k\approx153$; Fortran-vs-Fortran self-consistency
-  over the same 5 seeds: ~0.999), clearing the >0.95 gate. On the bundled sample ($k\approx30$) both
-  numbers are consistent: ~0.998 pamica-vs-Fortran, ~0.998 Fortran-vs-Fortran.
-- Amari distance ~0.006 (bundled sample; Fortran-vs-Fortran: ~0.005).
+- Log-likelihood $-3.6993$ on both sides ($k\approx153$): Fortran $-3.699346$ (sd $6.5\times10^{-5}$), pamica $-3.699341$ (sd $4.1\times10^{-5}$),
+  a gap of the means of $5.6\times10^{-6}$.
+- Hungarian-matched component correlation 0.9996 ($k\approx153$; sd 0.0005, lowest single component 0.960),
+  against the reference's own agreement over the same five runs of 0.998 (lowest component 0.917), clearing the >0.95 gate;
+  Amari distance 0.0013 (Fortran against Fortran 0.0025).
+- Amari distance on the bundled sample: 0.011 over the protocol's five run pairs, 0.004 over 50 pairs (next subsection).
+
+Per seed on the external recording (re-measured on 2026-09-23 with the code of epic #324; `benchmarks/reproduce_table1.py --tier external` on the RTX 4090 host,
+pamica on CUDA in float64, the pinned v0.3.3 reference at 16 threads, clock-seeded; `.context/issue-351/raw/table1_external/`):
+
+| seed | mean matched correlation | min matched correlation | Amari distance |
+|---:|---:|---:|---:|
+| 201 | 0.9999 | 0.9996 | 0.0008 |
+| 202 | 0.9987 | 0.9602 | 0.0024 |
+| 203 | 0.9999 | 0.9985 | 0.0012 |
+| 204 | 1.0000 | 0.9998 | 0.0007 |
+| 205 | 0.9998 | 0.9955 | 0.0012 |
+
+Before epic #324's changes to the fit, the same protocol gave a log-likelihood gap of ~0.0003, a correlation of ~0.998 and a Fortran-vs-Fortran agreement of ~0.999.
+
+### The bundled sample
+
+On the bundled 32-channel sample ($k\approx30$) the reproduction tier fits five pamica seeds (301-305) and five reference runs, one pair per seed,
+Newton off, 2000 iterations (re-measured on 2026-09-23 with the code of epic #324; `.context/issue-351/raw/table1_bundled/`):
+
+| seed | reference final LL | pamica final LL | mean matched correlation | min matched correlation | Amari distance |
+|---:|---:|---:|---:|---:|---:|
+| 301 | -3.3995 | -3.3997 | 0.9995 | 0.9960 | 0.0031 |
+| 302 | -3.3996 | -3.3996 | 0.9993 | 0.9952 | 0.0037 |
+| 303 | -3.4006 | -3.3997 | 0.9267 | 0.4528 | 0.0380 |
+| 304 | -3.3995 | -3.3995 | 0.9997 | 0.9981 | 0.0029 |
+| 305 | -3.3996 | -3.3994 | 0.9982 | 0.9893 | 0.0069 |
+
+The five pairs average a correlation of 0.985 and an Amari distance of 0.011;
+the ten pairs among the five reference runs average 0.971 and 0.019.
+The reference run of seed 303 ended in a lower-likelihood basin (-3.4006, against -3.3995 to -3.3996 for the other four), and that pair dominates the five-pair means.
+The tier does not seed its reference runs (`AMICANative` draws a clock-based seed per run), so a rerun draws new starts, and an event like this one may or may not recur.
+With the unmixing matrices kept (`.context/issue-351/bundled_single_basins.py`),
+ten seeded reference runs (seeds 1-10, final LL -3.39984 to -3.39945) against the same five pamica fits give, over all 50 pairs,
+a mean Amari distance of 0.0044 (largest 0.0083) and a mean correlation of 0.9988;
+the reference against itself, over 45 pairs, 0.0054 (largest 0.0101) and 0.9985; pamica against itself, over 10 pairs, 0.0039 and 0.9991.
+Before epic #324 the five-pair figures were an Amari distance of ~0.006 (Fortran against Fortran ~0.005) and a correlation of ~0.998.
 
 The fixed source-density families are bit-exact against the literal Fortran score/derivative expressions (~1e-15),
 and the backend converges to the binary's solution within ~0.005 log-likelihood on either dataset.
@@ -58,13 +188,42 @@ and the backend converges to the binary's solution within ~0.005 log-likelihood 
 ### Newton-enabled runs and the initialization basin
 
 The comparison above disables Newton (`do_newton=0`) to isolate the algorithm from its starting point.
-With Newton enabled (`do_newton=1`, the default), agreement at the full 2000-iteration budget depends on the initialization, not on any dynamics difference between the backends.
-From an *identical* initialization (the same starting mixing matrix and densities fed to both), `pamica` and Fortran converge to the same solution:
-mean Hungarian-matched correlation ~0.997 with no collapsed components on the full 70-channel recording, the residual being floating-point summation-order noise between two implementations rather than an algorithmic gap.
-From *independent* random initializations the picture differs, because the two backends' random number generators do not share a state, so a fixed seed does not map to a matched start.
-At the long Newton budget this occasionally settles a few of the weakest, under-determined components into a different but equally likely (equal- or higher-likelihood) optimum.
-Fortran is more robust to its own random inits (run-to-run self-consistency ~0.9997) than `pamica` is, so the effect appears as a `pamica`-specific spread on those components, not a divergence from the reference.
-It is therefore an initialization-basin property (like the non-identifiable multi-model case below), not a parity defect; see issue #145 and the optional init-robustness follow-up #198.
+With Newton enabled (`do_newton=1`, as in the bundled parameter files and EEGLAB's `runamica15.m`; pamica's own default is off), agreement at the full 2000-iteration budget depends on where a fit starts.
+Re-measured on 2026-09-23 with the code of epic #324 on the full 70-channel recording
+(pamica on CUDA in float64, seeds 42, 13 and 7; the pinned v0.3.3 reference seeded 1 and 2; the `input.param` settings with the early stops off;
+`.context/issue-351/newton_seeds.py`), Hungarian-matched correlation of the 70 unmixing rows:
+
+| Pair | Mean | Min | Components below 0.9 |
+|---|---:|---:|---:|
+| pamica seed 42 vs reference seed 1 | 0.963 | 0.667 | 8 |
+| pamica seed 42 vs reference seed 2 | 0.986 | 0.858 | 3 |
+| pamica seed 13 vs reference seed 1 | 0.996 | 0.946 | 0 |
+| pamica seed 13 vs reference seed 2 | 0.981 | 0.773 | 3 |
+| pamica seed 7 vs reference seed 1 | 0.995 | 0.943 | 0 |
+| pamica seed 7 vs reference seed 2 | 0.982 | 0.786 | 3 |
+| reference seed 1 vs reference seed 2 | 0.985 | 0.841 | 2 |
+| pamica seed 42 vs pamica seed 13 | 0.962 | 0.658 | 7 |
+| pamica vs reference, both from the same start | 0.9999998 | 0.9999964 | 0 |
+| reference from that start vs reference seed 1 | 0.996 | 0.955 | 0 |
+
+The weakest, under-determined components settle into different basins from different starts, in the reference's runs as in pamica's:
+pamica's seed 42 differs from the reference's seed 1 on 8 components, and the reference's seed 2 differs from its own seed 1 on 2 and from each pamica seed on 3.
+The alternative basins have equal or higher likelihood
+(final log-likelihood: reference seeds 1 and 2, -3.697804 and -3.697709; pamica seeds 42, 13 and 7, -3.697569, -3.697816 and -3.697812).
+The same start is the deterministic one of issue #145 ($A = I$, `mu` at -1, 0 and 1, `sbeta` = 1, `rho` = 1.5), fed to the reference through its `load_*` files;
+from it, pamica and the reference end with the same components after 2000 Newton iterations
+(mean correlation 0.9999998, Amari distance $3.8\times10^{-5}$, final log-likelihoods $7.6\times10^{-8}$ apart).
+In issue #145, measured before epic #324's changes to the fit, two clock-seeded reference runs agreed at 0.9997 (minimum 0.998),
+pamica's seeds 42, 13 and 7 reached 0.942, 0.994 and 0.996 against them, and the same start gave 0.997.
+The seeded pair above (0.985) is a second measurement of the reference's own seed-to-seed spread, on one more pair of starts.
+See issue #145 and the optional init-robustness follow-up #198.
+
+A single-seed supplementary run gives the float32 side at this data size:
+the MLX backend (float32), with the same keywords and the same start as the CUDA seed-7 fit, stops on its learning-rate floor after 952 iterations,
+after about 120 likelihood decreases below float32 resolution, at log-likelihood -3.69809 (the float64 fit was at -3.69791 at that iteration).
+Its components match the float64 seed-7 fit at a mean correlation of 0.985 (minimum 0.907) and the reference's seed 1 at 0.983 (minimum 0.905);
+with seed 42, float32 and float64 differ on 10 of the 70 components (mean 0.955).
+At this budget the weak components' float32 basin varies the way a change of start does (`.context/issue-351/raw/newton_mlx/`).
 
 ### Source-density families are bit-exact
 
@@ -72,6 +231,12 @@ AMICA models each source with one of the reference's five `pdftype` density fami
 For every family other than the default generalized Gaussian, the vectorized log-density and score reproduce the literal `amica15.f90` expressions
 to float64 precision (test bound $<10^{-12}$, observed $\sim\!10^{-15}$):
 the source model is not an approximation of the Fortran one, it is the same function.
+That includes the normalizing constants at the precision the binary uses them:
+the reference writes them as single-precision literals widened to double, and every backend has used those values since issue #344
+([the differences guide](amica-differences.md#single-precision-constants-issue-344)).
+Seeded with pamica's initialization, the native binary's log-likelihood for families 2, 4 and 1 matches PyTorch's to $3\times10^{-15}$ after one and three iterations,
+where the decimals' double values had been off by $3.7\times10^{-10}$, $2.0\times10^{-8}$ and $-2.1\times10^{-8}$
+(`pamica/tests/test_reference_constants.py`, opt-in with `AMICA_RUN_FORTRAN=1`).
 The generalized Gaussian has no closed-form literal to compare against, since its score depends on the adaptive shape $\rho$,
 so the default family is validated by the single-model parity above instead.
 The oracle column below records which check applies to each family:
@@ -93,106 +258,127 @@ See `pamica/tests/torch_tests/test_ng_pdf_families.py` and ADR 0002.
 
 ## Multi-model distributional similarity
 
-Multi-model AMICA is not partition-identifiable, so exact partition parity with Fortran is the wrong acceptance bar.
-The right test is whether the two implementations sample a similar distribution over solutions. Running an ensemble of `N = 20` fits per implementation on the bundled sample EEG (`n_models = 2`, 3 mixture components, 100 iterations, matched schedule),
-the pamica-vs-Fortran partition cross-correlation distribution overlaps Fortran's own run-to-run distribution:
+Multi-model AMICA is not partition-identifiable: fits from different starts reach different partitions of nearly the same likelihood,
+so a single-run partition comparison with Fortran cannot serve as the acceptance bar.
+The comparison is between the distributions of solutions the two implementations sample.
+An ensemble of `N = 20` fits per implementation on the bundled sample EEG (`n_models = 2`, 3 mixture components, 100 iterations, matched schedule)
+gives the distributions of pairwise agreement below
+(`benchmarks/reproduce_table1.py --tier bundled`, re-measured on 2026-09-23 with the code of epic #324 against the pinned v0.3.3 native binary,
+whose runs here draw their own clock-based seeds; the 40 fits are saved in `.context/issue-351/raw/table1_bundled/bundled_multimodel_ensemble.npz`).
+The schedule matches except for one setting: the reference runs with `invsigmin` 0.0, the value EEGLAB's `runamica15.m` writes, and pamica with 1e-8.
 
 | Distribution (pairwise Hungarian-matched \|corr\|) | Mean | SD | Range |
 |---|---:|---:|---|
-| within-Fortran (Fortran vs Fortran) | 0.638 | 0.040 | [0.572, 0.797] |
-| within-pamica (pamica vs pamica) | 0.661 | 0.045 | [0.583, 0.820] |
-| between (pamica vs Fortran) | 0.649 | 0.045 | [0.582, 0.886] |
+| within-Fortran (Fortran vs Fortran) | 0.626 | 0.036 | [0.568, 0.868] |
+| within-pamica (pamica vs pamica) | 0.638 | 0.042 | [0.578, 0.805] |
+| between (pamica vs Fortran) | 0.632 | 0.042 | [0.564, 0.845] |
 
-![Multi-model solution-ensemble cross-correlation distributions for pamica and Fortran.](../assets/figures/multimodel-ensemble.png){ width=640 }
+![Multi-model solution-ensemble cross-correlation and log-likelihood distributions for pamica and Fortran.](../assets/figures/multimodel-ensemble.png){ width=640 }
 /// caption
-Pairwise Hungarian-matched component correlation for 20 pamica and 20 Fortran multi-model fits of the sample EEG.
-The within-Fortran, within-pamica, and between-implementation distributions overlap: the estimators sample the same solution space.
+Pairwise Hungarian-matched component correlation (A) and final log-likelihood (B) for 20 pamica and 20 Fortran multi-model fits of the sample EEG.
+The three agreement distributions overlap, and so do the two likelihood distributions.
 ///
 
-The three distribution means lie within 0.011 of each other (between 0.649, within-Fortran 0.638), well inside a $\pm 0.05$ margin. To test this at the correct unit of analysis, we use a **run-level permutation test**:
-the 190/400 pairwise correlations are *not* independent (each of the 40 runs appears in ~39 pairs),
+The three means lie within 0.012 of each other.
+The between-minus-within-Fortran difference is +0.006, inside the $\pm 0.05$ margin the original study set
+(run-level bootstrap 90% interval -0.002 to 0.014, `.context/issue-351/equivalence_check.py`).
+The pairwise values (190 within-Fortran and 190 within-pamica, plus 400 cross-implementation pairs) are not independent (each of the 40 runs appears in 39 pairs),
 so a Mann-Whitney or TOST applied to the pairwise values is pseudoreplicated and its p-value is invalid.
-Permuting the 40 runs as intact units instead (20000 permutations, statistic = within-Fortran minus between-implementation mean correlation) respects that dependence and finds **no evidence that cross-implementation agreement is worse than Fortran's own run-to-run agreement ($p = 0.96$)**.
+The significance test permutes the 40 runs as intact units instead (20000 permutations, statistic = within-Fortran minus between-implementation mean correlation).
+For the one-sided hypothesis that cross-implementation agreement is worse than Fortran's own run-to-run agreement, it gives $p = 0.88$.
 
-The single-run cross-correlation of ~0.65 is therefore intrinsic estimator spread, not a shortfall: Fortran agrees with *itself* at 0.64.
-The per-block sufficient statistics and one M-step are bit-exact against Fortran (~$10^{-15}$),
-so the update equations are correct;
-a small residual in the log-likelihood *distribution* (pamica $-3.363 \pm 0.006$ vs Fortran $-3.354 \pm 0.003$;
-Kolmogorov-Smirnov $p \approx 6\times10^{-5}$) is an optimizer-quality effect,
-not a model-correctness defect (pamica reaches Fortran's mean with about twice as many iterations).
+The single-run cross-correlation of ~0.63 matches Fortran's agreement with itself (0.63), so it measures the estimator's run-to-run spread.
+The per-block sufficient statistics and one M-step agree with the reference to round-off (~$3\times10^{-16}$ relative).
+The final log-likelihoods agree too: pamica $-3.3541 \pm 0.003$, Fortran $-3.3543 \pm 0.002$ (Kolmogorov-Smirnov $p = 0.83$).
+The ensembles of this study measured before epic #324's changes to the fit differed on this one metric
+(pamica $-3.363 \pm 0.006$ against Fortran $-3.354 \pm 0.003$, $p \approx 6\times10^{-5}$), a gap attributed then to convergence speed.
+Refitting the pamica half with that code (e38aa11) against the same 20 reference fits gives $-3.3627 \pm 0.006$ ($p = 1\times10^{-5}$)
+(`.context/issue-351/multimodel_pamica_fits.py`).
+Seven of those 20 fits stop early on `min_dll`, whose check counted likelihood dips as small gains until issue #339 (mean $-3.3679$),
+and the 13 that run the full 100 iterations average $-3.3600$, so the old gap came partly from the early stops and partly from the update rule of that code.
+A seeded ensemble with the same settings (the reference seeded 0-19 and single-threaded) puts pamica's mean $8.1\times10^{-4}$ above the reference's at 100 iterations, $2.1\times10^{-4}$ at 200 and $1.0\times10^{-4}$ at 300
+([ADR 0003](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0003-best-iterate-safeguard.md)).
 
 ### Amari distance: a second, assignment-free metric
 
 The correlation above needs a Hungarian assignment step to resolve component permutation before it can be computed.
 The Amari distance does not: it is permutation- and scale-invariant by construction,
-so it is a genuinely independent check on the same 20-run ensembles (`.context/issue-27/ensemble.npz`;
-recomputed by `.context/issue-27/amari_distance.py` with no re-fitting, since the raw unmixing matrices from the original 40 fits are already saved).
+so it is an independent check on the same 20-run ensembles, computed from the saved unmixing matrices with no refitting
+(`.context/issue-351/multimodel_ensemble.py`, which reuses `.context/issue-27/amari_distance.py`).
 Each stacked 2-model matrix is split into its per-model 32x32 blocks;
 since which Fortran model corresponds to which pamica model is not identified, both label pairings are tried and the lower-distance pairing is kept, per run pair.
-This pairing correction is not free: on this ensemble it lowers the reported distance by ~0.02-0.03 versus always keeping the naive (unswapped) pairing, a similar order of magnitude to the within-Fortran/within-pamica gap below, so part of that gap plausibly reflects how often each group happens to need the swap, not just genuine agreement differences.
+This pairing correction lowers the mean distance by 0.0185 on this ensemble (333 of the 780 run pairs take the swapped pairing),
+the same order as the gaps between the groups below, so part of those gaps may reflect how often each group needs the swap.
 
 | Distribution (Amari distance, lower is better) | Mean | SD |
 |---|---:|---:|
-| within-Fortran (Fortran vs Fortran) | 0.174 | 0.023 |
-| within-pamica (pamica vs pamica) | 0.154 | 0.019 |
-| between (pamica vs Fortran) | 0.163 | 0.022 |
+| within-Fortran (Fortran vs Fortran) | 0.166 | 0.017 |
+| within-pamica (pamica vs pamica) | 0.176 | 0.025 |
+| between (pamica vs Fortran) | 0.172 | 0.022 |
 
-The same run-level permutation test (20000 permutations, intact 40-run units) finds no evidence that between-implementation agreement is worse than Fortran's own run-to-run agreement ($p > 0.999$), agreeing with the correlation-based conclusion above.
+By this metric pamica's ensemble spreads slightly more than the reference's (0.176 against 0.166),
+and the between-implementation distance lies between the two: +0.005 from within-Fortran (bootstrap 90% interval 0.002 to 0.009).
+The same one-sided run-level permutation test gives $p = 0.051$.
+Before epic #324's changes to the fit, pamica's ensemble was the tighter one:
+refit with that code against the same reference fits, within-pamica 0.151 and between 0.160 ($p = 0.998$),
+and the original ensembles of this study measured 0.154 and 0.163 against the bundled `amica15mac` binary's 0.174 ($p > 0.999$).
 
 ??? note "Per-run detail (all 40 runs, both metrics)"
 
     Table 1 in the paper and the group summaries above report distribution means;
     the table below gives each of the 40 runs' own mean agreement to its own group's other 19 runs (`within`) and to all 20 opposite-implementation runs (`between`), for both metrics.
-    Regenerate with `uv run python .context/issue-27/amari_distance.py`, which writes `.context/issue-27/per_run_detail.csv`.
+    Regenerate with `uv run python .context/issue-351/multimodel_ensemble.py --from-npz .context/issue-351/raw/table1_bundled/bundled_multimodel_ensemble.npz`,
+    which writes `.context/issue-351/per_run_detail.csv` (with each run's final log-likelihood) and the figure above.
 
     | implementation | run | corr within | corr between | Amari within | Amari between |
     |---|---:|---:|---:|---:|---:|
-    | Fortran | 0 | 0.6164 | 0.6274 | 0.1880 | 0.1745 |
-    | Fortran | 1 | 0.6292 | 0.6568 | 0.1784 | 0.1592 |
-    | Fortran | 2 | 0.6465 | 0.6396 | 0.1694 | 0.1654 |
-    | Fortran | 3 | 0.6593 | 0.6740 | 0.1627 | 0.1508 |
-    | Fortran | 4 | 0.6323 | 0.6522 | 0.1797 | 0.1629 |
-    | Fortran | 5 | 0.6692 | 0.6773 | 0.1590 | 0.1488 |
-    | Fortran | 6 | 0.6660 | 0.6808 | 0.1628 | 0.1502 |
-    | Fortran | 7 | 0.6341 | 0.6400 | 0.1786 | 0.1678 |
-    | Fortran | 8 | 0.6285 | 0.6491 | 0.1779 | 0.1663 |
-    | Fortran | 9 | 0.6212 | 0.6341 | 0.1835 | 0.1702 |
-    | Fortran | 10 | 0.6308 | 0.6414 | 0.1794 | 0.1663 |
-    | Fortran | 11 | 0.6297 | 0.6444 | 0.1736 | 0.1614 |
-    | Fortran | 12 | 0.6334 | 0.6416 | 0.1782 | 0.1690 |
-    | Fortran | 13 | 0.6513 | 0.6630 | 0.1693 | 0.1574 |
-    | Fortran | 14 | 0.6666 | 0.6689 | 0.1584 | 0.1540 |
-    | Fortran | 15 | 0.6231 | 0.6254 | 0.1827 | 0.1750 |
-    | Fortran | 16 | 0.6147 | 0.6258 | 0.1903 | 0.1755 |
-    | Fortran | 17 | 0.6280 | 0.6483 | 0.1749 | 0.1632 |
-    | Fortran | 18 | 0.6441 | 0.6371 | 0.1691 | 0.1665 |
-    | Fortran | 19 | 0.6389 | 0.6505 | 0.1733 | 0.1637 |
-    | pamica | 0 | 0.6317 | 0.6149 | 0.1690 | 0.1806 |
-    | pamica | 1 | 0.6935 | 0.6777 | 0.1440 | 0.1529 |
-    | pamica | 2 | 0.6624 | 0.6583 | 0.1545 | 0.1606 |
-    | pamica | 3 | 0.6406 | 0.6459 | 0.1527 | 0.1561 |
-    | pamica | 4 | 0.6493 | 0.6384 | 0.1506 | 0.1569 |
-    | pamica | 5 | 0.6755 | 0.6591 | 0.1548 | 0.1622 |
-    | pamica | 6 | 0.6339 | 0.6236 | 0.1677 | 0.1807 |
-    | pamica | 7 | 0.6809 | 0.6788 | 0.1417 | 0.1479 |
-    | pamica | 8 | 0.6780 | 0.6552 | 0.1508 | 0.1631 |
-    | pamica | 9 | 0.6270 | 0.6206 | 0.1703 | 0.1823 |
-    | pamica | 10 | 0.6855 | 0.6665 | 0.1474 | 0.1612 |
-    | pamica | 11 | 0.6739 | 0.6556 | 0.1506 | 0.1612 |
-    | pamica | 12 | 0.6321 | 0.6190 | 0.1617 | 0.1753 |
-    | pamica | 13 | 0.6639 | 0.6610 | 0.1519 | 0.1597 |
-    | pamica | 14 | 0.6866 | 0.6849 | 0.1460 | 0.1520 |
-    | pamica | 15 | 0.6944 | 0.6672 | 0.1417 | 0.1559 |
-    | pamica | 16 | 0.6576 | 0.6533 | 0.1551 | 0.1633 |
-    | pamica | 17 | 0.6435 | 0.6249 | 0.1615 | 0.1756 |
-    | pamica | 18 | 0.6753 | 0.6547 | 0.1442 | 0.1549 |
-    | pamica | 19 | 0.6302 | 0.6180 | 0.1562 | 0.1655 |
+    | Fortran | 0 | 0.6169 | 0.6061 | 0.1710 | 0.1853 |
+    | Fortran | 1 | 0.6348 | 0.6508 | 0.1615 | 0.1593 |
+    | Fortran | 2 | 0.6145 | 0.6064 | 0.1756 | 0.1876 |
+    | Fortran | 3 | 0.6250 | 0.6356 | 0.1655 | 0.1684 |
+    | Fortran | 4 | 0.6290 | 0.6424 | 0.1654 | 0.1663 |
+    | Fortran | 5 | 0.6118 | 0.6047 | 0.1707 | 0.1853 |
+    | Fortran | 6 | 0.6268 | 0.6334 | 0.1610 | 0.1648 |
+    | Fortran | 7 | 0.6238 | 0.6247 | 0.1700 | 0.1765 |
+    | Fortran | 8 | 0.6332 | 0.6471 | 0.1643 | 0.1696 |
+    | Fortran | 9 | 0.6344 | 0.6458 | 0.1606 | 0.1648 |
+    | Fortran | 10 | 0.6057 | 0.6019 | 0.1782 | 0.1876 |
+    | Fortran | 11 | 0.6353 | 0.6534 | 0.1627 | 0.1631 |
+    | Fortran | 12 | 0.6182 | 0.6147 | 0.1680 | 0.1796 |
+    | Fortran | 13 | 0.6497 | 0.6503 | 0.1590 | 0.1642 |
+    | Fortran | 14 | 0.6270 | 0.6343 | 0.1637 | 0.1679 |
+    | Fortran | 15 | 0.6315 | 0.6322 | 0.1653 | 0.1715 |
+    | Fortran | 16 | 0.6101 | 0.6119 | 0.1701 | 0.1772 |
+    | Fortran | 17 | 0.6181 | 0.6287 | 0.1698 | 0.1718 |
+    | Fortran | 18 | 0.6428 | 0.6764 | 0.1596 | 0.1537 |
+    | Fortran | 19 | 0.6222 | 0.6371 | 0.1638 | 0.1664 |
+    | pamica | 0 | 0.6507 | 0.6421 | 0.1703 | 0.1671 |
+    | pamica | 1 | 0.6491 | 0.6338 | 0.1687 | 0.1687 |
+    | pamica | 2 | 0.6264 | 0.6206 | 0.1829 | 0.1785 |
+    | pamica | 3 | 0.6277 | 0.6324 | 0.1860 | 0.1730 |
+    | pamica | 4 | 0.6390 | 0.6358 | 0.1804 | 0.1706 |
+    | pamica | 5 | 0.5984 | 0.6025 | 0.1983 | 0.1880 |
+    | pamica | 6 | 0.6608 | 0.6492 | 0.1605 | 0.1615 |
+    | pamica | 7 | 0.6266 | 0.6175 | 0.1823 | 0.1786 |
+    | pamica | 8 | 0.6177 | 0.6205 | 0.1859 | 0.1751 |
+    | pamica | 9 | 0.6587 | 0.6442 | 0.1633 | 0.1644 |
+    | pamica | 10 | 0.6385 | 0.6269 | 0.1747 | 0.1749 |
+    | pamica | 11 | 0.6291 | 0.6259 | 0.1800 | 0.1752 |
+    | pamica | 12 | 0.6608 | 0.6499 | 0.1642 | 0.1631 |
+    | pamica | 13 | 0.6591 | 0.6456 | 0.1638 | 0.1665 |
+    | pamica | 14 | 0.6237 | 0.6252 | 0.1823 | 0.1733 |
+    | pamica | 15 | 0.6357 | 0.6361 | 0.1795 | 0.1704 |
+    | pamica | 16 | 0.6256 | 0.6219 | 0.1789 | 0.1720 |
+    | pamica | 17 | 0.6408 | 0.6326 | 0.1784 | 0.1742 |
+    | pamica | 18 | 0.6173 | 0.6221 | 0.1868 | 0.1751 |
+    | pamica | 19 | 0.6663 | 0.6528 | 0.1574 | 0.1609 |
 
 ## Cross-platform device and precision invariance
 
 The strongest reassurance that pamica is a single, well-defined implementation is that it recovers the *same*
 independent components no matter where or how it runs. Fitting the same real EEG (ds002718 sub-002, 147,000 frames, 70 channels, 2000 iterations)
-on every backend and Hungarian-matching the unmixing components across them:
+on every backend and Hungarian-matching the unmixing components across them
+(measured before epic #324's changes to the fit and not re-measured since; issue #351 re-measured the figures elsewhere on this page):
 
 ![Cross-backend IC-equivalence matrix at 70 channels.](../assets/figures/cross-backend-equivalence-matrix.png){ width=680 }
 /// caption
@@ -220,6 +406,8 @@ The well-determined components are indistinguishable across all backends.
 Whether backends recover the *same* components depends on how well-determined the decomposition is, captured by the data-adequacy factor:
 
 $$k = \frac{\text{frames}}{\text{channels}^2}$$
+
+The two sweeps below were measured before epic #324's changes to the fit and have not been re-measured since.
 
 As `k` grows, cross-backend component equivalence rises toward 1.0;
 at the rule-of-thumb minimum (`k` around 20-30) only the strongest components are backend-reproducible,
@@ -293,16 +481,21 @@ files (`gm`, `W`, `S`, `mean`, `c`, `alpha`, `mu`, `sbeta`, `rho`, `comp_list`, 
 
 The round-trip is verified two ways:
 
-- **Byte-level:** for a single model the written files are an exact float64 serialization of the fitted
-  parameters. `W` and the symmetric zero-phase component analysis (ZCA) sphere are byte-identical in C order; the non-square mixture
-  parameters and `c`/`comp_list` are column-major (Fortran layout), matching the reference `amicaout` files.
+- **Byte-level:** for a single model the written files are an exact float64 serialization of the fitted parameters.
+  `W` is byte-identical in C order;
+  the sphere `S` and the non-square mixture parameters and `c`/`comp_list` are column-major (Fortran layout),
+  matching the reference `amicaout` files.
+  The default symmetric zero-phase component analysis (ZCA) sphere happens to be its own transpose to about 1e-17,
+  which is why an earlier column-major/C-order mismatch in the square-sphere write path went unnoticed,
+  until it was measured against an asymmetric (`do_approx_sphere=False`) sphere (issue #336).
 - **Reader-level:** the directory loads through `loadmodout15.m` (and its NumPy port `loadmodout`) with the
   expected shapes and the correct column-major layout. The MATLAB round-trip during development is what caught,
   and fixed, a column-major format bug in the mixture-parameter arrays.
 
 `variance_order()` reproduces EEGLAB's IC ordering (IC1 = highest back-projected variance) in Python without a
-disk round-trip. For `n_models > 1` the layout is self-consistent and round-trips through both readers, but is
-not byte-identical to a native multi-model run (see the multi-model discussion above).
+disk round-trip. For `n_models > 1` every file is also in the reference's layout (`W` since issue #159, `A` since issue #334),
+and the directory round-trips through both readers; the values differ from any one native run
+only because multi-model AMICA is not partition-identifiable (see the multi-model discussion above).
 Full usage is in the [EEGLAB interoperability guide](eeglab.md); tests are in `pamica/tests/torch_tests/test_amica_ng_wrapper.py`.
 
 ## Performance across backends
@@ -310,6 +503,9 @@ Full usage is in the [EEGLAB interoperability guide](eeglab.md); tests are in `p
 Throughput on real EEG (OpenNeuro ds002718 sub-002; `n_mix=3`, `pdftype=0`, `block_size=512`, warmed, min-of-repeats).
 CPU, MPS, and MLX were measured on Apple Silicon; CUDA on a separate NVIDIA RTX 4090 host,
 so MLX-versus-CUDA reads as "best Apple-GPU path versus a strong NVIDIA GPU", not a same-box comparison.
+These tables predate epic #324.
+A same-session check on the Apple M4 Pro at 70 channels (`benchmark_dimsweep.py`, 30000 frames, 25 iterations, three repeats; issue #351)
+found per-iteration cost unchanged by the epic: 33.3 and 33.1 ms for MLX, 190.8 and 189.4 ms for torch-CPU float64, 165.1 and 166.7 ms for torch-MPS float32, before and after.
 
 ### Single-model, ms/iteration
 
@@ -411,14 +607,27 @@ narrows here too is untested.
 
 ### Cross-backend log-likelihood agreement (single-model)
 
-Every backend converges to the same log-likelihood to ~3 significant digits on real EEG,
-across device and precision, confirming the whole backend family end-to-end:
+The log-likelihood each backend reaches with the same settings and the same start,
+from the throughput sweep's own runs (`benchmark_dimsweep.py`: the first 30000 frames of ds002718 sub-002,
+the first 32, 48 or 70 channels, 25 iterations, `block_size=512`, no Newton, seed 42;
+re-measured on 2026-09-23 with the code of epic #324, issue #351, on the Apple M4 Pro and, for CUDA, the RTX 4090 host):
 
-| channels | MLX f32 | CUDA f64 | torch-CPU f64 | torch-MPS f32 | NumPy f64 |
-|---:|---:|---:|---:|---:|---:|
-| 32 | -3.28634 | -3.28635 | -3.28636 | -3.28635 | -3.28620 |
-| 48 | -3.20951 | -3.20952 | -3.20953 | -3.20951 | -3.21019 |
-| 70 | -3.21579 | -3.21562 | -3.21560 | -3.21570 | -3.21315 |
+| channels | MLX f32 | CUDA f64 | CUDA f32 | torch-CPU f64 | torch-MPS f32 | NumPy f64 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 | -3.28488 | -3.28489 | -3.28488 | -3.28489 | -3.28488 | -3.28478 |
+| 48 | -3.20839 | -3.20838 | -3.20839 | -3.20838 | -3.20839 | -3.20893 |
+| 70 | -3.21643 | -3.21723 | -3.21689 | -3.21746 | -3.21638 | -3.22054 |
+
+At 32 and 48 channels every backend that starts from the shared draw agrees to 1e-5, so float32 matches float64 to five significant digits.
+At 70 channels the sweep's 30000 frames give $k\approx6$, and 25 iterations at `lrate=0.1` amplify round-off:
+two float64 runs of the same code on CPU and CUDA differ by 2.3e-4, the backends by up to 1.1e-3,
+and adding 1e-9 µV to one sample changes the torch-CPU value by 1.3e-15 after one iteration and 4.4e-4 after 25
+(the trajectory has a likelihood decrease on its 25th iteration).
+The 70-channel differences are of the same size as that sensitivity,
+and the code before epic #324's changes to the fit (e38aa11) shows the same growth.
+NumPy is called without a seed here, so it starts from its own draw, which is why its column sits apart (by up to 4.2e-3 at 70 channels).
+The component-level float32 comparison is in [the per-backend rows](#parity-rows-per-backend):
+from a shared start, MLX float32 and PyTorch float64 agree to a mean matched correlation of 0.99999991 after 100 iterations.
 
 ## Other validated behaviors
 
@@ -429,33 +638,35 @@ guarded to a no-op so the parity results above stay byte-for-byte unchanged.
 
 | Behavior | Status | Validation |
 |---|---|---|
-| Best-iterate safeguard (`keep_best`, #51) | on by default | returns the highest-LL iterate; cuts multi-model LL sd from 12.7x to 2.0x Fortran's. Single-model parity stays bit-exact (monotone, no restore). ADR 0003 |
+| Best-iterate safeguard (`keep_best`, #51) | on by default | returns the highest-LL iterate. It cut the multi-model LL sd from 12.7x to 2.0x Fortran's before epic #324; re-measured with the epic's code, the sd ratio is 1.0x with or without it and a restore fired in one of 20 seeded fits, at the 300-iteration budget only (gain 4.2e-6). Single-model parity stays bit-exact (monotone, no restore). ADR 0003 |
 | Per-model bias `c` update (#27) | on for `n_models>1` | Fortran `update_c`; per-block stats bit-exact; no-op for `n_models=1` |
-| Component sharing (`share_comps`, #60) | off by default | Fortran `identify_shared_comps` ported; no bit-exact oracle (`Spinv2` is unrunnable), behavior-validated; byte-identical when unshared |
+| Component sharing (`share_comps`, #60, #334) | off by default | Fortran `identify_shared_comps` ported; the scan itself has no bit-exact oracle (`Spinv2` is never allocated, so the reference's scan computes NaN similarities and never merges), but the update from a merged state seeded through the reference's `load_comp_list` matches the native binary to float64 round-off on PyTorch and NumPy (`test_component_rows.py`, opt-in with `AMICA_RUN_FORTRAN=1`); byte-identical when unshared |
 | Outlier rejection (`do_reject`, #123) | off by default | `good_idx` mechanism on all three backends (NumPy, PyTorch, MLX -- the last landed epic #278 Phase 3, #289); MLX/NumPy ports validated vs the PyTorch backend |
-| Degenerate-fit contract (#50) | always | the `AMICA` wrapper refuses a NaN or singular fit (`converged_` / `stop_reason_`); `transform`/`get_*`/`save` raise through the wrapper instead of returning NaN sources. This is a wrapper-level contract, not a raw-backend one -- calling a raw `AMICATorchNG`/`AMICAMLXNG`/`AMICA_NumPy` instance's `transform`/`get_*`/`save` directly, bypassing the wrapper, is not gated (tracked as issue #306). `write_amica_output` is the one exception: both the PyTorch and MLX backends gained the same degenerate/non-finite refusal directly on the raw class in this epic, since it has no wrapper equivalent to gate it. |
+| Degenerate-fit contract (#50, #306, #339) | always | a fit that stops on a non-finite log-likelihood (`nan_ll`/`singular_ll`), update direction (`nan_direction`) or parameters (`nan_params`) is marked unusable (`converged_=False`, with `stop_reason_`), and every output path refuses it instead of returning NaN sources: the `AMICA` wrapper's `transform`/`get_*`/`write_amica_output`/`save`, and since issue #306 the raw `AMICATorchNG`, `AMICAMLXNG` and `AMICA_NumPy` output accessors too (`pamica/tests/test_backend_guards.py`, `pamica/tests/test_nonfinite_stops.py`). |
+| End-to-end workflow (#315) | always, PyTorch and MLX | average-referenced sample EEG with `pcakeep = n_channels - 1` through `AMICAICA`: 31 components, `get_sources` equal to `transform`, an exclusion that removes exactly one back-projection and keeps the residual, the EEGLAB export reloaded by `loadmodout`, `save`/`load`, an `input.param`-driven fit, and the two backends' sources Hungarian-matched with a minimum correlation of at least 0.999 (measured 0.999999999) |
 
-Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests/test_ng_sharing.py`, `torch_tests/test_amica_ng_wrapper.py`, and `test_numpy_reject.py`.
+Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests/test_ng_sharing.py`, `torch_tests/test_amica_ng_wrapper.py`, `test_numpy_reject.py`, and `mne_tests/test_end_to_end_workflow.py`.
 
 ## Which convergence criterion actually stops a fit
 
 AMICA ships four stops. On recordings the size of the bundled sample, only two of
 them fire, and it is worth knowing which before concluding that one is broken.
 
-Two of the four defaults differ between the backends, so read the column that
-matches the entry point you use. `AMICA_NumPy` resolves its defaults from the
-bundled `pamica/numpy_impl/params.json`; `AMICA`/`AMICATorchNG` and `AMICAMLXNG`
-take theirs from the constructor signature (`max_iter` from `fit`); Fortran
-compiles in the values in `amica15_header.f90` and the bundled
+The pamica backends share these defaults (issue #354):
+`AMICA`/`AMICATorchNG` and `AMICAMLXNG` take theirs from the constructor signature (`max_iter` from `fit`),
+and `AMICA_NumPy` resolves the same values from the bundled `pamica/numpy_impl/params.json`,
+which before issue #354 turned Newton on and ran 2000 iterations.
+Fortran compiles in the values in `amica15_header.f90`, and the bundled
 `pamica/sample_data/input.param` overrides several.
+The [defaults table](amica-differences.md#default-settings-issue-354) of the differences guide lists every setting across these sources.
 
 | Stop | `AMICA` / `AMICATorchNG` | `AMICA_NumPy` | `AMICAMLXNG` (MLX) | Fortran (compiled / `input.param`) |
 |---|---|---|---|---|
-| `max_iter` | **100** | 2000 | **100** | none / 2000 |
+| `max_iter` | **100** | **100** | **100** | none / 2000 |
 | `min_dll` (`use_min_dll`) | on, `1e-9` | on, `1e-9` | on, `1e-9` | on, `1e-9` |
 | `min_nd` (`use_grad_norm`) | on, `1e-7` | on, `1e-7` (named `min_grad_norm`) | on, `1e-7` | on, `1e-7` |
 | `minlrate` (`lrate_floor`) | `1e-12` | `1e-12` | `1e-12` | `1e-12` / `1e-8` |
-| `do_newton` | **off** | **on** | **off** | off / on |
+| `do_newton` | **off** | **off** | **off** | off / on |
 
 The MLX column dates from issue #248, which ported both stops to that backend;
 before it, an MLX fit had no convergence criterion at all and always ran to
@@ -464,10 +675,10 @@ backend-differences guide), taking `AMICATorchNG`'s off-by-default.
 
 Which of them actually ends a fit:
 
-- **`min_dll` normally wins**, at iteration 326-1076 depending on the BLAS build
-  — but only when `max_iter` is large enough to let it. At `AMICATorchNG`'s
-  default `max_iter=100` the fit always ends on `max_iter` before `min_dll` can
-  fire, so the default PyTorch run is iteration-limited, not converged. Raise
+- **`min_dll` normally wins**, at iteration 326-1076 depending on the BLAS build,
+  when `max_iter` is large enough to let it. At the default
+  `max_iter=100` the fit always ends on `max_iter` before `min_dll` can
+  fire, so a default run on any pamica backend is iteration-limited, not converged. Raise
   `max_iter` if you want the likelihood stop to be the one that decides.
 - **`min_nd` never fires** on a recording this size, in any of the four
   implementations. This is the subject of the rest of this section.
@@ -489,7 +700,7 @@ configuration, its own gradient norm oscillates rather than shrinking:
 
 It then plateaus at 1.0-1.65e-5 out to iteration 5073 without ever crossing the
 `1e-7` threshold, which sits about two orders of magnitude below the reference's
-own floor. The Python backends plateau roughly two orders higher again — near
+own floor. The Python backends plateau roughly two orders higher again: near
 a fixed point `dAk` tends to zero, so the norm is measuring a near-total
 cancellation where floating-point and BLAS ordering differences dominate what is
 left.
@@ -532,17 +743,18 @@ tier: below $k\approx60$ the decomposition is under-determined and backends dive
 reasons, so a faster variant would reproduce a noisier number and invite the misreading this section
 exists to prevent.
 
-Two general checks remain useful and are much quicker, but note that neither reproduces a specific
-table row: `validate_implementations.py` defaults to a single seed at 100 iterations with `do_newton`
-read from `sample_params.json`, and `pytest` runs the parity and behaviour suite.
+Two general checks remain useful and are much quicker, but note that neither reproduces a row of
+the paper's table: `validate_implementations.py` defaults to a single seed at 100 iterations with `do_newton`
+read from `sample_params.json` (it reproduces the [per-backend harness rows](#parity-rows-per-backend) above),
+and `pytest` runs the parity and behavior suite.
 
 ```bash
-uv run python validate_implementations.py     # single- and multi-model parity report
-uv run pytest                                  # the full parity/behavior test suite
+uv run python validate_implementations.py --backend all  # single-model parity report, every backend
+uv run pytest                                             # the full parity/behavior test suite
 ```
 
 The multi-model ensemble and Amari detail regenerate from saved fits (no re-fitting) with
-`uv run python .context/issue-27/amari_distance.py`. The cross-platform benchmark and equivalence
+`uv run python .context/issue-351/multimodel_ensemble.py --from-npz .context/issue-351/raw/table1_bundled/bundled_multimodel_ensemble.npz`. The cross-platform benchmark and equivalence
 figures are produced by `benchmarks/benchmark_decompose.py` (and the sweep scripts alongside it);
 the underlying findings are in `.context/issue-84/` and `.context/issue-90/`.
 
@@ -566,34 +778,60 @@ model = AMICA.from_params_file("sample_data/input.param")   # Fortran text forma
 model = AMICA.from_params_file("sample_data/sample_params.json")  # JSON, as before
 ```
 
-The translation lives in `pamica/fortran_params.py` (`read_fortran_param_file`), which parses
-Fortran's whitespace-separated `key value` lines (`#` full-line comments, plus a deliberately
-permissive inline `" #..."` trailing comment; ints/floats/strings, including Fortran's `d`/`D`
-double-precision exponent marker; `0`/`1` boolean flags using Fortran's own `k == 1` semantics)
-into a dict targeting pamica's actual Python call surface: `AMICA.fit`'s named parameters
-(`max_iter`, `lrate`, `do_mean`, `do_sphere`, `do_newton`) and `AMICATorchNG` constructor
-keywords. It was built by reading every `case('...')` arm of `amica15.f90`'s parameter parser
-(~amica15.f90:3100-3700) against `AMICATorchNG`'s constructor and `validate_implementations.py`'s
-`_NG_PARAMS`/`_HANDLED_KEYS`. `AMICA.from_params_file` (which sniffs `.param` vs `.json` content
-rather than trusting the file extension) stashes the translated dict on the returned instance, and
+Every backend reads through one function now (issue #304): `pamica.fortran_params.read_params_file`
+is the single params-file entry point, used by `AMICA.from_params_file` above and by
+`AMICA_NumPy(params_file=...)` / `AMICA_NumPy.from_params_file` (the legacy backend's `params_file`
+used to accept only JSON, raising a raw `json.JSONDecodeError` on a Fortran text file).
+It content-sniffs the same way (JSON if the file starts with `{`/`[`, Fortran text otherwise --
+a JSON top level that is not an object raises `ValueError`) and returns pamica's canonical keys
+either way.
+A JSON file's own keys pass through one alias table, `JSON_ALIAS_TO_CANONICAL`:
+pamica's JSON schema (`sample_params.json`, `numpy_impl/params.json`) spells five settings
+differently from the canonical/constructor name --
+
+| JSON schema key   | canonical pamica key | Note                                          |
+| ------------------ | --------------------- | ---------------------------------------------- |
+| `min_grad_norm`    | `min_nd`              | same rename Fortran's own keyword needs        |
+| `max_decs`         | `maxdecs`             | same rename Fortran's own keyword needs        |
+| `numrej`           | `maxrej`              | same rename Fortran's own keyword needs        |
+| `num_mix_comps`    | `num_mix`             | same rename Fortran's own keyword needs        |
+| `share_int`        | `share_iter`          | JSON-schema-only; Fortran's own spelling already matches |
+
+-- and a file carrying both a setting's alias and its canonical key (e.g. both `max_decs` and
+`maxdecs`) raises `ValueError` naming both rather than picking one silently.
+Applying this table is itself a behavior change for the PyTorch wrapper:
+`sample_params.json`'s own `max_decs`/`min_grad_norm`/`share_int` settings previously matched
+neither a named `fit()` parameter nor an `AMICATorchNG` keyword under their raw JSON spelling,
+so they were only named in the "not applied" warning rather than applied;
+fitting from that file now applies them.
+
+The Fortran-text branch (`read_fortran_param_file`) parses Fortran's whitespace-separated
+`key value` lines (`#` full-line comments, plus a deliberately permissive inline `" #..."`
+trailing comment; ints/floats/strings, including Fortran's `d`/`D` double-precision exponent
+marker; `0`/`1` boolean flags using Fortran's own `k == 1` semantics) into a dict targeting
+pamica's actual Python call surface: `AMICA.fit`'s named parameters (`max_iter`, `lrate`,
+`do_mean`, `do_sphere`, `do_newton`) and `AMICATorchNG` constructor keywords. It was built by
+reading every `case('...')` arm of `amica15.f90`'s parameter parser (~amica15.f90:3100-3700)
+against `AMICATorchNG`'s constructor and `validate_implementations.py`'s `_NG_PARAMS`/
+`_HANDLED_KEYS`. `AMICA.from_params_file` stashes the translated dict on the returned instance, and
 `fit()` applies it as **per-call defaults**: an argument passed explicitly to `fit()` always wins
 over the file's value, whether that argument is one of the five named parameters above or an
 `AMICATorchNG` keyword passed through `**kwargs` (e.g. `block_size`, `rho0`, `newt_start`).
 
-89 Fortran keywords are recognized; 57 (56 distinct pamica-side names) are translated and 32 are
+89 Fortran keywords are recognized; 60 (59 distinct pamica-side names) are translated and 29 are
 deliberately unsupported (checkpoint warm-start, per-family EM freeze toggles, FIR/DFT
-pre-filtering, console/output-file reporting, ...) --
+pre-filtering, console reporting, ...) --
 a keyword this reader drops always fires a `logger.warning` naming it, whether that is because
 it is a real Fortran keyword pamica has no equivalent for, or because it is not a Fortran keyword
 this reader recognizes at all (the bundled `sample_data/input.param` template itself carries three
 such stale entries -- `field_blocksize`, `doPCA`, `load_W` -- that predate this parser and are not
 `case('...')` arms in `amica15.f90` either, so the reference binary already ignores them too). A
 malformed line (a keyword with no value, or a non-empty file where not one keyword is recognized
-by the reference parser at all -- e.g. a JSON file mistakenly handed to this reader) raises
-`ValueError` rather than being dropped or defaulted silently. Data-location metadata the file
-carries (`files`, `outdir`, `data_dim`, `field_dim`, ...) matches no `fit()`/`AMICATorchNG`
-parameter by design; `fit()` names these in a single warning as "not applied" rather than
-forwarding or silently dropping them.
+by the reference parser at all -- e.g. a JSON file mistakenly handed to `read_fortran_param_file`
+directly) raises `ValueError` rather than being dropped or defaulted silently. Data-location
+metadata the file carries (`files`, `outdir`, `data_dim`, `field_dim`, ...) matches no
+`fit()`/`AMICATorchNG` parameter by design; `fit()` names these in a single warning as
+"not applied" rather than forwarding or silently dropping them.
 
 Only three keywords are renamed, because Fortran spells them differently from the pamica-side
 (constructor) name:
@@ -607,9 +845,10 @@ Only three keywords are renamed, because Fortran spells them differently from th
 `num_mix_comps`/`num_mix` both collapse to the pamica key `num_mix`, read directly by
 `from_params_file` to size the instance (`AMICA(n_mix=...)`) before the rest of the dict ever
 reaches `fit()`. `share_iter` is **not** renamed -- it already matches `AMICATorchNG.share_iter`
-exactly, unlike `sample_params.json`'s own schema, which spells the same setting `share_int` (a
-pre-existing mismatch in that JSON file, out of scope here, that `fit()`'s per-call-default merge
-now surfaces as a "not applied" warning when fitting from it rather than silently ignoring it).
+exactly, so this table has no entry for it. `sample_params.json`'s own JSON schema instead spells
+the same setting `share_int`; the JSON alias table above (`JSON_ALIAS_TO_CANONICAL`) is what maps
+that JSON-schema spelling -- and the JSON schema's `max_decs`/`min_grad_norm` spellings for the
+two renamed settings above -- to the canonical names on the way in, not this Fortran-keyword table.
 
 `do_opt_block`, `blk_min`, `blk_max` and `blk_step` moved from the unsupported table to identity
 mappings with issue #232: pamica now implements the block-size search under Fortran's own four
@@ -617,5 +856,28 @@ names and Fortran's arithmetic stepping, so a file carrying them is applied rath
 about and dropped. pamica's *defaults* for the three bounds differ (Fortran's 128-1024 is far
 below where any pamica backend peaks), but a file that sets them is honored as written.
 
+`writestep`, `do_history` and `histstep` moved the same way with issue #304: the reader
+translates what *any* pamica backend can honor, not just the one a given call targets, and
+each consumer warns about what *it* cannot apply.
+The legacy NumPy backend is the one backend that implements periodic on-disk checkpointing
+under these exact names today (`numpy_impl/core.py`'s fit loop and `_write_history`);
+torch/MLX have no matching mechanism yet (issue #312), so `AMICA.fit` names these three in
+its own "not applied" warning instead of silently dropping them.
+
 Every other translated keyword keeps its Fortran spelling; see `FORTRAN_TO_PAMICA_KEY` and
 `FORTRAN_UNSUPPORTED_KEYS` in `pamica/fortran_params.py` for the full tables.
+
+The legacy NumPy backend reads through the same `read_params_file` (`AMICA_NumPy(params_file=...)`
+or the `from_params_file` classmethod -- renamed from `from_json_file`, since it now accepts
+both formats), mapping the canonical keys above to its own attribute spellings (`min_nd` ->
+`min_grad_norm`, `maxdecs` -> `max_decs`, `share_iter` -> `share_int`; `maxrej`/`num_mix` need
+no translation, already matching).
+A params-file setting this backend does not consume (e.g. `kurt_start`/`num_kurt`/`kurt_int`,
+the adaptive-pdf schedule it has no family switch for) is named in a single `logger.warning`
+rather than silently dropped.
+`AMICA_NumPy(pdftype=...)` with anything other than `0` -- the only source-density family
+this backend implements -- raises `NotImplementedError` at construction (see the
+backend-differences table above).
+The NumPy CLI (`python -m pamica.numpy_impl.cli`) reads through the same helper
+(`_read_numpy_keyed_params`), so it accepts both formats too, instead of its own separate
+`json.load` (issue #304).

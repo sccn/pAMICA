@@ -42,7 +42,7 @@ import torch
 from pamica import AMICA_NumPy
 from pamica.numpy_impl.data import load_data_file
 from pamica.numpy_impl.load import loadmodout
-from pamica.torch_impl.core import AMICATorchNG
+from pamica.torch_impl.core import _KEEP_BEST_TOL, AMICATorchNG
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
 _FDT = SAMPLE_DIR / "eeglab_data.fdt"
@@ -104,7 +104,7 @@ def _llt_invariant(Lt: np.ndarray, n_good: int, nw: int) -> float:
     record at once, so they can differ by a summation ULP. The quantity being
     discriminated -- one M-step of movement -- is ~1e-4 here, eight orders of
     magnitude above that, so the tests below pair the tolerance with an
-    explicit check that a neighbouring iterate is far outside it.
+    explicit check that a neighboring iterate is far outside it.
     """
     return float(Lt.sum()) / (n_good * nw)
 
@@ -124,7 +124,7 @@ def test_fortran_reference_llt_is_the_last_estep():
     of its own ``LL`` trajectory -- i.e. it is the E-step that produced that LL,
     taken before the final ``update_params``. On the machine this was written
     the residual is exactly 0.0; the assertion allows a summation ULP so it
-    cannot fail on a different BLAS, and the neighbouring-iterate check below
+    cannot fail on a different BLAS, and the neighboring-iterate check below
     shows the tolerance is nowhere near wide enough to match the wrong entry.
 
     This is the evidence for the write convention issue #157 adopts, measured
@@ -179,7 +179,8 @@ def test_native_binary_llt_is_the_last_estep(tmp_path):
     Opt-in (``AMICA_RUN_FORTRAN=1``) like the other binary-driven tests, so the
     default suite does not depend on a runnable ``amica15mac``. Uses the whole
     record, as the native-engine tests do: the binary NaNs on a short slice at
-    its default 512 block size (issue #292), which would test nothing here.
+    block size 512 (issue #292, the bundled input.param's size and the
+    engine's default until issue #354), which would test nothing here.
     """
     from pamica import AMICANative
 
@@ -286,7 +287,9 @@ def test_torch_and_numpy_stash_the_same_llt_on_matched_state(real_data, tmp_path
 
 # --- do_reject: the one reference-faithful break in the invariant -----------
 def _reject_kwargs(rejstart):
-    """Fire exactly one rejection, on iteration ``rejstart`` (0-indexed).
+    """Fire exactly one rejection, on iteration ``rejstart`` (counted from 1, as
+    the reference counts it -- issue #335), so a fit of ``rejstart`` iterations
+    rejects on its own last one.
 
     ``rejint=3`` keeps the modulo arm of the schedule from firing earlier (both
     backends clamp ``max(1, iter - rejstart)``, so a ``rejint`` of 1 would
@@ -318,7 +321,7 @@ def test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration(
     rather than pinned to a value -- what is asserted is that it is far above
     the summation tolerance and far below anything resembling a blow-up.
     """
-    tm = _torch_fit(real_data, n_models=1, max_iter=6, **_reject_kwargs(5))
+    tm = _torch_fit(real_data, n_models=1, max_iter=6, **_reject_kwargs(6))
     assert len(tm.ll_history) == 6 and tm.numrej == 1
     assert tm.good_idx is not None and int(tm.good_idx.numel()) < real_data.shape[1]
     assert tm._llt_lt is not None
@@ -334,7 +337,7 @@ def test_llt_invariant_breaks_when_rejection_fires_on_the_last_iteration(
         n_models=1,
         max_iter=6,
         outdir=str(tmp_path / "rej"),
-        **_reject_kwargs(5),
+        **_reject_kwargs(6),
     )
     assert len(nm.ll) == 6 and nm.numrej == 1
     _, n_lt = nm._llt_arrays()
@@ -352,7 +355,7 @@ def test_llt_invariant_returns_one_iteration_after_a_rejection(real_data, tmp_pa
     the rejected samples contribute 0 to both sides, so the equality is exact
     again.
     """
-    tm = _torch_fit(real_data, n_models=1, max_iter=7, **_reject_kwargs(5))
+    tm = _torch_fit(real_data, n_models=1, max_iter=7, **_reject_kwargs(6))
     assert len(tm.ll_history) == 7 and tm.numrej == 1
     assert tm.good_idx is not None and tm._llt_lt is not None
     n_good = int(tm.good_idx.numel())
@@ -364,7 +367,7 @@ def test_llt_invariant_returns_one_iteration_after_a_rejection(real_data, tmp_pa
         n_models=1,
         max_iter=7,
         outdir=str(tmp_path / "rej2"),
-        **_reject_kwargs(5),
+        **_reject_kwargs(6),
     )
     assert len(nm.ll) == 7 and nm.numrej == 1
     _, n_lt = nm._llt_arrays()
@@ -387,19 +390,33 @@ def test_keep_best_restore_rolls_the_llt_stash_back(real_data, tmp_path):
     would still hold the discarded last iterate's values, which the second
     assertion rules out.
     """
+    # The overshoot recipe of test_ng_convergence.py (same data, block size
+    # and settings, so the same trajectory): aggressive Newton that
+    # maxincs=0/min_dll=1e-8 stop on its first likelihood decrease (peak at
+    # iteration 13, stop at 14). Endings left to the trajectory (a fixed
+    # 60-iteration budget, then min_dll=1e-4/maxincs=2) overshot on one
+    # machine and ended at the peak on another.
     m = _torch_fit(
         real_data,
         n_models=2,
-        max_iter=60,
+        max_iter=150,
         seed=0,
         do_newton=True,
-        newt_start=1,
+        newt_start=2,
         lrate=0.5,
+        newtrate=3.0,
+        use_min_dll=True,
+        min_dll=1e-8,
+        maxincs=0,
+        use_grad_norm=False,
     )
-    if m.stop_reason in AMICATorchNG._DEGENERATE_STOP_REASONS:
-        pytest.skip("aggressive run ended degenerate; not the case under test")
-    if np.isclose(m.ll_history[-1], m.final_ll_):
-        pytest.skip("run was monotone; keep_best restore did not fire")
+    assert m.stop_reason not in AMICATorchNG._DEGENERATE_STOP_REASONS, (
+        "the overshoot recipe ended degenerate: retune it"
+    )
+    assert m.final_ll_ is not None
+    assert max(m.ll_history) - m.ll_history[-1] > _KEEP_BEST_TOL, (
+        "the overshoot recipe no longer overshoots: retune it"
+    )
 
     assert m._llt_lt is not None and m._llt_lht is not None
     inv = _llt_invariant(m._llt_lt, m._llt_lt.size, NW)

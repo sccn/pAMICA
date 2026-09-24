@@ -4,14 +4,15 @@ Quality metrics for a decomposition, as free functions over plain arrays. They
 are backend-agnostic and independent of any fitted model object, so they work on
 sources from any source.
 
-- **`mir`** — Mutual Information Reduction, in nats: how much mutual information
+- **`mir`**: Mutual Information Reduction, in nats: how much mutual information
   a linear unmixing removes from the data. Higher is a better separation. It
-  needs the **full raw-data-to-sources transform** (the unmixing composed with
+  needs the **linear map from raw data to sources** (the unmixing composed with
   the sphering matrix), which must be square and invertible, since the estimate
-  includes a log-Jacobian term.
-- **`pairwise_mi`** — the symmetric mutual-information matrix between sources.
+  includes a log-Jacobian term. The mean and per-model center that `transform`
+  subtracts are offsets, and MIR does not depend on them.
+- **`pairwise_mi`**: the symmetric mutual-information matrix between sources.
   Its diagonal is each source's own entropy, not a mutual information.
-- **`block_diagonal_order`** — a permutation that clusters mutually dependent
+- **`block_diagonal_order`**: a permutation that clusters mutually dependent
   components near the diagonal, for reading structure out of a `pairwise_mi`
   matrix.
 
@@ -30,7 +31,7 @@ from pamica.metrics import mir, pairwise_mi, block_diagonal_order
 
 `mir` is a direct port of `getMIR.m` from
 [bigdelys/pre_ICA_cleaning](https://github.com/bigdelys/pre_ICA_cleaning)
-(Apache-2.0); the licence is vendored in `THIRD_PARTY_NOTICES.md`. It agrees
+(Apache-2.0); the license is vendored in `THIRD_PARTY_NOTICES.md`. It agrees
 with the original to 1.7e-15 relative on the bundled sample data.
 
 `pairwise_mi` and `block_diagonal_order` are a clean-room reimplementation. The

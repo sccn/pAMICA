@@ -1,4 +1,4 @@
-"""MNE-Python-facing wrapper over pamica's AMICA backend (issue #139).
+"""MNE-Python-facing wrapper over pamica's AMICA backends (issue #139).
 
 :class:`AMICAICA` fits AMICA directly from an :class:`mne.io.Raw` /
 :class:`mne.Epochs` and exposes the standard MNE ICA consumer surface
@@ -22,6 +22,10 @@ together with the discarded PCA residual, so ``apply`` restores it (issue #322).
 :meth:`AMICAICA.fit` omits annotated samples by default (recorded in
 ``good_sample_mask_``), and the scoring methods evaluate the passed instance's
 good samples, keeping per-sample outputs timeline-aligned via ``NaN`` columns.
+The fit runs on either :class:`~pamica.AMICA` backend (``backend="torch"``, the
+default, or ``backend="mlx"``, issue #313); the export reads the fitted
+preprocessing through the backend-agnostic float64 accessors
+(``get_sphere``/``get_mean``/``get_model_center``), never a backend array.
 """
 
 import logging
@@ -36,7 +40,7 @@ import torch
 import mne  # ty: ignore[unresolved-import]
 from mne.preprocessing import ICA as _MNEICA  # ty: ignore[unresolved-import]
 
-from ..amica import AMICA
+from ..amica import AMICA, _check_backend
 from ..torch_impl import PDFTYPE_NAMES
 
 __all__ = ["AMICAICA", "PDFTYPE_NAMES"]
@@ -217,6 +221,10 @@ class AMICAICA:
     cannot hold -- source-density family, GG shape, component sharing -- is
     inspectable via :meth:`get_pdftype` / :meth:`get_rho` / :meth:`shared_components`.
 
+    The fit runs on the PyTorch backend by default and on the Apple-GPU MLX
+    backend with ``backend="mlx"`` (issue #313); see the precision note in the
+    Notes below.
+
     Parameters
     ----------
     n_models : int, default=1
@@ -229,8 +237,22 @@ class AMICAICA:
     device : str or torch.device, optional
         Torch device for the fit (``None`` = auto; the float64 parity backend
         falls back to CPU when auto-selection lands on MPS). See :class:`AMICA`.
+        PyTorch backend only: with ``backend="mlx"`` it must stay ``None``.
     verbose : bool, default=True
         Whether the underlying :class:`AMICA` prints fit progress.
+    backend : {"torch", "mlx"}, default="torch"
+        Which :class:`AMICA` backend fits the data, forwarded to
+        :class:`AMICA`. ``"mlx"`` is the Apple-GPU backend, float32 only; it
+        requires MLX (``ImportError`` here otherwise) and takes neither
+        ``device`` nor a ``dtype`` fit keyword.
+
+    Raises
+    ------
+    ValueError
+        If ``backend`` is not ``"torch"`` or ``"mlx"``, or ``device`` is set
+        with ``backend="mlx"``.
+    ImportError
+        If ``backend="mlx"`` and MLX is not installed.
 
     Attributes
     ----------
@@ -247,7 +269,7 @@ class AMICAICA:
     pre_whitener_ : np.ndarray of shape (n_channels, 1)
         Per-channel-type scaling applied before fitting, following MNE's own ICA
         convention (one ``std`` per channel type, applied as ``X / pre_whitener_``).
-    pca_components_ : np.ndarray of shape (n_channels, n_channels)
+    pca_components_ : np.ndarray of shape (n_channels, n_channels) or None
         The full orthonormal PCA basis of the fit, in pre-whitened channel
         space, computed once at fit time and exported as the MNE ICA's
         ``pca_components_``. The first ``n_components_`` rows span the
@@ -255,11 +277,13 @@ class AMICAICA:
         the PCA residual that reduction discarded, which MNE's ``apply``
         restores by default (issue #322); a full-rank fit has no such rows.
         Shared by every model of a multi-model fit (one sphere per fit).
-    pca_explained_variance_ : np.ndarray of shape (n_channels,)
+        ``None`` after a degenerate fit, which exports nothing.
+    pca_explained_variance_ : np.ndarray of shape (n_channels,) or None
         Variance of the pre-whitened fit data along each row of
         ``pca_components_``, in descending order: the retained rows carry the
         largest covariance eigenvalues and the residual rows the ones the
-        reduction discarded (clipped at 0 against round-off).
+        reduction discarded (clipped at 0 against round-off). ``None`` after
+        a degenerate fit.
     reject_by_annotation_ : bool
         Whether the last ``Raw`` fit dropped ``bad_*``-annotated samples
         (issue #251). Always ``False`` for an ``Epochs`` fit.
@@ -314,6 +338,21 @@ class AMICAICA:
     reference's rank-reduced reconstruction pass MNE's own
     ``n_pca_components=ica.n_components_`` to :meth:`apply`. See
     ``docs/guides/amica-differences.md`` and ADR 0005.
+
+    Precision: the export always reads the fit through the same float64
+    accessors (``AMICA.get_sphere``/``get_mean``/``get_model_center``), so
+    both backends go through one code path. A PyTorch fit (float64 by
+    default) exports at float64 parity. An MLX fit computes in float32, so its
+    unmixing matrix, mean and centers carry float32 rounding (its sphere is
+    the float64 one it was built from), and the export is float32-consistent
+    rather than float64-parity: :meth:`get_sources` agrees with
+    ``amica_.transform`` (which runs in float32) to float32 tolerance, and
+    excluding a component changes the data by that component's
+    back-projection to the same tolerance. Reconstruction does not depend on
+    that precision: MNE's mixing is the float64 pseudo-inverse of the exported
+    unmixing and the PCA basis is orthonormal to float64 round-off, so
+    :meth:`apply` with nothing excluded returns the input to float64
+    round-off on either backend, PCA residual included.
     """
 
     def __init__(
@@ -323,12 +362,16 @@ class AMICAICA:
         random_state: Optional[int] = None,
         device: Optional[Union[str, torch.device]] = None,
         verbose: bool = True,
+        backend: str = "torch",
     ):
+        # The same checks, errors and messages as AMICA's own constructor.
+        _check_backend(backend, device)
         self.n_models = n_models
         self.n_mix = n_mix
         self.random_state = random_state
         self.device = device
         self.verbose = verbose
+        self.backend = backend
 
         self.amica_: Optional[AMICA] = None
         self.info_ = None
@@ -396,12 +439,17 @@ class AMICAICA:
         Raises
         ------
         TypeError
-            If ``inst`` is not an MNE ``Raw``/``Epochs``.
+            If ``inst`` is not an MNE ``Raw``/``Epochs``, or (from
+            :meth:`AMICA.fit`) a keyword in ``fit_kwargs`` is neither an
+            :meth:`AMICA.fit` parameter nor a constructor keyword of the
+            selected backend.
         ValueError
             If ``start``/``stop`` are given for ``Epochs``, ``stop`` exceeds the
             recording length, the selected data is non-finite, or no samples
             remain to fit (an empty ``start``/``stop`` range, or ``bad``
-            annotations covering the entire selected range).
+            annotations covering the entire selected range); or (from
+            :meth:`AMICA.fit`) ``fit_kwargs`` carries ``dtype`` or
+            ``device`` with ``backend="mlx"``.
         """
         if not isinstance(inst, (mne.io.BaseRaw, mne.BaseEpochs)):
             raise TypeError(
@@ -478,22 +526,25 @@ class AMICAICA:
             n_mix=self.n_mix,
             device=self.device,
             verbose=self.verbose,
+            backend=self.backend,
         )
         amica.fit(X, **fit_kwargs)
+        backend = amica.model_
+        if backend is None:
+            raise RuntimeError("AMICAICA.fit: AMICA.fit returned without a model.")
 
         # The full PCA basis (retained rows, then the residual a rank-reduced
         # fit discarded), computed once here from the fitted sphere and the fit
         # data so nothing is recomputed from data at apply time (issue #322).
         # The sphere does not depend on the model, so one basis serves every
-        # per-model export.
-        backend = amica.model_
-        if backend is None or backend.sphere is None:
-            raise RuntimeError(
-                "AMICAICA.fit: the backend returned without a fitted sphere, so "
-                "the PCA basis cannot be built."
-            )
-        sphere = np.asarray(backend.sphere.cpu().numpy(), dtype=np.float64)
-        pca_components, pca_explained_variance = _pca_basis(sphere, X)
+        # per-model export. Read through the backend-agnostic float64 accessor
+        # (issue #313), which refuses a degenerate fit: such a fit is kept for
+        # inspection but never exported (_check_fitted refuses it), so it gets
+        # no basis.
+        pca_components: Optional[np.ndarray] = None
+        pca_explained_variance: Optional[np.ndarray] = None
+        if amica.converged_:
+            pca_components, pca_explained_variance = _pca_basis(amica.get_sphere(), X)
 
         # Publish to self only after every fallible step above succeeds, so a
         # failed (re)fit leaves the previously fitted state intact rather than a
@@ -574,17 +625,12 @@ class AMICAICA:
             raise RuntimeError(
                 "AMICAICA: internal state is inconsistent; refit before to_mne_ica()."
             )
-        backend = amica.model_
-        if backend.mean is None or backend.sphere is None or backend.c is None:
-            raise RuntimeError(
-                "AMICAICA: the fitted backend is missing mean/sphere/c; refit "
-                "before to_mne_ica()."
-            )
-
-        mean = backend.mean.cpu().numpy().ravel()
-        sphere = np.asarray(backend.sphere.cpu().numpy(), dtype=np.float64)
+        # The backend-agnostic float64 accessors (issue #313), identical for
+        # the PyTorch and MLX backends; see the class Notes on precision.
+        mean = amica.get_mean()
+        sphere = amica.get_sphere()
         w_fort = amica.get_unmixing_matrix(model_idx=model_idx)
-        c = backend.c.cpu().numpy()[:, model_idx]  # per-model center (sphered space)
+        c = amica.get_model_center(model_idx=model_idx)  # sphered space
         n_ch = sphere.shape[0]
 
         # The full PCA basis was computed once at fit time (see _pca_basis): the
@@ -623,7 +669,10 @@ class AMICAICA:
         ica.pca_explained_variance_ = cov_evals
         ica.unmixing_matrix_ = unmixing
         ica.pre_whitener_ = self.pre_whitener_
-        ica.n_iter_ = max(int(getattr(backend, "iteration", 0)), 1)
+        # The number of iterations the fit ran: ``iteration`` is the 0-based
+        # index of the last one whose E-step ran (issue #339), which is also the
+        # reference's own ``iter`` count at a stop.
+        ica.n_iter_ = int(getattr(amica.model_, "iteration", 0)) + 1
         # MNE's own fit sets these; read_ica_eeglab (the precedent for building
         # an ICA from an external decomposition) sets reject_=None. Without them
         # ICA.save()/plot_properties raise AttributeError.
@@ -880,7 +929,7 @@ class AMICAICA:
     def shared_components(self) -> list:
         """Components shared across models by ``share_comps`` (issue #60).
 
-        One group of ``(model_idx, component_idx)`` pairs per shared column;
+        One group of ``(model_idx, component_idx)`` pairs per shared component;
         empty when nothing is shared (always so for a single model or a default
         multi-model fit with ``share_comps`` off).
         """
@@ -979,16 +1028,17 @@ class AMICAICA:
             )
 
     def __repr__(self) -> str:
+        config = (
+            f"backend={self.backend!r}, n_models={self.n_models}, n_mix={self.n_mix}"
+        )
         if self.amica_ is None:
-            return (
-                f"<AMICAICA (unfitted, n_models={self.n_models}, n_mix={self.n_mix})>"
-            )
+            return f"<AMICAICA (unfitted, {config})>"
         if not self.converged_:
             return (
                 f"<AMICAICA (degenerate fit, stop_reason={self.stop_reason_!r}, "
-                f"n_models={self.n_models}, n_mix={self.n_mix}, {self._fit_kind})>"
+                f"{config}, {self._fit_kind})>"
             )
         return (
-            f"<AMICAICA (fitted: {self.n_components_} components, "
-            f"n_models={self.n_models}, n_mix={self.n_mix}, {self._fit_kind})>"
+            f"<AMICAICA (fitted: {self.n_components_} components, {config}, "
+            f"{self._fit_kind})>"
         )

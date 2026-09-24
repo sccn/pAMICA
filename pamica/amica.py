@@ -1,59 +1,239 @@
 """
-Main AMICA interface using the PyTorch natural-gradient EM backend.
+Main AMICA interface over pamica's natural-gradient EM backends.
 
 This module provides the primary :class:`AMICA` class, a scikit-learn-style
-wrapper over :class:`AMICATorchNG` (the natural-gradient EM port that reaches
-Fortran parity; see ``.context/decisions/0001-torch-backend-natural-gradient-em.md``).
+wrapper over :class:`AMICATorchNG` (the default: the PyTorch natural-gradient
+EM port that reaches Fortran parity; see
+``.context/decisions/0001-torch-backend-natural-gradient-em.md``) or, with
+``backend="mlx"``, :class:`pamica.mlx_impl.AMICAMLXNG` (the optional
+Apple-GPU port, float32 only; issue #313).
 """
+
+import functools
+import importlib.util
+import inspect
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import torch
-from pathlib import Path
-from typing import Optional, Union
-import inspect
-import logging
 
-from .torch_impl import AMICATorchNG, setup_device
+from .torch_impl import AMICATorchNG
+
+if TYPE_CHECKING:
+    from .mlx_impl import AMICAMLXNG
 
 logger = logging.getLogger(__name__)
-
-# AMICATorchNG's default parameter dtype, derived from its signature so the
-# wrapper's MPS/float64 fallback below stays in lockstep if that default ever
-# changes (rather than duplicating the literal).
-_NG_DEFAULT_DTYPE = inspect.signature(AMICATorchNG).parameters["dtype"].default
 
 # fit()'s own named parameters that a parameter-file dict can default.
 _FIT_NAMED_PARAMS = {"max_iter", "lrate", "do_mean", "do_sphere", "do_newton"}
 
-# AMICATorchNG constructor keywords eligible to be defaulted from a
-# from_params_file dict via **kwargs (issue #132 review item 2).
-# n_channels/n_models/n_mix/device are excluded because fit() always passes
-# those positionally in the AMICATorchNG(...) call below; lrate/do_mean/
-# do_sphere/do_newton are excluded because, despite also being AMICATorchNG
-# constructor parameters, fit() resolves and passes those as its own named
-# arguments (_FIT_NAMED_PARAMS) -- merging them into **kwargs too would raise
-# "got multiple values for keyword argument".
-_NG_CTOR_PARAMS = (
-    set(inspect.signature(AMICATorchNG).parameters)
-    - {"n_channels", "n_models", "n_mix", "device"}
-    - _FIT_NAMED_PARAMS
+# The backends the wrapper can build (issue #313). "torch" is AMICATorchNG,
+# the float64 Fortran-parity default; "mlx" is AMICAMLXNG, the optional
+# Apple-GPU backend, which computes in float32 only.
+_BACKENDS = ("torch", "mlx")
+
+# Constructor keywords only AMICATorchNG has: MLX runs on one device (MLX's
+# default, the Apple GPU) at one precision (float32), so it takes neither.
+_TORCH_ONLY_PARAMS = ("device", "dtype")
+
+_MLX_INSTALL_HINT = (
+    "install it with `uv pip install mlx` or the `mlx` extra "
+    "(`pip install pamica[mlx]`); MLX runs on Apple Silicon only"
 )
 
 # Sentinel distinguishing "caller did not pass this fit() argument" from
-# "caller explicitly passed the same value as the hard default", so a
+# "caller explicitly passed the same value as the backend's default", so a
 # from_params_file default can be overridden by an explicit call-site value
-# without also being masked by fit()'s own hard-coded defaults.
+# without also being masked by the backend defaults fit() falls back to.
 _UNSET = object()
+
+
+def _check_backend(backend: str, device) -> None:
+    """Validate a wrapper's backend choice (issue #313).
+
+    Shared by :class:`AMICA` and :class:`pamica.mne_compat.AMICAICA`, so the
+    two wrappers accept and refuse exactly the same combinations. MLX's
+    availability is checked with :func:`importlib.util.find_spec`, which
+    locates the package without importing it, so neither ``import pamica`` nor
+    a torch-backed wrapper ever imports MLX.
+
+    Raises
+    ------
+    ValueError
+        If ``backend`` is not one of ``"torch"``/``"mlx"``, or ``device`` is
+        set with ``backend="mlx"``.
+    ImportError
+        If ``backend="mlx"`` and MLX is not installed.
+    """
+    if backend not in _BACKENDS:
+        raise ValueError(
+            f"backend must be one of {', '.join(map(repr, _BACKENDS))}; "
+            f"got {backend!r}."
+        )
+    if backend == "mlx":
+        if device is not None:
+            raise ValueError(
+                f"device={device!r} applies only to backend='torch'. The MLX "
+                "backend always runs on MLX's default device (the Apple GPU), "
+                "so leave device=None with backend='mlx'."
+            )
+        if importlib.util.find_spec("mlx") is None:
+            raise ImportError(
+                f"backend='mlx' requires MLX, which is not installed; "
+                f"{_MLX_INSTALL_HINT}."
+            )
+
+
+def _mlx_backend_class() -> "type[AMICAMLXNG]":
+    """:class:`AMICAMLXNG`, imported on first use so ``import pamica`` never
+    imports MLX."""
+    try:
+        from .mlx_impl import AMICAMLXNG
+    except ImportError as exc:
+        raise ImportError(
+            f"backend='mlx' requires MLX, which failed to import ({exc}); "
+            f"{_MLX_INSTALL_HINT}."
+        ) from exc
+    return AMICAMLXNG
+
+
+def _backend_class(backend: str) -> "type[AMICATorchNG] | type[AMICAMLXNG]":
+    """The backend class a validated ``backend`` name selects."""
+    return AMICATorchNG if backend == "torch" else _mlx_backend_class()
+
+
+@functools.cache
+def _ctor_params(backend_cls: type) -> frozenset:
+    """Constructor keywords ``fit()`` accepts from ``**kwargs`` and from a
+    parameter file, for one backend class (issue #132 review item 2,
+    issue #313).
+
+    Derived from the class signature, so each backend gets exactly its own
+    keywords: a file setting only AMICATorchNG accepts is applied to a torch
+    fit and named in the "not applied" warning of an MLX fit. Excluded are
+    n_channels/n_models/n_mix/device, which fit() passes itself when it builds
+    the backend, and lrate/do_mean/do_sphere/do_newton, which are backend
+    constructor parameters too but which fit() resolves as its own named
+    arguments (_FIT_NAMED_PARAMS); taking them from **kwargs as well would
+    raise "got multiple values for keyword argument".
+    """
+    return frozenset(
+        set(inspect.signature(backend_cls).parameters)
+        - {"n_channels", "n_models", "n_mix", "device"}
+        - _FIT_NAMED_PARAMS
+    )
+
+
+@functools.cache
+def _fit_defaults(backend_cls: "type[AMICATorchNG] | type[AMICAMLXNG]") -> dict:
+    """The defaults of ``fit()``'s named parameters, for one backend class
+    (issue #354).
+
+    Read from the backend's own signatures, so the wrapper cannot drift from
+    it: ``max_iter`` from ``backend_cls.fit``, and ``lrate``/``do_mean``/
+    ``do_sphere``/``do_newton`` from the constructor. An argument left unset
+    in :meth:`AMICA.fit`, and absent from a parameter file, takes this value,
+    so ``AMICA().fit(X)`` runs exactly as ``backend_cls(n_channels).fit(X)``.
+    """
+    ctor = inspect.signature(backend_cls).parameters
+    defaults = {name: ctor[name].default for name in _FIT_NAMED_PARAMS - {"max_iter"}}
+    defaults["max_iter"] = (
+        inspect.signature(backend_cls.fit).parameters["max_iter"].default
+    )
+    return defaults
+
+
+# AMICA.save's payload version (issue #313). Version 2 records the backend
+# in wrapper["backend"]; version 1 (written before backend selection) is still
+# read, and holds a torch state dict by construction.
+_SAVE_FORMAT_VERSION = 2
+_LOADABLE_FORMAT_VERSIONS = (1, 2)
+
+
+def _weights_only_safe(value, path: str):
+    """``value`` as something ``torch.load(weights_only=True)`` reads back.
+
+    Tensors and plain Python primitives pass through, dicts/lists/tuples are
+    checked element by element, and numpy scalars (which the ``weights_only``
+    unpickler refuses) become the equivalent Python number. Anything else
+    raises ``TypeError`` naming where it sits in the state, so :meth:`AMICA.save`
+    fails loudly instead of writing a file :meth:`AMICA.load` cannot open.
+    """
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (bool, int, float, str, torch.Tensor)):
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _weights_only_safe(item, f"{path}[{key!r}]")
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return type(value)(
+            _weights_only_safe(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        )
+    raise TypeError(
+        f"AMICA.save cannot write {path} = {value!r} ({type(value).__name__}): "
+        "AMICA.load reads with torch.load(weights_only=True), which accepts "
+        "only tensors and plain Python primitives."
+    )
+
+
+def _state_to_payload(state: dict) -> dict:
+    """A backend ``state_dict`` in the form :meth:`AMICA.save` writes.
+
+    AMICAMLXNG's params are numpy arrays, which the ``weights_only``
+    unpickler refuses, so each becomes a CPU tensor of the same dtype (int64,
+    int32, bool and float32 all map exactly); :func:`_mlx_state_from_payload`
+    turns them back. AMICATorchNG's params are tensors already. Everything
+    else goes through :func:`_weights_only_safe`.
+    """
+    payload = {}
+    for key, value in state.items():
+        if key == "params":
+            payload[key] = {
+                name: torch.from_numpy(np.array(array))
+                if isinstance(array, np.ndarray)
+                else _weights_only_safe(array, f"state['params'][{name!r}]")
+                for name, array in value.items()
+            }
+        else:
+            payload[key] = _weights_only_safe(value, f"state[{key!r}]")
+    return payload
+
+
+def _mlx_state_from_payload(state: dict, filepath: str) -> dict:
+    """Invert :func:`_state_to_payload` for an AMICAMLXNG state: the params
+    back to numpy arrays of their original dtype."""
+    if not isinstance(state.get("params"), dict):
+        raise ValueError(
+            f"malformed AMICA save file {filepath!r}: the MLX state has no "
+            "'params' section; the file may be truncated or corrupted."
+        )
+    params = {}
+    for name, tensor in state["params"].items():
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(
+                f"malformed AMICA save file {filepath!r}: MLX param {name!r} is "
+                f"a {type(tensor).__name__}, not a tensor."
+            )
+        params[name] = tensor.numpy()
+    return {**state, "params": params}
 
 
 class AMICA:
     """
-    Adaptive Mixture ICA using the PyTorch natural-gradient EM backend.
+    Adaptive Mixture ICA over pamica's natural-gradient EM backends.
 
     This is the main interface for pamica, providing a scikit-learn style
     API over :class:`AMICATorchNG`, the natural-gradient EM implementation
     that matches the Fortran reference (Newton, exact-EM mixture updates,
-    symmetric-ZCA sphere, Jacobian LL).
+    symmetric-ZCA sphere, Jacobian LL), or, with ``backend="mlx"``, over its
+    Apple-GPU port :class:`pamica.mlx_impl.AMICAMLXNG` (issue #313). Every
+    method below behaves the same on both backends; only precision differs.
 
     Parameters
     ----------
@@ -62,36 +242,66 @@ class AMICA:
     n_mix : int, default=3
         Number of mixture components per source
     device : str or torch.device, optional
-        Device to use ('cuda', 'mps', 'cpu', or None for auto). With ``None``
-        (auto), an auto-selected MPS device is redirected to CPU because the
-        backend computes in float64 for Fortran parity and MPS cannot
-        represent it; pass ``dtype=torch.float32`` (with ``device="mps"``) to
-        run on MPS instead.
+        Device to use ('cuda', 'mps', 'cpu', or None for auto), passed to
+        :class:`AMICATorchNG`. With ``None`` (auto), the backend moves an
+        auto-selected MPS device to the CPU with a logged warning, because it
+        computes in float64 for Fortran parity and MPS cannot represent it;
+        pass ``dtype=torch.float32`` (with ``device="mps"``) to run on MPS
+        instead. PyTorch backend only: with ``backend="mlx"`` it must stay
+        ``None``.
     verbose : bool, default=True
         Whether to show progress during fitting
+    backend : {"torch", "mlx"}, default="torch"
+        Which backend :meth:`fit` builds. ``"torch"`` is
+        :class:`AMICATorchNG`, float64 by default and the Fortran-parity
+        path. ``"mlx"`` is :class:`pamica.mlx_impl.AMICAMLXNG`, the fastest
+        option on Apple Silicon, which computes in float32 only (about 7
+        significant digits, not float64 parity), so it takes neither
+        ``device`` nor ``dtype``. MLX is an optional dependency: ``"mlx"``
+        without it raises ``ImportError`` here, and ``import pamica`` never
+        imports it.
+
+    Raises
+    ------
+    ValueError
+        If ``backend`` is not ``"torch"`` or ``"mlx"``, or ``device`` is set
+        with ``backend="mlx"``.
+    ImportError
+        If ``backend="mlx"`` and MLX is not installed.
 
     Attributes
     ----------
-    model_ : AMICATorchNG
-        The underlying PyTorch model
+    model_ : AMICATorchNG or AMICAMLXNG
+        The underlying backend model
     is_fitted_ : bool
         Whether a *usable* model is available. ``fit`` sets this True only when
-        the fit converged normally; a degenerate fit (see ``converged_``) leaves
-        it False, and ``transform``/``get_mixing_matrix``/``get_unmixing_matrix``/
-        ``save`` refuse such a model (issue #50).
+        the fit ended on a non-degenerate stop (a convergence stop or
+        ``max_iter``); a degenerate fit (see ``converged_``) leaves it False,
+        and every output method (``transform``, the ``get_*`` accessors,
+        ``write_amica_output``, ``save``) refuses such a model (issue #50).
     converged_ : bool
         Whether the last ``fit`` ended on a usable stop rather than a degenerate
-        one (``stop_reason_`` not in ``nan_ll``/``singular_ll``). A degenerate fit
-        holds non-finite parameters and would produce NaN sources (issue #50).
+        one (``stop_reason_`` not in the backend's ``_DEGENERATE_STOP_REASONS``:
+        ``nan_ll``/``singular_ll``/``nan_direction``/``nan_params``, or
+        ``restart_error`` under best-of-N restarts). A ``max_iter`` stop counts
+        as usable. A degenerate fit holds non-finite parameters, or stopped
+        before applying a non-finite step, and would produce NaN sources
+        (issue #50).
     stop_reason_ : str or None
         Why the last ``fit`` stopped (the backend ``stop_reason``):
         ``"max_iter"``, ``"lrate_floor"``, ``"grad_norm_floor"``, ``"min_dll"``,
-        ``"grad_norm"``, ``"nan_ll"``, or ``"singular_ll"``. The last five are
+        ``"grad_norm"``, ``"nan_ll"``, ``"singular_ll"``, ``"nan_direction"``
+        or ``"nan_params"``. ``"lrate_floor"`` to ``"grad_norm"`` are
         Fortran-faithful convergence stops (issue #207: ``lrate_floor``/
         ``grad_norm_floor`` fire together as two halves of the same
         likelihood-decrease branch; ``min_dll``/``grad_norm`` are separate,
-        unconditional per-iteration checks); only ``nan_ll``/``singular_ll``
-        are degenerate (see ``converged_``). None of these checks short-
+        unconditional per-iteration checks). The last four are degenerate (see
+        ``converged_``): a non-finite log-likelihood (``nan_ll``/
+        ``singular_ll``), a non-finite update direction caught before it is
+        applied (``nan_direction``), or non-finite parameters right after an
+        update (``nan_params``); PyTorch and MLX use the same set (issue #339
+        review), and under best-of-N restarts a restart that raised is
+        recorded as ``"restart_error"``, also degenerate. None of these checks short-
         circuits on an earlier one in the same iteration, so under the
         shipped ``use_grad_norm=True`` default ``"grad_norm"`` always takes
         precedence over ``"grad_norm_floor"`` when both would apply --
@@ -100,11 +310,17 @@ class AMICA:
         docstring for the full explanation).
     ll_history_ : list
         Log-likelihood history during training (the true per-iteration
-        trajectory; may dip below its peak on a late overshoot)
+        trajectory; may dip below its peak on a late overshoot): entry ``i`` is
+        the likelihood of the parameters iteration ``i`` started from, recorded
+        before that iteration's checks and update.
     final_ll_ : float
         Log-likelihood of the *fitted* parameters (issue #51). Use this, not
         ``ll_history_[-1]``, as the model's log-likelihood: with the best-iterate
         safeguard the returned parameters can be an earlier, higher-LL iterate.
+        Exact after a convergence stop, which exits before that iteration's
+        update, as the reference does (issue #339); after ``max_iter`` it is
+        the likelihood one update before the returned parameters, also as in
+        the reference.
     mir_history_ : list
         Mutual Information Reduction (MIR) waypoint trajectory (issue #137),
         populated when ``fit`` is called
@@ -115,6 +331,9 @@ class AMICA:
         Not index-aligned with ``ll_history_``: entry ``i`` is computed after
         iteration ``i``'s update, while ``ll_history_[i]`` is the likelihood of
         the parameters before it, so the two are one update apart (issue #161).
+        An iteration that ends the fit on a stop (a convergence check or a
+        degenerate value) takes no update and so records no waypoint: the last
+        waypoint then belongs to the iteration before it (issue #339).
     restart_seeds_ : list
         The seed each restart ran from (issue #198). One entry for a default
         ``n_restarts=1`` fit, ``n_restarts`` entries otherwise.
@@ -142,6 +361,9 @@ class AMICA:
     >>>
     >>> # Get mixing matrix
     >>> A = amica.get_mixing_matrix()
+    >>>
+    >>> # The same on the Apple GPU (requires the mlx extra)
+    >>> S_mlx = AMICA(backend="mlx").fit(X, max_iter=100).transform(X)
     """
 
     def __init__(
@@ -150,13 +372,16 @@ class AMICA:
         n_mix: int = 3,
         device: Optional[Union[str, torch.device]] = None,
         verbose: bool = True,
+        backend: str = "torch",
     ):
+        _check_backend(backend, device)
         self.n_models = n_models
         self.n_mix = n_mix
         self.device = device
         self.verbose = verbose
+        self.backend = backend
 
-        self.model_ = None
+        self.model_: Optional[Union[AMICATorchNG, "AMICAMLXNG"]] = None
         self.is_fitted_ = False
         self.ll_history_ = []
         self.final_ll_ = None
@@ -172,34 +397,9 @@ class AMICA:
         self.restart_stop_reasons_ = []
         # Set by from_params_file (issue #132 review item 2): the full
         # translated parameter-file dict, applied by fit() as per-call
-        # defaults (an explicitly passed fit()/AMICATorchNG kwarg always
-        # wins). None for an instance built directly via AMICA(...).
+        # defaults (an explicitly passed fit()/backend kwarg always wins).
+        # None for an instance built directly via AMICA(...).
         self._file_params: Optional[dict] = None
-
-    def _select_device(self, ng_dtype) -> Union[str, torch.device]:
-        """Resolve the compute device, applying the MPS/float64 fallback.
-
-        ``AMICATorchNG`` defaults to float64 for Fortran parity, which MPS
-        cannot represent. When the device was auto-selected (the user did not
-        pin one) and resolved to MPS for a float64 run, fall back to CPU so the
-        default config runs instead of crashing. CUDA supports float64, so only
-        MPS needs this. An explicit ``device="mps"`` is left untouched and
-        surfaces ``AMICATorchNG``'s own ValueError; users wanting MPS pass
-        ``dtype=torch.float32`` too.
-        """
-        device = setup_device() if self.device is None else self.device
-        dev_type = getattr(device, "type", device)
-        if self.device is None and dev_type == "mps" and ng_dtype == torch.float64:
-            device = torch.device("cpu")
-            msg = (
-                "AMICA uses float64 for Fortran parity; MPS lacks float64 "
-                "support, so falling back to CPU. Pass dtype=torch.float32 "
-                "with device='mps' to run on MPS."
-            )
-            logger.warning(msg)
-            if self.verbose:
-                print(msg)
-        return device
 
     def fit(
         self,
@@ -215,14 +415,22 @@ class AMICA:
         """
         Fit AMICA model to data.
 
+        The defaults of ``max_iter``, ``lrate``, ``do_mean``, ``do_sphere``
+        and ``do_newton`` are the selected backend's own, read from its
+        signatures (issue #354), so ``AMICA().fit(X)`` fits exactly as the
+        backend class does with its defaults. Both backends default to the
+        values listed below.
+
         Parameters
         ----------
         X : np.ndarray
             Input data of shape (n_channels, n_samples)
         max_iter : int, default=100
             Maximum number of iterations
-        lrate : float, default=0.05
-            Learning rate
+        lrate : float, default=0.1
+            Initial and maximum natural-gradient learning rate, the compiled
+            amica15 default. EEGLAB's ``runamica15.m`` uses 0.05; see the
+            defaults table in ``docs/guides/amica-differences.md``.
         do_mean : bool, default=True
             Whether to remove mean from data
         do_sphere : bool, default=True
@@ -236,14 +444,19 @@ class AMICA:
             disables the waypoints; see :meth:`AMICATorchNG.fit` for details
             and the interaction with ``keep_best``.
         **kwargs
-            Additional parameters passed to the :class:`AMICATorchNG`
-            constructor (e.g. ``block_size``, ``rho0``, ``seed``, ``dtype``,
-            ``use_min_dll``, ``min_dll``, ``maxincs``, ``use_grad_norm``,
+            Additional parameters passed to the backend constructor,
+            :class:`AMICATorchNG` or :class:`pamica.mlx_impl.AMICAMLXNG`
+            (the two take the same keywords, except that ``dtype`` is
+            PyTorch-only and raises ``ValueError`` with ``backend="mlx"``,
+            which is float32-only; e.g. ``block_size``, ``rho0``, ``seed``,
+            ``pcakeep``, ``use_min_dll``, ``min_dll``, ``maxincs``, ``use_grad_norm``,
             ``min_nd`` -- the issue #207 convergence stops, Fortran-faithful
             defaults ``True``/``1e-9``/``5``/``True``/``1e-7`` -- or
-            ``do_opt_block``/``blk_min``/``blk_max``/``blk_step``, the issue
-            #232 block-size search, off by default) -- the backend's tunables
-            are constructor arguments, not fit() kwargs.
+            ``do_opt_block``/``blk_min``/``blk_max``/``blk_step``, the
+            issue #232 block-size search, off by default) -- the backend's tunables
+            are constructor arguments, not fit() kwargs. A keyword the
+            selected backend's constructor does not take raises
+            ``TypeError``.
 
             ``n_restarts`` (default 1) runs the fit from that many seeds and
             keeps the highest-likelihood one (issue #198), recording every
@@ -254,26 +467,36 @@ class AMICA:
             that never heard of restarts.
 
             Rank-deficient input (Maxwell-filtered MEG, average-referenced or
-            interpolated EEG) is handled by ``mineig``/``mineig_rel`` (issue
-            #223): the model is sized to the detected numerical rank and
-            :meth:`AMICATorchNG.get_sensor_mixing_matrix` maps components back
-            to input channels. ``mineig`` is an absolute eigenvalue floor and so
+            interpolated EEG) is handled by ``mineig``/``mineig_rel``
+            (issue #223): the model is sized to the detected numerical rank and
+            :meth:`get_sensor_mixing_matrix` maps components back to input
+            channels. ``mineig`` is an absolute eigenvalue floor and so
             unit-dependent; pass ``mineig_rel`` for data far from unit scale.
 
-            When the instance was built via :meth:`from_params_file` (issue
-            #132), any of the parameters above -- named or in ``**kwargs`` --
+            When the instance was built via :meth:`from_params_file`
+            (issue #132), any of the parameters above -- named or in ``**kwargs`` --
             left unset here falls back to that file's translated value instead
-            of the hard-coded default; an explicitly passed argument always
+            of the backend's default; an explicitly passed argument always
             wins over the file. Settings the file carries that match neither a
-            named ``fit()`` parameter nor an :class:`AMICATorchNG` constructor
-            keyword (data-location metadata like ``files``/``outdir``/
-            ``data_dim``, or a setting with no pamica equivalent) are not
-            applied and are named in a single ``logger.warning``.
+            named ``fit()`` parameter nor a constructor keyword of the
+            selected backend (data-location metadata like ``files``/
+            ``outdir``/``data_dim``, or a setting with no equivalent in that
+            backend) are not applied and are named in a single
+            ``logger.warning``.
 
         Returns
         -------
         self : AMICA
             Fitted model
+
+        Raises
+        ------
+        ValueError
+            If ``X`` is not 2D, or ``dtype``/``device`` is passed with
+            ``backend="mlx"``.
+        TypeError
+            If a keyword is neither a ``fit()`` parameter nor a constructor
+            keyword of the selected backend.
         """
         # Validate input
         if X.ndim != 2:
@@ -281,40 +504,83 @@ class AMICA:
 
         n_channels, n_samples = X.shape
 
+        # Re-checked here, not only in __init__, so a backend/device attribute
+        # changed after construction cannot slip past the validation.
+        _check_backend(self.backend, self.device)
+        backend_cls = _backend_class(self.backend)
+        ctor_params = _ctor_params(backend_cls)
+        # Both categories computed before either is raised (PR #347 review
+        # item 4, the same fix as AMICA_NumPy's _reject_unknown_kwargs): a
+        # first version of this check raised on torch_only alone, so
+        # backend='mlx' with fit(dtype=..., blocksize=...) named only
+        # 'dtype' and silently dropped 'blocksize' from the message.
+        # unknown excludes torch_only so a torch-only name (which is not in
+        # ctor_params for backend='mlx' either) is not double-counted.
+        torch_only = (
+            sorted(set(kwargs) & set(_TORCH_ONLY_PARAMS))
+            if self.backend == "mlx"
+            else []
+        )
+        unknown = sorted(set(kwargs) - ctor_params - set(torch_only))
+        if torch_only and unknown:
+            raise TypeError(
+                f"AMICA.fit got invalid keyword argument(s): {torch_only} "
+                "apply only to backend='torch' (the MLX backend computes in "
+                "float32 only, on its default device; use backend='torch' "
+                f"for float64 Fortran-parity runs), and {unknown} is "
+                "neither a fit() parameter nor a constructor keyword of "
+                f"{backend_cls.__name__}."
+            )
+        if torch_only:
+            raise ValueError(
+                f"{torch_only} apply only to backend='torch'. The MLX "
+                "backend computes in float32 only (Apple GPUs have no "
+                "float64) on MLX's default device; use backend='torch' "
+                "for float64 Fortran-parity runs."
+            )
+        if unknown:
+            raise TypeError(
+                f"AMICA.fit got unexpected keyword argument(s) {unknown}: "
+                "neither a fit() parameter nor a constructor keyword of "
+                f"{backend_cls.__name__}."
+            )
+
         # Apply from_params_file's translated dict as per-call defaults
         # (issue #132 review item 2): an explicitly passed argument here
         # always wins, whether named (max_iter/lrate/do_mean/do_sphere/
-        # do_newton, via the _UNSET sentinel) or in **kwargs (AMICATorchNG
-        # constructor keywords, via plain dict membership). Settings the file
-        # carries that apply to neither surface are named in one warning
-        # rather than silently discarded.
+        # do_newton, via the _UNSET sentinel) or in **kwargs (the selected
+        # backend's constructor keywords, via plain dict membership). Settings
+        # the file carries that apply to neither surface are named in one
+        # warning rather than silently discarded.
         file_params = self._file_params or {}
+        backend_defaults = _fit_defaults(backend_cls)
 
-        def _file_default(explicit, name, hard_default):
+        def _file_default(explicit, name):
             if explicit is not _UNSET:
                 return explicit
-            return file_params.get(name, hard_default)
+            return file_params.get(name, backend_defaults[name])
 
-        max_iter = _file_default(max_iter, "max_iter", 100)
-        lrate = _file_default(lrate, "lrate", 0.05)
-        do_mean = _file_default(do_mean, "do_mean", True)
-        do_sphere = _file_default(do_sphere, "do_sphere", True)
-        do_newton = _file_default(do_newton, "do_newton", False)
+        max_iter = _file_default(max_iter, "max_iter")
+        lrate = _file_default(lrate, "lrate")
+        do_mean = _file_default(do_mean, "do_mean")
+        do_sphere = _file_default(do_sphere, "do_sphere")
+        do_newton = _file_default(do_newton, "do_newton")
 
         if file_params:
             for key, value in file_params.items():
-                if key in _NG_CTOR_PARAMS and key not in kwargs:
+                if key in ctor_params and key not in kwargs:
                     kwargs[key] = value
-            handled = _FIT_NAMED_PARAMS | _NG_CTOR_PARAMS | {"num_models", "num_mix"}
+            handled = _FIT_NAMED_PARAMS | ctor_params | {"num_models", "num_mix"}
             unhandled = sorted(set(file_params) - handled)
             if unhandled:
                 logger.warning(
                     "AMICA.fit: %d parameter-file setting(s) match neither a "
-                    "fit()/AMICATorchNG parameter and were NOT applied "
+                    "fit()/%s parameter and were NOT applied "
                     "(informational only -- data-location metadata like "
                     "files/outdir/data_dim/num_comps is expected here; "
-                    "anything else means pamica has no equivalent): %s",
+                    "anything else means this backend has no equivalent): %s",
                     len(unhandled),
+                    backend_cls.__name__,
                     unhandled,
                 )
 
@@ -322,8 +588,12 @@ class AMICA:
             print(f"Fitting AMICA with {n_channels} channels, {n_samples} samples")
             print(f"Models: {self.n_models}, Mixture components: {self.n_mix}")
 
-        # Setup device (with the MPS/float64 parity fallback, see _select_device).
-        device = self._select_device(kwargs.get("dtype", _NG_DEFAULT_DTYPE))
+        # The torch device as given (None picks one inside AMICATorchNG,
+        # which also moves an automatic MPS pick for a float64 fit to the
+        # CPU, issue #354); MLX always runs on MLX's default device.
+        placement: dict[str, Any] = {}
+        if self.backend == "torch":
+            placement["device"] = self.device
 
         # Build and train the backend on a LOCAL reference first, and only
         # publish it to self (and derive the fitted-state attributes) once
@@ -333,7 +603,7 @@ class AMICA:
         # raise a clean "not fitted"), and a refit keeps the previous, known-good
         # model rather than a half-trained one falsely marked usable (issue #50
         # silent-failure review).
-        backend = AMICATorchNG(
+        backend = backend_cls(
             n_channels=n_channels,
             n_models=self.n_models,
             n_mix=self.n_mix,
@@ -341,25 +611,13 @@ class AMICA:
             do_mean=do_mean,
             do_sphere=do_sphere,
             do_newton=do_newton,
-            device=device,
+            **placement,
             **kwargs,
         )
         backend.fit(X, max_iter=max_iter, verbose=self.verbose, mir_step=mir_step)
 
         self.model_ = backend
-        self.ll_history_ = backend.ll_history
-        self.final_ll_ = backend.final_ll_
-        self.stop_reason_ = backend.stop_reason
-        self.mir_history_ = backend.mir_history_
-        self.restart_seeds_ = backend.restart_seeds_
-        self.restart_lls_ = backend.restart_lls_
-        self.restart_stop_reasons_ = backend.restart_stop_reasons_
-        self.converged_ = self.stop_reason_ not in AMICATorchNG._DEGENERATE_STOP_REASONS
-        # A degenerate fit (nan_ll/singular_ll) holds non-finite parameters and
-        # would return NaN sources, so it is not a usable model: is_fitted_ stays
-        # False and the output methods refuse it (issue #50). stop_reason_/
-        # converged_ stay set for inspection.
-        self.is_fitted_ = self.converged_
+        self._mirror_backend()
         if not self.converged_:
             logger.warning(
                 "AMICA.fit ended degenerate (stop_reason=%r) at iteration %d: the "
@@ -372,22 +630,62 @@ class AMICA:
 
         return self
 
+    def _mirror_backend(self) -> None:
+        """Copy the fitted backend's record onto the wrapper.
+
+        Shared by :meth:`fit` and :meth:`load`, so both backends and both
+        routes expose the same surface. A degenerate stop (one of the backend
+        class's own ``_DEGENERATE_STOP_REASONS``) holds non-finite parameters
+        and would return NaN sources, so it is not a usable model:
+        ``is_fitted_`` stays False and the output methods refuse it
+        (issue #50), while ``stop_reason_``/``converged_`` stay set for inspection.
+        """
+        backend = self.model_
+        assert backend is not None
+        self.ll_history_ = backend.ll_history
+        self.final_ll_ = backend.final_ll_
+        self.stop_reason_ = backend.stop_reason
+        # mir_history_ is not persisted in state_dict() (a diagnostic
+        # trajectory, not a fitted parameter), so a loaded model's is always
+        # empty; exposed anyway for attribute-surface consistency.
+        self.mir_history_ = backend.mir_history_
+        # Restart records are persisted by state_dict (issue #198), so a loaded
+        # best-of-N model can still say how its parameters were chosen.
+        self.restart_seeds_ = backend.restart_seeds_
+        self.restart_lls_ = backend.restart_lls_
+        self.restart_stop_reasons_ = backend.restart_stop_reasons_
+        self.converged_ = self.stop_reason_ not in backend._DEGENERATE_STOP_REASONS
+        self.is_fitted_ = self.converged_
+
     def _check_usable(self, action: str) -> None:
         """Raise if the model cannot produce valid output: either never fitted,
-        or the fit ended degenerate (``nan_ll``/``singular_ll``), leaving
-        non-finite parameters that would yield NaN sources. This mirrors
-        :meth:`AMICATorchNG.state_dict`'s refusal to serialize a degenerate model
-        (issue #50): a diverged fit fails loudly here instead of silently
+        or the fit ended degenerate (a stop in the backend class's own
+        ``_DEGENERATE_STOP_REASONS``, such as ``nan_ll``/``singular_ll``),
+        leaving non-finite parameters that would yield NaN sources. This
+        mirrors the backends' ``state_dict`` refusal to serialize a degenerate
+        model (issue #50): a diverged fit fails loudly here instead of silently
         returning garbage."""
         if self.model_ is None:
             raise ValueError(f"Model must be fitted before {action}.")
-        if self.stop_reason_ in AMICATorchNG._DEGENERATE_STOP_REASONS:
+        if self.stop_reason_ in self.model_._DEGENERATE_STOP_REASONS:
             raise RuntimeError(
                 f"Refusing to {action}: fit ended degenerate "
                 f"(stop_reason={self.stop_reason_!r}), so the model holds "
                 f"non-finite parameters and would produce NaN output. Lower "
                 f"lrate, disable Newton, or check data conditioning, then refit."
             )
+
+    def __repr__(self) -> str:
+        config = (
+            f"backend={self.backend!r}, n_models={self.n_models}, n_mix={self.n_mix}"
+        )
+        if self.model_ is None:
+            return f"<AMICA (unfitted, {config})>"
+        if not self.converged_:
+            return (
+                f"<AMICA (degenerate fit, stop_reason={self.stop_reason_!r}, {config})>"
+            )
+        return f"<AMICA (fitted: {self.model_.n_channels} sources, {config})>"
 
     def transform(self, X: np.ndarray, model_idx: int = 0) -> np.ndarray:
         """
@@ -403,7 +701,8 @@ class AMICA:
         Returns
         -------
         S : np.ndarray
-            Sources of shape (n_sources, n_samples)
+            Sources of shape (n_sources, n_samples): float64 from a default
+            PyTorch fit, float32 from an MLX fit (its only precision).
         """
         self._check_usable("transform")
         assert self.model_ is not None
@@ -431,7 +730,11 @@ class AMICA:
 
     def get_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """
-        Get the mixing matrix A.
+        Get the mixing matrix A in the sphered space.
+
+        Column ``i`` is source ``i``'s mixing vector after sphering, the
+        reference's ``A(:, comp_list(:, h))``. For scalp maps in input-channel
+        space use :meth:`get_sensor_mixing_matrix`.
 
         Parameters
         ----------
@@ -441,7 +744,7 @@ class AMICA:
         Returns
         -------
         A : np.ndarray
-            Mixing matrix of shape (n_channels, n_sources)
+            Mixing matrix of shape (n_sources, n_sources)
         """
         self._check_usable("get the mixing matrix")
         assert self.model_ is not None
@@ -450,7 +753,12 @@ class AMICA:
 
     def get_unmixing_matrix(self, model_idx: int = 0) -> np.ndarray:
         """
-        Get the unmixing matrix W.
+        Get the unmixing matrix W, which acts on sphered data.
+
+        :meth:`transform` applies it after centering and sphering:
+        ``S = W @ (get_sphere() @ (X - mean[:, None]) - c[:, None])``, with
+        ``mean = get_mean()`` and ``c = get_model_center(model_idx)``, so
+        ``W @ get_sphere()`` is only the linear part of that map.
 
         Parameters
         ----------
@@ -460,12 +768,122 @@ class AMICA:
         Returns
         -------
         W : np.ndarray
-            Unmixing matrix of shape (n_sources, n_channels)
+            Unmixing matrix of shape (n_sources, n_sources)
         """
         self._check_usable("get the unmixing matrix")
         assert self.model_ is not None
 
         return self.model_.get_unmixing_matrix(model_idx=model_idx)
+
+    def get_sensor_mixing_matrix(self, model_idx: int = 0) -> np.ndarray:
+        """
+        Get the mixing matrix in input-channel space, ``pinv(sphere) @ A``.
+
+        These are the scalp maps. Unlike :meth:`get_mixing_matrix` (sphered
+        space), they stay valid after rank reduction, where the sphere is
+        non-square (issue #223).
+
+        Parameters
+        ----------
+        model_idx : int, default=0
+            Which model's maps to return
+
+        Returns
+        -------
+        A_sensor : np.ndarray
+            Mixing matrix of shape (n_channels_in, n_sources)
+
+        Raises
+        ------
+        ValueError
+            If the model is unfitted, or ``model_idx`` is out of range.
+        TypeError
+            If ``model_idx`` is not an integer.
+        RuntimeError
+            If the fit ended degenerate (issue #50).
+        """
+        self._check_usable("get the sensor mixing matrix")
+        assert self.model_ is not None
+
+        return self.model_.get_sensor_mixing_matrix(model_idx=model_idx)
+
+    def get_sphere(self) -> np.ndarray:
+        """
+        Get the fitted sphering matrix (issue #313).
+
+        With :meth:`get_mean`, :meth:`get_model_center` and
+        :meth:`get_unmixing_matrix` it composes :meth:`transform`:
+        ``S = W @ (sphere @ (X - mean) - c)``.
+
+        Returns
+        -------
+        sphere : np.ndarray of float64
+            Shape (n_sources, n_channels_in), square unless the fit was
+            rank-reduced. An MLX fit returns the float64 sphere its float32
+            GPU copy was cast from.
+
+        Raises
+        ------
+        ValueError
+            If the model is unfitted.
+        RuntimeError
+            If the fit ended degenerate (issue #50).
+        """
+        self._check_usable("get the sphere")
+        assert self.model_ is not None
+
+        return self.model_.get_sphere()
+
+    def get_mean(self) -> np.ndarray:
+        """
+        Get the per-channel mean removed before sphering (issue #313).
+
+        Returns
+        -------
+        mean : np.ndarray of float64
+            Shape (n_channels_in,); zeros for a ``do_mean=False`` fit, and
+            float32 values for an MLX fit.
+
+        Raises
+        ------
+        ValueError
+            If the model is unfitted.
+        RuntimeError
+            If the fit ended degenerate (issue #50).
+        """
+        self._check_usable("get the mean")
+        assert self.model_ is not None
+
+        return self.model_.get_mean()
+
+    def get_model_center(self, model_idx: int = 0) -> np.ndarray:
+        """
+        Get model ``model_idx``'s center ``c`` in the sphered space (issue #313).
+
+        Parameters
+        ----------
+        model_idx : int, default=0
+            Which model's center to return
+
+        Returns
+        -------
+        c : np.ndarray of float64
+            Shape (n_sources,); zeros for a single-model fit, and float32
+            values for an MLX fit.
+
+        Raises
+        ------
+        ValueError
+            If the model is unfitted, or ``model_idx`` is out of range.
+        TypeError
+            If ``model_idx`` is not an integer.
+        RuntimeError
+            If the fit ended degenerate (issue #50).
+        """
+        self._check_usable("get the model center")
+        assert self.model_ is not None
+
+        return self.model_.get_model_center(model_idx=model_idx)
 
     def mir(
         self, X: np.ndarray, model_idx: int = 0, nbins: Optional[int] = None
@@ -473,8 +891,10 @@ class AMICA:
         """
         Mutual Information Reduction (issue #137) of the fitted unmixing on ``X``.
 
-        Composes the full raw-data-to-sources transform (unmixing @ sphere)
-        the documented way and delegates to :func:`pamica.metrics.mir`.
+        Composes the linear part of the raw-data-to-sources transform
+        (unmixing @ sphere) and delegates to :func:`pamica.metrics.mir`. MIR
+        is shift-invariant, so the mean and center that :meth:`transform`
+        subtracts do not change it.
 
         Parameters
         ----------
@@ -499,7 +919,7 @@ class AMICA:
             (explicit ``pcakeep``/``pcadb`` or automatic ``mineig``/
             ``mineig_rel`` detection), which leaves it rank-deficient so
             MIR's log-Jacobian term is undefined; or if ``X`` is non-finite or
-            has a constant channel. See :meth:`AMICATorchNG.mir` and
+            has a constant channel. See the backend's ``mir`` (:meth:`AMICATorchNG.mir`) and
             :func:`pamica.metrics.mir`.
         RuntimeError
             If the fit ended degenerate (issue #50), since the parameters are
@@ -553,7 +973,8 @@ class AMICA:
     def model_loglik(self, X: np.ndarray) -> np.ndarray:
         """Per-model, per-sample log-likelihood ``Lht`` on ``X`` (issue #141).
 
-        Delegates to :meth:`AMICATorchNG.model_loglik`. For a multi-model fit
+        Delegates to the backend's ``model_loglik`` (:meth:`AMICATorchNG.model_loglik`,
+        the same on either backend). For a multi-model fit
         this is the joint log-likelihood of each model at each sample, from
         which the per-sample model posterior (dominance) is
         ``softmax(Lht, axis=0)``; see :meth:`model_probability`.
@@ -582,7 +1003,8 @@ class AMICA:
     def model_probability(self, X: np.ndarray) -> np.ndarray:
         """Per-sample posterior probability of each model (issue #141).
 
-        Delegates to :meth:`AMICATorchNG.model_probability`: the column-wise
+        Delegates to the backend's ``model_probability`` (see
+        :meth:`AMICATorchNG.model_probability`): the column-wise
         ``softmax`` over models of :meth:`model_loglik`, i.e. ``P(model h |
         x_t)``. Each column sums to 1; all ones for a single model.
 
@@ -611,7 +1033,8 @@ class AMICA:
     def get_pdftype(self, model_idx: int = 0) -> np.ndarray:
         """Per-source density-family code for model ``model_idx`` (issue #142).
 
-        Delegates to :meth:`AMICATorchNG.get_pdftype`. One integer per source
+        Delegates to the backend's ``get_pdftype`` (see
+        :meth:`AMICATorchNG.get_pdftype`). One integer per source
         component (0-4; see :data:`pamica.torch_impl.PDFTYPE_NAMES`).
 
         Returns
@@ -626,7 +1049,7 @@ class AMICA:
     def get_rho(self, model_idx: int = 0) -> np.ndarray:
         """Generalized-Gaussian shape ``rho`` for model ``model_idx`` (issue #142).
 
-        Delegates to :meth:`AMICATorchNG.get_rho`.
+        Delegates to the backend's ``get_rho`` (see :meth:`AMICATorchNG.get_rho`).
 
         Returns
         -------
@@ -640,9 +1063,10 @@ class AMICA:
     def shared_components(self) -> list:
         """Components shared across models by ``share_comps`` (issue #142).
 
-        Delegates to :meth:`AMICATorchNG.shared_components`: one group of
-        ``(model_idx, source_idx)`` pairs per shared column; empty when nothing
-        is shared.
+        Delegates to the backend's ``shared_components`` (see
+        :meth:`AMICATorchNG.shared_components`): one group of
+        ``(model_idx, source_idx)`` pairs per shared component; empty when
+        nothing is shared.
         """
         self._check_usable("get the shared components")
         assert self.model_ is not None
@@ -683,20 +1107,24 @@ class AMICA:
 
         Emits the raw binary files that EEGLAB's ``loadmodout15.m`` reads (``W``,
         ``S``, ``gm``, ``mean``, ``c``, ``alpha``, ``mu``, ``sbeta``, ``rho``,
-        ``comp_list``, ``LL``), so a pamica fit drops directly into an EEGLAB
-        workflow (``mod = loadmodout15(outdir)``). ``loadmodout15`` applies the
+        ``comp_list``, ``LL``), plus the sphered-space mixing matrix ``A``, so
+        a pamica fit drops directly into an EEGLAB workflow
+        (``mod = loadmodout15(outdir)``). ``loadmodout15`` applies the
         variance-ordering and normalization on load, so no manual re-ordering or
-        sign-flipping is needed. Single-model output is byte-compatible with the
-        Fortran reference (issue #92).
+        sign-flipping is needed. Every file is in the Fortran reference's
+        layout for any number of models, so single-model output is
+        byte-compatible with the reference (issue #92).
 
-        Also writes ``LLt`` (the per-sample/per-model log-likelihood, issue
-        #155) for a model that was just fit in this process, taken from the
+        Also writes ``LLt`` (the per-sample/per-model log-likelihood,
+        issue #155) for a model that was just fit in this process, taken from the
         E-step stash (issue #157); a model restored via :meth:`load` carries no
         stash, so ``LLt`` is omitted for it (a warning is logged). As in the
-        reference, ``LLt`` is the E-step that produced ``final_ll_`` and is
-        therefore one M-step older than the ``W``/``A`` written beside it --
-        see ``docs/guides/amica-differences.md``. Use :meth:`model_loglik` for
-        the log-likelihood of the written parameters.
+        reference, ``LLt`` is the E-step that produced ``final_ll_``: after a
+        fit that ran to ``max_iter`` it is therefore one M-step older than the
+        ``W``/``A`` written beside it, and after a convergence stop, which
+        exits before that iteration's update, it belongs to them -- see
+        ``docs/guides/amica-differences.md``. Use :meth:`model_loglik` for the
+        log-likelihood of the written parameters.
 
         Parameters
         ----------
@@ -712,29 +1140,46 @@ class AMICA:
         """
         Save the fitted model to ``filepath`` via ``torch.save``.
 
-        Persists the underlying :class:`AMICATorchNG` state (config + fitted
-        tensors) plus the wrapper's own configuration, so :meth:`load` can
-        fully reconstruct a transform-ready model. Everything written is a
-        tensor or plain Python primitive (see
-        :meth:`AMICATorchNG.state_dict`), so it reloads with
-        ``weights_only=True``.
+        Persists the backend's ``state_dict`` (config, fitted arrays and fit
+        record) plus the wrapper's own configuration, including which backend
+        built the model, so :meth:`load` can fully reconstruct a
+        transform-ready model of either backend. Everything written is a
+        tensor or a plain Python primitive, so the file reloads with
+        ``torch.load(weights_only=True)``: an MLX model's numpy arrays are
+        stored as CPU tensors of the same dtype, and numpy scalars in the
+        config or fit record (a ``seed=np.int64(...)``, say) as the equivalent
+        Python numbers.
+
+        The file is ``format_version`` 2 (issue #313), which records the
+        backend; :meth:`load` still reads version 1 files, written before
+        backend selection existed.
 
         Parameters
         ----------
         filepath : str
             Destination path (a ``.pt`` file by convention).
+
+        Raises
+        ------
+        TypeError
+            If the backend's state holds a value that ``weights_only`` loading
+            could not read back (anything but a tensor, an array or a plain
+            Python primitive), rather than writing a file :meth:`load` cannot
+            open.
         """
         self._check_usable("save")
         assert self.model_ is not None
 
+        backend = "torch" if isinstance(self.model_, AMICATorchNG) else "mlx"
         payload = {
-            "format_version": 1,
+            "format_version": _SAVE_FORMAT_VERSION,
             "wrapper": {
                 "n_models": self.n_models,
                 "n_mix": self.n_mix,
                 "verbose": self.verbose,
+                "backend": backend,
             },
-            "backend": self.model_.state_dict(),
+            "backend": _state_to_payload(self.model_.state_dict()),
         }
         torch.save(payload, filepath)
 
@@ -745,25 +1190,44 @@ class AMICA:
         """
         Load a fitted model saved by :meth:`save`.
 
+        The file records which backend built the model (``format_version``
+        2), and the model comes back on that backend. A ``format_version`` 1
+        file, written before backend selection existed (issue #313), holds a
+        PyTorch model by construction and still loads. A backend payload
+        saved before issue #334 (components as columns of ``A``) is converted
+        on load, or refused with a request to refit when ``share_comps`` had
+        merged components (see ``AMICATorchNG.from_state_dict``).
+
         Parameters
         ----------
         filepath : str
             Path to a file written by :meth:`save`.
         device : str or torch.device, optional
-            Device to place the restored model on. With ``None`` (auto), the
-            same MPS/float64 fallback as :meth:`fit` applies so a float64
-            parity model never lands on MPS.
+            Device to place a restored PyTorch model on. With ``None`` (auto),
+            the backend constructor chooses, as in :meth:`fit`, so a float64
+            parity model never lands on MPS. An MLX model always loads onto
+            MLX's default device, so it must stay ``None`` for one.
 
         Returns
         -------
         amica : AMICA
             A fitted model ready for :meth:`transform` / :meth:`get_mixing_matrix`.
+
+        Raises
+        ------
+        ValueError
+            If the file's ``format_version`` is not 1 or 2, a section is
+            missing, ``device`` is set for an MLX model, or the model was
+            saved before issue #334 with merged components.
+        ImportError
+            If the file holds an MLX model and MLX is not installed.
         """
         payload = torch.load(filepath, weights_only=True)
         version = payload.get("format_version")
-        if version != 1:
+        if version not in _LOADABLE_FORMAT_VERSIONS:
             raise ValueError(
-                f"unsupported AMICA save format_version: {version!r} (expected 1)"
+                f"unsupported AMICA save format_version: {version!r} (expected "
+                f"one of {list(_LOADABLE_FORMAT_VERSIONS)})"
             )
         for key in ("wrapper", "backend"):
             if key not in payload:
@@ -774,40 +1238,49 @@ class AMICA:
                 )
 
         wrapper = payload["wrapper"]
+        # Version 1 predates backend selection: the wrapper could only build
+        # AMICATorchNG then, so every version 1 file is a torch payload.
+        backend = "torch" if version == 1 else wrapper.get("backend")
+        if backend not in _BACKENDS:
+            raise ValueError(
+                f"malformed AMICA save file {filepath!r}: wrapper['backend'] is "
+                f"{backend!r}, expected one of {list(_BACKENDS)} "
+                f"(format_version={version})."
+            )
+        if backend == "mlx":
+            if device is not None:
+                raise ValueError(
+                    f"{filepath!r} holds an MLX-backend model, which always "
+                    f"loads onto MLX's default device; device={device!r} "
+                    "applies only to PyTorch-backend models, so pass "
+                    "device=None."
+                )
+            if importlib.util.find_spec("mlx") is None:
+                raise ImportError(
+                    f"{filepath!r} holds an MLX-backend model (backend='mlx'), "
+                    f"but MLX is not installed; {_MLX_INSTALL_HINT}."
+                )
+
         model = cls(
             n_models=wrapper["n_models"],
             n_mix=wrapper["n_mix"],
             device=device,
             verbose=wrapper["verbose"],
+            backend=backend,
         )
-
-        # Resolve the device using the persisted backend dtype so the same
-        # MPS/float64 fallback as fit() applies to an auto-selected device.
-        ng_dtype = getattr(torch, payload["backend"]["config"]["dtype"])
-        resolved_device = model._select_device(ng_dtype)
-        model.model_ = AMICATorchNG.from_state_dict(
-            payload["backend"], device=resolved_device
-        )
-        model.ll_history_ = model.model_.ll_history
-        model.final_ll_ = model.model_.final_ll_
-        # mir_history_ is not persisted in state_dict() (a diagnostic
-        # trajectory, not a fitted parameter), so a loaded model's is always
-        # empty; expose it anyway for attribute-surface consistency with
-        # ll_history_.
-        model.mir_history_ = model.model_.mir_history_
-        # Restart records ARE persisted by state_dict (issue #198), so a loaded
-        # best-of-N model can still say how its parameters were chosen; a model
-        # saved before #198 simply has none.
-        model.restart_seeds_ = model.model_.restart_seeds_
-        model.restart_lls_ = model.model_.restart_lls_
-        model.restart_stop_reasons_ = model.model_.restart_stop_reasons_
-        # state_dict() refuses to serialize a degenerate model, so a loaded model
-        # is always usable; carry its stop_reason through for inspection anyway.
-        model.stop_reason_ = model.model_.stop_reason
-        model.converged_ = (
-            model.stop_reason_ not in AMICATorchNG._DEGENERATE_STOP_REASONS
-        )
-        model.is_fitted_ = model.converged_
+        state = payload["backend"]
+        if backend == "torch":
+            # device=None lets the constructor choose from the saved dtype, so
+            # a float64 model's automatic MPS pick moves to the CPU as in fit().
+            model.model_ = AMICATorchNG.from_state_dict(state, device=device)
+        else:
+            model.model_ = _mlx_backend_class().from_state_dict(
+                _mlx_state_from_payload(state, filepath)
+            )
+        # state_dict() refuses to serialize a degenerate model, so a loaded
+        # model is always usable; its stop_reason is carried through for
+        # inspection anyway.
+        model._mirror_backend()
         return model
 
     @classmethod
@@ -824,37 +1297,44 @@ class AMICA:
         otherwise) rather than trusting the extension -- a compact JSON file
         saved with a ``.param`` extension must still parse as JSON, not be
         silently misread as garbled Fortran text (issue #132 review item 3).
-        See :func:`pamica.fortran_params.read_fortran_param_file` for the
-        Fortran-side key-mapping table and the deliberately-unmapped keys it
-        warns about rather than silently drops.
+        Both formats are read through :func:`pamica.fortran_params.
+        read_params_file` (issue #304), which also applies pamica's JSON
+        schema's own alias spellings (``min_grad_norm``/``max_decs``/
+        ``share_int``/...) to the canonical/constructor names, so a
+        ``sample_params.json`` fit applies its ``max_decs``/
+        ``min_grad_norm``/``share_int`` settings as ``maxdecs``/``min_nd``/
+        ``share_iter``. See that function and
+        :func:`pamica.fortran_params.read_fortran_param_file` for the
+        Fortran-side key-mapping table and the deliberately-unmapped keys
+        they warn about rather than silently drop.
 
         The full translated dict (beyond the ``n_models``/``n_mix`` used to
         size the instance here) is stashed on the returned instance and
         applied by :meth:`fit` as per-call defaults -- see ``fit``'s
-        docstring for the precedence rule.
+        docstring for the precedence rule. Which settings apply is decided
+        by the selected backend's own constructor signature, so
+        ``from_params_file(path, backend="mlx")`` drives
+        :class:`pamica.mlx_impl.AMICAMLXNG` from the same file (issue #313),
+        and :meth:`fit` names any setting that backend cannot take in its
+        "not applied" warning.
 
         Parameters
         ----------
         params_file : str
             Path to a JSON or Fortran-format parameter file.
         **kwargs
-            Additional parameters to override.
+            Constructor arguments (``n_models``, ``n_mix``, ``device``,
+            ``verbose``, ``backend``); ``n_models``/``n_mix`` given here
+            override the file's.
 
         Returns
         -------
         amica : AMICA
             Configured AMICA instance
         """
-        import json
+        from .fortran_params import read_params_file
 
-        path = Path(params_file)
-        text = path.read_text()
-        if text.lstrip().startswith(("{", "[")):
-            params = json.loads(text)
-        else:
-            from .fortran_params import read_fortran_param_file
-
-            params = read_fortran_param_file(path)
+        params = read_params_file(Path(params_file))
 
         # Extract relevant parameters
         n_models = params.get("num_models", 1)

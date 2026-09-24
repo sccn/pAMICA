@@ -43,12 +43,12 @@ Per torch seed vs Fortran:
   converge and not a worse fit. This is the fingerprint of the Fable agent's root
   cause: the Newton step is faithful (~1e-9 vs Fortran); the drift is mu/beta/rho
   exact-EM ill-conditioning on weak components, amplified by Newton's sharpening,
-  which occasionally tips a fit into a neighbouring basin Fortran's plain-EM path
+  which occasionally tips a fit into a neighboring basin Fortran's plain-EM path
   does not enter.
 
 ## Next step
 Implement the faithful mu/beta/rho ill-conditioning guard (keep the Newton step,
-stabilise the exact-EM weak-component updates so the Newton-preconditioned path
+stabilize the exact-EM weak-component updates so the Newton-preconditioned path
 stays in Fortran's basin), then re-run this exact ensemble on
 `/mnt/local/pamica-145` and re-measure - expectation: seed 42 stops collapsing
 (all seeds -> ~0.99 vs Fortran, matching within-Fortran self-consistency).

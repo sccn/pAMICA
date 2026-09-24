@@ -1,5 +1,12 @@
 # Multi-model AMICA parity: distributional equivalence to Fortran (issue #27)
 
+> **Historical record.** These ensembles predate epic #324, which changed every
+> backend's default trajectory (issues #333, #335, #339, #341, #344, #345).
+> The re-measured study under the finished epic, with the same protocol against
+> the pinned v0.3.3 native binary, is in `.context/issue-351/findings.md`
+> (script `.context/issue-351/multimodel_ensemble.py`, which reuses this
+> directory's analysis and figure code).
+
 **Bottom line.** For multi-model AMICA (`n_models > 1`), the natural-gradient
 PyTorch backend (`AMICATorchNG`) is validated against the Fortran reference at
 the level that is actually well-posed: its **ensemble of solutions is

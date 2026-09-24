@@ -2,7 +2,7 @@
 
 Internal status snapshot for the PyTorch AMICA effort. The living source of truth for parity
 status is the **Known Issues** section of `../AGENTS.md`; this file summarizes what has landed and
-what remains as of the v0.1.0 preparation.
+what remains, as of epic #324 (after v0.3.3). User-facing detail is in `docs/changelog.md`.
 
 ## Delivered
 
@@ -16,7 +16,8 @@ what remains as of the v0.1.0 preparation.
 - Newton is ported from the NumPy reference and stays positive-definite (0 fallbacks on the
   sample data).
 - **Metrics:** single-model LL ~ -3.40 (Fortran -3.4018); Hungarian-matched component correlation
-  ~0.997, clearing the >0.95 gate.
+  ~0.997, clearing the >0.95 gate. Re-measured under epic #324 (#351) against the bundled
+  200-iteration fixture: LL within 1.4e-4, correlation 0.998, Amari 4.8e-3, on all three backends.
 
 ### Adaptive PDF selection (issue #26)
 - All five `amica15.f90` `pdftype` density families ported to `AMICATorchNG`: 0 generalized
@@ -28,56 +29,75 @@ what remains as of the v0.1.0 preparation.
 
 ### Multi-model AMICA (issue #27)
 - Validated by **distributional equivalence**: multi-model AMICA is not partition-identifiable, so
-  the NG-vs-Fortran partition cross-correlation distribution is statistically indistinguishable
-  from Fortran's own run-to-run spread (Mann-Whitney p=0.97, TOST within +/-0.05). Per-block
-  sufficient stats are bit-exact vs Fortran.
+  the NG-vs-Fortran partition cross-correlation distribution is compared with Fortran's own
+  run-to-run spread. Re-measured under epic #324 (#351): between minus within-Fortran +0.006
+  (run-level permutation p=0.88; Amari +0.005, p=0.051), final LL -3.3541 vs -3.3543 (Kolmogorov-Smirnov (KS) p=0.83).
+  Per-block sufficient stats agree with Fortran to round-off.
 - Per-model bias `c` update (`update_c`) ported to both backends, guarded to a no-op for
   `n_models=1` so single-model parity stays bit-exact. See `.context/issue-27/`.
 
 ### Best-iterate safeguard (issue #51)
 - `AMICATorchNG.fit` returns the highest-LL iterate (`keep_best`, default on; `final_ll_` reports
   the returned iterate's LL, `ll_history` keeps the true trajectory), not the last iterate under
-  the non-monotone lrate schedule. Cuts multi-model LL sd from 12.7x to 2.0x Fortran's at a
-  matched 100-iter budget. Single-model #24 parity stays bit-exact (monotone => no restore). See
-  ADR 0003.
+  the non-monotone lrate schedule. It cut multi-model LL sd from 12.7x to 2.0x Fortran's at a
+  matched 100-iter budget; re-measured under epic #324 (#351) the sd ratio is 1.0x with or without
+  it, and a restore fired in one of 20 seeded fits (300-iteration budget only). Single-model #24 parity stays bit-exact
+  (monotone => no restore). See ADR 0003.
 
-### Degenerate-fit contract (issue #50)
-- The `AMICA` wrapper no longer treats a degenerate fit (`stop_reason` nan_ll / singular_ll) as
-  usable. `fit` sets `is_fitted_` only on a converged fit and exposes `converged_` /
-  `stop_reason_`; `transform` / `get_mixing_matrix` / `get_unmixing_matrix` / `save` raise a clear
-  degenerate error instead of returning NaN sources.
+### Degenerate-fit contract (issues #50, #306, #339)
+- The `AMICA` wrapper no longer treats a degenerate fit (`stop_reason` nan_ll / singular_ll /
+  nan_direction / nan_params, or restart_error under best-of-N) as usable. `fit` sets `is_fitted_`
+  only on a non-degenerate stop and exposes `converged_` / `stop_reason_`; `transform` / `get_*` /
+  `write_amica_output` / `save` raise a clear degenerate error instead of returning NaN sources.
+- Since #306 the raw `AMICATorchNG`, `AMICAMLXNG` and `AMICA_NumPy` accessors refuse a degenerate
+  fit too; since #339 every backend stops on a non-finite likelihood, update direction or
+  parameter before using it.
 
-### Component sharing (issue #60)
-- `share_comps` ported to `AMICATorchNG`: on the `share_start`/`share_iter` schedule, components
-  that are near-collinear across different models (cosine angle of their de-sphered mixing columns
-  above `comp_thresh`) are merged into one shared mixing column and density, with an A-freeze for
-  ~6 iterations after each merge (Fortran `identify_shared_comps`, amica15.f90:1898).
-- The M-step already sums sufficient statistics through `comp_list` (index_add), so shared
-  components update jointly; the A-update was refactored to accumulate columns as Fortran's
-  `gm`-weighted average (`dAk/zeta`, so shared columns are averaged, not summed) -- byte-identical
-  to the per-model update when unshared.
+### Component sharing (issues #60, #334)
+- `share_comps` runs on all three backends. Since #334 (ADR 0007) `A` stores one component per row,
+  so the metric compares de-sphered component mixing vectors (rows of `A` through `pinv(sphere)`,
+  the scalp maps) across models, and a merge above `comp_thresh` ties the two components: `comp_list`
+  is re-pointed and they share one mixing vector and density (Fortran `identify_shared_comps`,
+  amica15.f90:1916). The A-freeze is the reference's unconditional schedule (ADR 0008, #345): from
+  `share_start` on, `A` is held on every iteration with `mod(iter, share_iter) <= 5`, on every fit,
+  sharing on or off.
+- The `gm`-weighted `dAk/zeta` step averages a shared component over its models; byte-identical to
+  the per-model update when no merge fires.
 - `keep_best` (#51) is disabled under sharing (a merge changes the parameter count, so pre-/post-merge
   LLs are not comparable and restoring an earlier snapshot would revert the merge); `fit` returns the
   last, merged iterate like Fortran.
-- OFF by default, and a no-op for `n_models=1`, so single-model (#24) and default multi-model (#27)
-  results are byte-for-byte unchanged (verified by the full torch suite). No bit-exact oracle: the
-  reference's `Spinv2` similarity metric is *declared but never allocated* (unrunnable, like the dead
-  `do_choose_pdfs`, #26), so the intended algorithm is implemented and behavior-validated. See
-  `tests/torch_tests/test_ng_sharing.py`.
+- OFF by default, and a no-op for `n_models=1`. The reference binary's own scan never merges
+  (`Spinv2` is never allocated, so every similarity is NaN), but the update from a merged state
+  seeded through `load_comp_list` matches PyTorch and NumPy to float64 round-off
+  (`pamica/tests/test_component_rows.py`, opt-in with `AMICA_RUN_FORTRAN=1`).
+
+### MLX first-class and reference fidelity (epic #324)
+- `AMICA(backend="mlx")` and `AMICAICA(backend="mlx")` run every wrapper feature on MLX (#313);
+  MLX has explicit `pcakeep`/`pcadb` (#323); one params-file reader serves every backend (#304).
+- Default fits on every backend follow the reference more closely, so trajectories differ from
+  0.3.3: the reference's iteration order and unconditional A-freeze (#339, #345, ADR 0008),
+  `doscaling` of component rows (#333, ADR 0006), component-row storage and correct sharing (#334,
+  ADR 0007), 1-based schedule gates (#335), a normalized initial `A` (#341) and the reference's
+  single-precision constants (#344), each decided in one shared module (`schedule.py`,
+  `component_layout.py`, `initialization.py`, `reference_constants.py`, with `rank.py`).
+- `AMICAICA.apply` restores the PCA residual of rank-reduced fits (#322, on `dev`).
 
 ### Structure and infrastructure
 - Module rename into `numpy_impl/` and `torch_impl/` with topic-based names (issue #34); the public
-  import surface (`from pamica import AMICA, AMICA_NumPy, AMICATorchNG`) is stable.
+  import surface (`from pamica import AMICA, AMICA_NumPy, AMICATorchNG, AMICANative`) is stable.
 - UV is the canonical environment (`pyproject.toml` + `uv.lock`); the legacy conda env is retired.
 - CI is live and green on `main`: ruff lint/format, pytest (excluding slow/Fortran-binary parity),
   and a build + clean-env import matrix on Python 3.12 and 3.13. Typos check green.
-- Validation harness (`validate_implementations.py`) runs the PyTorch (NG) backend against the
-  Fortran binary (`amica15mac`) and matches components via the Hungarian algorithm, on real sample
-  EEG; it does not exercise the NumPy or MLX backends. NumPy-vs-Fortran parity lives in pytest
-  (`test_sample_data_numpy_vs_fortran`), MLX validation in `mlx_tests/` plus the cross-backend
-  suites (extending the harness itself is tracked as issue #315).
+- Validation harness (`validate_implementations.py --backend {torch,numpy,mlx}`, a comma-separated
+  list, or `all`; default `torch`, whose report is unchanged) runs each backend against one Fortran
+  reference run with the same settings and matches components via the Hungarian algorithm, on real
+  sample EEG (#315). All three meet the Fortran bar on the bundled sample (re-measured under epic
+  #324 in #351: LL within 2.8e-4, correlation 0.9991, Amari 0.004 from independent starts, inside the
+  reference's own seed-to-seed LL sd of 2.6e-4; from a shared start LL within 1.6e-6; rows and bars
+  in `docs/guides/validation.md`, run records in `.context/issue-351/`), pinned by the
+  `AMICA_RUN_FORTRAN`-gated test in `test_fortran_param_forwarding.py`.
 
-## Remaining before / around v0.1.0
+## Remaining
 
 - **Performance benchmark:** DONE. The "runtime within 2-3x of Fortran" success criterion has been
   measured and met/exceeded: CUDA float64 ~4.5x over a 16-thread CPU, MLX ~7x on Apple Silicon
