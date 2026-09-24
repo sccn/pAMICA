@@ -103,3 +103,81 @@ def test_site_url(target, url):
 def test_check_passes_for_a_released_version(capsys):
     assert script.main(["0.3.3", "--check"]) == 0
     assert capsys.readouterr().out == ""
+
+
+# Edge cases of the extractor, on small Markdown snippets written in the
+# changelog's own format.
+_SNIPPET = """# Changelog
+
+## Unreleased
+
+- Next change.
+
+## 0.3.10 - 2026-09-10
+
+- **A tenth patch.** See [the guide](guides/backends.md#devices).
+
+## 0.3.1 - 2026-07-19   \n
+- Inline code keeps `[text](guides/backends.md)` as written.
+- Reference link to [the guide][guide].
+
+[guide]: guides/amica-differences.md#default-settings
+
+```markdown
+## 9.9.9 - 2099-01-01
+[fenced](guides/backends.md)
+```
+
+## 0.3.0 - 2026-07-18
+
+- The last section.
+"""
+
+
+def test_version_prefix_does_not_match_a_longer_version():
+    tenth = script.section(_SNIPPET, "0.3.10")
+    first = script.section(_SNIPPET, "0.3.1")
+    assert tenth is not None and "A tenth patch" in tenth
+    assert first is not None and "A tenth patch" not in first
+    assert "Inline code" in first and "Inline code" not in tenth
+
+
+def test_heading_with_trailing_whitespace_is_found():
+    assert "0.3.1 - 2026-07-19" in script.release_titles(_SNIPPET)
+
+
+def test_code_spans_and_fences_are_left_as_written():
+    body = script.section(_SNIPPET, "0.3.1")
+    assert body is not None
+    assert "`[text](guides/backends.md)`" in body
+    assert "[fenced](guides/backends.md)" in body
+
+
+def test_heading_inside_a_fence_is_not_a_release():
+    assert "9.9.9 - 2099-01-01" not in script.release_titles(_SNIPPET)
+    assert script.section(_SNIPPET, "9.9.9") is None
+    body = script.section(_SNIPPET, "0.3.1")
+    assert body is not None and body.rstrip().endswith("```")
+
+
+def test_reference_definitions_are_rewritten():
+    body = script.section(_SNIPPET, "0.3.1")
+    assert body is not None
+    assert (
+        "[guide]: https://eeglab.org/pAMICA/guides/amica-differences/#default-settings"
+        in body
+    )
+
+
+def test_inline_links_are_rewritten_and_the_last_section_is_found():
+    tenth = script.section(_SNIPPET, "0.3.10")
+    assert tenth is not None
+    assert "](https://eeglab.org/pAMICA/guides/backends/#devices)" in tenth
+    last = script.section(_SNIPPET, "0.3.0")
+    assert last == "- The last section.\n"
+
+
+def test_empty_section_is_missing():
+    empty = "## 0.2.0 - 2026-07-18\n\n## 0.1.0 - 2026-07-11\n\n- First.\n"
+    assert script.section(empty, "0.2.0") is None
+    assert script.section(empty, "0.1.0") == "- First.\n"

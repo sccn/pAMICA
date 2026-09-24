@@ -31,8 +31,16 @@ _HEADING = re.compile(r"^## (?P<title>.+?)\s*$")
 _RELEASE_TITLE = re.compile(
     r"^(?P<version>\d+\.\d+\.\d+\S*) - (?P<date>\d{4}-\d{2}-\d{2})$"
 )
-# A Markdown link target that is neither absolute nor an e-mail address.
-_RELATIVE_LINK = re.compile(r"\]\((?!https?://|mailto:)(?P<target>[^)\s]+)\)")
+_FENCE = re.compile(r"^\s*(```|~~~)")
+_ABSOLUTE = r"(?!https?://|mailto:)"
+# An inline code span (left as written) or an inline link with a relative target.
+_INLINE = re.compile(
+    r"(?P<code>`+[^`]*?`+)|\]\(" + _ABSOLUTE + r"(?P<target>[^)\s]+)\)"
+)
+# A reference-style link definition, "[label]: target", with a relative target.
+_REFERENCE = re.compile(
+    r"^(?P<lead>\s{0,3}\[[^\]]+\]:\s*)" + _ABSOLUTE + r"(?P<target>\S+)(?P<rest>.*)$"
+)
 
 
 def _site_url(target: str) -> str:
@@ -48,33 +56,58 @@ def _site_url(target: str) -> str:
     return SITE_URL + page + (f"#{anchor}" if anchor else "")
 
 
+def _headings(lines: list[str]):
+    """``(index, title)`` of each level-2 heading outside fenced code."""
+    fenced = False
+    for i, line in enumerate(lines):
+        if _FENCE.match(line):
+            fenced = not fenced
+        elif not fenced and (m := _HEADING.match(line)):
+            yield i, m["title"]
+
+
 def release_titles(text: str) -> list[str]:
     """Every level-2 heading title, in file order."""
-    return [m["title"] for line in text.splitlines() if (m := _HEADING.match(line))]
+    return [title for _, title in _headings(text.splitlines())]
+
+
+def _absolute_links(body: str) -> str:
+    """Rewrite relative link targets to site URLs, outside code spans and fences."""
+    out = []
+    fenced = False
+    for line in body.split("\n"):
+        if _FENCE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            if m := _REFERENCE.match(line):
+                line = m["lead"] + _site_url(m["target"]) + m["rest"]
+            else:
+                line = _INLINE.sub(
+                    lambda m: m[0] if m["code"] else f"]({_site_url(m['target'])})",
+                    line,
+                )
+        out.append(line)
+    return "\n".join(out)
 
 
 def section(text: str, version: str) -> str | None:
     """The body of ``version``'s section, links made absolute, or ``None``."""
     lines = text.splitlines()
     start = None
-    for i, line in enumerate(lines):
-        m = _HEADING.match(line)
-        if m is None:
-            continue
+    end = len(lines)
+    for i, heading in _headings(lines):
         if start is not None:
             end = i
             break
-        title = _RELEASE_TITLE.match(m["title"])
+        title = _RELEASE_TITLE.match(heading)
         if title is not None and title["version"] == version:
             start = i + 1
-    else:
-        end = len(lines)
     if start is None:
         return None
     body = "\n".join(lines[start:end]).strip()
     if not body:
         return None
-    return _RELATIVE_LINK.sub(lambda m: f"]({_site_url(m['target'])})", body) + "\n"
+    return _absolute_links(body) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
