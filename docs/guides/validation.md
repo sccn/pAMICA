@@ -332,7 +332,8 @@ and the original ensembles of this study measured 0.154 and 0.163 against the bu
 
 The strongest reassurance that pamica is a single, well-defined implementation is that it recovers the *same*
 independent components no matter where or how it runs. Fitting the same real EEG (ds002718 sub-002, 147,000 frames, 70 channels, 2000 iterations)
-on every backend and Hungarian-matching the unmixing components across them:
+on every backend and Hungarian-matching the unmixing components across them
+(measured before epic #324's changes to the fit and not re-measured since; issue #351 re-measured the figures elsewhere on this page):
 
 ![Cross-backend IC-equivalence matrix at 70 channels.](../assets/figures/cross-backend-equivalence-matrix.png){ width=680 }
 /// caption
@@ -360,6 +361,8 @@ The well-determined components are indistinguishable across all backends.
 Whether backends recover the *same* components depends on how well-determined the decomposition is, captured by the data-adequacy factor:
 
 $$k = \frac{\text{frames}}{\text{channels}^2}$$
+
+The two sweeps below were measured before epic #324's changes to the fit and have not been re-measured since.
 
 As `k` grows, cross-backend component equivalence rises toward 1.0;
 at the rule-of-thumb minimum (`k` around 20-30) only the strongest components are backend-reproducible,
@@ -455,6 +458,9 @@ Full usage is in the [EEGLAB interoperability guide](eeglab.md); tests are in `p
 Throughput on real EEG (OpenNeuro ds002718 sub-002; `n_mix=3`, `pdftype=0`, `block_size=512`, warmed, min-of-repeats).
 CPU, MPS, and MLX were measured on Apple Silicon; CUDA on a separate NVIDIA RTX 4090 host,
 so MLX-versus-CUDA reads as "best Apple-GPU path versus a strong NVIDIA GPU", not a same-box comparison.
+These tables predate epic #324.
+A same-session check on the Apple M4 Pro at 70 channels (`benchmark_dimsweep.py`, 30000 frames, 25 iterations, three repeats; issue #351)
+found per-iteration cost unchanged by the epic: 33.3 and 33.1 ms for MLX, 190.8 and 189.4 ms for torch-CPU float64, 165.1 and 166.7 ms for torch-MPS float32, before and after.
 
 ### Single-model, ms/iteration
 
