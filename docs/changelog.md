@@ -1,6 +1,9 @@
 # Changelog
 
-Release notes are also published on the
+User-visible changes to pamica, newest first.
+Changes merged to `dev` since the last release collect under **Unreleased**;
+at release time that heading becomes the version and its date.
+Each release's section is also its note on the
 [GitHub releases page](https://github.com/sccn/pAMICA/releases).
 
 ## Unreleased
@@ -664,8 +667,23 @@ and every backend's fitting follows the Fortran reference more closely.
   Python files under `.context/` still run the full CI.
 - **The rebuilt `paper.pdf` is committed back on `dev` and `main` only.**
   Feature branches build it as an artifact, so a PR's head is never a bot commit whose checks wait for approval.
+  The commit rebases onto the branch head before pushing, because the version bump can land while the PDF builds.
+- **A changelog check runs on every pull request.**
+  A change to package code into `dev` must add its entry to this changelog, or carry the `skip-changelog` label when it has no user-visible effect.
+  A release into `main` must carry its dated section.
+- **Release notes come from this changelog.**
+  `auto-tag.yml` publishes the release's section, extracted by `scripts/changelog_section.py` with its links made absolute, and appends GitHub's generated pull-request list.
+  The notes of the earlier releases were refreshed the same way.
 
-## 0.3.3
+### Project
+
+- **A root `CHANGELOG.md` points to this changelog,**
+  and the package metadata links it and the documentation site, so PyPI shows both.
+- **Release headings carry their dates** (`## X.Y.Z - YYYY-MM-DD`), taken from the release tags;
+  `pamica/tests/test_changelog.py` checks the format.
+- **`.rules/changelog.md` records the practice:** what an entry says, when the `skip-changelog` label applies, and the release-prep steps.
+
+## 0.3.3 - 2026-09-01
 
 MLX fitting parity (convergence stops, component sharing, Newton, all five
 source-density families), best-of-N restarts on every backend, the
@@ -1043,7 +1061,7 @@ external tester (#221).
   bundled sample reproduces its previous `comp_list` and log-likelihood bit for
   bit.
 
-## 0.3.2
+## 0.3.2 - 2026-08-15
 
 Rank-deficient input support across every backend, a much faster default block
 size, and a reproducible Fortran reference for parity runs.
@@ -1103,7 +1121,7 @@ size, and a reproducible Fortran reference for parity runs.
   (missing these keys) still load, falling back to the Fortran-faithful
   defaults.
 
-## 0.3.1
+## 0.3.1 - 2026-07-19
 
 Rho-rate schedule fixes across all backends and a reproducible-seed option in the
 native binary build.
@@ -1126,7 +1144,7 @@ native binary build.
   components, not a dynamics bug (identical init gives matching results); the
   optional init-robustness enhancement is tracked in #198.
 
-## 0.3.0
+## 0.3.0 - 2026-07-18
 
 MNE-Python compatibility layer (epic #139), additive: the scikit-learn-style
 `AMICA` API and the byte-identical EEGLAB I/O are unchanged.
@@ -1180,7 +1198,7 @@ MNE-Python compatibility layer (epic #139), additive: the scikit-learn-style
   `AMICA.mir`/`pmi` (#133); the results match the array API exactly (phase 4,
   #143).
 
-## 0.2.2
+## 0.2.2 - 2026-07-18
 
 GitHub repository rename to pAMICA and a `__version__` fix.
 
@@ -1197,7 +1215,7 @@ GitHub repository rename to pAMICA and a `__version__` fix.
   snippets are updated to match. GitHub redirects the old repo URLs, and the
   package/import name stays lowercase `pamica` (#184).
 
-## 0.2.1
+## 0.2.1 - 2026-07-18
 
 PyPI publishing, release-metadata sync, the pAMICA display title, and
 native-engine documentation.
@@ -1218,7 +1236,7 @@ native-engine documentation.
   backend on any platform, not only through the bundled macOS `amica15mac`
   fixture (#147 phase 5, #179).
 
-## 0.2.0
+## 0.2.0 - 2026-07-17
 
 Package rename to align with the reserved PyPI name.
 
@@ -1229,7 +1247,7 @@ Package rename to align with the reserved PyPI name.
   domain (`eeglab.org/pyAMICA`), and the release-asset repository are unchanged
   (#176).
 
-## 0.1.3
+## 0.1.3 - 2026-07-17
 
 Native Fortran run engine, separation-quality metrics, LLt output parity, and
 the `loadmodout` byte-order fix.
@@ -1309,7 +1327,7 @@ the `loadmodout` byte-order fix.
   `rho0=1.5`). Affected `numpy_impl.viz.plot_pdf_fits`; the fit path was never
   affected, as it uses its own log-space implementation (#136).
 
-## 0.1.2
+## 0.1.2 - 2026-07-14
 
 Outlier-rejection parity in the NumPy backend, repo-wide type-checking, and the
 full validation-evidence documentation.
@@ -1328,7 +1346,7 @@ full validation-evidence documentation.
   (cross-backend equivalence matrix and IC topomaps), the EEGLAB drop-in
   round-trip, and the other validated behaviors (#108).
 
-## 0.1.1
+## 0.1.1 - 2026-07-13
 
 Validation-methodology and correctness fixes since 0.1.0.
 
@@ -1347,7 +1365,7 @@ Validation-methodology and correctness fixes since 0.1.0.
 - Corrected a stale float32-speedup claim and added a funding acknowledgment
   (#114).
 
-## 0.1.0
+## 0.1.0 - 2026-07-11
 
 First public release.
 
