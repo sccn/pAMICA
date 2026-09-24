@@ -68,8 +68,12 @@ Three sources set AMICA's defaults:
 pamica's own, the compiled amica15 binary's (`pamica/amica15_header.f90`),
 and those of EEGLAB's `runamica15.m`, the MATLAB front end that writes an `input.param` and runs the binary
 (read here from sccn/amica at commit 509c8be).
-pamica's column holds for `AMICATorchNG` and `AMICAMLXNG` and for the `AMICA` and `AMICAICA` wrappers on either backend,
-which since issue #354 take their defaults from the backend they build.
+pamica's column holds for every pamica backend except the native one:
+`AMICATorchNG` and `AMICAMLXNG`, the `AMICA` and `AMICAICA` wrappers on either backend,
+which since issue #354 take their defaults from the backend they build,
+and the legacy NumPy backend (`AMICA_NumPy`), which reads them from `pamica/numpy_impl/params.json`
+(before issue #354 that file turned Newton on and set `max_iter` to 2000).
+`AMICA_NumPy` has no `keep_best` ([Backend differences](#backend-differences)).
 Bold marks a pamica default that differs from the compiled one.
 The line numbers are those of `amica15_header.f90` and `runamica15.m`.
 
@@ -111,11 +115,8 @@ The compiled values are single-precision literals widened to double (row 16), so
 the table gives the decimals.
 `runamica15.m` writes `invsigmin` with six decimal places, so the binary it runs sees `invsigmin 0.000000`,
 as the bundled `pamica/sample_data/input.param` shows.
-Two pamica entry points that the wrappers never build keep other defaults.
-The legacy NumPy backend (`AMICA_NumPy`) reads its defaults from `pamica/numpy_impl/params.json`:
-they are pamica's column except `max_iter` (2000) and `do_newton` (on),
-and it has no `keep_best` ([Backend differences](#backend-differences)).
-[`AMICANative`](../api/native-backend.md), which runs the binary itself, writes a full `input.param` whose defaults are those of the bundled `pamica/sample_data/input.param`:
+[`AMICANative`](../api/native-backend.md), which runs the binary itself, keeps other defaults:
+it writes a full `input.param` whose defaults are those of the bundled `pamica/sample_data/input.param`,
 `runamica15.m`'s column as written, with `block_size=512`.
 
 pamica follows the compiled binary because its values are the reference's own defaults:

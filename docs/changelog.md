@@ -18,10 +18,13 @@ and every backend's fitting follows the Fortran reference more closely.
     each iteration runs in the reference's order, so a likelihood decrease takes effect in the same iteration and a convergence stop returns the parameters its likelihood was computed from (issue #339);
     the reference's A-freeze holds the mixing update on iterations 100-105, 200-205, and so on, of every fit (issue #345);
     and the density normalizers are the reference's single-precision constants (issue #344).
-    A sixth is a wrapper change: an `AMICA()` or `AMICAICA()` fit that sets no `lrate` now runs at 0.1, the backends' default, where it ran at 0.05,
-    which raises the final log-likelihood of a default 100-iteration fit on the bundled sample by 0.008
-    (issue #354, [Defaults and device selection](#defaults-and-device-selection));
-    the raw backends already used 0.1.
+    Every pamica backend now also shares one set of defaults (issue #354, [Defaults and device selection](#defaults-and-device-selection)),
+    which moves default fits in two entry points:
+    an `AMICA()` or `AMICAICA()` fit that sets no `lrate` now runs at 0.1, the backends' default, where it ran at 0.05,
+    which raises the final log-likelihood of a default 100-iteration fit on the bundled sample by 0.008;
+    and a default `AMICA_NumPy` fit now runs without Newton and stops at 100 iterations, like the other backends,
+    where it switched Newton on at iteration 20 and ran up to 2000 iterations.
+    The raw PyTorch and MLX backends already used these values.
     Two more reach default fits in narrow cases.
     With schedule gates counted from 1 (issue #335), a `maxdecs` ratchet that completes on iteration `newt_start + 1` tightens the rho-rate ceiling whether or not Newton is on,
     and on NumPy a non-finite likelihood on iteration `restartiter + 1` ends the fit.
@@ -481,11 +484,26 @@ and every backend's fitting follows the Fortran reference more closely.
   - Tests: `pamica/tests/test_wrapper_backends.py` checks on both backends that the wrapper resolves the backend's own defaults,
     that a default wrapper fit is the default backend fit (the same learning rate and log-likelihood trajectory),
     and that an explicit `lrate` still takes precedence;
-    a cross-backend test holds every constructor default that `AMICATorchNG` and `AMICAMLXNG` share equal,
-    since the defaults table gives one pamica column for both.
+    a cross-backend test (now in `pamica/tests/test_default_settings.py`) holds every constructor default that `AMICATorchNG` and `AMICAMLXNG` share equal,
+    since the defaults table gives one pamica column for them.
     `pamica/tests/mne_tests/test_mne_backends.py` checks that an `AMICAICA` fit runs at the backend's default.
     No existing test depended on the old default;
     the figures quoted in two torch-against-MLX test docstrings were measured again at the new one.
+- **`AMICA_NumPy` defaults to the other backends' settings** (issue #354).
+  **Behavior change: a default NumPy fit now runs without Newton and stops at 100 iterations, like the PyTorch and MLX backends.**
+  The bundled `pamica/numpy_impl/params.json`, which the NumPy constructor reads for its defaults, set `do_newton` on and `max_iter` to 2000,
+  the only two settings it shares with `AMICATorchNG` on which the two disagreed;
+  it now sets `do_newton` off and `max_iter` to 100,
+  and the constructor's fallback for a parameter file without `max_iter` is 100 too (it was 2000), which also reaches the NumPy CLI.
+  A fit that sets these, directly or through its own parameter file, is unaffected;
+  pass `do_newton=True` and `max_iter=2000` to reproduce an earlier default NumPy fit.
+  Fits shorter than `newt_start` (20 by default) iterations are byte-identical, since Newton had not started in them.
+  `AMICANative`, which writes the bundled `input.param`'s values, keeps its own defaults for now.
+  - Tests: `pamica/tests/test_default_settings.py` holds every setting `AMICA_NumPy` shares with `AMICATorchNG` to `AMICATorchNG`'s default,
+    read through a default NumPy construction and through the backend's own `params.json` loader,
+    and holds `AMICAMLXNG`'s constructor and `fit` defaults to `AMICATorchNG`'s (moved from `test_wrapper_backends.py`).
+    `pamica/tests/test_pamica.py::test_amica_initialization`, which pinned the old `max_iter`, now expects the shared default;
+    no other test relied on the old values, since every NumPy fit that runs past `newt_start` in the suite sets `do_newton` itself.
 - **The raw `AMICATorchNG` runs a default construction on the CPU on Apple Silicon** (issue #354).
   `AMICATorchNG(n_channels)` with default arguments raised `ValueError` on every Mac with Metal Performance Shaders (MPS):
   automatic device selection picks MPS, which cannot represent the float64 default.

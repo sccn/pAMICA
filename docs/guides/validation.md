@@ -522,21 +522,21 @@ Tests live under `pamica/tests/`: `torch_tests/test_ng_backend.py`, `torch_tests
 AMICA ships four stops. On recordings the size of the bundled sample, only two of
 them fire, and it is worth knowing which before concluding that one is broken.
 
-Two of the four defaults differ between the backends, so read the column that
-matches the entry point you use. `AMICA_NumPy` resolves its defaults from the
-bundled `pamica/numpy_impl/params.json`; `AMICA`/`AMICATorchNG` and `AMICAMLXNG`
-take theirs from the constructor signature (`max_iter` from `fit`); Fortran
-compiles in the values in `amica15_header.f90` and the bundled
+The pamica backends share these defaults (issue #354):
+`AMICA`/`AMICATorchNG` and `AMICAMLXNG` take theirs from the constructor signature (`max_iter` from `fit`),
+and `AMICA_NumPy` resolves the same values from the bundled `pamica/numpy_impl/params.json`,
+which before issue #354 turned Newton on and ran 2000 iterations.
+Fortran compiles in the values in `amica15_header.f90`, and the bundled
 `pamica/sample_data/input.param` overrides several.
 The [defaults table](amica-differences.md#default-settings-issue-354) of the differences guide lists every setting across these sources.
 
 | Stop | `AMICA` / `AMICATorchNG` | `AMICA_NumPy` | `AMICAMLXNG` (MLX) | Fortran (compiled / `input.param`) |
 |---|---|---|---|---|
-| `max_iter` | **100** | 2000 | **100** | none / 2000 |
+| `max_iter` | **100** | **100** | **100** | none / 2000 |
 | `min_dll` (`use_min_dll`) | on, `1e-9` | on, `1e-9` | on, `1e-9` | on, `1e-9` |
 | `min_nd` (`use_grad_norm`) | on, `1e-7` | on, `1e-7` (named `min_grad_norm`) | on, `1e-7` | on, `1e-7` |
 | `minlrate` (`lrate_floor`) | `1e-12` | `1e-12` | `1e-12` | `1e-12` / `1e-8` |
-| `do_newton` | **off** | **on** | **off** | off / on |
+| `do_newton` | **off** | **off** | **off** | off / on |
 
 The MLX column dates from issue #248, which ported both stops to that backend;
 before it, an MLX fit had no convergence criterion at all and always ran to
@@ -546,9 +546,9 @@ backend-differences guide), taking `AMICATorchNG`'s off-by-default.
 Which of them actually ends a fit:
 
 - **`min_dll` normally wins**, at iteration 326-1076 depending on the BLAS build,
-  when `max_iter` is large enough to let it. At `AMICATorchNG`'s
-  default `max_iter=100` the fit always ends on `max_iter` before `min_dll` can
-  fire, so the default PyTorch run is iteration-limited, not converged. Raise
+  when `max_iter` is large enough to let it. At the default
+  `max_iter=100` the fit always ends on `max_iter` before `min_dll` can
+  fire, so a default run on any pamica backend is iteration-limited, not converged. Raise
   `max_iter` if you want the likelihood stop to be the one that decides.
 - **`min_nd` never fires** on a recording this size, in any of the four
   implementations. This is the subject of the rest of this section.
