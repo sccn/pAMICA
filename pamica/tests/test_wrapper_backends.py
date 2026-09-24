@@ -410,6 +410,62 @@ def test_params_file_warning_names_the_torch_backend(X, caplog):
     assert not set(keys) & set(inspect.signature(AMICATorchNG).parameters)
 
 
+# --- the wrapper's defaults are the backend's (issue #354) ------------------------
+_FIT_NAMED = ("max_iter", "lrate", "do_mean", "do_sphere", "do_newton")
+
+
+def _signature_defaults(cls) -> dict:
+    """The defaults of the five settings ``AMICA.fit`` names, read off
+    ``cls`` itself: ``max_iter`` from ``cls.fit``, the rest from ``cls``."""
+    ctor = inspect.signature(cls).parameters
+    fit = inspect.signature(cls.fit).parameters
+    return {
+        name: (fit if name == "max_iter" else ctor)[name].default for name in _FIT_NAMED
+    }
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_wrapper_resolves_the_backends_own_defaults(backend):
+    """Until issue #354 the wrapper restated these defaults, and its lrate
+    (0.05) differed from every backend's (0.1)."""
+    from pamica.amica import _fit_defaults
+
+    cls = _backend_class(backend)
+    assert _fit_defaults(cls) == _signature_defaults(cls)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_default_wrapper_fit_is_the_default_backend_fit(X, backend):
+    """``AMICA().fit(X)``, with none of the five named settings passed, runs
+    the same fit as the backend class built with its own defaults (the full
+    default ``max_iter``, so on a shorter slice to stay cheap)."""
+    cls = _backend_class(backend)
+    placement = {"device": "cpu"} if backend == "torch" else {}
+    data = X[:, :4096]
+    model = _wrapper(backend)
+    model.fit(data, seed=SEED)
+    raw = cls(n_channels=NW, seed=SEED, **placement)
+    raw.fit(data, verbose=False)
+
+    b = model.model_
+    assert b is not None
+    defaults = _signature_defaults(cls)
+    assert b.lrate0 == raw.lrate0 == defaults["lrate"]
+    assert b.do_mean is raw.do_mean is defaults["do_mean"]
+    assert b.do_sphere is raw.do_sphere is defaults["do_sphere"]
+    assert b.do_newton is raw.do_newton is defaults["do_newton"]
+    assert len(model.ll_history_) == len(raw.ll_history) <= defaults["max_iter"]
+    assert model.ll_history_ == raw.ll_history
+    assert model.stop_reason_ == raw.stop_reason
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_explicit_lrate_overrides_the_backend_default(X, backend):
+    model = _wrapper(backend)
+    model.fit(X, max_iter=1, lrate=0.05, seed=SEED)
+    assert model.model_ is not None and model.model_.lrate0 == 0.05
+
+
 # --- pcakeep through the wrapper on MLX (#323's remaining bullet) ---------------------
 def test_pcakeep_through_the_mlx_wrapper(X):
     _require_mlx()
@@ -685,8 +741,9 @@ def test_torch_and_mlx_wrappers_find_the_same_components(real_data, pcakeep):
     number of components, the same sources (Hungarian-matched |corr| at the
     bar of test_pca_reduction_cross_backend.py, which this reuses), and the
     same log-likelihood to MLX's float32 bar. Measured on the full sample, 10
-    iterations: min matched |corr| 0.99999996 full rank / 0.99999993 at
-    pcakeep=20, identity matching, LL difference 1.3e-6 / 4.8e-6."""
+    iterations at the default lrate (0.1 since issue #354): min matched |corr|
+    0.99999995 both full rank and at pcakeep=20, identity matching, LL
+    difference 2.2e-6 / 1.4e-6."""
     from pamica.tests.test_pca_reduction_cross_backend import _matched_abs_corr
 
     kwargs = {} if pcakeep is None else {"pcakeep": pcakeep}

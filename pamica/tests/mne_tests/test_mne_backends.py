@@ -16,6 +16,7 @@ Real sample EEG only: the bundled EEGLAB ``eeglab_data.set`` (32 channels,
 the construction checks run everywhere.
 """
 
+import inspect
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -151,6 +152,17 @@ def test_mlx_rejects_a_dtype(raw):
     assert ica.amica_ is None
 
 
+@pytest.mark.parametrize("fixture", ["torch_keep", "mlx_keep"])
+def test_fit_without_lrate_uses_the_backend_default(fixture, request):
+    """``AMICAICA.fit`` forwards its keywords to ``AMICA.fit`` and sets no
+    ``lrate`` of its own, so a fit that passes none runs at the backend's
+    default, as ``AMICA`` does (issue #354)."""
+    fitted = request.getfixturevalue(fixture)
+    backend = fitted.amica_.model_
+    default = inspect.signature(type(backend)).parameters["lrate"].default
+    assert backend.lrate0 == default
+
+
 # --- the MLX fit and its export ---------------------------------------------------
 def test_mlx_fit_builds_the_mlx_backend(mlx_keep):
     AMICAMLXNG = _require_mlx()
@@ -237,8 +249,11 @@ def test_mlx_and_torch_export_the_same_basis(mlx_keep, torch_keep):
 # least 1e6 on unit-variance sphered data, the densities collapse (the next
 # log-likelihood is about -4e8) and the real fit path diverges. Measured over
 # seeds 0/1/2/42, 4096 samples and the full recording, with and without
-# pcakeep=20, max_iter=10: torch stops on nan_ll at iteration 3 and MLX on
-# nan_params at iteration 2, 16 of 16 runs each.
+# pcakeep=20, max_iter=10, at lrate 0.05 and at the default 0.1 (issue #354):
+# both backends end degenerate in 16 of 16 runs, on nan_params with the
+# backend's 0-based ``iteration`` at 2. The test asserts only that the stop
+# is one of the backend's degenerate reasons, so it does not depend on which
+# one or when.
 INVSIGMIN, INVSIGMAX = 1e6, 1e7
 
 

@@ -31,7 +31,8 @@ clean = ica.apply(raw.copy(), exclude=[0, 3])
 
 `fit` accepts a `Raw` or `Epochs` (epochs are concatenated along time, as MNE's
 own ICA does), any MNE `picks` selector, and forwards remaining keywords
-(`max_iter`, `lrate`, `do_newton`, ...) to [`AMICA.fit`](amica.md). It rejects
+(`max_iter`, `lrate`, `do_newton`, ...) to [`AMICA.fit`](amica.md),
+so a setting left out takes the backend's default, as with `AMICA` (for example `lrate=0.1`). It rejects
 non-finite input, supports principal component analysis (PCA) reduction
 (`pcakeep`/`pcadb`) and rank-deficient data
 (see [Rank-reduced fits and the PCA residual](#rank-reduced-fits-and-the-pca-residual)),

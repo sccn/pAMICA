@@ -31,6 +31,22 @@ any Fortran `input.param` field (`max_iter`, `lrate`, `pdftype`, `do_newton`,
 ...) can be passed as a keyword. A collapsed fit (non-finite weights) is raised
 as a clear degenerate-fit error rather than an opaque SVD failure.
 
+The `input.param` it writes carries pamica's shared defaults (issue #354),
+the values the PyTorch, MLX and NumPy backends default to, under the binary's keywords:
+`lrate` 0.1, Newton off, `max_iter` 100, `do_opt_block` off, `pdftype` 0, and so on
+([Default settings](../guides/amica-differences.md#default-settings-issue-354) has the full table).
+The binary's `block_size` counts one thread's share of a block, and it processes no block at all,
+writing an all-NaN fit, when `max_threads * block_size` exceeds the samples (issue #292).
+Unless you pass `block_size`, the engine writes pamica's 8192-sample block, capped at the data's length, divided by `max_threads` (10 unless given),
+so a default run keeps pamica's block and never meets that case; a `block_size` you pass is written as is.
+pamica settings the binary has no keyword for, such as `keep_best` and `mineig_rel`, are not written,
+so the binary returns its last iterate and applies the absolute `mineig` floor.
+Keys only the binary reads (`max_threads`, `byte_size`, `writestep`, the `load_*` and `update_*` switches) keep the bundled `input.param`'s values.
+Before issue #354 the engine wrote the bundled `pamica/sample_data/input.param`'s settings instead
+(`lrate` 0.05, Newton on from iteration 50, `max_iter` 2000, `block_size` 512).
+To run as that file or an EEGLAB-written one configures the binary, pass the file's settings as keywords
+([Reproducing an EEGLAB run](../guides/amica-differences.md#reproducing-an-eeglab-run) shows how).
+
 ## Binary resolution and caching
 
 On the first run for a given host, the engine downloads the matching release

@@ -37,7 +37,10 @@ def test_amica_initialization():
     # Test default initialization
     model = AMICA()
     assert model.num_models == 1
-    assert model.max_iter == 2000
+    # The other backends' defaults since issue #354 (params.json had 2000 and
+    # Newton on); test_default_settings.py checks every shared setting.
+    assert model.max_iter == 100
+    assert model.do_newton is False
 
     # Test custom parameters
     model = AMICA(num_models=2, max_iter=500, do_newton=True)

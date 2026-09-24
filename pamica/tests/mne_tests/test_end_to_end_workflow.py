@@ -245,7 +245,8 @@ def test_input_param_drives_the_fit(raw, backend):
 def test_torch_and_mlx_find_the_same_components(raw, fitted):
     """Same data, seed and settings on both backends: the same number of
     components and the same sources (Hungarian-matched |corr|, the bar of the
-    other torch-vs-MLX suites; measured min 0.999999999)."""
+    other torch-vs-MLX suites; measured min 0.999999997 at the default lrate,
+    0.1 since issue #354)."""
     t, m = fitted("torch"), fitted("mlx")
     assert t.n_components_ == m.n_components_ == N_KEEP
     matched, _ = _matched_abs_corr(

@@ -18,6 +18,11 @@ model = AMICA.load("model.pt")  # restored on the MLX backend
 `device` and a `dtype` fit keyword apply to the PyTorch backend only and raise `ValueError` with `backend="mlx"`;
 `backend="mlx"` without MLX installed raises `ImportError`.
 
+`fit`'s `max_iter`, `lrate`, `do_mean`, `do_sphere` and `do_newton` default to the selected backend's own values (issue #354),
+so `AMICA().fit(X)` runs the same fit as the backend class with its defaults:
+`lrate=0.1`, the compiled amica15 default, where EEGLAB's `runamica15.m` uses 0.05.
+[Default settings](../guides/amica-differences.md#default-settings-issue-354) compares every default with the compiled binary's and EEGLAB's.
+
 `get_sphere()`, `get_mean()` and `get_model_center(model_idx)` return the fitted preprocessing as float64 arrays on either backend,
 so the transform can be composed by hand:
 `transform(X)` is `W @ (sphere @ (X - mean[:, None]) - c[:, None])` with `W = get_unmixing_matrix()`.

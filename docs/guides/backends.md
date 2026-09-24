@@ -117,12 +117,12 @@ so its export omits the `LLt` file (with a warning).
 With the PyTorch backend, `AMICA(device=...)` accepts `"cuda"`, `"cpu"`, `"mps"`, or `None` (auto):
 
 - **`None` (auto)**: picks MPS, then CUDA, then CPU, whichever is available first.
-  For a float64 fit (the default) the wrapper redirects an MPS pick to CPU, because MPS cannot represent float64,
+  For a float64 fit (the default) the `AMICATorchNG` constructor moves an MPS pick to the CPU and logs a warning, because MPS cannot represent float64,
   so on a Mac a default fit runs on the CPU and a `dtype=torch.float32` fit on MPS.
-  The raw `AMICATorchNG` does not redirect: with `device=None` and float64 on a Mac its constructor raises `ValueError`,
-  so pass `device="cpu"` there.
+  The wrappers pass `device` through to it, so `AMICA`, `AMICAICA`, `AMICA.load` and the raw `AMICATorchNG` all choose the same way (issue #354).
 - **`"cuda"`**: the bit-safe path for float64 Fortran parity on NVIDIA GPUs.
-- **`"mps"`**: requires `dtype=torch.float32`. Note that PyTorch-MPS is not a
+- **`"mps"`**: requires `dtype=torch.float32`, and raises `ValueError` at the float64 default.
+  Note that PyTorch-MPS is not a
   performance win for AMICA (see below); prefer the MLX backend on Apple hardware.
 
 ## Precision: float64 vs float32

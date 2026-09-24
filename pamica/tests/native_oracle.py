@@ -42,11 +42,40 @@ from typing import Optional
 import numpy as np
 
 from pamica.native import resolver
-from pamica.native.engine import _DEFAULT_PARAMS, _render_param
+from pamica.native.engine import _render_param
 
 # The release whose native binary the seeded oracles run (resolver cache, else a
 # verified download); PAMICA_NATIVE_BINARY overrides it with a local build.
 REFERENCE_VERSION = "v0.3.3"
+
+_BUNDLED_PARAM_FILE = (
+    Path(__file__).resolve().parents[1] / "sample_data" / "input.param"
+)
+# The keys each run sets for itself.
+_PER_RUN_KEYS = frozenset({"files", "outdir", "data_dim", "field_dim"})
+
+
+def _bundled_reference_params() -> dict[str, object]:
+    """The bundled ``sample_data/input.param`` settings, verbatim, without the
+    keys each run sets.
+
+    Every oracle run starts from this configuration, the one the oracles were
+    written and measured against (``runamica15.m``'s run of the bundled
+    sample): ``lrate`` 0.05, Newton on from iteration 50, ``block_size`` 512,
+    and so on, which each caller then overrides where its protocol needs to.
+    Until issue #354 ``AMICANative``'s own defaults were these values; they are
+    now pamica's shared defaults, so the oracles pin the file instead. Values
+    stay the file's strings, which ``_render_param`` writes back unchanged.
+    """
+    params: dict[str, object] = {}
+    for line in _BUNDLED_PARAM_FILE.read_text().splitlines():
+        key, _, value = line.strip().partition(" ")
+        if key and not key.startswith("#") and key not in _PER_RUN_KEYS:
+            params[key] = value.strip()
+    return params
+
+
+REFERENCE_RUN_PARAMS: dict[str, object] = _bundled_reference_params()
 
 # Every output file :func:`run_seeded_reference` reads back.
 _OUTPUT_FILES = ("A", "mu", "sbeta", "rho", "alpha", "gm", "c", "comp_list", "LL", "S")
@@ -169,7 +198,7 @@ def run_seeded_reference(
 
     ``data_file`` is the raw float32 column-major recording
     (``nx x n_samples``) the pamica side fitted; it is linked into ``workdir``.
-    ``params`` override the engine defaults by Fortran name (``do_newton``,
+    ``params`` override :data:`REFERENCE_RUN_PARAMS` by Fortran name (``do_newton``,
     ``doscaling``, ``block_size``, ...).
 
     A reused ``workdir`` is safe: its ``out`` and ``init`` directories are
@@ -221,7 +250,7 @@ def run_seeded_reference(
         # `files` must come first: amica15.f90 stops if other keys precede it.
         "files": "./data.fdt",
         "outdir": "./out/",
-        **_DEFAULT_PARAMS,
+        **REFERENCE_RUN_PARAMS,
         "indir": "./init",
         "data_dim": nx,
         "field_dim": n_samples,
@@ -280,7 +309,7 @@ def run_drawn_reference(
     iteration (:955) and ``write_output`` writes the initialization itself, so
     the returned ``A`` is the drawn initial mixing matrix (issue #341).
     Full rank only (``nw`` channels, ``pcakeep = nw``); ``params`` override
-    the engine defaults by Fortran name. Raises like
+    :data:`REFERENCE_RUN_PARAMS` by Fortran name. Raises like
     :func:`run_seeded_reference`.
     """
     num_comps = nw * num_models
@@ -294,7 +323,7 @@ def run_drawn_reference(
         # `files` must come first: amica15.f90 stops if other keys precede it.
         "files": "./data.fdt",
         "outdir": "./out/",
-        **_DEFAULT_PARAMS,
+        **REFERENCE_RUN_PARAMS,
         "data_dim": nw,
         "field_dim": n_samples,
         "pcakeep": nw,

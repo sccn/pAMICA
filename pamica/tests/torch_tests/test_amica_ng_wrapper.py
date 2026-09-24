@@ -3,7 +3,9 @@
 These cover the wiring the wrapper adds on top of ``AMICATorchNG``: the
 save/load round-trip (issue #36) and the device-selection fallback that keeps
 the float64 parity default from crashing on Apple Silicon (MPS cannot
-represent float64). Real sample EEG data only (no synthetic/mock).
+represent float64). Since issue #354 that fallback lives in the backend's
+constructor, so its tests here cover the raw ``AMICATorchNG`` as well as the
+wrapper that relies on it. Real sample EEG data only (no synthetic/mock).
 """
 
 import logging
@@ -104,20 +106,95 @@ def test_ng_load_rejects_unknown_version(fitted_ng, tmp_path):
         AMICA.load(path)
 
 
+_HAS_MPS = torch.backends.mps.is_available()
+_BACKEND_LOGGER = "pamica.torch_impl.core"
+
+
+def _fallback_warnings(caplog) -> list:
+    return [
+        r
+        for r in caplog.records
+        if r.name == _BACKEND_LOGGER and "auto-selected MPS" in r.getMessage()
+    ]
+
+
 def test_ng_default_device_avoids_mps_float64(real_data, caplog):
     """The default float64 NG config must not crash when the auto-selected
-    device is MPS; the wrapper falls back to CPU (regression for #29)."""
+    device is MPS; the backend falls back to CPU, and the wrapper relies on it
+    (regression for #29, moved into the backend by issue #354)."""
     model = AMICA(n_models=1, n_mix=3, verbose=False)  # device=None
-    with caplog.at_level(logging.WARNING, logger="pamica.amica"):
+    with caplog.at_level(logging.WARNING, logger=_BACKEND_LOGGER):
         model.fit(real_data[:, :2048], max_iter=2, block_size=1024, seed=42)
 
     # float64 parity runs must never land on MPS.
     assert isinstance(model.model_, AMICATorchNG)
     assert model.model_.device.type in ("cpu", "cuda")
-    if torch.backends.mps.is_available():
+    if _HAS_MPS:
         assert model.model_.device.type == "cpu"
-        # The downgrade must be announced even with verbose=False (not silent).
-        assert any("float64" in r.message for r in caplog.records)
+        # The downgrade must be announced even with verbose=False (not silent),
+        # once per fit.
+        assert len(_fallback_warnings(caplog)) == 1
+
+
+# --- the raw backend's automatic device choice (issue #354) --------------------------
+@pytest.mark.skipif(not _HAS_MPS, reason="the fallback needs an MPS device")
+def test_raw_backend_default_construction_uses_cpu_on_mps(caplog):
+    """``AMICATorchNG(n_channels)`` with default arguments raised ValueError on
+    every Apple Silicon Mac: auto-selection picks MPS, which cannot hold the
+    float64 default. It now resolves to the CPU and says so."""
+    with caplog.at_level(logging.WARNING, logger=_BACKEND_LOGGER):
+        model = AMICATorchNG(n_channels=NW)
+    assert model.device.type == "cpu"
+    assert model.dtype == torch.float64
+    (record,) = _fallback_warnings(caplog)
+    assert record.levelno == logging.WARNING
+    assert "dtype=torch.float32" in record.getMessage()
+
+
+@pytest.mark.skipif(not _HAS_MPS, reason="the fallback needs an MPS device")
+def test_raw_backend_default_fit_runs_on_cpu_on_mps(real_data):
+    """The fallback holds through a fit, which places every tensor on the
+    resolved device."""
+    model = AMICATorchNG(n_channels=NW, block_size=1024, seed=42)
+    model.fit(real_data[:, :2048], max_iter=2, verbose=False)
+    assert model.stop_reason == "max_iter"
+    assert model.W is not None
+    assert model.W.device.type == "cpu" and model.W.dtype == torch.float64
+
+
+@pytest.mark.skipif(not _HAS_MPS, reason="needs an MPS device to auto-select")
+def test_raw_backend_float32_auto_selection_keeps_mps(caplog):
+    with caplog.at_level(logging.WARNING, logger=_BACKEND_LOGGER):
+        model = AMICATorchNG(n_channels=NW, dtype=torch.float32)
+    assert model.device.type == "mps"
+    assert _fallback_warnings(caplog) == []
+
+
+def test_raw_backend_explicit_mps_float64_raises():
+    """A caller who names MPS gets the error instead of a move to the CPU.
+    Raised at construction, before any tensor is placed, so no MPS hardware
+    is needed."""
+    with pytest.raises(ValueError, match="MPS does not support float64"):
+        AMICATorchNG(n_channels=NW, device="mps")
+
+
+def test_load_without_a_device_uses_the_backend_choice(fitted_ng, tmp_path, caplog):
+    """``AMICA.load(path)`` with ``device=None`` rebuilds the model through the
+    backend constructor, so a float64 model lands where a fresh one would: the
+    CPU on a host whose automatic choice is MPS."""
+    path = str(tmp_path / "model.pt")
+    fitted_ng.save(path)
+    with caplog.at_level(logging.WARNING, logger=_BACKEND_LOGGER):
+        loaded = AMICA.load(path)
+    assert isinstance(loaded.model_, AMICATorchNG)
+    assert loaded.model_.dtype == torch.float64
+    assert loaded.model_.device.type in ("cpu", "cuda")
+    if _HAS_MPS:
+        assert loaded.model_.device.type == "cpu"
+        assert len(_fallback_warnings(caplog)) == 1
+    np.testing.assert_array_equal(
+        loaded.get_unmixing_matrix(), fitted_ng.get_unmixing_matrix()
+    )
 
 
 def test_ng_explicit_mps_float64_raises(real_data):

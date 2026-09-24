@@ -28,6 +28,7 @@ that is not listed, that is a bug worth
 | 14 | `scalestep` | parsed (amica15.f90:3686), never used; rescales every iteration (:1843) | rescales every `scalestep` iterations counted from 1; default 1 matches the reference | pamica has always honored the keyword, and keeping it costs nothing; since issue #333 it counts from 1 like the reference's live cadences (`writestep`, `histstep`) instead of firing on the first iteration | `scalestep=1`, the default |
 | 15 | Restart after a non-finite likelihood (NumPy backend only) | within the first `restartiter` iterations, redraws `A` up to `maxrestarts + 1` times (`numrestarts > maxrestarts` ends the run, amica15.f90:1022-1049); `startover` is set at :1046 and never cleared, so after the first restart the binary never calls `update_params` again (:1115-1122) and the redrawn parameters are never fitted | redraws `A` up to `maxrestarts` times within the same window (counted from 1; `restartiter=0` disables it) and resumes fitting after each restart, with the learning rates and likelihood history reset; the restart uses up that iteration of `max_iter` | the reference's recovery path cannot resume, so its count has nothing to recover into; a restart that fits is the evident intent. PyTorch and MLX have no restart-on-NaN path at all: they stop on the non-finite likelihood (`stop_reason="nan_ll"`), and their `n_restarts` (row 10) is a different mechanism | none for the stalled loop; `maxrestarts` one higher reproduces the reference's count, and `restartiter=0` stops on the first non-finite likelihood, as the reference does with `restartiter=0` |
 | 16 | Defaults of `input.param` keys | the compiled-in defaults are single-precision literals widened to double (amica15_header.f90:66-74), so a key missing from `input.param` takes the float32 rounding of its default: `comp_thresh` is 0.9900000095, and likewise `mineig`, `minlrate`, `rholrate`, `rholratefact`, `invsigmin`, `min_dll`, `min_grad_norm` and `lrate` (0.1000000015, printed by the binary; without the key its ceiling `lrate0` is never set, and the binary's `lrate` drops to 0 after the first iteration); a value given in `input.param` is read as double | the decimal values (`lrate=0.1`), given or defaulted | they are user inputs, and the reference reads any value it is given as double; pamica's native engine and the seeded oracles write every one of these keys, so they never meet the compiled-in values. The constants the reference hard-codes the same way are its values in every backend since issue #344 ([below](#single-precision-constants-issue-344)) | pass the float32 rounding, for example `lrate=float(numpy.float32(0.1))` |
+| 17 | Default settings | the compiled defaults (amica15_header.f90); EEGLAB's `runamica15.m` writes its own choices into `input.param` | the compiled defaults, except `pdftype=0`, `block_size=8192` and `max_iter=100` (and the settings of rows 1, 3 and 9) | the binary falls back to its compiled values for any key an `input.param` leaves out; the three exceptions are explained in [Default settings](#default-settings-issue-354) | fit from the run's `input.param` with `AMICA.from_params_file`, or pass its values ([Reproducing an EEGLAB run](#reproducing-an-eeglab-run)) |
 
 Rows 1, 2 and 7 arrived with [ADR 0004](https://github.com/sccn/pAMICA/blob/main/.context/decisions/0004-rank-deficient-input-handling.md);
 row 3 with ADR 0003; row 5 with issue #50, extended to the raw backends by issue #306 and to non-finite steps and updates by issue #339; row 8 with issues #60, #240 and #334;
@@ -35,7 +36,8 @@ row 9 with issue #232; row 10 with issue #198; row 11 with issue #322 (ADR 0005)
 row 12 with issue #323; row 13 is recorded, not yet resolved, by issue #328;
 row 14 with issue #333 (ADR 0006);
 row 15 with issue #335, which also made the NumPy restart window count from 1;
-row 16 with issue #344, which adopted the reference's hard-coded single-precision constants.
+row 16 with issue #344, which adopted the reference's hard-coded single-precision constants;
+row 17 with issue #354, which made the wrappers take the backends' defaults.
 
 The A-freeze is the reference's arithmetic, applied as it is (issue #345):
 once `iter >= share_start`, every iteration with `mod(iter, share_iter) <= 5` holds the `A` update,
@@ -59,6 +61,132 @@ The merged state the scan would produce does have an oracle:
 the reference's `load_comp_list` seeds a merged `comp_list`, and the PyTorch
 and NumPy updates from such a state match the native binary to float64 round-off
 ([below](#component-sharing-compares-and-ties-components-issue-334)).
+
+## Default settings (issue #354)
+
+Three sources set AMICA's defaults:
+pamica's own, the compiled amica15 binary's (`pamica/amica15_header.f90`),
+and those of EEGLAB's `runamica15.m`, the MATLAB front end that writes an `input.param` and runs the binary
+(read here from sccn/amica at commit 509c8be).
+pamica's column holds for every pamica entry point since issue #354:
+`AMICATorchNG` and `AMICAMLXNG`;
+the `AMICA` and `AMICAICA` wrappers on either backend, which take their defaults from the backend they build;
+the legacy NumPy backend (`AMICA_NumPy`), which reads them from `pamica/numpy_impl/params.json`
+(before issue #354 that file turned Newton on and set `max_iter` to 2000);
+and [`AMICANative`](../api/native-backend.md), which runs the binary itself and writes them into the `input.param` it gives it
+(before issue #354 it wrote the bundled `pamica/sample_data/input.param`'s values).
+`AMICA_NumPy` has no `keep_best` ([Backend differences](#backend-differences)).
+`AMICANative` writes every setting the binary has a keyword for;
+the binary has none for `keep_best` or `mineig_rel`,
+so a native run returns the last iterate and applies the absolute `mineig` floor, as the reference does (rows 1 and 3).
+The binary's `block_size` counts one thread's share of a block (amica15.f90:1215-1227),
+and a block of `max_threads * block_size` samples longer than the data leaves it no block to process and an all-NaN fit (issue #292),
+so `AMICANative` writes pamica's 8192-sample block, capped at the data's length, divided by `max_threads`:
+819 with its 10 threads on a recording of 8192 samples or more.
+Bold marks a pamica default that differs from the compiled one.
+The line numbers are those of `amica15_header.f90` and `runamica15.m`.
+
+| Setting (`input.param` key) | pamica | Compiled amica15 | EEGLAB `runamica15.m` |
+|---|---|---|---|
+| `lrate` | 0.1 | 0.1 (:68) | 0.05 (:163) |
+| `minlrate` | 1e-12 | 1e-12 (:68) | 1e-8 (:164) |
+| `lratefact` | 0.5 | 0.5 (:68) | 0.5 (:165) |
+| `maxdecs` (`max_decs`) | 5 | 5 (:111) | 3 (:197) |
+| `do_newton` | off | off (:19) | on (:177) |
+| `newt_start` | 20 | 20 (:87) | 50 (:178) |
+| `newtrate` | 0.5 | 0.5 (:73) | 1.0 (:179) |
+| `newt_ramp` | 10 | 10 (:87) | 10 (:180) |
+| `pdftype` | **0** | 1 (:93) | 0 (:150) |
+| `block_size` | **8192** | 128 (:81) | 128 (:142) |
+| `do_opt_block` | **off** (row 9) | on (:20), over 128-1024 in steps of 128 (:76-77) | off (:143) |
+| `max_iter` | **100** | none: declared without a value (:93), so `input.param` must set it | 2000 (:151) |
+| `n_mix` (`num_mix_comps`) | 3 | 3 (:76) | 3 (:149) |
+| `rholrate` | 0.05 | 0.05 (:68) | 0.05 (:167) |
+| `rholratefact` | 0.1 | 0.1 (:70) | 0.5 (:171) |
+| `invsigmin` | 1e-4 | 1e-4 (:72) | 1e-8 (:206), which it writes with `%f` as `0.000000` (:845) |
+| `invsigmax` | 1000 | 1000 (:69) | 100 (:205) |
+| `mineig` | 1e-15, with the relative floor `mineig_rel=1e-12` taking precedence (row 1) | 1e-15 (:66) | 1e-12 (:153) |
+| `do_mean` | on | on (:14) | on (:220) |
+| `do_sphere` | on | on (:14) | on (:221) |
+| `doscaling` | on | on (:14) | on (:224) |
+| `share_comps` | off | off (:18) | off (:158) |
+| `share_start` | 100 | 100 (:76) | 100 (:160) |
+| `share_iter` | 100 | 100 (:76) | 100 (:161, as `share_int`) |
+| `comp_thresh` | 0.99 | 0.99 (:74) | 0.99 (:159) |
+| `do_reject` | off | off (:20) | off (:182) |
+| `use_min_dll` | on | on (:24) | on (:188) |
+| `min_dll` | 1e-9 | 1e-9 (:74) | 1e-9 (:189) |
+| `use_grad_norm` | on | on (:24) | on (:190) |
+| `min_nd` (`min_grad_norm`) | 1e-7 | 1e-7 (:74) | 1e-7 (:191) |
+| `keep_best` | on (row 3) | no such setting | no such setting |
+
+The compiled values are single-precision literals widened to double (row 16), so the binary's `lrate` default is 0.1000000015;
+the table gives the decimals.
+`runamica15.m` writes `invsigmin` with six decimal places, so the binary it runs sees `invsigmin 0.000000`,
+as the bundled `pamica/sample_data/input.param` shows.
+
+pamica follows the compiled binary because its values are the reference's own defaults:
+the binary falls back to them for any key an `input.param` leaves out, whichever front end wrote the file.
+`runamica15.m` is EEGLAB's front end, and it writes its own choices for the keys it knows.
+Besides `do_opt_block` (row 9), three defaults depart from the compiled ones:
+
+- **`pdftype=0`**, the generalized Gaussian mixture, as in `runamica15.m`.
+  The compiled `pdftype=1` is the extended-Infomax switcher between two single-component densities,
+  which reads only the first mixture component (pamica requires `n_mix=1` for it),
+  while all three sources default to three mixture components.
+- **`block_size=8192`**, for throughput:
+  every backend is dispatch-bound at small blocks ([Block-size sensitivity](validation.md#block-size-sensitivity)).
+  The trajectory moves by about 1e-6 with `block_size`,
+  so a run compared bit for bit with the binary sets the same `block_size` on both sides.
+- **`max_iter=100`**, where the compiled binary has no default and `runamica15.m` uses 2000.
+  On a recording the size of the bundled sample, a default fit therefore ends on `max_iter` before the likelihood stop can fire
+  ([Which convergence criterion actually stops a fit](validation.md#which-convergence-criterion-actually-stops-a-fit)).
+
+Rows 1 and 3 add two settings of pamica's own, the relative rank floor `mineig_rel` and the best-iterate restore `keep_best`.
+
+### Reproducing an EEGLAB run
+
+`runamica15.m` writes the settings of each run into `input.param` in its output directory,
+so the file records what the binary was given, `invsigmin 0.000000` included;
+the bundled `pamica/sample_data/input.param` is one such file.
+Fit from it with [`AMICA.from_params_file`](../api/amica.md):
+
+```python
+from pamica import AMICA
+
+# X: the data the EEGLAB run fitted, shape (n_channels, n_samples)
+model = AMICA.from_params_file("/path/to/amicaouttmp/input.param")
+model.fit(X)
+```
+
+`fit` applies every setting the file carries, and a keyword passed to `fit` still takes precedence.
+Without the file, pass `runamica15.m`'s values from the table as `fit` keywords, for example
+`fit(X, lrate=0.05, minlrate=1e-8, maxdecs=3, do_newton=True, newt_start=50, newtrate=1.0, rholratefact=0.5, invsigmin=0.0, invsigmax=100.0, mineig=1e-12, block_size=128, max_iter=2000)`.
+Either way, the pamica-only settings keep their defaults unless you set them:
+pass `mineig_rel=None` for the file's absolute `mineig` floor (row 1)
+and `keep_best=False` to return the last iterate, as the binary does (row 3).
+pamica draws its own random initialization (the reference's generator is gfortran's),
+so a run with the same settings agrees with the EEGLAB run to the tolerances in [Single-model parity](validation.md#single-model-parity)
+and does not reproduce it bit for bit;
+with Newton on, the weakest components can settle in a different optimum
+([Newton-enabled runs](validation.md#newton-enabled-runs-and-the-initialization-basin)).
+
+To run the reference binary itself as such a file configures it,
+pass the file's settings to [`AMICANative`](../api/native-backend.md), which forwards any `input.param` keyword;
+its own defaults are pamica's column, so a keyword the file leaves out takes pamica's value, where the binary run by `runamica15.m` would take its compiled one:
+
+```python
+from pathlib import Path
+
+from pamica import AMICANative
+
+settings = {}
+for line in Path("/path/to/amicaouttmp/input.param").read_text().splitlines():
+    key, _, value = line.partition(" ")
+    if key and key not in ("files", "outdir", "data_dim", "field_dim"):
+        settings[key] = value.strip()  # written back verbatim
+model = AMICANative(**settings).fit(X)  # X: the data the EEGLAB run fitted
+```
 
 ## 1. Relative rank threshold
 
