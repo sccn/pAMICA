@@ -74,8 +74,9 @@ def _shared_default_params() -> dict[str, object]:
     pamica setting ``AMICATorchNG`` has takes ``AMICATorchNG``'s default
     (``max_iter`` from its ``fit``), the same value the other backends hold
     (``pamica/tests/test_default_settings.py``). A setting whose default is
-    ``None`` (``pcakeep``, ``pcadb``, ``seed``) is not written, and pamica
-    settings with no binary keyword (``keep_best``, ``mineig_rel``,
+    ``None`` (``pcakeep``, ``pcadb``, ``seed``) is left out of this table;
+    ``_input_params`` then fills ``pcakeep`` with the data's channel count.
+    pamica settings with no binary keyword (``keep_best``, ``mineig_rel``,
     ``n_restarts``, ...) have nothing to write. Then the native-only knobs.
     Imported lazily: the torch backend's signature is the shared source.
     """
