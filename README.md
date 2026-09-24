@@ -14,7 +14,7 @@ single-model output is written in exactly the reference's on-disk format and
 loads directly in EEGLAB.
 
 Single-model results match the Fortran reference (Hungarian-matched component correlation ~ 0.998
-on well-determined data, Newton disabled); see the
+on well-determined data, Newton disabled, measured before the fitting changes of epic #324; re-measurement in issue #357); see the
 [documentation](https://eeglab.org/pAMICA/) for validation details and the
 backend-selection guide.
 

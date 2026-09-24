@@ -20,7 +20,7 @@ Throughout, IC abbreviates independent component and LL log-likelihood.
 |---|---|---|
 | Source-density score and log-density (non-GG families) | vs the literal `amica15.f90` expressions | bit-exact ($<10^{-12}$) |
 | Per-block sufficient statistics and one M-step | vs Fortran | bit-exact ($\sim\!10^{-15}$) |
-| Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | LL within ~0.0005 of $-3.6993$; correlation 0.998 |
+| Single-model solution (`do_newton=0`, $k\approx153$) | log-likelihood, component correlation vs Fortran | LL gap ~0.0003 from $-3.6993$; correlation 0.998 (measured before epic #324; re-measurement tracked in issue #357) |
 | Single-model solution (`do_newton=0`, bundled, $k\approx30$) | Amari distance vs Fortran | 0.011 over the protocol's 5 run pairs, one of whose reference runs ended in another basin; 0.004 over 50 pairs (Fortran vs Fortran 0.005) |
 | Every backend against the reference (harness defaults, bundled) | `validate_implementations.py --backend all`: PyTorch, NumPy and MLX each vs Fortran | from independent starts: LL within 2.8e-4 (the reference's own seed-to-seed standard deviation is 2.6e-4), correlation 0.9991, Amari distance 0.004, for all three; from a shared start: LL within 1.6e-6, correlation 0.99999993 ([per-backend rows](#parity-rows-per-backend)) |
 | Multi-model solution | distributional similarity over 20-run ensembles | between-implementation correlation within 0.006 of Fortran's own run-to-run agreement (one-sided permutation $p = 0.88$; Amari distance $p = 0.051$); final log-likelihood $-3.3541$ against $-3.3543$ (KS $p = 0.83$) |
@@ -142,6 +142,8 @@ distance:
 - Log-likelihood ~ -3.6993 ($k\approx153$; Fortran ~ -3.6993, gap ~0.0003).
 - Hungarian-matched component correlation ~0.998 ($k\approx153$; Fortran-vs-Fortran self-consistency
   over the same 5 seeds: ~0.999), clearing the >0.95 gate.
+- The two $k\approx153$ figures above were measured before epic #324's changes to the fit;
+  their re-measurement with the epic's code is tracked in issue #357.
 - Amari distance on the bundled sample: 0.011 over the protocol's five run pairs, 0.004 over 50 pairs (next subsection).
 
 ### The bundled sample
