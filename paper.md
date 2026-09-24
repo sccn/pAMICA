@@ -92,7 +92,7 @@ Parity is measured two ways: by Hungarian-matched component correlation,
 and by the Amari distance [@amari1996new], a relabeling- and scale-invariant metric that needs no assignment step.
 Both implementations ran AMICA's default 2000 iterations with Newton disabled (`pamica`'s own default), to isolate the algorithm from initialization.
 With Newton enabled, some of the weakest components settle into different basins of equal or higher likelihood from different starts, in the reference's runs as in `pamica`'s:
-against one reference run, one `pamica` seed of three differed on eight of seventy components and the other two matched at 0.995,
+against one reference run, one `pamica` seed of three differed on eight of seventy components and the other two matched at 0.995 and 0.996,
 and two reference runs from different seeds differed on two.
 From a shared start the two implementations end with the same components (correlation 0.9999998).
 The single-model comparison uses a well-determined external recording ([NEMAR on002718](https://doi.org/10.82901/nemar.on002718), $k\approx153$, where $k$ = frames over squared channel count [@frank2025sufficient]) alongside the bundled 32-channel sample ($k\approx30$).
