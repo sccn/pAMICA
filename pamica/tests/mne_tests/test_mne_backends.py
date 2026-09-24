@@ -249,8 +249,11 @@ def test_mlx_and_torch_export_the_same_basis(mlx_keep, torch_keep):
 # least 1e6 on unit-variance sphered data, the densities collapse (the next
 # log-likelihood is about -4e8) and the real fit path diverges. Measured over
 # seeds 0/1/2/42, 4096 samples and the full recording, with and without
-# pcakeep=20, max_iter=10: torch stops on nan_ll at iteration 3 and MLX on
-# nan_params at iteration 2, 16 of 16 runs each.
+# pcakeep=20, max_iter=10, at lrate 0.05 and at the default 0.1 (issue #354):
+# both backends end degenerate in 16 of 16 runs, on nan_params with the
+# backend's 0-based ``iteration`` at 2. The test asserts only that the stop
+# is one of the backend's degenerate reasons, so it does not depend on which
+# one or when.
 INVSIGMIN, INVSIGMAX = 1e6, 1e7
 
 
