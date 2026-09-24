@@ -120,7 +120,7 @@ give $p=0.88$ by correlation and $p=0.051$ by Amari distance, by which `pamica`'
 : Parity of `pamica` with the Fortran reference. Multi-model rows are over 20-run ensembles (190 within-Fortran and 190 within-`pamica`, plus 400 cross-implementation pairs); sd is the standard deviation, given where computed;
 $p$ values are one-sided run-level permutation tests.
 
-![Multi-model ensemble partition-correlation (A) and log-likelihood (B) distributions, 20 `pamica` and 20 Fortran fits of the sample EEG; dashed lines mark each mean.
+![Multi-model ensemble partition-correlation (A) and log-likelihood (B) distributions, 20 `pamica` and 20 Fortran fits of the sample EEG; vertical lines mark each mean.
 A's three distributions overlap: the single-run correlation of ~0.63 matches the reference's agreement with itself.
 B's two means lie 0.0002 apart on a ~0.02 axis.\label{fig:ensemble}](docs/assets/figures/multimodel-ensemble.png){ width=100% }
 
