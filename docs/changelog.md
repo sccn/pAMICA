@@ -6,10 +6,13 @@ at release time that heading becomes the version and its date.
 Each release's section is also its note on the
 [GitHub releases page](https://github.com/sccn/pAMICA/releases).
 
-## Unreleased
+## 0.4.0 - 2026-09-24
 
 MLX becomes a first-class backend, reachable through every wrapper feature (epic #324, completing the raw backend of epic #278),
 and every backend's fitting follows the Fortran reference more closely.
+Against the pinned v0.3.3 reference binary, single-model fits of a 70-channel EEG recording (5 seeds, 2000 iterations)
+now agree with it to 6e-6 in log-likelihood, with a mean matched component correlation of 0.9996
+([Validation & Parity](guides/validation.md)).
 
 !!! warning "Default fits differ from 0.3.3"
     A default fit on any backend (PyTorch, NumPy or MLX) follows a different trajectory than in 0.3.3,
