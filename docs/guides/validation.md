@@ -249,7 +249,9 @@ The comparison is between the distributions of solutions the two implementations
 An ensemble of `N = 20` fits per implementation on the bundled sample EEG (`n_models = 2`, 3 mixture components, 100 iterations, matched schedule)
 gives these distributions of pairwise agreement
 (`benchmarks/reproduce_table1.py --tier bundled`, re-measured on 2026-09-23 with the code of epic #324 against the pinned v0.3.3 native binary,
-whose runs here draw their own clock-based seeds; the 40 fits are saved in `.context/issue-351/raw/table1_bundled/bundled_multimodel_ensemble.npz`):
+whose runs here draw their own clock-based seeds; the 40 fits are saved in `.context/issue-351/raw/table1_bundled/bundled_multimodel_ensemble.npz`).
+The schedule matches except for one setting: the reference runs with `invsigmin` 0.0, the value EEGLAB's `runamica15.m` writes, and pamica with 1e-8.
+The distributions:
 
 | Distribution (pairwise Hungarian-matched \|corr\|) | Mean | SD | Range |
 |---|---:|---:|---|
