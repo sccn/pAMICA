@@ -159,8 +159,11 @@ Integration into this Center's Python preprocessing and into NEMAR, the public a
 
 Generative AI was used in this project, disclosed here under the journal's policy.
 
-**Tools.** Anthropic's Claude models (Sonnet and Opus families), through the Claude Code command-line assistant.
-The instructions given to them are public in the repository (`AGENTS.md`, `CLAUDE.md`, `.rules/`).
+**Tools.** Anthropic's Claude models (Sonnet and Opus families), through the Claude Code command-line assistant,
+with the Research Skills plugin collection [@shirazi2026researchskills] as the working harness, which Claude Code does not provide on its own.
+Its project plugin supplies the repository instructions (`AGENTS.md`, `CLAUDE.md`, `.rules/`), the phased, issue-tracked development workflow and the pull-request review,
+and its manuscript plugin the manuscript review.
+The instructions given to the models are public in the repository.
 
 **Scope.** The source code (translating the reference Fortran into Python, refactoring, scaffolding tests), the documentation, and the drafting and copy-editing of this manuscript.
 
