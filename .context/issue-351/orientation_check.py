@@ -25,6 +25,8 @@ BINARY = Path.home() / ".cache/pamica/bin/v0.3.3/amica15-macos-arm64"
 
 
 def main() -> None:
+    from _reference_settings import REFERENCE_SETTINGS
+
     root = Path(sys.argv[1]).resolve()
     sys.path.insert(0, str(root))
     import numpy as np
@@ -67,7 +69,8 @@ def main() -> None:
         with tempfile.TemporaryDirectory() as td:
             ref = oracle.run_seeded_reference(
                 st, fdt, Path(td), n_samples=n, max_iter=1, threads=1, binary=BINARY,
-                block_size=512, do_newton=1, use_min_dll=0, use_grad_norm=0,
+                **{**REFERENCE_SETTINGS, "block_size": 512, "do_newton": 1,
+                   "use_min_dll": 0, "use_grad_norm": 0},
             )  # fmt: skip
         out[name] = float(ref.LL[0])
     asym = float(np.abs(state.A - state.A.T).max())

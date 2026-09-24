@@ -56,10 +56,26 @@ PAMICA_KW = dict(
     rholrate=0.05, rholratefact=0.5, maxdecs=3, block_size=512,
     use_min_dll=False, use_grad_norm=False,
 )  # fmt: skip
-FORTRAN_KW = dict(
-    num_models=1, num_mix_comps=NMIX, max_iter=MAX_ITER, do_newton=1,
-    use_min_dll=0, use_grad_norm=0, block_size=512,
-)  # fmt: skip
+# The reference's settings (every one explicit, from _reference_settings):
+# Newton on, early stops off, as the #145 load-path run had them.
+FORTRAN_OVERRIDES = dict(do_newton=1, use_min_dll=0, use_grad_norm=0, block_size=512)
+
+
+def fortran_kwargs(max_iter: int) -> dict:
+    """``AMICANative`` settings of the independent-start reference fits."""
+    from _reference_settings import REFERENCE_SETTINGS
+
+    return {
+        **REFERENCE_SETTINGS, "num_models": 1, "num_mix_comps": NMIX,
+        "max_iter": max_iter, **FORTRAN_OVERRIDES,
+    }  # fmt: skip
+
+
+def fixinit_kwargs() -> dict:
+    """``run_seeded_reference`` settings of the same-start reference fit."""
+    from _reference_settings import REFERENCE_SETTINGS
+
+    return {**REFERENCE_SETTINGS, **FORTRAN_OVERRIDES}
 
 
 def load_data(path: Path) -> np.ndarray:
@@ -151,7 +167,7 @@ def run_fortran(
     if not fixinit:
         eng = AMICANative(
             binary=binary, threads=threads, max_threads=threads, timeout=6 * 3600,
-            seed=seed, **{**FORTRAN_KW, "max_iter": max_iter},
+            seed=seed, **fortran_kwargs(max_iter),
         )  # fmt: skip
         eng.fit(data)
         out = eng.output_
@@ -168,11 +184,7 @@ def run_fortran(
             np.ascontiguousarray(data.T).astype("<f4").tofile(fdt)
         st = fixinit_state(nw)
         state = SeedState(mean=data.mean(axis=1), **st)
-        kw = {
-            k: v
-            for k, v in FORTRAN_KW.items()
-            if k not in ("num_models", "num_mix_comps", "max_iter")
-        }
+        kw = fixinit_kwargs()
         ref = run_seeded_reference(
             state, fdt, work / "fixinit_run", n_samples=n_samples, max_iter=max_iter,
             threads=threads, timeout=6 * 3600, binary=binary, **kw,

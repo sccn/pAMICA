@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from _reference_settings import REFERENCE_SETTINGS
 from pamica import AMICA_NumPy
 from pamica.numpy_impl.utils import identify_shared_components
 from pamica.tests.native_oracle import run_seeded_reference, seed_from_torch
@@ -143,7 +144,10 @@ def part_c(work: Path) -> dict:
     seed = dataclasses.replace(seed_from_torch(init), comp_list=default)
     ref8 = run_seeded_reference(
         seed, DATA_FILE, work / "c", n_samples=FIELD, max_iter=pre, num_models=2,
-        **{**_REF_OPT, "share_start": pre, "share_iter": 100, "share_comps": 0},
+        **{
+            **REFERENCE_SETTINGS, **_REF_OPT,
+            "share_start": pre, "share_iter": 100, "share_comps": 0,
+        },
     )  # fmt: skip
     t8 = torch_model(share_comps=False)
     t8.fit(X, max_iter=pre, verbose=False)

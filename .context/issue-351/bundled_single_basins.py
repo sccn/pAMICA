@@ -37,6 +37,15 @@ def _table1():
     return mod
 
 
+def fortran_kwargs(t1, seed: int, threads: int) -> dict:
+    """``AMICANative`` keywords of the reference runs: the tier's single-model
+    settings, every one explicit, plus the seed."""
+    return dict(
+        threads=threads, max_threads=threads, timeout=3600, seed=seed,
+        **t1.single_model_reference_kwargs(2000),
+    )  # fmt: skip
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("out", type=Path)
@@ -51,11 +60,7 @@ def main() -> None:
     binary = t1.resolve_binary(None, "v0.3.3")
     runs: dict[str, dict] = {}
     for s in range(1, a.n_fortran + 1):
-        eng = AMICANative(
-            binary=binary, threads=a.threads, max_threads=a.threads, timeout=3600,
-            n_models=1, n_mix=3, max_iter=2000, do_newton=0, use_min_dll=0,
-            use_grad_norm=0, block_size=512, seed=s,
-        )  # fmt: skip
+        eng = AMICANative(binary=binary, **fortran_kwargs(t1, s, a.threads))
         eng.fit(data)
         assert eng.output_ is not None
         runs[f"fortran_seed{s}"] = {

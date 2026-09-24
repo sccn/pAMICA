@@ -51,14 +51,24 @@ def load_data() -> np.ndarray:
     return load_eeglab_data(str(FDT), data_dim=NW, field_dim=FIELD).astype(np.float64)
 
 
+def fortran_kwargs(max_iter: int, seed: int) -> dict:
+    """``AMICANative`` keywords of the reference runs, every protocol setting
+    explicit (``_reference_settings``), seeded and single-threaded."""
+    from _reference_settings import multimodel_reference_kwargs
+
+    return dict(
+        threads=1, max_threads=1, timeout=3600, seed=seed,
+        **multimodel_reference_kwargs(max_iter),
+    )  # fmt: skip
+
+
 def run_fortran(data: np.ndarray, seed: int, max_iter: int) -> np.ndarray:
     from pamica import AMICANative
     from pamica.native import resolver
 
     eng = AMICANative(
-        binary=resolver.resolve("v0.3.3"), threads=1, max_threads=1,
-        timeout=3600, n_models=2, n_mix=3, max_iter=max_iter, seed=seed,
-    )  # fmt: skip
+        **fortran_kwargs(max_iter, seed), binary=resolver.resolve("v0.3.3")
+    )
     eng.fit(data)
     assert eng.output_ is not None
     ll = np.asarray(eng.output_.LL, dtype=np.float64)
