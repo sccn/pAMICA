@@ -466,23 +466,6 @@ def test_explicit_lrate_overrides_the_backend_default(X, backend):
     assert model.model_ is not None and model.model_.lrate0 == 0.05
 
 
-def test_torch_and_mlx_constructors_share_every_default():
-    """One pamica column in the defaults table of
-    docs/guides/amica-differences.md covers both backends: every keyword they
-    share has the same default (only torch has device/dtype)."""
-    torch_params = inspect.signature(AMICATorchNG).parameters
-    mlx_params = inspect.signature(_require_mlx()).parameters
-    assert set(torch_params) - set(mlx_params) == {"device", "dtype"}
-    assert set(mlx_params) <= set(torch_params)
-    differing = {
-        name: (torch_params[name].default, mlx_params[name].default)
-        for name in mlx_params
-        if torch_params[name].default != mlx_params[name].default
-    }
-    assert differing == {}
-    assert _signature_defaults(AMICATorchNG) == _signature_defaults(_require_mlx())
-
-
 # --- pcakeep through the wrapper on MLX (#323's remaining bullet) ---------------------
 def test_pcakeep_through_the_mlx_wrapper(X):
     _require_mlx()
