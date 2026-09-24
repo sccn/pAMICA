@@ -267,7 +267,7 @@ The three agreement distributions overlap, and so do the two likelihood distribu
 The three means lie within 0.012 of each other.
 The between-minus-within-Fortran difference is +0.006, inside the $\pm 0.05$ margin the original study set
 (run-level bootstrap 90% interval -0.002 to 0.014, `.context/issue-351/equivalence_check.py`).
-The 190/400 pairwise values are not independent (each of the 40 runs appears in ~39 pairs),
+The pairwise values (190 within-Fortran and 190 within-pamica, plus 400 cross-implementation pairs) are not independent (each of the 40 runs appears in 39 pairs),
 so a Mann-Whitney or TOST applied to the pairwise values is pseudoreplicated and its p-value is invalid.
 The significance test permutes the 40 runs as intact units instead (20000 permutations, statistic = within-Fortran minus between-implementation mean correlation).
 For the one-sided hypothesis that cross-implementation agreement is worse than Fortran's own run-to-run agreement, it gives $p = 0.88$.
