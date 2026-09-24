@@ -217,8 +217,8 @@ def test_native_engine_asymmetric_sphere_reads_the_right_orientation(real_data):
 @requires_binary
 def test_native_engine_param_aliases_and_multimodel(real_data):
     # n_models/n_mix aliases reach the Fortran num_models/num_mix_comps. Full data
-    # + enough iterations so the 2-model fit converges (a too-short multi-model run
-    # collapses -- exercised separately below).
+    # + enough iterations for a finite 2-model fit (a slice too short for its
+    # block ends with NaN weights -- exercised separately below).
     eng = AMICANative(binary=_BINARY, n_models=2, n_mix=3, max_iter=15, threads=2)
     eng.fit(real_data)
     assert eng.output_ is not None
@@ -229,10 +229,13 @@ def test_native_engine_param_aliases_and_multimodel(real_data):
 
 @requires_binary
 def test_native_engine_degenerate_fit_raises_clearly(real_data):
-    # A too-short multi-model fit collapses to non-finite weights; the engine must
-    # report that as a degenerate fit, not let loadmodout's pinv raise an opaque
-    # SVD error (cf. the #50 degenerate-fit contract).
-    eng = AMICANative(binary=_BINARY, n_models=2, max_iter=3, threads=2)
+    # A run that ends with non-finite weights must be reported as a degenerate
+    # fit, not let loadmodout's pinv raise an opaque SVD error (cf. the #50
+    # degenerate-fit contract). block_size=512 on 2048 samples produces one:
+    # the binary runs 2048 // (max_threads * 512) = 0 blocks and writes NaN
+    # weights (issue #292). The engine's own default block leaves it a block
+    # (issue #354), so this test pins the value that fails.
+    eng = AMICANative(binary=_BINARY, n_models=2, max_iter=3, threads=2, block_size=512)
     with pytest.raises(RuntimeError, match="degenerate"):
         eng.fit(real_data[:, :2048])
 

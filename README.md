@@ -64,7 +64,8 @@ order = model.variance_order()     # EEGLAB IC order (IC1 = highest variance)
 
 ### Backends and precision
 
-The wrapper auto-selects a device and computes in float64 for Fortran parity.
+The wrapper auto-selects a device and computes in float64 for Fortran parity;
+on a Mac, where the Metal Performance Shaders (MPS) device has no float64, a default fit runs on the CPU.
 
 - CPU and CUDA (float64) are bit-reproducible; use them for parity runs.
 - float32 (about 7 significant digits, not parity) is required on the Apple GPUs
@@ -92,6 +93,12 @@ model.write_amica_output("amicaout")   # gm, W, S, mean, c, alpha, mu, sbeta, rh
 ```matlab
 mod = loadmodout15('amicaout');   % components in EEGLAB variance order
 ```
+
+pamica's defaults follow the compiled amica15 binary (`lrate` 0.1, Newton off),
+and EEGLAB's `runamica15.m` sets its own (`lrate` 0.05, Newton on).
+To rerun an EEGLAB decomposition, fit from the `input.param` that `runamica15.m` wrote beside its output:
+`AMICA.from_params_file("amicaouttmp/input.param").fit(X)`.
+The [defaults table](https://eeglab.org/pAMICA/guides/amica-differences/#default-settings-issue-354) lists every setting in the three sources.
 
 ### Legacy NumPy CLI
 

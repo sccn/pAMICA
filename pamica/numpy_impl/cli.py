@@ -23,7 +23,7 @@ read_params_file`, issue #304). Either way it must include:
 Optional parameters can be included in the file:
 - num_models: Number of models (default: 1)
 - num_mix: Number of mixture components (default: 3)
-- max_iter: Maximum iterations (default: 2000)
+- max_iter: Maximum iterations (default: 100)
 And many others as documented in the AMICA class.
 """
 

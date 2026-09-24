@@ -8,10 +8,10 @@
     
     "num_models": 1,
     "num_mix": 3,
-    "max_iter": 2000,
+    "max_iter": 100,
     "num_comps": -1,
     
-    "do_newton": true,
+    "do_newton": false,
     "newt_start": 20,
     "newt_ramp": 10,
     "newtrate": 0.5,

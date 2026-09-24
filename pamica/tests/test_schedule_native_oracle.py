@@ -41,7 +41,8 @@ import pytest
 import torch
 
 from pamica.native import resolver
-from pamica.native.engine import _DEFAULT_PARAMS, _render_param
+from pamica.native.engine import _render_param
+from pamica.tests.native_oracle import REFERENCE_RUN_PARAMS
 from pamica.numpy_impl.core import AMICA as AMICA_NumPy
 from pamica.torch_impl.core import AMICATorchNG
 from pamica.torch_impl.utils import load_eeglab_data
@@ -141,7 +142,9 @@ def _seeded_reference_run(X: np.ndarray, workdir: Path) -> dict[str, np.ndarray]
         _write_f64(indir / name, value.numpy())
 
     X.astype(np.float32).ravel(order="F").tofile(workdir / "data.fdt")
-    params = dict(_DEFAULT_PARAMS)
+    # The bundled input.param, the configuration this oracle was measured
+    # against (AMICANative's defaults until issue #354).
+    params = dict(REFERENCE_RUN_PARAMS)
     params.update(
         {k: v for k, v in _CONFIG.items() if k not in ("maxdecs", "doscaling")}
     )

@@ -640,7 +640,7 @@ class AMICA:
         if self.num_models < 1:
             raise ValueError(f"num_models must be >= 1, got {self.num_models}")
         self.num_mix = params.get("num_mix", 3)
-        self.max_iter = params.get("max_iter", 2000)
+        self.max_iter = params.get("max_iter", 100)
         if self.max_iter < 1:
             raise ValueError(f"max_iter must be >= 1, got {self.max_iter}")
         self.do_newton = params.get("do_newton", False)

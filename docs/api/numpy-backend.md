@@ -15,6 +15,12 @@ the same shared reader.
 Settings the file carries that this backend does not consume are named in one
 `logger.warning` rather than silently dropped.
 
+Its defaults come from the bundled `pamica/numpy_impl/params.json`, read by the constructor,
+and match the PyTorch and MLX backends' ([Default settings](../guides/amica-differences.md#default-settings-issue-354)):
+since issue #354 a default fit runs without Newton and stops at `max_iter=100`,
+where it used to turn Newton on and run 2000 iterations.
+A `params_file` replaces the bundled file, and a keyword argument overrides either.
+
 It writes files only when given an `outdir` (keyword, params file, or the CLI's `--outdir`, default `output`):
 there it writes its `out.txt` log, its `writestep` checkpoints and its final results in the Fortran `amicaout` layout.
 Without one (the default) a fit writes nothing, like the PyTorch and MLX backends.
