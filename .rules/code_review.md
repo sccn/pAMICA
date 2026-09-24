@@ -24,6 +24,7 @@ When the `pr-review-toolkit` plugin is available, use it after creating PRs to c
 ### Before Committing
 - [ ] Code compiles/runs without warnings
 - [ ] Tests pass (real tests, no mocks)
+- [ ] A user-visible change has its entry under `## Unreleased` in `docs/changelog.md` (`.rules/changelog.md`)
 - [ ] No debug code left (print statements, TODO hacks)
 - [ ] No sensitive data in code or logs
 
