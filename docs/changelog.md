@@ -18,12 +18,14 @@ and every backend's fitting follows the Fortran reference more closely.
     each iteration runs in the reference's order, so a likelihood decrease takes effect in the same iteration and a convergence stop returns the parameters its likelihood was computed from (issue #339);
     the reference's A-freeze holds the mixing update on iterations 100-105, 200-205, and so on, of every fit (issue #345);
     and the density normalizers are the reference's single-precision constants (issue #344).
-    Every pamica backend now also shares one set of defaults (issue #354, [Defaults and device selection](#defaults-and-device-selection)),
-    which moves default fits in two entry points:
+    Every pamica entry point now also shares one set of defaults (issue #354, [Defaults and device selection](#defaults-and-device-selection)),
+    which moves default fits in three of them:
     an `AMICA()` or `AMICAICA()` fit that sets no `lrate` now runs at 0.1, the backends' default, where it ran at 0.05,
     which raises the final log-likelihood of a default 100-iteration fit on the bundled sample by 0.008;
-    and a default `AMICA_NumPy` fit now runs without Newton and stops at 100 iterations, like the other backends,
-    where it switched Newton on at iteration 20 and ran up to 2000 iterations.
+    a default `AMICA_NumPy` fit now runs without Newton and stops at 100 iterations, like the other backends,
+    where it switched Newton on at iteration 20 and ran up to 2000 iterations;
+    and a default `AMICANative` run gives the binary these shared settings, where it gave it the bundled `input.param`'s
+    (`lrate` 0.05, Newton on, `max_iter` 2000, `block_size` 512).
     The raw PyTorch and MLX backends already used these values.
     Two more reach default fits in narrow cases.
     With schedule gates counted from 1 (issue #335), a `maxdecs` ratchet that completes on iteration `newt_start + 1` tightens the rho-rate ceiling whether or not Newton is on,
@@ -498,12 +500,31 @@ and every backend's fitting follows the Fortran reference more closely.
   A fit that sets these, directly or through its own parameter file, is unaffected;
   pass `do_newton=True` and `max_iter=2000` to reproduce an earlier default NumPy fit.
   Fits shorter than `newt_start` (20 by default) iterations are byte-identical, since Newton had not started in them.
-  `AMICANative`, which writes the bundled `input.param`'s values, keeps its own defaults for now.
   - Tests: `pamica/tests/test_default_settings.py` holds every setting `AMICA_NumPy` shares with `AMICATorchNG` to `AMICATorchNG`'s default,
     read through a default NumPy construction and through the backend's own `params.json` loader,
     and holds `AMICAMLXNG`'s constructor and `fit` defaults to `AMICATorchNG`'s (moved from `test_wrapper_backends.py`).
     `pamica/tests/test_pamica.py::test_amica_initialization`, which pinned the old `max_iter`, now expects the shared default;
     no other test relied on the old values, since every NumPy fit that runs past `newt_start` in the suite sets `do_newton` itself.
+- **`AMICANative` gives the binary pamica's shared defaults** (issue #354).
+  **Behavior change: a native run that does not set them now runs at `lrate` 0.1, without Newton, for at most 100 iterations.**
+  The engine wrote the bundled `pamica/sample_data/input.param`'s settings as its defaults:
+  `lrate` 0.05, `minlrate` 1e-8, `maxdecs` 3, Newton on from iteration 50 at `newtrate` 1.0, `max_iter` 2000, `block_size` 512,
+  `rholratefact` 0.5, `invsigmin` 0, `invsigmax` 100, `mineig` 1e-12, `numrej` 3 and `pcadb` 30.
+  It now takes the default of every setting the binary has a keyword for from `AMICATorchNG`'s signature, through the shared keyword table of `pamica.fortran_params`,
+  so the four entry points cannot drift apart.
+  pamica settings without a binary keyword, such as `keep_best` and `mineig_rel`, are not written, and neither are settings whose default is `None` (`pcadb`, `seed`).
+  The binary's `block_size` counts one thread's share of a block and leaves an all-NaN fit when `max_threads * block_size` exceeds the samples (issue #292),
+  so unless `block_size` is given the engine writes pamica's 8192-sample block, capped at the data's length, divided by `max_threads`
+  (819 with the default 10 threads on the bundled sample, where 8192 as is would process nothing).
+  Keys only the binary reads (`max_threads`, `byte_size`, `writestep`, the `load_*` and `update_*` switches) keep their earlier values.
+  To run as the bundled or an EEGLAB-written `input.param` configures the binary, pass the file's settings as keywords
+  ([Reproducing an EEGLAB run](guides/amica-differences.md#reproducing-an-eeglab-run)).
+  - Tests: `pamica/tests/test_default_settings.py` builds the engine's `input.param` without a binary, reads it back through `pamica.fortran_params.read_params_file`,
+    and holds every setting it carries to `AMICATorchNG`'s default and every writable setting to being written.
+    The native-binary oracles (`pamica/tests/native_oracle.py` and `test_schedule_native_oracle.py`) relied on the old defaults;
+    they now start from the bundled `input.param` itself, the configuration they were measured against, and write byte-identical parameter files.
+    `test_native_engine.py::test_native_engine_degenerate_fit_raises_clearly` took its NaN weights from the binary's zero-block case at the old `block_size` 512 on 2048 samples,
+    which the new default avoids, so it pins `block_size=512`; the other native-engine tests pass at the new defaults.
 - **The raw `AMICATorchNG` runs a default construction on the CPU on Apple Silicon** (issue #354).
   `AMICATorchNG(n_channels)` with default arguments raised `ValueError` on every Mac with Metal Performance Shaders (MPS):
   automatic device selection picks MPS, which cannot represent the float64 default.

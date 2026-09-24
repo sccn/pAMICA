@@ -68,12 +68,21 @@ Three sources set AMICA's defaults:
 pamica's own, the compiled amica15 binary's (`pamica/amica15_header.f90`),
 and those of EEGLAB's `runamica15.m`, the MATLAB front end that writes an `input.param` and runs the binary
 (read here from sccn/amica at commit 509c8be).
-pamica's column holds for every pamica backend except the native one:
-`AMICATorchNG` and `AMICAMLXNG`, the `AMICA` and `AMICAICA` wrappers on either backend,
-which since issue #354 take their defaults from the backend they build,
-and the legacy NumPy backend (`AMICA_NumPy`), which reads them from `pamica/numpy_impl/params.json`
-(before issue #354 that file turned Newton on and set `max_iter` to 2000).
+pamica's column holds for every pamica entry point since issue #354:
+`AMICATorchNG` and `AMICAMLXNG`;
+the `AMICA` and `AMICAICA` wrappers on either backend, which take their defaults from the backend they build;
+the legacy NumPy backend (`AMICA_NumPy`), which reads them from `pamica/numpy_impl/params.json`
+(before issue #354 that file turned Newton on and set `max_iter` to 2000);
+and [`AMICANative`](../api/native-backend.md), which runs the binary itself and writes them into the `input.param` it gives it
+(before issue #354 it wrote the bundled `pamica/sample_data/input.param`'s values).
 `AMICA_NumPy` has no `keep_best` ([Backend differences](#backend-differences)).
+`AMICANative` writes every setting the binary has a keyword for;
+the binary has none for `keep_best` or `mineig_rel`,
+so a native run returns the last iterate and applies the absolute `mineig` floor, as the reference does (rows 1 and 3).
+The binary's `block_size` counts one thread's share of a block (amica15.f90:1215-1227),
+and a block of `max_threads * block_size` samples longer than the data leaves it no block to process and an all-NaN fit (issue #292),
+so `AMICANative` writes pamica's 8192-sample block, capped at the data's length, divided by `max_threads`:
+819 with its 10 threads on a recording of 8192 samples or more.
 Bold marks a pamica default that differs from the compiled one.
 The line numbers are those of `amica15_header.f90` and `runamica15.m`.
 
@@ -115,9 +124,6 @@ The compiled values are single-precision literals widened to double (row 16), so
 the table gives the decimals.
 `runamica15.m` writes `invsigmin` with six decimal places, so the binary it runs sees `invsigmin 0.000000`,
 as the bundled `pamica/sample_data/input.param` shows.
-[`AMICANative`](../api/native-backend.md), which runs the binary itself, keeps other defaults:
-it writes a full `input.param` whose defaults are those of the bundled `pamica/sample_data/input.param`,
-`runamica15.m`'s column as written, with `block_size=512`.
 
 pamica follows the compiled binary because its values are the reference's own defaults:
 the binary falls back to them for any key an `input.param` leaves out, whichever front end wrote the file.
@@ -164,6 +170,23 @@ so a run with the same settings agrees with the EEGLAB run to the tolerances in 
 and does not reproduce it bit for bit;
 with Newton on, the weakest components can settle in a different optimum
 ([Newton-enabled runs](validation.md#newton-enabled-runs-and-the-initialization-basin)).
+
+To run the reference binary itself as such a file configures it,
+pass the file's settings to [`AMICANative`](../api/native-backend.md), which forwards any `input.param` keyword;
+its own defaults are pamica's column, so a keyword the file leaves out takes pamica's value, where the binary run by `runamica15.m` would take its compiled one:
+
+```python
+from pathlib import Path
+
+from pamica import AMICANative
+
+settings = {}
+for line in Path("/path/to/amicaouttmp/input.param").read_text().splitlines():
+    key, _, value = line.partition(" ")
+    if key and key not in ("files", "outdir", "data_dim", "field_dim"):
+        settings[key] = value.strip()  # written back verbatim
+model = AMICANative(**settings).fit(X)  # X: the data the EEGLAB run fitted
+```
 
 ## 1. Relative rank threshold
 
