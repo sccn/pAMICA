@@ -1,0 +1,2 @@
+pamica seed13: final_ll=-3.697816 iters=2000 stop_reason=max_iter n_newton_fallbacks=0 end_newtrate=0.5 time=6239s
+pamica fixinit: final_ll=-3.697812 iters=2000 stop_reason=max_iter n_newton_fallbacks=0 end_newtrate=0.5 time=4323s

@@ -173,13 +173,42 @@ and the backend converges to the binary's solution within ~0.005 log-likelihood 
 ### Newton-enabled runs and the initialization basin
 
 The comparison above disables Newton (`do_newton=0`) to isolate the algorithm from its starting point.
-With Newton enabled (`do_newton=1`, the default), agreement at the full 2000-iteration budget depends on the initialization, not on any dynamics difference between the backends.
-From an *identical* initialization (the same starting mixing matrix and densities fed to both), `pamica` and Fortran converge to the same solution:
-mean Hungarian-matched correlation ~0.997 with no collapsed components on the full 70-channel recording, the residual being floating-point summation-order noise between two implementations rather than an algorithmic gap.
-From *independent* random initializations the picture differs, because the two backends' random number generators do not share a state, so a fixed seed does not map to a matched start.
-At the long Newton budget this occasionally settles a few of the weakest, under-determined components into a different but equally likely (equal- or higher-likelihood) optimum.
-Fortran is more robust to its own random inits (run-to-run self-consistency ~0.9997) than `pamica` is, so the effect appears as a `pamica`-specific spread on those components, not a divergence from the reference.
-It is therefore an initialization-basin property (like the non-identifiable multi-model case below), not a parity defect; see issue #145 and the optional init-robustness follow-up #198.
+With Newton enabled (`do_newton=1`, the reference's default), agreement at the full 2000-iteration budget depends on where a fit starts.
+Re-measured on 2026-09-23 with the code of epic #324 on the full 70-channel recording
+(pamica on CUDA in float64, seeds 42, 13 and 7; the pinned v0.3.3 reference seeded 1 and 2; the `input.param` settings with the early stops off;
+`.context/issue-351/newton_seeds.py`), Hungarian-matched correlation of the 70 unmixing rows:
+
+| Pair | Mean | Min | Components below 0.9 |
+|---|---:|---:|---:|
+| pamica seed 42 vs reference seed 1 | 0.963 | 0.667 | 8 |
+| pamica seed 42 vs reference seed 2 | 0.986 | 0.858 | 3 |
+| pamica seed 13 vs reference seed 1 | 0.996 | 0.946 | 0 |
+| pamica seed 13 vs reference seed 2 | 0.981 | 0.773 | 3 |
+| pamica seed 7 vs reference seed 1 | 0.995 | 0.943 | 0 |
+| pamica seed 7 vs reference seed 2 | 0.982 | 0.786 | 3 |
+| reference seed 1 vs reference seed 2 | 0.985 | 0.841 | 2 |
+| pamica seed 42 vs pamica seed 13 | 0.962 | 0.658 | 7 |
+| pamica vs reference, both from the same start | 0.9999998 | 0.9999964 | 0 |
+| reference from that start vs reference seed 1 | 0.996 | 0.955 | 0 |
+
+The weakest, under-determined components settle into different basins from different starts, in the reference's runs as in pamica's:
+pamica's seed 42 differs from the reference's seed 1 on 8 components, and the reference's seed 2 differs from its own seed 1 on 2 and from each pamica seed on 3.
+The alternative basins have equal or higher likelihood
+(final log-likelihood: reference seeds 1 and 2, -3.697804 and -3.697709; pamica seeds 42, 13 and 7, -3.697569, -3.697816 and -3.697812).
+The same start is the deterministic one of issue #145 ($A = I$, `mu` at -1, 0 and 1, `sbeta` = 1, `rho` = 1.5), fed to the reference through its `load_*` files;
+from it, pamica and the reference end with the same components after 2000 Newton iterations
+(mean correlation 0.9999998, Amari distance $3.8\times10^{-5}$, final log-likelihoods $7.6\times10^{-8}$ apart).
+In issue #145, measured before epic #324's changes to the fit, two clock-seeded reference runs agreed at 0.9997 (minimum 0.998),
+pamica's seeds 42, 13 and 7 reached 0.942, 0.994 and 0.996 against them, and the same start gave 0.997.
+The seeded pair above (0.985) is a second measurement of the reference's own seed-to-seed spread, on one more pair of starts.
+See issue #145 and the optional init-robustness follow-up #198.
+
+A single-seed supplementary run gives the float32 side at this data size:
+the MLX backend (float32), with the same keywords and the same start as the CUDA seed-7 fit, stops on its learning-rate floor at iteration 951,
+after about 120 likelihood decreases below float32 resolution, at log-likelihood -3.69809 (the float64 fit was at -3.69791 at that iteration).
+Its components match the float64 seed-7 fit at a mean correlation of 0.985 (minimum 0.907) and the reference's seed 1 at 0.983 (minimum 0.905);
+with seed 42, float32 and float64 differ on 10 of the 70 components (mean 0.955).
+At this budget the weak components' float32 basin varies the way a change of start does (`.context/issue-351/raw/newton_mlx/`).
 
 ### Source-density families are bit-exact
 
