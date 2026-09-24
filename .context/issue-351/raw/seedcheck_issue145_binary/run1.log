@@ -1,0 +1,127 @@
+Authorization required, but no authorization protocol specified
+
+Authorization required, but no authorization protocol specified
+
+Authorization required, but no authorization protocol specified
+
+Authorization required, but no authorization protocol specified
+
+           1 processor name = hallucinating
+           1 host_num =    302850659
+ This is MPI process           1 of           1 ; I am process           1 of           1 on node: hallucinating
+           1  : node root process           1 of           1
+Processing arguments ...
+ num_files =            1
+ FILES: 
+ ./eeglab_data.fdt
+ num_dir_files =            1
+ initial matrix block_size =          512
+ do_opt_block =            0
+ blk_min =          256
+ blk_step =          256
+ blk_max =         1024
+ number of models =            1
+ max_thrds =            1
+ use_min_dll =            1
+ min dll =    1.0000000000000001E-009
+ use_grad_norm =            1
+ min grad norm =    9.9999999999999995E-008
+ number of density mixture components =            3
+ pdf type =            0
+ max_iter =            1
+ num_samples =            1
+ data_dim =           32
+ field_dim =        30504
+ do_history =            0
+ histstep =           10
+ share_comps =            0
+ share_start =          100
+ comp_thresh =   0.98999999999999999     
+ share_int =          100
+ initial lrate =    5.0000000000000003E-002
+ minimum lrate =    1.0000000000000000E-008
+ minimum data covariance eigenvalue =    9.9999999999999998E-013
+ lrate factor =   0.50000000000000000     
+ initial rholrate =    5.0000000000000003E-002
+ rho0 =    1.5000000000000000     
+ min rho =    1.0000000000000000     
+ max rho =    2.0000000000000000     
+ rho lrate factor =   0.50000000000000000     
+ kurt_start =            3
+ num kurt =            5
+ kurt interval =            1
+ do_newton =            1
+ newt_start =           50
+ newt_ramp =           10
+ initial newton lrate =    1.0000000000000000     
+ do_reject =            0
+ num reject =            3
+ reject sigma =    3.0000000000000000     
+ reject start =            2
+ reject interval =            3
+ write step =          100
+ write_nd =            0
+ write_LLt =            1
+ dec window =            1
+ max_decs =            3
+ fix_init =            0
+ update_A =            1
+ update_c =            1
+ update_gm =            1
+ update_alpha =            1
+ update_mu =            1
+ update_beta =            1
+ invsigmax =    100.00000000000000     
+ invsigmin =    0.0000000000000000     
+ do_rho =            1
+ load_rej =            0
+ load_c =            0
+ load_gm =            0
+ load_alpha =            0
+ load_mu =            0
+ load_beta =            0
+ load_rho =            0
+ load_comp_list =            0
+ do_mean =            1
+ do_sphere =            1
+ pcakeep =           32
+ pcadb =    30.000000000000000     
+ byte_size =            4
+ doscaling =            1
+ scalestep =            1
+mkdir: cannot create directory ‘./out/’: File exists
+ output directory = ./out/
+           1 : setting num_thrds to            1  ...
+           1 : using           1 threads.
+           1 : node_thrds =            1
+ bytes in real =            4
+           1 : REAL nbyte =            4
+ getting segment list ...
+ blocks in sample =        30504
+ total blocks =        30504
+ node blocks =        30504
+ node            1  start: file            1  sample            1  index            1
+ node            1  stop : file            1  sample            1  index        30504
+           1 : data =   -35.797485351562500        2.3078439235687256     
+ getting the mean ...
+  mean =   -3.7090141912586323       -6.7516788952437894        2.5880450259870105     
+ subtracting the mean ...
+ getting the covariance matrix ...
+ cnt =        30504
+ doing eig nx =           32  lwork =        10240
+ minimum eigenvalues =    4.8799005132501803        6.9201197127079803        7.6562147928880702     
+ maximum eigenvalues =    9711.1430838537090        3039.6850435125002        1244.4129447052057     
+ num eigs kept =           32
+ getting the sphering matrix ...
+ minimum eigenvalues =    4.8799005132501803        6.9201197127079803        7.6562147928880702     
+ maximum eigenvalues =    9711.1430838537090        3039.6850435125002        1244.4129447052057     
+ num eigs kept =           32
+ sphering the data ...
+ numeigs =           32
+           1 : Allocating variables ...
+           1 : Initializing variables ...
+           1 : block size =          512
+           1 : entering the main loop ...
+ iter     1 lrate =  0.0500000000 LL =  -3.5114441940 nd =  0.0556873701, D =   0.42075E-02  0.42075E-02  (  0.10 s,   0.0 h)
+... done. Execution time:   0.00 h 
+ output directory = ./out/
