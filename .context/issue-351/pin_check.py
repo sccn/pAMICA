@@ -9,6 +9,11 @@ of ``pamica/tests/native_oracle.py`` are replaced by functions that record the
 parameter file and stop.
 
     uv run python .context/issue-351/pin_check.py OUT.json
+
+With ``--dump PATH`` it also saves the pinned calls' parameter files, and with
+``--against PATH`` it compares them with a saved dump instead, so a change of
+``AMICANative``'s defaults (epic #324 Phase 17) can be checked to leave every
+pinned call's ``input.param`` unchanged.
 """
 
 from __future__ import annotations
@@ -136,8 +141,10 @@ def main() -> None:
         ),
     }  # fmt: skip
     out = {}
+    pinned: dict[str, str] = {}
     for name, (before, after) in checks.items():
         a, b = native_param(**before), native_param(**after)
+        pinned[name] = b
         out[name] = {"identical": a == b, "lines": a.count("\n")}
     seeded = {
         "newton_seeds same-start reference": (
@@ -164,10 +171,26 @@ def main() -> None:
         nm = before.get("num_models", 1)
         a = seeded_param(state_models=nm, **before)
         b = seeded_param(state_models=nm, **after)
+        pinned[name] = b
         out[name] = {"identical": a == b, "lines": a.count("\n")}
-    Path(sys.argv[1]).write_text(json.dumps(out, indent=2))
+    args = sys.argv[1:]
+    if "--dump" in args:
+        Path(args[args.index("--dump") + 1]).write_text(json.dumps(pinned, indent=2))
+    if "--against" in args:
+        saved = json.loads(Path(args[args.index("--against") + 1]).read_text())
+        out = {
+            name: {
+                "pinned_identical_to_saved": pinned[name] == saved[name],
+                "unpinned_identical_to_pinned": out[name]["identical"],
+            }
+            for name in pinned
+        }
+        ok = all(v["pinned_identical_to_saved"] for v in out.values())
+    else:
+        ok = all(v["identical"] for v in out.values())
+    Path(args[0]).write_text(json.dumps(out, indent=2))
     print(json.dumps(out, indent=2))
-    if not all(v["identical"] for v in out.values()):
+    if not ok:
         raise SystemExit("a pinned call writes a different input.param")
 
 
