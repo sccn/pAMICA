@@ -108,9 +108,11 @@ MULTIMODEL_SEED_START = 1
 
 # The reference's settings for every Table 1 run: the values of the bundled
 # pamica/sample_data/input.param, which AMICANative's defaults mirrored when
-# the table was measured. Spelled out, so that a change of AMICANative's own
-# defaults cannot change this protocol; each call adds its model count,
-# iteration budget and the settings it overrides.
+# the table was measured, and do_approx_sphere 1, the binary's compiled value
+# for a key that file leaves unset (AMICANative writes it since issue #354).
+# Spelled out, so that a change of AMICANative's own defaults cannot change
+# this protocol; each call adds its model count, iteration budget and the
+# settings it overrides.
 REFERENCE_SETTINGS: dict[str, Any] = {
     "block_size": 512, "do_opt_block": 0, "blk_min": 256, "blk_step": 256,
     "blk_max": 1024, "use_min_dll": 1, "min_dll": 1e-09, "use_grad_norm": 1,
@@ -123,8 +125,9 @@ REFERENCE_SETTINGS: dict[str, Any] = {
     "rejsig": 3.0, "rejstart": 2, "rejint": 3, "decwindow": 1, "max_decs": 3,
     "fix_init": 0, "update_A": 1, "update_c": 1, "update_gm": 1,
     "update_alpha": 1, "update_mu": 1, "update_beta": 1, "invsigmax": 100.0,
-    "invsigmin": 0.0, "do_rho": 1, "do_mean": 1, "do_sphere": 1, "doPCA": 1,
-    "pcadb": 30.0, "byte_size": 4, "doscaling": 1, "scalestep": 1,
+    "invsigmin": 0.0, "do_rho": 1, "do_mean": 1, "do_sphere": 1,
+    "do_approx_sphere": 1, "doPCA": 1, "pcadb": 30.0, "byte_size": 4,
+    "doscaling": 1, "scalestep": 1,
 }  # fmt: skip
 
 

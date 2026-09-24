@@ -4,8 +4,9 @@
 Phase 17 (#354) rebuilt ``AMICANative``'s parameter table, so a pinned call
 now writes its keys in a new order and adds ``do_approx_sphere 1``, the value
 compiled into the binary (``amica15_header.f90``), with every other key and
-value unchanged (``pin_check.py --against``). The binary reads keys by name,
-so the two files should give the same run. This script checks that on the
+value unchanged (``pin_check.py --against``); ``REFERENCE_SETTINGS`` in
+``benchmarks/reproduce_table1.py`` now pins that key too. The binary reads
+keys by name, so the two files should give the same run. This script checks that on the
 bundled sample: for each pinned configuration it lets ``AMICANative`` write
 its current ``input.param``, runs the binary on it, then runs it again in a
 copy of the work directory whose ``input.param`` has the pre-Phase-17 key
