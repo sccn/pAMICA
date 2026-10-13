@@ -33,7 +33,8 @@ fi
 
 # LAPACK/BLAS: Accelerate on macOS (a system framework, always present -- no
 # install, so it does not count against "dependency-free"); reference LAPACK on
-# Linux/Windows (static-linked in CI via LAPACK_LIBS). Override with LAPACK_LIBS.
+# Linux otherwise. The release job overrides it via LAPACK_LIBS with static OpenBLAS
+# on Linux and Windows.
 if [[ -n "${LAPACK_LIBS:-}" ]]; then
   lapack_libs="$LAPACK_LIBS"
 elif [[ "$os" == "Darwin" ]]; then

@@ -148,7 +148,10 @@ jobs:
       - run: uv sync
       # Build the dependency-free native binary (epic #165) so the AMICANative
       # engine's end-to-end tests run for real on Linux (they skip without
-      # PAMICA_NATIVE_BINARY). Static reference LAPACK/BLAS, same as the release.
+      # PAMICA_NATIVE_BINARY). Static reference LAPACK/BLAS on the runner's own
+      # distribution; the release recipe for Linux (Rocky Linux 8 container, static
+      # OpenBLAS) is built by release-binaries.yml, which also runs on a pull request
+      # that touches native/ or that workflow.
       - name: Build native AMICA binary (for engine E2E tests)
         run: |
           sudo apt-get update
