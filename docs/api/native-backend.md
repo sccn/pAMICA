@@ -54,6 +54,10 @@ asset and caches it, so later runs are offline:
 
 - **Cache location:** `~/.cache/pamica/bin/<version>/` (or
   `$XDG_CACHE_HOME/pamica/bin/`; override with `PAMICA_NATIVE_CACHE`).
+- **A cached binary is not checked again:**
+  `resolve()` returns the file in the cache whenever it exists, including the `latest` alias.
+  If the cached binary does not start, for example the 0.4.0 Linux asset on a host with glibc 2.28,
+  delete `~/.cache/pamica/bin/latest/` (or the directory `PAMICA_NATIVE_CACHE` names), and the next run downloads the current release's binary.
 - **Integrity:** the download is staged in a temporary directory, verified
   against its `.sha256` release asset, marked executable, and only then moved
   atomically into the cache. A file therefore exists at the cache path only once
@@ -62,6 +66,9 @@ asset and caches it, so later runs are offline:
   Linux x64, Linux arm64 and Windows x64. Windows arm64 has no native Fortran
   toolchain yet ([#173](https://github.com/sccn/pAMICA/issues/173)); it maps to
   the x64 binary, which runs under Windows 11 ARM's x64 emulation.
+  The Linux binaries need glibc 2.28 or newer.
+  That covers Red Hat Enterprise Linux 8 and its rebuilds (Rocky Linux, AlmaLinux), Ubuntu 20.04, Debian 10 and later releases of each.
+  The release job checks the floor on every build; the 0.4.0 Linux assets need glibc 2.38.
 
 Install the binary explicitly (for example to pre-populate the cache in an
 offline or CI environment):

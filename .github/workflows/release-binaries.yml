@@ -6,6 +6,12 @@ name: Release binaries
 # means no MPI runtime is needed) and is smoke-tested on real sample EEG before
 # upload, so a binary that cannot run on its platform fails the job.
 #
+# The Linux targets build inside a Rocky Linux 8 container (glibc 2.28), not on the
+# runner's own distribution: a binary needs at least the glibc it was built against,
+# and the runner image's is far newer than Red Hat Enterprise Linux 8 and its
+# rebuilds, which many compute clusters run (issue #370). native/check_glibc_floor.sh
+# fails the job if that floor is ever exceeded again.
+#
 # Run manually (workflow_dispatch) to validate without cutting a release; assets
 # are only attached when triggered by a published release.
 
@@ -13,6 +19,13 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+  # A change to the recipe builds every target without publishing anything (assets
+  # attach only for a published release), so a broken Linux container build or a glibc
+  # floor regression shows up on the pull request instead of at the next release.
+  pull_request:
+    paths:
+      - 'native/**'
+      - '.github/workflows/release-binaries.yml'
 
 permissions:
   contents: write  # upload release assets
@@ -21,6 +34,7 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
     continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
@@ -31,9 +45,11 @@ jobs:
             shell: bash
           - target: linux-x64
             runner: ubuntu-latest
+            container: rockylinux:8
             shell: bash
           - target: linux-arm64
             runner: ubuntu-24.04-arm
+            container: rockylinux:8
             shell: bash
           - target: windows-x64
             runner: windows-latest
@@ -56,13 +72,17 @@ jobs:
         shell: bash
         run: brew install gcc  # gfortran + libgomp; LAPACK via Accelerate
 
-      - name: Set up toolchain (Linux)
+      - name: Set up toolchain (Linux, Rocky Linux 8 container)
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo apt-get update
-          # gfortran + static reference LAPACK/BLAS (.a) for a self-contained binary.
-          sudo apt-get install -y gfortran liblapack-dev libblas-dev
+          set -euo pipefail
+          dnf -y install dnf-plugins-core
+          dnf config-manager --set-enabled powertools
+          # gcc-toolset-13 supplies a gfortran new enough for -fallow-argument-mismatch
+          # (the system gfortran is 8.5). openblas-static is the serial flavor and
+          # carries both BLAS and LAPACK: Rocky 8 packages no static reference BLAS.
+          dnf -y install gcc-toolset-13-gcc-gfortran openblas-static python3 binutils
 
       - name: Set up toolchain (Windows)
         if: runner.os == 'Windows'
@@ -91,9 +111,15 @@ jobs:
               export EXTRA_LDFLAGS="-static-libquadmath"
               ;;
             linux-*)
-              # Static LAPACK/BLAS + Fortran runtime; glibc stays dynamic.
-              export LAPACK_LIBS="-l:liblapack.a -l:libblas.a"
-              export EXTRA_LDFLAGS="-static-libquadmath"
+              # Static OpenBLAS (BLAS + LAPACK), Fortran runtime and OpenMP runtime;
+              # only glibc stays dynamic, and the container pins its floor at 2.28.
+              # libgomp is linked from its archive because the toolset's libgomp.so
+              # resolves to the system's GCC 8 libgomp.so.1, older than the code the
+              # toolset emits; libgomp.a calls dlopen (offload plugins), hence -ldl,
+              # and --as-needed then drops the now-unused libgomp.so.1 dependency.
+              source /opt/rh/gcc-toolset-13/enable
+              export LAPACK_LIBS="-l:libopenblas.a"
+              export EXTRA_LDFLAGS="-static-libquadmath $(gfortran -print-file-name=libgomp.a) -ldl -Wl,--as-needed"
               ;;
             windows-*)
               # OpenBLAS (static archive) supplies BLAS+LAPACK; -static bundles the
@@ -103,9 +129,21 @@ jobs:
               ;;
           esac
           bash native/build.sh
+          # Static OpenBLAS carries kernels for every CPU generation (46 MB on x86-64);
+          # dropping the symbols halves that without touching the code.
+          if [ "${{ runner.os }}" = "Linux" ]; then strip -s native/amica15_shim; fi
           ext=""; [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
           mkdir -p dist
           cp "native/amica15_shim$ext" "dist/amica15-${{ matrix.target }}$ext"
+
+      # --- glibc floor: the binary must load on a glibc 2.28 host -----------
+      # The allowed libraries are the glibc ones; libgomp.so.1 and libgfortran.so.5 must stay
+      # inside the binary, because the host may not have them or may have an older one.
+      - name: Check the glibc floor and shared libraries
+        if: runner.os == 'Linux'
+        run: |
+          bash native/check_glibc_floor.sh "dist/amica15-${{ matrix.target }}" 2.28 \
+            '^(libc|libm|libdl|libpthread|libmvec|librt)\.so\.|^ld-linux'
 
       # --- Smoke test: the binary must actually run on this platform --------
       - name: Smoke test on sample EEG
@@ -119,8 +157,9 @@ jobs:
           sed -e 's#^files .*#files ./eeglab_data.fdt#' \
               -e 's#^outdir .*#outdir ./out/#' \
               -e 's#^max_iter .*#max_iter 2#' -e 's#^writestep .*#writestep 2#' \
+              -e 's#^max_threads .*#max_threads 2#' \
               "$GITHUB_WORKSPACE/pamica/sample_data/input.param" > p.param
-          OMP_NUM_THREADS=2 "$bin" p.param | tee run.log
+          "$bin" p.param | tee run.log
           # Extract the last iteration's LL. A finite negative number (starts with
           # "-<digit>") = a working decomposition; a blank, "NaN" or "Infinity"
           # extraction, or a positive value, fails the pattern below.

@@ -6,6 +6,27 @@ at release time that heading becomes the version and its date.
 Each release's section is also its note on the
 [GitHub releases page](https://github.com/sccn/pAMICA/releases).
 
+## Unreleased
+
+### Native binary
+
+**The Linux native binaries of the next release run on Red Hat Enterprise Linux 8 and its rebuilds.**
+The 0.4.0 `amica15-linux-x64` and `amica15-linux-arm64` assets were built on the continuous integration (CI) runner's recent distribution and need version 2.38 of the GNU C Library (glibc),
+so `AMICANative` cannot start them on a host with glibc 2.28, as on many compute clusters (issue #370).
+The [native backend page](api/native-backend.md) lists the supported platforms.
+
+The release job now builds both Linux binaries in a Rocky Linux 8 container.
+It fails when a binary needs a newer glibc than 2.28, or a shared library other than glibc's own.
+The binaries link the Fortran and OpenMP runtimes statically, so they no longer depend on the host's `libgomp.so.1`.
+They also link OpenBLAS statically where they linked the reference Basic Linear Algebra Subprograms (BLAS) and Linear Algebra PACKage (LAPACK),
+which makes the stripped `amica15-linux-x64` asset about 25 MB where the 0.4.0 asset was 1 MB.
+On the bundled sample electroencephalography (EEG) data (seed 42, `max_threads 1`, Newton on, 100 iterations), repeated runs of one binary agree bit for bit.
+The final log-likelihood is -3.4112684 for the previous x86-64 build, -3.4112714 for the new x86-64 build and -3.4112694 for the new arm64 build.
+
+The 0.4.0 assets stay as published, so this fix reaches users with the next release.
+**If you ran `AMICANative` with 0.4.0 on a host with glibc 2.28, delete the cached binary after upgrading** (`~/.cache/pamica/bin/latest/`, or the directory `PAMICA_NATIVE_CACHE` names).
+A cached binary is used without being checked again, so the unusable one would otherwise be picked up again.
+
 ## 0.4.0 - 2026-09-24
 
 MLX becomes a first-class backend, reachable through every wrapper feature (epic #324, completing the raw backend of epic #278),
