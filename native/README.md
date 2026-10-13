@@ -15,7 +15,8 @@ This is epic #165 phase 1. It extends sccn/amica PR #53's vendor-neutral recipe:
 | ifort-only `random_seed` | portable full-size seed array + reproducible `seed` param (PR #54, supersedes #53) | `patch_sources.py` |
 
 LAPACK/BLAS remains, satisfied by Apple's Accelerate framework on macOS (a system
-framework, always present) and static reference LAPACK/OpenBLAS on Linux/Windows.
+framework, always present) and by static OpenBLAS in the Linux and Windows release
+binaries; a local build can link any static or shared LAPACK and BLAS.
 
 ## The single-rank MPI shim
 
@@ -42,16 +43,49 @@ for the shim build. macOS: `brew install gcc`; Debian/Ubuntu:
 
 ## Release binaries (cross-platform)
 
-`.github/workflows/release-binaries.yml` builds this recipe on a native runner for
-each target and attaches the checksummed binaries to the GitHub release:
+`.github/workflows/release-binaries.yml` builds this recipe for each target, on a native
+runner (inside a container for Linux), and attaches the checksummed binaries to the GitHub release:
 
 | target | runner | LAPACK/BLAS | link |
 |---|---|---|---|
 | macos-arm64 | macos-26 | Accelerate (system) | static Fortran runtime -> only Accelerate + libSystem |
-| linux-x64 | ubuntu-latest | static reference LAPACK/BLAS | static Fortran runtime, dynamic glibc |
-| linux-arm64 | ubuntu-24.04-arm | static reference LAPACK/BLAS | as above |
+| linux-x64 | ubuntu-latest, in a `rockylinux:8` container | static OpenBLAS | static Fortran and OpenMP runtimes, dynamic glibc (floor 2.28) |
+| linux-arm64 | ubuntu-24.04-arm, in a `rockylinux:8` container | static OpenBLAS | as above |
 | windows-x64 | windows-latest (MSYS2 MINGW64) | static OpenBLAS | `-static` (no MSYS2 DLLs) |
 | windows-arm64 | windows-11-arm (MSYS2 CLANGARM64) | static OpenBLAS | `-static`; experimental |
+
+### The Linux glibc floor
+
+A Linux binary needs at least the glibc it was built against.
+The Linux targets therefore build in a Rocky Linux 8 container (glibc 2.28),
+so they load on Red Hat Enterprise Linux 8 and its rebuilds, Ubuntu 20.04, Debian 10 and anything newer.
+Built on the runner image instead, the 0.4.0 assets needed glibc 2.38 (issue #370).
+
+`native/check_glibc_floor.sh` enforces the floor in the release job:
+
+```bash
+bash native/check_glibc_floor.sh dist/amica15-linux-x64 2.28 '^(libc|libm|libdl|libpthread|libmvec|librt)\.so\.|^ld-linux'
+```
+
+It exits 1 when any glibc symbol version is above the floor
+(a binary linked with `-z pack-relative-relocs` counts as needing glibc 2.36),
+or when the optional third argument, a regular expression, does not match every shared library the binary needs.
+The release job passes the glibc libraries, which keeps `libgomp.so.1` from creeping back in.
+It exits 2 when the binary cannot be read, so a damaged file is never reported as passing.
+
+The workflow also runs on a pull request that changes `native/` or the workflow itself.
+That builds every target without publishing anything, so a recipe change is tested before the next release.
+
+Two choices in the Linux build follow from the container:
+
+- **BLAS and LAPACK come from the serial `openblas-static` package,** because Rocky 8 packages no static reference BLAS.
+  The serial flavor starts no threads of its own, so it does not compete with the OpenMP threads of the fit.
+  Static OpenBLAS carries kernels for every x86-64 CPU generation,
+  so the stripped linux-x64 asset is about 25 MB (the 0.4.0 asset was 1 MB); the Windows asset, which also links static OpenBLAS, is 33 MB.
+- **`libgomp` is linked from its archive.**
+  The gcc-toolset's `libgomp.so` is a linker script that resolves to the system's GCC 8 library,
+  which is older than the compiler and can lack `GOMP_*` versions the compiled code requests.
+  The archive calls `dlopen` (offload plugins), hence `-ldl`, and `--as-needed` then drops the unused shared dependency.
 
 Each target is smoke-tested (a 2-iteration fit on the bundled sample EEG must
 produce a finite negative LL) before its binary is uploaded, so a binary that
