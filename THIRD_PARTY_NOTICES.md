@@ -8,7 +8,7 @@ redistribution terms.
 ## MIR (Mutual Information Reduction) metric
 
 `pamica/metrics/mir.py` is ported from `getMIR.m` (and its nested
-`getent4`) in Arnaud Delorme's
+`getent4`) by Nima Bigdely-Shamlo, in the
 [`bigdelys/pre_ICA_cleaning`](https://github.com/bigdelys/pre_ICA_cleaning)
 repository, at
 [commit `b6034f0`](https://github.com/bigdelys/pre_ICA_cleaning/blob/b6034f03889a6a418968ee119123f3df55251957/getMIR.m),
